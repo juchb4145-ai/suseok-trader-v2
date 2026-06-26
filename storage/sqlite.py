@@ -29,6 +29,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
         )
         """
     )
+    _create_ai_sidecar_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -51,4 +52,70 @@ def _upsert_metadata(connection: sqlite3.Connection, key: str, value: str) -> No
             updated_at = datetime('now')
         """,
         (key, value),
+    )
+
+
+def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_requests (
+            request_id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            prompt_hash TEXT,
+            context_hash TEXT,
+            model TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT,
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_insights (
+            insight_id TEXT PRIMARY KEY,
+            request_id TEXT,
+            task_type TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            summary TEXT NOT NULL,
+            root_cause TEXT,
+            severity TEXT,
+            operator_action TEXT,
+            output_json TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_prompt_templates (
+            template_id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            version TEXT NOT NULL,
+            system_prompt TEXT NOT NULL,
+            user_template TEXT NOT NULL,
+            output_schema_json TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_evaluation_cases (
+            case_id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            input_json TEXT NOT NULL,
+            expected_properties_json TEXT NOT NULL,
+            grade_result_json TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
     )

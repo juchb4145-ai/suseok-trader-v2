@@ -18,3 +18,30 @@ def test_sqlite_initialization_creates_app_metadata_and_pragmas(tmp_path) -> Non
     assert journal_mode == "wal"
     assert busy_timeout == 5000
     assert synchronous == 1
+
+
+def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'ai_requests',
+                'ai_insights',
+                'ai_prompt_templates',
+                'ai_evaluation_cases'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "ai_requests",
+        "ai_insights",
+        "ai_prompt_templates",
+        "ai_evaluation_cases",
+    }

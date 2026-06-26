@@ -22,6 +22,12 @@ class Settings:
     trading_db_path: Path = Path("storage/suseok-trader-v2.sqlite3")
     trading_allow_live_sim: bool = False
     trading_allow_live_real: bool = False
+    ai_sidecar_enabled_value: bool = False
+    ai_sidecar_allow_intraday: bool = False
+    ai_sidecar_allow_order_context: bool = False
+    ai_sidecar_model: str = ""
+    ai_sidecar_max_context_chars: int = 12000
+    ai_sidecar_request_timeout_sec: int = 30
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -30,6 +36,18 @@ class Settings:
     @property
     def live_real_allowed(self) -> bool:
         return self.trading_allow_live_real
+
+    @property
+    def ai_sidecar_enabled(self) -> bool:
+        return self.ai_sidecar_enabled_value
+
+    @property
+    def ai_sidecar_intraday_allowed(self) -> bool:
+        return self.ai_sidecar_allow_intraday
+
+    @property
+    def ai_sidecar_order_context_allowed(self) -> bool:
+        return self.ai_sidecar_allow_order_context
 
 
 _TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
@@ -45,6 +63,22 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         trading_db_path=Path(env.get("TRADING_DB_PATH", DEFAULT_DB_PATH)).expanduser(),
         trading_allow_live_sim=_parse_bool(env.get("TRADING_ALLOW_LIVE_SIM", "false")),
         trading_allow_live_real=_parse_bool(env.get("TRADING_ALLOW_LIVE_REAL", "false")),
+        ai_sidecar_enabled_value=_parse_bool(env.get("AI_SIDECAR_ENABLED", "false")),
+        ai_sidecar_allow_intraday=_parse_bool(env.get("AI_SIDECAR_ALLOW_INTRADAY", "false")),
+        ai_sidecar_allow_order_context=_parse_bool(
+            env.get("AI_SIDECAR_ALLOW_ORDER_CONTEXT", "false")
+        ),
+        ai_sidecar_model=env.get("AI_SIDECAR_MODEL", ""),
+        ai_sidecar_max_context_chars=_parse_int(
+            env.get("AI_SIDECAR_MAX_CONTEXT_CHARS", "12000"),
+            "AI_SIDECAR_MAX_CONTEXT_CHARS",
+            min_value=1,
+        ),
+        ai_sidecar_request_timeout_sec=_parse_int(
+            env.get("AI_SIDECAR_REQUEST_TIMEOUT_SEC", "30"),
+            "AI_SIDECAR_REQUEST_TIMEOUT_SEC",
+            min_value=1,
+        ),
     )
 
 
@@ -64,3 +98,15 @@ def _parse_bool(value: str) -> bool:
     if normalized in _FALSE_VALUES:
         return False
     raise ValueError(f"Unsupported boolean value: {value!r}")
+
+
+def _parse_int(value: str, field_name: str, *, min_value: int | None = None) -> int:
+    normalized = value.strip()
+    try:
+        parsed = int(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported integer value for {field_name}: {value!r}") from exc
+
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"{field_name} must be >= {min_value}")
+    return parsed
