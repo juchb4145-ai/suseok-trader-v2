@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from apps.core_api import app
 
 ROOT = Path(__file__).resolve().parents[1]
-CODE_DIRS = ("api", "apps", "domain", "infrastructure", "services", "storage", "tools")
+CODE_DIRS = ("api", "apps", "domain", "gateway", "infrastructure", "services", "storage", "tools")
 
 
 def iter_project_python_files() -> list[Path]:
@@ -46,3 +47,15 @@ def test_order_execution_apis_and_order_intent_are_not_exposed() -> None:
     assert all("cancel_order" not in path for path in paths)
     assert all("modify_order" not in path for path in paths)
     assert "class OrderIntent" not in combined_source
+
+
+def test_order_execution_functions_strategy_risk_and_oms_are_not_implemented() -> None:
+    combined_source = project_python_source()
+
+    order_function_pattern = r"def\s+(send_order|submit_order|cancel_order|modify_order)\b"
+
+    assert re.search(order_function_pattern, combined_source) is None
+    assert "class StrategyEngine" not in combined_source
+    assert "class RiskGate" not in combined_source
+    assert "class OMS" not in combined_source
+    assert "class Oms" not in combined_source

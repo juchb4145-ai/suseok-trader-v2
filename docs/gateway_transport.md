@@ -1,7 +1,8 @@
 # Gateway Transport Surface
 
 PR 2B creates the broker-neutral HTTP and SQLite surface between the future Gateway process and
-Core. It does not implement Kiwoom OpenAPI+, PyQt, a concrete Gateway process, strategy logic,
+Core. PR 3 adds a separate mock Gateway process skeleton that exercises this surface before any
+real broker runtime is introduced. It does not implement Kiwoom OpenAPI+, PyQt, strategy logic,
 risk gates, OMS behavior, OpenAI API calls, or order execution.
 
 ## Boundary
@@ -15,6 +16,20 @@ risk gates, OMS behavior, OpenAI API calls, or order execution.
 
 The Core accepts only broker-neutral envelope dictionaries from `domain/broker`. Future Kiwoom
 or PyQt code must stay outside the Core process.
+
+## Mock Gateway Flow
+
+`python -m apps.mock_gateway --once` performs one deterministic transport pass:
+
+1. Emit `heartbeat`.
+2. Emit `price_tick`.
+3. Emit `condition_event`.
+4. Poll `GET /api/gateway/commands`.
+5. Dispatch allowed commands through mock handlers.
+6. Emit command lifecycle events back to Core.
+
+Loop mode repeats heartbeat and price ticks on configured intervals while continuing to poll
+Core commands. The default loop does not emit `execution_event`.
 
 ## Event Ingest
 
@@ -64,6 +79,29 @@ Command states are:
 Gateway events with `event_type` of `command_started`, `command_ack`, or `command_failed` and a
 matching `command_id` update `gateway_commands` and add a row to `gateway_command_events`.
 
+PR 3 mock handlers use this lifecycle:
+
+- `heartbeat_request`: `command_started` then `command_ack`.
+- `request_tr`: `command_started`, mock `tr_response`, then `command_ack`.
+- `register_realtime`: `command_started`, add code to the mock subscription set, then
+  `command_ack`.
+- `remove_realtime`: `command_started`, remove code from the mock subscription set, then
+  `command_ack`.
+- `load_conditions`: `command_started`, mock `condition_load_result`, then `command_ack`.
+- `send_condition`: `command_started`, mock `condition_event`, then `command_ack`.
+- `stop_condition`: `command_started` then `command_ack`.
+
+Example `request_tr` flow:
+
+```text
+Core gateway_commands.QUEUED
+Gateway polls command and Core marks it DISPATCHED
+Gateway posts command_started
+Gateway posts tr_response
+Gateway posts command_ack
+Core marks command ACKED
+```
+
 ## Token Auth
 
 When `TRADING_CORE_TOKEN` is empty, local development may call Gateway write/poll endpoints
@@ -91,3 +129,7 @@ order-like command types including:
 - `live_order`
 
 `GET /api/gateway/status` always returns `order_commands_allowed=false` in PR 2B.
+
+PR 3 keeps this policy in the mock Gateway. If an order-like command reaches the mock handler,
+the handler emits `command_failed` with an `error_message` containing `order command disabled`
+and performs no order side effect.

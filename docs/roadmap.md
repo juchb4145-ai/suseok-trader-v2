@@ -31,13 +31,13 @@
 - Add command idempotency and duplicate suppression tests.
 - Keep the surface broker-neutral and isolated from Kiwoom/PyQt imports.
 
-## Next: PR 3. Mock Gateway + Gateway Adapter Skeleton
+## Done: PR 3. Mock Gateway + Gateway Adapter Skeleton
 
 - Add a separate 32-bit Gateway package skeleton.
 - Keep Kiwoom OpenAPI+ and PyQt dependencies isolated from Core requirements.
 - Implement heartbeat and mock event posting before any broker action.
 
-## PR 4. Market Data Service
+## Next: PR 4. Market Data Service
 
 - Normalize price ticks, condition events, and TR-derived market snapshots.
 - Provide read-only market data access to strategy and dashboard surfaces.

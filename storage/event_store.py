@@ -23,6 +23,7 @@ SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
         "heartbeat",
         "price_tick",
         "condition_event",
+        "condition_load_result",
         "tr_response",
         "execution_event",
         "command_started",

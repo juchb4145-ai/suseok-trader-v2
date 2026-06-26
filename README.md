@@ -3,9 +3,10 @@
 Broker-neutral foundation for a Kiwoom OpenAPI+ based domestic stock trading system.
 
 The project currently contains the Core API bootstrap, settings loading, SQLite initialization,
-PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, and the PR 2B Event Store
-plus Gateway transport surface. It intentionally does not contain Kiwoom or PyQt imports,
-strategy decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
+PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
+plus Gateway transport surface, and the PR 3 mock Gateway process skeleton. It intentionally
+does not contain Kiwoom or PyQt imports, strategy decisions, risk policy execution, OMS behavior,
+OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -42,6 +43,48 @@ Gateway command enqueue is intentionally service-only for now. There is no publi
 enqueue endpoint and no order endpoint. Order-like command types such as `send_order`,
 `submit_order`, `cancel_order`, `modify_order`, and `order_intent` are rejected until a later
 OMS/Risk PR creates a reviewed order path.
+
+## Mock Gateway
+
+PR 3 adds a separate `gateway/` package and executable mock Gateway harness. The mock process
+calls only Core HTTP endpoints and uses only broker-neutral contracts:
+
+- `gateway/settings.py`: Gateway-only environment settings.
+- `gateway/core_client.py`: JSON HTTP client for Core Gateway endpoints.
+- `gateway/runtime.py`: shared heartbeat, queue, polling, and snapshot loop.
+- `gateway/mock_runtime.py`: deterministic heartbeat, price tick, condition, and command flow.
+- `gateway/command_handlers.py`: mock handlers for allowed non-order commands.
+- `gateway/event_factory.py`: broker-neutral mock event builders.
+- `apps/mock_gateway.py`: CLI entrypoint for transport tests.
+- `apps/kiwoom_gateway.py`: safe placeholder for a future 32-bit Gateway entrypoint.
+
+Run Core first:
+
+```powershell
+python -m uvicorn apps.core_api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Then run one deterministic mock pass:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+```
+
+Or run the loop:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --interval-sec 1.0
+```
+
+Confirm Core received the mock events:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/gateway/status
+Invoke-RestMethod http://127.0.0.1:8000/api/gateway/events/recent
+```
+
+`apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX
+runtime and prints a safe message directing operators to the mock Gateway for transport tests.
 
 ## Local Token
 
