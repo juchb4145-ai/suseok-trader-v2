@@ -45,3 +45,34 @@ def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:
         "ai_prompt_templates",
         "ai_evaluation_cases",
     }
+
+
+def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'raw_events',
+                'gateway_events',
+                'gateway_commands',
+                'gateway_command_events',
+                'gateway_command_dedupe_keys',
+                'gateway_status'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "raw_events",
+        "gateway_events",
+        "gateway_commands",
+        "gateway_command_events",
+        "gateway_command_dedupe_keys",
+        "gateway_status",
+    }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 APP_NAME = "suseok-trader-v2"
 
 
@@ -30,6 +30,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
         """
     )
     _create_ai_sidecar_tables(connection)
+    _create_gateway_transport_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -117,5 +118,104 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
             grade_result_json TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
+        """
+    )
+
+
+def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS raw_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            command_id TEXT,
+            idempotency_key TEXT,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL DEFAULT (datetime('now')),
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            duplicate_count INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_events (
+            event_id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            command_id TEXT,
+            idempotency_key TEXT,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL DEFAULT (datetime('now')),
+            payload_json TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ACCEPTED',
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_commands (
+            command_id TEXT PRIMARY KEY,
+            command_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL,
+            idempotency_key TEXT,
+            payload_json TEXT NOT NULL,
+            payload_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            available_at TEXT,
+            dispatched_at TEXT,
+            completed_at TEXT,
+            expires_at TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_command_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            command_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_command_dedupe_keys (
+            idempotency_key TEXT PRIMARY KEY,
+            command_id TEXT NOT NULL,
+            command_type TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            retained_until TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gateway_status (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_commands_poll
+        ON gateway_commands (status, available_at, expires_at, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_events_received_at
+        ON gateway_events (received_at)
         """
     )

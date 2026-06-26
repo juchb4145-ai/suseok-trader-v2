@@ -22,15 +22,15 @@ The future Gateway/Core transport is HTTP-based:
 - Gateway to Core: `POST /api/gateway/events`
 - Core to Gateway: `GET /api/gateway/commands` using long-polling
 
-PR 0 does not implement these endpoints. They are documented as the intended contract boundary
-for later work.
+PR 2B implements these Core endpoints as a broker-neutral transport surface. The concrete
+Kiwoom/PyQt Gateway process remains future work.
 
 ## Safety Defaults
 
 - `TRADING_MODE` defaults to `OBSERVE`.
 - `TRADING_ALLOW_LIVE_SIM` defaults to `false`.
 - `TRADING_ALLOW_LIVE_REAL` defaults to `false`.
-- There is no order, buy, sell, strategy, or Kiwoom execution path in PR 0.
+- There is no order, buy, sell, strategy, or Kiwoom execution path in PR 2B.
 - Future order-related commands must use `command_id`, `request_id`, and `idempotency_key`
   before any live-like path can be considered.
 

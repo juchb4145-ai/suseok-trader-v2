@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from api.routes.ai_sidecar import router as ai_sidecar_router
+from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from fastapi import FastAPI
 from services.config import load_settings
@@ -26,6 +27,7 @@ def create_app() -> FastAPI:
     )
     application.include_router(health_router)
     application.include_router(ai_sidecar_router)
+    application.include_router(gateway_router)
     return application
 
 

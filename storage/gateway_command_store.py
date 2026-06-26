@@ -1,0 +1,434 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
+from hashlib import sha256
+from typing import Any
+
+from domain.broker.commands import GatewayCommand
+from domain.broker.utils import datetime_to_wire, normalize_payload, parse_timestamp, utc_now
+
+
+class GatewayCommandStatus(StrEnum):
+    QUEUED = "QUEUED"
+    DISPATCHED = "DISPATCHED"
+    ACKED = "ACKED"
+    REJECTED = "REJECTED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
+ALLOWED_COMMAND_TYPES: frozenset[str] = frozenset(
+    {
+        "heartbeat_request",
+        "request_tr",
+        "register_realtime",
+        "remove_realtime",
+        "load_conditions",
+        "send_condition",
+        "stop_condition",
+    }
+)
+FORBIDDEN_ORDER_COMMAND_TYPES: frozenset[str] = frozenset(
+    {
+        "send_order",
+        "submit_order",
+        "cancel_order",
+        "modify_order",
+        "enqueue_order",
+        "order_intent",
+        "gateway_order",
+        "live_order",
+    }
+)
+
+
+@dataclass(frozen=True, kw_only=True)
+class EnqueueCommandResult:
+    accepted: bool
+    command_id: str
+    status: GatewayCommandStatus
+    payload_hash: str | None = None
+    duplicate: bool = False
+    error_message: str | None = None
+
+
+def enqueue_command(
+    connection: sqlite3.Connection,
+    command: GatewayCommand,
+    *,
+    expires_at: datetime | str | None = None,
+) -> EnqueueCommandResult:
+    command_type = _normalize_command_type(command.command_type)
+    payload_json = canonical_json(command.payload)
+    payload_hash = hash_payload_json(payload_json)
+
+    safety_error = validate_command_type_allowed(command_type)
+    if safety_error is not None:
+        return EnqueueCommandResult(
+            accepted=False,
+            command_id=command.command_id,
+            status=GatewayCommandStatus.REJECTED,
+            payload_hash=payload_hash,
+            error_message=safety_error,
+        )
+
+    existing_command = connection.execute(
+        "SELECT command_id, status FROM gateway_commands WHERE command_id = ?",
+        (command.command_id,),
+    ).fetchone()
+    if existing_command is not None:
+        return EnqueueCommandResult(
+            accepted=False,
+            command_id=command.command_id,
+            status=GatewayCommandStatus(existing_command["status"]),
+            payload_hash=payload_hash,
+            duplicate=True,
+            error_message="command_id already exists",
+        )
+
+    now = datetime_to_wire(utc_now())
+    expires_at_wire = _optional_timestamp(expires_at)
+    if command.idempotency_key is not None:
+        dedupe_error = _find_active_dedupe_error(connection, command.idempotency_key)
+        if dedupe_error is not None:
+            return EnqueueCommandResult(
+                accepted=False,
+                command_id=command.command_id,
+                status=GatewayCommandStatus.REJECTED,
+                payload_hash=payload_hash,
+                duplicate=True,
+                error_message=dedupe_error,
+            )
+
+    try:
+        connection.execute(
+            """
+            INSERT INTO gateway_commands (
+                command_id,
+                command_type,
+                source,
+                status,
+                idempotency_key,
+                payload_json,
+                payload_hash,
+                created_at,
+                available_at,
+                expires_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                command.command_id,
+                command_type,
+                command.source,
+                GatewayCommandStatus.QUEUED.value,
+                command.idempotency_key,
+                payload_json,
+                payload_hash,
+                datetime_to_wire(command.ts),
+                None,
+                expires_at_wire,
+            ),
+        )
+        if command.idempotency_key is not None:
+            connection.execute(
+                """
+                INSERT INTO gateway_command_dedupe_keys (
+                    idempotency_key,
+                    command_id,
+                    command_type,
+                    created_at,
+                    retained_until
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    command.idempotency_key,
+                    command.command_id,
+                    command_type,
+                    now,
+                    expires_at_wire,
+                ),
+            )
+        connection.commit()
+    except sqlite3.IntegrityError as exc:
+        connection.rollback()
+        return EnqueueCommandResult(
+            accepted=False,
+            command_id=command.command_id,
+            status=GatewayCommandStatus.REJECTED,
+            payload_hash=payload_hash,
+            duplicate=True,
+            error_message=str(exc),
+        )
+
+    return EnqueueCommandResult(
+        accepted=True,
+        command_id=command.command_id,
+        status=GatewayCommandStatus.QUEUED,
+        payload_hash=payload_hash,
+    )
+
+
+def poll_commands(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 20,
+    wait_sec: float = 0,
+) -> list[GatewayCommand]:
+    bounded_limit = min(max(int(limit), 1), 100)
+    bounded_wait_sec = min(max(float(wait_sec), 0), 5)
+    deadline = time.monotonic() + bounded_wait_sec
+
+    while True:
+        commands = _dispatch_ready_commands(connection, bounded_limit)
+        if commands or time.monotonic() >= deadline:
+            return commands
+        time.sleep(min(0.1, max(deadline - time.monotonic(), 0)))
+
+
+def record_command_event(
+    connection: sqlite3.Connection,
+    *,
+    command_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+    commit: bool = True,
+) -> GatewayCommandStatus | None:
+    payload_json = canonical_json(payload)
+    next_status = _status_for_command_event(event_type)
+    last_error = (
+        _extract_error_message(payload) if next_status is GatewayCommandStatus.FAILED else None
+    )
+    now = datetime_to_wire(utc_now())
+
+    connection.execute(
+        """
+        INSERT INTO gateway_command_events (
+            command_id,
+            event_type,
+            status,
+            payload_json,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (command_id, event_type, next_status.value if next_status else None, payload_json, now),
+    )
+
+    if next_status is not None:
+        completed_at = now if next_status in _COMPLETED_STATUSES else None
+        connection.execute(
+            """
+            UPDATE gateway_commands
+            SET
+                status = ?,
+                completed_at = COALESCE(?, completed_at),
+                last_error = COALESCE(?, last_error)
+            WHERE command_id = ?
+            """,
+            (next_status.value, completed_at, last_error, command_id),
+        )
+
+    if commit:
+        connection.commit()
+    return next_status
+
+
+def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    expire_queued_commands(connection)
+    rows = connection.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM gateway_commands
+        GROUP BY status
+        """
+    ).fetchall()
+    counts = {status.value: 0 for status in GatewayCommandStatus}
+    for row in rows:
+        counts[row["status"]] = row["count"]
+    return counts
+
+
+def expire_queued_commands(connection: sqlite3.Connection) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?, completed_at = ?
+        WHERE status = ?
+            AND expires_at IS NOT NULL
+            AND expires_at <= ?
+        """,
+        (
+            GatewayCommandStatus.EXPIRED.value,
+            now,
+            GatewayCommandStatus.QUEUED.value,
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def validate_command_type_allowed(command_type: str) -> str | None:
+    normalized = _normalize_command_type(command_type)
+    if normalized in FORBIDDEN_ORDER_COMMAND_TYPES or "order" in normalized:
+        return f"Order command_type is disabled for PR 2B: {command_type}"
+    if normalized not in ALLOWED_COMMAND_TYPES:
+        return f"Unsupported gateway command_type for PR 2B: {command_type}"
+    return None
+
+
+def canonical_json(payload: object) -> str:
+    return json.dumps(
+        normalize_payload(payload),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def hash_payload_json(payload_json: str) -> str:
+    return sha256(payload_json.encode("utf-8")).hexdigest()
+
+
+def _dispatch_ready_commands(
+    connection: sqlite3.Connection,
+    limit: int,
+) -> list[GatewayCommand]:
+    now = datetime_to_wire(utc_now())
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            """
+            UPDATE gateway_commands
+            SET status = ?, completed_at = ?
+            WHERE status = ?
+                AND expires_at IS NOT NULL
+                AND expires_at <= ?
+            """,
+            (
+                GatewayCommandStatus.EXPIRED.value,
+                now,
+                GatewayCommandStatus.QUEUED.value,
+                now,
+            ),
+        )
+        rows = connection.execute(
+            """
+            SELECT
+                command_id,
+                command_type,
+                source,
+                idempotency_key,
+                payload_json,
+                created_at
+            FROM gateway_commands
+            WHERE status = ?
+                AND (available_at IS NULL OR available_at <= ?)
+                AND (expires_at IS NULL OR expires_at > ?)
+            ORDER BY created_at ASC, command_id ASC
+            LIMIT ?
+            """,
+            (GatewayCommandStatus.QUEUED.value, now, now, limit),
+        ).fetchall()
+        for row in rows:
+            connection.execute(
+                """
+                UPDATE gateway_commands
+                SET status = ?,
+                    dispatched_at = ?,
+                    attempts = attempts + 1
+                WHERE command_id = ? AND status = ?
+                """,
+                (
+                    GatewayCommandStatus.DISPATCHED.value,
+                    now,
+                    row["command_id"],
+                    GatewayCommandStatus.QUEUED.value,
+                ),
+            )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+
+    return [_row_to_gateway_command(row) for row in rows]
+
+
+def _row_to_gateway_command(row: sqlite3.Row) -> GatewayCommand:
+    return GatewayCommand(
+        command_id=row["command_id"],
+        command_type=row["command_type"],
+        source=row["source"],
+        ts=parse_timestamp(row["created_at"], "created_at"),
+        payload=json.loads(row["payload_json"]),
+        idempotency_key=row["idempotency_key"],
+    )
+
+
+def _find_active_dedupe_error(connection: sqlite3.Connection, idempotency_key: str) -> str | None:
+    row = connection.execute(
+        """
+        SELECT command_id, retained_until
+        FROM gateway_command_dedupe_keys
+        WHERE idempotency_key = ?
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if row is None:
+        return None
+
+    retained_until = row["retained_until"]
+    if retained_until is None or parse_timestamp(retained_until, "retained_until") > utc_now():
+        return f"idempotency_key already retained for command_id={row['command_id']}"
+
+    connection.execute(
+        "DELETE FROM gateway_command_dedupe_keys WHERE idempotency_key = ?",
+        (idempotency_key,),
+    )
+    return None
+
+
+def _status_for_command_event(event_type: str) -> GatewayCommandStatus | None:
+    normalized = event_type.strip().lower()
+    if normalized == "command_started":
+        return GatewayCommandStatus.DISPATCHED
+    if normalized == "command_ack":
+        return GatewayCommandStatus.ACKED
+    if normalized == "command_failed":
+        return GatewayCommandStatus.FAILED
+    return None
+
+
+def _extract_error_message(payload: dict[str, Any]) -> str | None:
+    for key in ("error_message", "message", "error"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _optional_timestamp(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    return datetime_to_wire(parse_timestamp(value, "timestamp"))
+
+
+def _normalize_command_type(command_type: str) -> str:
+    return command_type.strip().lower()
+
+
+_COMPLETED_STATUSES = {
+    GatewayCommandStatus.ACKED,
+    GatewayCommandStatus.REJECTED,
+    GatewayCommandStatus.FAILED,
+    GatewayCommandStatus.EXPIRED,
+    GatewayCommandStatus.CANCELLED,
+}

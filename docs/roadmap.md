@@ -16,7 +16,7 @@
 - Add serialization tests and idempotency field validation.
 - Keep contracts free of Kiwoom/PyQt runtime imports.
 
-## Current: PR 2A. Roadmap Reset + AI Sidecar Read-Only Contract
+## Done: PR 2A. Roadmap Reset + AI Sidecar Read-Only Contract
 
 - Reset the delivery roadmap around broker-neutral Core plus later Gateway transport.
 - Add the read-only AI Sidecar architecture and safety policy.
@@ -24,14 +24,14 @@
 - Add additive SQLite tables for future prompt, request, insight, and evaluation records.
 - Expose read-only AI Sidecar status/task/insight list APIs only.
 
-## Next: PR 2B. Event Store + Gateway Transport Surface
+## Done: PR 2B. Event Store + Gateway Transport Surface
 
 - Add the Core event store and transport-facing Gateway API surface.
 - Store inbound Gateway events and command state in SQLite.
 - Add command idempotency and duplicate suppression tests.
 - Keep the surface broker-neutral and isolated from Kiwoom/PyQt imports.
 
-## PR 3. Mock Gateway + Gateway Adapter Skeleton
+## Next: PR 3. Mock Gateway + Gateway Adapter Skeleton
 
 - Add a separate 32-bit Gateway package skeleton.
 - Keep Kiwoom OpenAPI+ and PyQt dependencies isolated from Core requirements.

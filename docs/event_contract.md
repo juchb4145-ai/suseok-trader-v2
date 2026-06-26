@@ -1,8 +1,9 @@
 # Broker Gateway/Core Event Contract
 
-PR 1 adds broker-neutral Python contracts under `domain/broker`. These models define the
-message shape shared by the future 32-bit Kiwoom Gateway and the Core process, without adding
-transport endpoints, Kiwoom imports, strategy decisions, or order execution paths.
+PR 1 adds broker-neutral Python contracts under `domain/broker`. PR 2B adds the first HTTP
+transport surface and SQLite Event Store for those contracts. The Core still has no Kiwoom
+imports, PyQt imports, strategy decisions, risk execution, OMS behavior, or order execution
+paths.
 
 ## Design Rules
 
@@ -26,7 +27,7 @@ Gateway-to-Core event envelope.
 | Field | Required | Notes |
 | --- | --- | --- |
 | `event_id` | Generated if omitted | Unique event identifier with `evt_` prefix. |
-| `event_type` | Yes | Event category, for example `price_tick`, `execution`, `condition_match`, or `heartbeat`. |
+| `event_type` | Yes | Event category, for example `heartbeat`, `price_tick`, `condition_event`, `tr_response`, `execution_event`, `command_ack`, or `gateway_error`. |
 | `source` | Yes | Gateway or subsystem identifier. |
 | `ts` | Generated if omitted | Gateway event timestamp. |
 | `payload` | Yes | Broker-neutral payload dictionary. |
@@ -40,7 +41,7 @@ Core-to-Gateway command envelope.
 | Field | Required | Notes |
 | --- | --- | --- |
 | `command_id` | Generated if omitted | Unique command identifier with `cmd_` prefix. |
-| `command_type` | Yes | Command category, for example `request_tr` or `submit_order`. |
+| `command_type` | Yes | Command category, for example `request_tr`, `register_realtime`, `load_conditions`, or `send_condition`. Order-like command types are disabled in PR 2B. |
 | `source` | Yes | Command producer, usually `core`. |
 | `ts` | Generated if omitted | Command creation timestamp. |
 | `payload` | Yes | Broker-neutral command payload dictionary. |
@@ -118,7 +119,105 @@ Common helpers live in `domain/broker/utils.py`:
 - `normalize_payload()` and `normalize_value()` for JSON-compatible payloads.
 - `parse_int()` and `parse_float()` for numeric string normalization.
 
+## Gateway HTTP Surface
+
+### `POST /api/gateway/events`
+
+The future Gateway posts broker-neutral `GatewayEvent` envelopes to Core. The Core validates the
+envelope, stores canonical JSON payloads in both `raw_events` and `gateway_events`, and updates
+transport status values.
+
+Example request:
+
+```json
+{
+  "event_id": "evt_heartbeat_1",
+  "event_type": "heartbeat",
+  "source": "local-gateway",
+  "ts": "2026-06-26T09:01:02Z",
+  "payload": {"status": "ok"}
+}
+```
+
+Example response:
+
+```json
+{
+  "accepted": true,
+  "event_id": "evt_heartbeat_1",
+  "duplicate": false,
+  "status": "ACCEPTED"
+}
+```
+
+Supported event types in PR 2B are `heartbeat`, `price_tick`, `condition_event`, `tr_response`,
+`execution_event`, `command_started`, `command_ack`, `command_failed`, and `gateway_error`.
+Unknown event types are stored with `UNKNOWN_EVENT_TYPE` status so the operator can inspect
+future or malformed Gateway behavior without dropping the envelope.
+
+### `GET /api/gateway/commands`
+
+The future Gateway long-polls Core for queued commands. Polling atomically moves selected
+commands from `QUEUED` to `DISPATCHED`, increments `attempts`, and records `dispatched_at`.
+
+Example response:
+
+```json
+{
+  "commands": [
+    {
+      "command_id": "cmd_request_tr_1",
+      "command_type": "request_tr",
+      "source": "core",
+      "ts": "2026-06-26T09:01:02Z",
+      "payload": {"tr_code": "OPT10001", "params": {"code": "005930"}},
+      "idempotency_key": "tr-005930-once"
+    }
+  ]
+}
+```
+
+PR 2B does not expose a public command enqueue API. Tests and internal services may enqueue
+non-order Gateway commands through `storage.gateway_command_store.enqueue_command()`.
+
+## Command State Lifecycle
+
+Command states are:
+
+- `QUEUED`: stored and available for future Gateway polling.
+- `DISPATCHED`: delivered by `GET /api/gateway/commands`; `attempts` has been incremented.
+- `ACKED`: Gateway sent a `command_ack` event with the command ID.
+- `FAILED`: Gateway sent a `command_failed` event or a future transport handler marks failure.
+- `EXPIRED`: command expired before dispatch.
+- `REJECTED`: command enqueue was rejected, for example by the PR 2B order-command policy.
+- `CANCELLED`: reserved for future operator/system cancellation.
+
+`command_started`, `command_ack`, and `command_failed` events are also copied into
+`gateway_command_events` when they include `command_id`.
+
+## Duplicate Event Handling
+
+Event payloads are stored as canonical JSON and hashed deterministically. Duplicate handling is:
+
+- Same `event_id` and same `payload_hash`: the event is treated as a duplicate, the existing
+  `raw_events.duplicate_count` is incremented, and the API returns `duplicate=true`.
+- Same `event_id` and different `payload_hash`: the append is rejected with `CONFLICT`.
+
+`command_id` and `idempotency_key` are preserved in both `raw_events` and `gateway_events`.
+
+## Command Idempotency Policy
+
+When `idempotency_key` is present on a command, Core stores it in
+`gateway_command_dedupe_keys`. A retained key prevents creation of another command with the
+same key. This suppresses duplicate TR/realtime/condition commands before the future Gateway
+adapter exists.
+
+Order-like command types are blocked in PR 2B, including `send_order`, `submit_order`,
+`cancel_order`, `modify_order`, `enqueue_order`, `order_intent`, `gateway_order`, and
+`live_order`.
+
 ## Explicitly Out of Scope
 
-PR 1 does not implement Gateway/Core HTTP transport, Kiwoom OpenAPI+ integration, PyQt imports,
-strategy evaluation, risk decisions, or order execution APIs. Those remain future PR work.
+PR 2B does not implement Kiwoom OpenAPI+ integration, PyQt imports, a 32-bit Gateway process,
+strategy evaluation, risk decisions, OMS behavior, OpenAI API calls, AI context building, or
+order execution APIs. Those remain future PR work.
