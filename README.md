@@ -5,9 +5,10 @@ Broker-neutral foundation for a Kiwoom OpenAPI+ based domestic stock trading sys
 The project currently contains the Core API bootstrap, settings loading, SQLite initialization,
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
 plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4 read-only
-Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer, and
-the PR 6 observe-only Candidate FSM. It intentionally does not contain Kiwoom or PyQt imports,
-strategy decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
+Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
+the PR 6 observe-only Candidate FSM, and the PR 7 observe-only Strategy Observation layer. It
+intentionally does not contain Kiwoom or PyQt imports, risk policy execution, OMS behavior,
+OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -174,6 +175,62 @@ API calls.
 
 See `docs/candidate_fsm.md` for source types, transition rules, schema, API, and safety scope.
 
+## Strategy Engine Observe-Only
+
+PR 7 adds deterministic setup observation over PR 6 candidates. It reads `CONTEXT_READY`
+candidate context, Market Data projection rows, and Theme Snapshot rows, then stores
+`StrategyObservation` and `SetupObservation` records. A strategy observation is not an entry
+plan, risk approval, position size, or order request. `MATCHED_OBSERVATION` means a setup
+classifier matched its observation rule; it is not buy readiness.
+
+Initial setup classifiers:
+
+- `THEME_LEADER_PULLBACK`
+- `VWAP_RECLAIM`
+- `BREAKOUT_RETEST`
+- `THEME_FOLLOWER_EXPANSION`
+
+Strategy endpoints:
+
+- `GET /api/strategy/status`
+- `GET /api/strategy/observations/latest`
+- `GET /api/strategy/candidates/{candidate_instance_id}`
+- `GET /api/strategy/candidates/{candidate_instance_id}/history`
+- `GET /api/strategy/observations/{strategy_observation_id}/setups`
+- `GET /api/strategy/runs`
+- `GET /api/strategy/errors`
+- `POST /api/strategy/evaluate`
+
+Evaluate strategy observations from current candidate context:
+
+```powershell
+python -m tools.evaluate_strategy --trade-date 2026-06-27
+```
+
+Inspect the latest observation for one candidate:
+
+```powershell
+python -m tools.inspect_strategy_observation `
+  --candidate-instance-id CAND-2026-06-27-005930-1
+```
+
+Check the full observe-only flow:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+python -m tools.rebuild_theme_snapshots
+python -m tools.rebuild_candidates
+python -m tools.rebuild_candidates
+python -m tools.evaluate_strategy
+Invoke-RestMethod http://127.0.0.1:8000/api/strategy/status
+Invoke-RestMethod http://127.0.0.1:8000/api/strategy/observations/latest
+```
+
+PR 7 still has no Risk Gate, OMS, public order API, GatewayCommand creation from strategy,
+OpenAI API call, or AI Sidecar execution path. See `docs/strategy_engine_observe.md` for the
+status definitions, setup rules, storage schema, and API details.
+
 ## Mock Gateway
 
 PR 3 adds a separate `gateway/` package and executable mock Gateway harness. The mock process
@@ -218,7 +275,10 @@ Invoke-RestMethod http://127.0.0.1:8000/api/market-data/conditions/recent
 python -m tools.import_theme_memberships --file data/themes/sample_themes.json
 python -m tools.rebuild_theme_snapshots
 python -m tools.rebuild_candidates
+python -m tools.rebuild_candidates
+python -m tools.evaluate_strategy
 Invoke-RestMethod http://127.0.0.1:8000/api/candidates/status
+Invoke-RestMethod http://127.0.0.1:8000/api/strategy/status
 ```
 
 `apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX

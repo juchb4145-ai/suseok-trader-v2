@@ -232,3 +232,55 @@ def test_sqlite_initialization_creates_candidate_projection_tables(tmp_path) -> 
         "gateway_events",
         "ai_requests",
     }
+
+
+def test_sqlite_initialization_creates_strategy_projection_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'strategy_observations',
+                'strategy_observations_latest',
+                'strategy_setup_observations',
+                'strategy_evaluation_runs',
+                'strategy_evaluation_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'candidates',
+                'candidate_context_latest',
+                'theme_latest_snapshots',
+                'market_ticks_latest',
+                'gateway_events',
+                'ai_requests'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "strategy_observations",
+        "strategy_observations_latest",
+        "strategy_setup_observations",
+        "strategy_evaluation_runs",
+        "strategy_evaluation_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "candidates",
+        "candidate_context_latest",
+        "theme_latest_snapshots",
+        "market_ticks_latest",
+        "gateway_events",
+        "ai_requests",
+    }

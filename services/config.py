@@ -65,6 +65,28 @@ class Settings:
     )
     candidate_condition_action_enter: str = "ENTER"
     candidate_condition_action_exit: str = "EXIT"
+    strategy_engine_enabled: bool = True
+    strategy_engine_observe_only: bool = True
+    strategy_engine_max_candidates: int = 500
+    strategy_engine_require_context_ready: bool = True
+    strategy_engine_allowed_candidate_states: tuple[str, ...] = ("CONTEXT_READY", "WATCHING")
+    strategy_engine_stale_tick_sec: int = 30
+    strategy_engine_allowed_theme_states: tuple[str, ...] = ("LEADING", "SPREADING")
+    strategy_engine_allowed_theme_roles: tuple[str, ...] = (
+        "LEADER_CANDIDATE",
+        "CO_LEADER_CANDIDATE",
+        "FOLLOWER_CANDIDATE",
+    )
+    strategy_engine_require_1m_bar: bool = True
+    strategy_engine_require_vwap: bool = False
+    strategy_pullback_min_pct: float = 0.3
+    strategy_pullback_max_pct: float = 5.0
+    strategy_vwap_reclaim_tolerance_pct: float = 1.0
+    strategy_min_trade_value_delta_1m: float = 0.0
+    strategy_min_trade_value_delta_3m: float = 0.0
+    strategy_breakout_retest_near_high_pct: float = 2.0
+    strategy_follower_expansion_min_theme_rising_ratio: float = 0.35
+    strategy_config_version: str = "observe_v1"
 
     def __post_init__(self) -> None:
         if self.market_data_degraded_tick_stale_sec < self.market_data_tick_stale_sec:
@@ -118,6 +140,51 @@ class Settings:
             self,
             "candidate_condition_action_exit",
             _normalize_non_empty(self.candidate_condition_action_exit),
+        )
+        for field_name in ("strategy_engine_max_candidates", "strategy_engine_stale_tick_sec"):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        for field_name in (
+            "strategy_pullback_min_pct",
+            "strategy_pullback_max_pct",
+            "strategy_vwap_reclaim_tolerance_pct",
+            "strategy_min_trade_value_delta_1m",
+            "strategy_min_trade_value_delta_3m",
+            "strategy_breakout_retest_near_high_pct",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.strategy_pullback_max_pct < self.strategy_pullback_min_pct:
+            raise ValueError("STRATEGY_PULLBACK_MAX_PCT must be >= STRATEGY_PULLBACK_MIN_PCT")
+        _validate_ratio(
+            self.strategy_follower_expansion_min_theme_rising_ratio,
+            "STRATEGY_FOLLOWER_EXPANSION_MIN_THEME_RISING_RATIO",
+        )
+        if not self.strategy_engine_allowed_candidate_states:
+            raise ValueError("STRATEGY_ENGINE_ALLOWED_CANDIDATE_STATES must not be empty")
+        if not self.strategy_engine_allowed_theme_states:
+            raise ValueError("STRATEGY_ENGINE_ALLOWED_THEME_STATES must not be empty")
+        if not self.strategy_engine_allowed_theme_roles:
+            raise ValueError("STRATEGY_ENGINE_ALLOWED_THEME_ROLES must not be empty")
+        object.__setattr__(
+            self,
+            "strategy_engine_allowed_candidate_states",
+            _normalize_list_values(self.strategy_engine_allowed_candidate_states),
+        )
+        object.__setattr__(
+            self,
+            "strategy_engine_allowed_theme_states",
+            _normalize_list_values(self.strategy_engine_allowed_theme_states),
+        )
+        object.__setattr__(
+            self,
+            "strategy_engine_allowed_theme_roles",
+            _normalize_list_values(self.strategy_engine_allowed_theme_roles),
+        )
+        object.__setattr__(
+            self,
+            "strategy_config_version",
+            _require_non_empty_config(self.strategy_config_version),
         )
 
     @property
@@ -277,6 +344,79 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         candidate_condition_action_enter=env.get("CANDIDATE_CONDITION_ACTION_ENTER", "ENTER"),
         candidate_condition_action_exit=env.get("CANDIDATE_CONDITION_ACTION_EXIT", "EXIT"),
+        strategy_engine_enabled=_parse_bool(env.get("STRATEGY_ENGINE_ENABLED", "true")),
+        strategy_engine_observe_only=_parse_bool(
+            env.get("STRATEGY_ENGINE_OBSERVE_ONLY", "true")
+        ),
+        strategy_engine_max_candidates=_parse_int(
+            env.get("STRATEGY_ENGINE_MAX_CANDIDATES", "500"),
+            "STRATEGY_ENGINE_MAX_CANDIDATES",
+            min_value=1,
+        ),
+        strategy_engine_require_context_ready=_parse_bool(
+            env.get("STRATEGY_ENGINE_REQUIRE_CONTEXT_READY", "true")
+        ),
+        strategy_engine_allowed_candidate_states=_parse_csv_list(
+            env.get("STRATEGY_ENGINE_ALLOWED_CANDIDATE_STATES", "CONTEXT_READY,WATCHING"),
+            "STRATEGY_ENGINE_ALLOWED_CANDIDATE_STATES",
+        ),
+        strategy_engine_stale_tick_sec=_parse_int(
+            env.get("STRATEGY_ENGINE_STALE_TICK_SEC", "30"),
+            "STRATEGY_ENGINE_STALE_TICK_SEC",
+            min_value=1,
+        ),
+        strategy_engine_allowed_theme_states=_parse_csv_list(
+            env.get("STRATEGY_ENGINE_ALLOWED_THEME_STATES", "LEADING,SPREADING"),
+            "STRATEGY_ENGINE_ALLOWED_THEME_STATES",
+        ),
+        strategy_engine_allowed_theme_roles=_parse_csv_list(
+            env.get(
+                "STRATEGY_ENGINE_ALLOWED_THEME_ROLES",
+                "LEADER_CANDIDATE,CO_LEADER_CANDIDATE,FOLLOWER_CANDIDATE",
+            ),
+            "STRATEGY_ENGINE_ALLOWED_THEME_ROLES",
+        ),
+        strategy_engine_require_1m_bar=_parse_bool(
+            env.get("STRATEGY_ENGINE_REQUIRE_1M_BAR", "true")
+        ),
+        strategy_engine_require_vwap=_parse_bool(
+            env.get("STRATEGY_ENGINE_REQUIRE_VWAP", "false")
+        ),
+        strategy_pullback_min_pct=_parse_float(
+            env.get("STRATEGY_PULLBACK_MIN_PCT", "0.3"),
+            "STRATEGY_PULLBACK_MIN_PCT",
+            min_value=0.0,
+        ),
+        strategy_pullback_max_pct=_parse_float(
+            env.get("STRATEGY_PULLBACK_MAX_PCT", "5.0"),
+            "STRATEGY_PULLBACK_MAX_PCT",
+            min_value=0.0,
+        ),
+        strategy_vwap_reclaim_tolerance_pct=_parse_float(
+            env.get("STRATEGY_VWAP_RECLAIM_TOLERANCE_PCT", "1.0"),
+            "STRATEGY_VWAP_RECLAIM_TOLERANCE_PCT",
+            min_value=0.0,
+        ),
+        strategy_min_trade_value_delta_1m=_parse_float(
+            env.get("STRATEGY_MIN_TRADE_VALUE_DELTA_1M", "0"),
+            "STRATEGY_MIN_TRADE_VALUE_DELTA_1M",
+            min_value=0.0,
+        ),
+        strategy_min_trade_value_delta_3m=_parse_float(
+            env.get("STRATEGY_MIN_TRADE_VALUE_DELTA_3M", "0"),
+            "STRATEGY_MIN_TRADE_VALUE_DELTA_3M",
+            min_value=0.0,
+        ),
+        strategy_breakout_retest_near_high_pct=_parse_float(
+            env.get("STRATEGY_BREAKOUT_RETEST_NEAR_HIGH_PCT", "2.0"),
+            "STRATEGY_BREAKOUT_RETEST_NEAR_HIGH_PCT",
+            min_value=0.0,
+        ),
+        strategy_follower_expansion_min_theme_rising_ratio=_parse_float(
+            env.get("STRATEGY_FOLLOWER_EXPANSION_MIN_THEME_RISING_RATIO", "0.35"),
+            "STRATEGY_FOLLOWER_EXPANSION_MIN_THEME_RISING_RATIO",
+        ),
+        strategy_config_version=env.get("STRATEGY_CONFIG_VERSION", "observe_v1"),
     )
 
 

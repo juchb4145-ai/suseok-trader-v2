@@ -58,13 +58,16 @@
 - Connect condition observations, theme snapshots, and market readiness as candidate sources.
 - Keep Candidate FSM separate from Strategy, Risk, OMS, GatewayCommand, and order APIs.
 
-## Next: PR 7. Strategy Engine observe-only
+## Done: PR 7. Strategy Engine observe-only
 
-- Add deterministic strategy evaluation in observe-only mode.
-- Read PR 6 Candidate context and emit strategy observations without order intent creation.
-- Keep strategy thresholds controlled by configuration and code review only.
+- Add deterministic setup observation in observe-only mode.
+- Read PR 6 Candidate context, Market Data projection, and Theme Snapshot rows.
+- Store StrategyObservation, SetupObservation, latest projection, run, and error rows.
+- Expose Strategy status, observation, setup, run, error, and evaluate APIs.
+- Keep `MATCHED_OBSERVATION` as a classifier result, not buy readiness.
+- Keep Risk, OMS, GatewayCommand creation, and order APIs out of scope.
 
-## PR 8. Risk Gate observe-only
+## Next: PR 8. Risk Gate observe-only
 
 - Add deterministic risk evaluation in observe-only mode.
 - Record blocked reasons and risk observations.

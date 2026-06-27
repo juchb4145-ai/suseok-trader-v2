@@ -1,8 +1,8 @@
 # Candidate FSM
 
 PR 6 adds an observe-only Candidate FSM. A Candidate is an observation episode, not a buy
-candidate. It exists so PR 7 Strategy Engine can later read a deterministic, source-attributed
-context packet without touching Gateway commands, OMS, Risk, or order APIs.
+candidate. PR 7 Strategy Engine reads `CONTEXT_READY` candidate context as a read-only input and
+stores strategy observations without touching Gateway commands, OMS, Risk, or order APIs.
 
 ## Purpose
 
@@ -11,7 +11,7 @@ context packet without touching Gateway commands, OMS, Risk, or order APIs.
 - Track lifecycle state through a deterministic FSM.
 - Store source events, source latest rows, state transitions, context latest rows, and projection
   errors.
-- Expose read-only Candidate context for later Strategy evaluation.
+- Expose read-only Candidate context for Strategy observation evaluation.
 
 ## Source Types
 
@@ -41,8 +41,9 @@ Condition sources are read from `market_condition_signals`. Theme sources are re
 - `COOLDOWN`: reserved for episode churn control.
 - `CLOSED`: source exit, no active source, TTL expiry, or theme rotation ended the episode.
 
-`CONTEXT_READY` is not buy readiness. PR 6 has no setup validation, entry readiness, score, risk
-pass/fail, order intent, or order command.
+`CONTEXT_READY` is not buy readiness. It only means the observation context can be read by PR 7
+Strategy Engine. PR 6 has no setup validation, entry readiness, score, risk pass/fail, order
+intent, or order command.
 
 ## Identity And Generation
 
@@ -101,6 +102,16 @@ from Gateway transport events; Candidate FSM does not write `gateway_events` or 
 The resulting read-only context is stored in `candidate_context_latest` as `theme_context_json`,
 `market_context_json`, `source_context_json`, and `readiness_json`.
 
+## PR 7 Strategy Connection
+
+Strategy Engine observe-only reads candidate rows and `candidate_context_latest` when evaluating
+candidate setup observations. It also reads Market Data projection rows and Theme Snapshot rows as
+read-only evidence. Strategy evaluation does not mutate Candidate state, does not convert
+`CONTEXT_READY` into buy readiness, and does not create Gateway commands or order API calls.
+
+When a Strategy setup reaches `MATCHED_OBSERVATION`, the Candidate remains an observation episode.
+Risk Gate and OMS behavior are intentionally absent before later PRs.
+
 ## API
 
 - `GET /api/candidates/status`
@@ -156,3 +167,6 @@ PR 6 does not implement:
 - OpenAI API calls;
 - AI Sidecar context builder;
 - automatic buy/sell decisions from candidates.
+
+PR 7 keeps this boundary: Strategy observations are stored separately in strategy projection
+tables and never write Candidate states such as buy-ready or order-ready.

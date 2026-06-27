@@ -8,6 +8,7 @@ from api.routes.candidates import router as candidates_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.market_data import router as market_data_router
+from api.routes.strategy import router as strategy_router
 from api.routes.themes import router as themes_router
 from fastapi import FastAPI
 from services.config import load_settings
@@ -34,6 +35,7 @@ def create_app() -> FastAPI:
     application.include_router(market_data_router)
     application.include_router(themes_router)
     application.include_router(candidates_router)
+    application.include_router(strategy_router)
     return application
 
 

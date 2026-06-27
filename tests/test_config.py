@@ -35,6 +35,28 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
         "CO_LEADER_CANDIDATE",
         "FOLLOWER_CANDIDATE",
     )
+    assert settings.strategy_engine_enabled is True
+    assert settings.strategy_engine_observe_only is True
+    assert settings.strategy_engine_max_candidates == 500
+    assert settings.strategy_engine_require_context_ready is True
+    assert settings.strategy_engine_allowed_candidate_states == ("CONTEXT_READY", "WATCHING")
+    assert settings.strategy_engine_stale_tick_sec == 30
+    assert settings.strategy_engine_allowed_theme_states == ("LEADING", "SPREADING")
+    assert settings.strategy_engine_allowed_theme_roles == (
+        "LEADER_CANDIDATE",
+        "CO_LEADER_CANDIDATE",
+        "FOLLOWER_CANDIDATE",
+    )
+    assert settings.strategy_engine_require_1m_bar is True
+    assert settings.strategy_engine_require_vwap is False
+    assert settings.strategy_pullback_min_pct == 0.3
+    assert settings.strategy_pullback_max_pct == 5.0
+    assert settings.strategy_vwap_reclaim_tolerance_pct == 1.0
+    assert settings.strategy_min_trade_value_delta_1m == 0
+    assert settings.strategy_min_trade_value_delta_3m == 0
+    assert settings.strategy_breakout_retest_near_high_pct == 2.0
+    assert settings.strategy_follower_expansion_min_theme_rising_ratio == 0.35
+    assert settings.strategy_config_version == "observe_v1"
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -84,3 +106,33 @@ def test_candidate_settings_are_validated() -> None:
         assert "CANDIDATE_THEME_SOURCE_STATES" in str(exc)
     else:
         raise AssertionError("expected invalid candidate list setting")
+
+
+def test_strategy_settings_are_validated() -> None:
+    try:
+        load_settings({"STRATEGY_ENGINE_MAX_CANDIDATES": "0"})
+    except ValueError as exc:
+        assert "STRATEGY_ENGINE_MAX_CANDIDATES" in str(exc)
+    else:
+        raise AssertionError("expected invalid strategy max candidates setting")
+
+    try:
+        load_settings({"STRATEGY_ENGINE_ALLOWED_CANDIDATE_STATES": "CONTEXT_READY,"})
+    except ValueError as exc:
+        assert "STRATEGY_ENGINE_ALLOWED_CANDIDATE_STATES" in str(exc)
+    else:
+        raise AssertionError("expected invalid strategy state list setting")
+
+    try:
+        load_settings({"STRATEGY_PULLBACK_MIN_PCT": "5", "STRATEGY_PULLBACK_MAX_PCT": "1"})
+    except ValueError as exc:
+        assert "STRATEGY_PULLBACK_MAX_PCT" in str(exc)
+    else:
+        raise AssertionError("expected invalid strategy pullback range")
+
+    try:
+        load_settings({"STRATEGY_FOLLOWER_EXPANSION_MIN_THEME_RISING_RATIO": "1.5"})
+    except ValueError as exc:
+        assert "ratio between 0 and 1" in str(exc)
+    else:
+        raise AssertionError("expected invalid strategy follower ratio")

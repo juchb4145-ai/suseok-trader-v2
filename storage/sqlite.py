@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 APP_NAME = "suseok-trader-v2"
 
 
@@ -34,6 +34,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
     _create_candidate_projection_tables(connection)
+    _create_strategy_projection_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -718,5 +719,138 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_candidate_projection_errors_created_at
         ON candidate_projection_errors (created_at)
+        """
+    )
+
+
+def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_observations (
+            strategy_observation_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            overall_status TEXT NOT NULL,
+            primary_setup_type TEXT,
+            primary_setup_status TEXT,
+            score REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            config_version TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_observations_latest (
+            candidate_instance_id TEXT PRIMARY KEY,
+            strategy_observation_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            overall_status TEXT NOT NULL,
+            primary_setup_type TEXT,
+            primary_setup_status TEXT,
+            score REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            config_version TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_setup_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            strategy_observation_id TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            score REAL NOT NULL DEFAULT 0,
+            confidence REAL NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            evaluated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_evaluation_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            evaluated_count INTEGER NOT NULL DEFAULT 0,
+            data_wait_count INTEGER NOT NULL DEFAULT 0,
+            matched_observation_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            config_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_evaluation_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            candidate_instance_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_observations_trade_evaluated
+        ON strategy_observations (trade_date, evaluated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_observations_code_trade
+        ON strategy_observations (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_observations_status_trade
+        ON strategy_observations (overall_status, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_setup_candidate_type
+        ON strategy_setup_observations (candidate_instance_id, setup_type)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_setup_type_status
+        ON strategy_setup_observations (setup_type, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_runs_started_at
+        ON strategy_evaluation_runs (started_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_errors_created_at
+        ON strategy_evaluation_errors (created_at)
         """
     )
