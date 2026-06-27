@@ -324,10 +324,12 @@ const renderAi = (snapshot) => {
     metric("order_tools_enabled", status.order_tools_enabled),
     metric("recent_request_count", ai.recent_request_count || 0),
     metric("insight_count", ai.insight_count || 0),
+    metric("rca_report_count", ai.rca_report_count || 0),
   ].join("");
 
   const insights = ai.insights || [];
   const requests = ai.requests || [];
+  const rcaReports = ai.latest_rca_reports || [];
   const requestCards = requests.length
     ? requests
         .slice(0, 5)
@@ -342,6 +344,21 @@ const renderAi = (snapshot) => {
         )
         .join("")
     : emptyState("표시할 AI request가 없습니다.");
+  const rcaCards = rcaReports.length
+    ? rcaReports
+        .slice(0, 5)
+        .map(
+          (item) => `
+            <article class="log-card">
+              <h3>RCA · ${escapeHtml(item.report_type)} · ${escapeHtml(item.status)}</h3>
+              <p>${escapeHtml(item.summary)}</p>
+              <p class="muted">${escapeHtml(item.generated_at)}</p>
+              ${rawJson(item)}
+            </article>
+          `,
+        )
+        .join("")
+    : emptyState("표시할 RCA report가 없습니다.");
   document.getElementById("ai-insights").innerHTML = insights.length
     ? insights
         .map(
@@ -356,7 +373,7 @@ const renderAi = (snapshot) => {
         )
         .join("")
     : emptyState("표시할 AI insight가 없습니다.");
-  document.getElementById("ai-requests").innerHTML = requestCards;
+  document.getElementById("ai-requests").innerHTML = `${rcaCards}${requestCards}`;
 };
 
 const logGroup = (title, rows) => `

@@ -41,6 +41,11 @@ observation and checks, related projection/evaluation errors, and dashboard safe
 top reason codes, recent errors, gateway transport status, and AI Sidecar status. It always warns
 that PR AI-1 has no OMS/order path by design.
 
+PR AI-3 uses the `NO_TRADE_RCA` and `CANDIDATE_BLOCK_RCA` context packets as deterministic RCA
+evidence. The RCA workflow persists the packet, writes report sections, and optionally links a
+valid AI-2 insight. The context packet and report remain read-only review artifacts and are not
+fed into Strategy/Risk/OMS automation.
+
 `TRADE_REVIEW` is intentionally limited. Because OMS/position/trade tables do not exist in PR
 AI-1, it returns observation review context and marks `OMS_UNAVAILABLE`,
 `TRADE_TABLE_UNAVAILABLE`, and `LIVE_SIM_NOT_ENABLED` as missing sections.

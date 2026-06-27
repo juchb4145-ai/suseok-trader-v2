@@ -136,6 +136,20 @@ OpenAI failures do not affect Core health/status endpoints.
 
 POST endpoints require the local token when `TRADING_CORE_TOKEN` is configured.
 
+## RCA Workflow Linkage
+
+PR AI-3 RCA workflows may call `run_ai_sidecar_task` manually when an operator explicitly passes
+`run_ai=true` or CLI `--run-ai`. The deterministic RCA report is built and saved regardless of
+AI availability.
+
+When the runner returns a valid insight, the RCA report stores `ai_request_id`, `ai_insight_id`,
+and a short AI summary. When the runner returns disabled/unavailable/invalid/policy failure, the
+RCA report stores failure status and may link `ai_request_id`, but no `ai_insight_id` is recorded.
+
+AI output remains report context only. It is not Strategy input, Risk input, Candidate mutation,
+OMS input, order approval, OrderIntent, GatewayCommand, live-flag mutation, or automated trading
+decision input.
+
 ## Dashboard Policy
 
 Dashboard can display AI Sidecar status, request counts, recent request rows, recent insight rows,

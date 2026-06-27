@@ -30,6 +30,7 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
 - Risk Notes: latest risk observation, severity, block/caution/pass count, reason code를 표시한다.
 - Recent Events / Errors: Gateway recent events와 각 projection/evaluation error를 최근 N개 표시한다.
 - AI Sidecar Insight: 저장된 request/insight 상태를 표시하되 실행 컨트롤은 제공하지 않는다.
+- AI RCA Reports: PR AI-3부터 최근 RCA report/error를 read-only로 표시할 수 있다.
 
 ## Snapshot API
 
@@ -104,6 +105,10 @@ recent request counts, recent request rows, recent insight rows, and last error 
 AI 실행 버튼, OpenAI client 직접 호출, 자동 판단 연결은 여전히 없다.
 AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/OMS 자동 input으로 쓰지 않는다.
 
+PR AI-3부터 Dashboard snapshot의 `ai_sidecar` section은 `rca_available`, `rca_report_count`,
+`latest_rca_reports`, `latest_rca_errors`를 포함할 수 있다. Dashboard는 이 데이터를 표시만 하며
+`/api/ai-sidecar/rca/*` POST endpoint를 호출하지 않는다. RCA 실행 버튼도 없다.
+
 ## 금지 범위
 
 - Kiwoom OpenAPI+ 실제 구현 없음
@@ -117,8 +122,11 @@ AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/O
 - Dashboard에서 rebuild/evaluate/import 실행 버튼 없음
 - OpenAI API 직접 호출 없음
 - AI Sidecar request/insight status 표시만 가능
+- AI RCA report/error read-only 표시만 가능
 - Dashboard AI 실행 버튼 없음
+- Dashboard RCA 실행 버튼 없음
 - Dashboard JavaScript의 AI 실행 POST 없음
+- Dashboard JavaScript의 RCA 실행 POST 없음
 - Dashboard 근거 자동 주문/자동 매수 판단 없음
 
 ## Local Runbook

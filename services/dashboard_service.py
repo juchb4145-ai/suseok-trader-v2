@@ -19,6 +19,11 @@ from storage.event_store import (
 )
 
 from services.ai_sidecar.openai_client import get_openai_client_status
+from services.ai_sidecar.rca_report_store import (
+    count_rca_reports,
+    list_rca_report_errors,
+    list_rca_reports,
+)
 from services.ai_sidecar.request_store import (
     get_ai_request_status_counts,
     get_last_ai_request_error,
@@ -118,6 +123,9 @@ def build_dashboard_snapshot(
     ai_requests = list_ai_requests(connection, limit=bounded_limit)
     ai_request_status_counts = get_ai_request_status_counts(connection)
     ai_last_error = get_last_ai_request_error(connection)
+    latest_rca_reports = list_rca_reports(connection, limit=min(bounded_limit, 10))
+    latest_rca_errors = list_rca_report_errors(connection, limit=min(bounded_limit, 10))
+    rca_report_count = count_rca_reports(connection)
 
     strategy_status_counts = _enum_counts(
         connection,
@@ -213,6 +221,12 @@ def build_dashboard_snapshot(
             "recent_request_count": len(ai_requests),
             "recent_insight_count": len(ai_insights),
             "last_error": ai_last_error,
+            "rca_available": True,
+            "rca_report_count": rca_report_count,
+            "latest_rca_reports": latest_rca_reports,
+            "latest_rca_errors": latest_rca_errors,
+            "latest_rca_report_count": len(latest_rca_reports),
+            "latest_rca_error_count": len(latest_rca_errors),
             "execution_controls_available": False,
             "notice": "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         },
@@ -445,6 +459,7 @@ def _pipeline_summary(
         "ai_sidecar": {
             "enabled": settings.ai_sidecar_enabled,
             "insight_count": len(ai_insights),
+            "rca_available": True,
             "request_status_counts": ai_request_status_counts,
             "execution_api_available": True,
             "context_builder_available": True,

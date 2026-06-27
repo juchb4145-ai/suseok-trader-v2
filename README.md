@@ -8,9 +8,10 @@ plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4
 Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
 the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, the
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
-PR AI-1 read-only LLM Context Builder.
+PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, and PR AI-3
+No-trade RCA / Candidate Block RCA reports.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
-behavior, OpenAI API calls, or live order APIs.
+behavior, automatic OpenAI calls, or live order APIs.
 
 ## Broker Contract
 
@@ -426,6 +427,48 @@ button and no POST call from `dashboard.js`.
 See `docs/ai_context_builder.md`, `docs/ai_openai_client.md`, and
 `docs/ai_sidecar_architecture.md` for context, prompt, client, validation, persistence, and safety
 details.
+
+## AI RCA Reports
+
+PR AI-3 adds deterministic operator-review RCA reports for the two most common questions:
+
+- why no buy/order happened for a trade date
+- why a candidate was blocked or did not progress
+
+RCA reports use the PR AI-1 context builder and can optionally link to PR AI-2 AI insights. They
+are report artifacts only. They are not Strategy input, Risk input, OMS input, order approval,
+OrderIntent, GatewayCommand, buy/sell recommendation, or live-mode mutation.
+
+RCA endpoints:
+
+- `GET /api/ai-sidecar/rca/status`
+- `POST /api/ai-sidecar/rca/no-trade/{trade_date}?run_ai=false`
+- `POST /api/ai-sidecar/rca/candidate/{candidate_instance_id}?run_ai=false`
+- `POST /api/ai-sidecar/rca/candidates/batch`
+- `GET /api/ai-sidecar/rca/reports`
+- `GET /api/ai-sidecar/rca/reports/{report_id}`
+- `GET /api/ai-sidecar/rca/errors`
+
+POST endpoints require the local token when `TRADING_CORE_TOKEN` is configured. `run_ai=false` is
+the default, so deterministic reports work without an OpenAI API key. When `run_ai=true` is
+explicitly requested, the workflow calls the AI-2 manual runner only if AI Sidecar execution is
+enabled and configured. AI disabled, unavailable, timeout, invalid output, or policy rejection
+does not discard the deterministic report; the report links the failed `ai_request_id` and stores
+no `ai_insight_id` unless output passed validation.
+
+CLI examples:
+
+```powershell
+python tools/build_no_trade_rca.py --trade-date 2026-06-27
+python tools/build_candidate_block_rca.py --candidate-instance-id CAND-2026-06-27-005930-1
+python tools/build_candidate_block_rca_batch.py --trade-date 2026-06-27 --limit 20
+```
+
+Add `--run-ai` only for an explicit manual AI run. Dashboard snapshot can show recent RCA reports
+and errors, but Dashboard still has no RCA execution button and sends no RCA POST request.
+
+See `docs/ai_rca_workflows.md` for storage tables, root-cause categories, API, CLI, AI linking,
+and forbidden scope.
 
 ## Mock Gateway
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 APP_NAME = "suseok-trader-v2"
 
 
@@ -30,6 +30,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
         """
     )
     _create_ai_sidecar_tables(connection)
+    _create_ai_rca_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
@@ -224,6 +225,114 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ai_context_build_errors_created_at
         ON ai_context_build_errors (created_at)
+        """
+    )
+
+
+def _create_ai_rca_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_rca_reports (
+            report_id TEXT PRIMARY KEY,
+            report_type TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            root_cause_category TEXT NOT NULL,
+            root_cause TEXT NOT NULL,
+            context_id TEXT,
+            ai_request_id TEXT,
+            ai_insight_id TEXT,
+            suggested_checks_json TEXT NOT NULL DEFAULT '[]',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1,
+            generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_rca_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id TEXT NOT NULL,
+            section_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_rca_report_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_id TEXT NOT NULL,
+            link_type TEXT NOT NULL,
+            related_entity_type TEXT NOT NULL,
+            related_entity_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_rca_report_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type TEXT,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_reports_type_generated
+        ON ai_rca_reports (report_type, generated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_reports_trade_date
+        ON ai_rca_reports (trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_reports_related_entity
+        ON ai_rca_reports (related_entity_type, related_entity_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_sections_report_id
+        ON ai_rca_sections (report_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_report_links_report_id
+        ON ai_rca_report_links (report_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_rca_report_errors_created_at
+        ON ai_rca_report_errors (created_at)
         """
     )
 

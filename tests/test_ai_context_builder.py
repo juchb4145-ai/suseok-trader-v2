@@ -247,8 +247,11 @@ def test_safety_regression_ai_execution_is_manual_run_only_and_no_order_routes()
     }
 
     assert "/api/ai-sidecar/run" in route_methods
+    assert "/api/ai-sidecar/rca/no-trade/{trade_date}" in route_methods
     assert all(
-        "POST" not in methods or path.startswith("/api/ai-sidecar/run")
+        "POST" not in methods
+        or path.startswith("/api/ai-sidecar/run")
+        or path.startswith("/api/ai-sidecar/rca")
         for path, methods in route_methods.items()
     )
     assert "/api/orders/enqueue" not in {route.path for route in app.routes}

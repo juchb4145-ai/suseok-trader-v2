@@ -97,13 +97,17 @@
 - Keep tools/function calling and order tools disabled.
 - Keep Dashboard display-only with no AI run button.
 
-## Next: PR AI-3. No-trade RCA / Candidate Block RCA
+## Done: PR AI-3. No-trade RCA / Candidate Block RCA
 
-- Expand the no-trade and candidate block explanation workflow on top of the AI-2 runner.
-- Surface results in reports and operator review.
-- Keep results out of Strategy, Risk, and OMS automatic decisions.
+- Add deterministic no-trade and candidate block RCA report workflows.
+- Persist `ai_rca_reports`, sections, links, and build errors.
+- Link valid AI-2 insights only when `run_ai=true` is explicitly requested.
+- Preserve deterministic reports when AI is disabled, unavailable, invalid, or policy rejected.
+- Expose report APIs and CLI tools without adding OMS/order/GatewayCommand behavior.
+- Add Dashboard snapshot summary for recent RCA reports without execution controls.
+- Keep reports out of Strategy, Risk, and OMS automatic decisions.
 
-## PR AI-4. Dashboard AI Explanation Cards
+## Next: PR AI-4. Dashboard AI Explanation Cards
 
 - Display validated AI insights in Dashboard cards.
 - Include invalid/error/timeout states.
@@ -120,6 +124,8 @@
 - Add order management contracts and DRY_RUN-only flow.
 - Require deterministic Strategy and Risk decisions before any order intent can be created.
 - Keep live flags disabled by default.
+- Proceed only after PR AI-4/AI-5 or a separate safety review confirms RCA/Sidecar reports remain
+  review-only.
 
 ## PR 11. Exit Engine
 
