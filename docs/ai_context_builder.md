@@ -1,112 +1,83 @@
 # AI Context Builder
 
-## Purpose
+## 요약
 
-PR AI-1 adds a read-only LLM Context Builder for the AI Sidecar. It builds bounded,
-redacted, schema-versioned context packets from Event Store and projection state so an operator
-can preview or persist the exact packet used by later Sidecar execution.
+AI Context Builder는 AI에게 넘기기 전 정리된 입력자료인 `AISidecarContextPacket`을 만든다. 모델을 호출하지 않고, insight를 만들지 않고, 주문 관련 command를 만들지 않는다. Context packet과 이후 AI insight는 모두 review-only artifact다.
 
-The Context Builder itself does not call OpenAI, create AI insights, enqueue work, create
-`GatewayCommand`, create `OrderIntent`, implement OMS, or feed AI context into Strategy/Risk/OMS
-automatic decisions. PR AI-2's runner may consume a context packet as model input, but the packet
-and validated insight remain read-only operator-review artifacts.
+## Read-only 원칙
 
-## Read-only Principles
-
-- Context Builder only reads SQLite projection tables and existing read-only service queries.
-- `GET /api/ai-sidecar/context/preview` builds a packet but does not call a model.
-- `persist=true` stores the final context packet for audit only.
-- Context preview writes no row to `ai_requests` or `ai_insights`.
-- PR AI-2 manual execution may write `ai_requests`, and writes `ai_insights` only after valid
-  structured output.
-- `AI_SIDECAR_ENABLED=false` does not disable preview, because preview has no model call.
-- `execution_api_available=true` can be reported by AI-2, but Dashboard still has no execution
-  control and preview remains GET/read-only.
+- SQLite projection table과 read-only service query만 읽는다.
+- `GET /api/ai-sidecar/context/preview`는 packet을 만들지만 model call을 하지 않는다.
+- `persist=true`는 audit용 packet 저장만 수행한다.
+- context preview는 `ai_requests`, `ai_insights`를 쓰지 않는다.
+- `AI_SIDECAR_ENABLED=false`여도 preview는 가능하다.
+- Dashboard에는 context build나 AI execution control이 없다.
 
 ## Task Sections
 
-`DAILY_MARKET_BRIEF` includes dashboard safety, gateway status, market-data status, theme snapshot
-summary, candidate state counts, strategy status counts, risk status counts, recent event/error
-summary, and AI Sidecar status.
+| Task | 포함 내용 |
+| --- | --- |
+| `DAILY_MARKET_BRIEF` | dashboard safety, gateway, market data, theme, candidate, strategy, risk, recent error summary |
+| `THEME_BRIEF` | theme detail, latest snapshot, top members, readiness, related candidate/strategy/risk |
+| `CANDIDATE_BLOCK_RCA` | candidate detail, context, sources, transitions, market/theme/strategy/risk evidence |
+| `NO_TRADE_RCA` | safety, pipeline funnel, reason counts, recent errors, gateway status |
+| `TRADE_REVIEW` | observation review context, OMS unavailable marker |
+| `OPS_INCIDENT_SUMMARY` | gateway status, rejected/unknown/conflict events, projection/evaluation errors |
+| `CODEX_PROMPT_DRAFT` | observation summary, docs pointers, safety policy, forbidden scope |
 
-`THEME_BRIEF` includes theme detail, latest theme snapshot, top snapshot members, recent snapshot
-history, market readiness for top members, related candidates, related strategy observations, and
-related risk observations.
-
-`CANDIDATE_BLOCK_RCA` includes candidate detail, candidate context latest, sources, transitions,
-latest market tick/readiness, theme context, latest strategy observation and setups, latest risk
-observation and checks, related projection/evaluation errors, and dashboard safety warnings.
-
-`NO_TRADE_RCA` includes dashboard safety, pipeline funnel counts, candidate/strategy/risk counts,
-top reason codes, recent errors, gateway transport status, and AI Sidecar status. It always warns
-that PR AI-1 has no OMS/order path by design.
-
-PR AI-3 uses the `NO_TRADE_RCA` and `CANDIDATE_BLOCK_RCA` context packets as deterministic RCA
-evidence. The RCA workflow persists the packet, writes report sections, and optionally links a
-valid AI-2 insight. The context packet and report remain read-only review artifacts and are not
-fed into Strategy/Risk/OMS automation.
-
-`TRADE_REVIEW` is intentionally limited. Because OMS/position/trade tables do not exist in PR
-AI-1, it returns observation review context and marks `OMS_UNAVAILABLE`,
-`TRADE_TABLE_UNAVAILABLE`, and `LIVE_SIM_NOT_ENABLED` as missing sections.
-
-`OPS_INCIDENT_SUMMARY` includes gateway status, rejected/unknown/conflict gateway events when
-available, gateway transport status, projection/evaluation errors, and heartbeat timestamps.
-
-`CODEX_PROMPT_DRAFT` includes selected observation summary, docs pointers, recent errors, safety
-policy summary, and forbidden-scope summary. It does not generate a prompt body or automate code
-changes.
+PR AI-3 RCA workflow는 `NO_TRADE_RCA`, `CANDIDATE_BLOCK_RCA` packet을 deterministic report evidence로 사용한다. report도 review-only다.
 
 ## Redaction Policy
 
-The redactor masks or removes:
+redactor가 masking/removal하는 값:
 
-- account/account_id/account_no fields
-- password, token, api_key, secret, authorization, cookie fields
+- account/account_id/account_no
+- password, token, api_key, secret, authorization, cookie
 - `X-Core-Token`, `X-Local-Token`, `TRADING_CORE_TOKEN`, `OPENAI_API_KEY`
-- raw headers and raw environment mappings
-- local absolute paths such as `C:\Users\...`, `/home/...`, and `/mnt/c/...`
-- long account-like numeric strings
+- raw headers, raw environment mappings
+- local absolute path
+- long account-like numeric string
 
-It preserves normal market values such as stock code `005930`, prices, volumes, trade value,
-candidate IDs, theme IDs, strategy observation IDs, and risk observation IDs.
+보존되는 값:
+
+- stock code `005930`
+- price, volume, trade value
+- candidate ID
+- theme ID
+- strategy observation ID
+- risk observation ID
 
 ## Order-context Restriction
 
-`AI_SIDECAR_ALLOW_ORDER_CONTEXT=false` is the default. When disabled, context policy drops
-order-like keys or action/tool fields such as:
+`AI_SIDECAR_ALLOW_ORDER_CONTEXT=false`가 기본이다. disabled 상태에서는 다음 action/tool-like key를 context packet에서 제거한다.
 
-- `order`, `orders`, `order_intent`, `order_request`
+- `order`
+- `orders`
+- `order_intent`
+- `order_request`
 - `gateway_command`
-- `send_order`, `cancel_order`, `modify_order`
+- `send_order`
+- `cancel_order`
+- `modify_order`
 - `position_size`
-- `live_real`, `live_sim`
+- `live_real`
+- `live_sim`
 - `account`
 
-Natural-language safety text such as "order disabled" is allowed. Executable action/tool fields
-are not allowed in the context packet.
+자연어 safety text는 가능하지만 실행 가능한 action field는 허용되지 않는다.
 
-## Size And Truncation
+## Size / Truncation
 
-The builder uses `AI_SIDECAR_MAX_CONTEXT_CHARS` as the final packet limit and
-`AI_SIDECAR_CONTEXT_DEFAULT_LIMIT` / `AI_SIDECAR_CONTEXT_MAX_LIMIT` for row caps.
+`AI_SIDECAR_MAX_CONTEXT_CHARS`가 최종 packet limit이다.
 
-When the packet is too large:
+too large일 때:
 
-1. Optional sections are summarized first.
-2. Lists are compacted and raw/metadata payloads are removed.
-3. Required sections are reduced to summary-only if still necessary.
-4. `truncated=true` and `CONTEXT_TRUNCATED` are added.
+1. optional section 요약
+2. list compact와 raw/metadata payload 제거
+3. required section을 summary-only로 축소
+4. `truncated=true`, `CONTEXT_TRUNCATED` 추가
 
-The context hash is calculated from the final redacted/truncated payload and stable packet
-metadata, not from `generated_at`.
-
-## Deterministic Hash
-
-`context_hash` is a SHA-256 hash of canonical JSON. The hash material includes task type,
-schema version, related entity fields, source sections, missing sections, warnings, flags, and the
-final payload. The generated timestamp and context ID are excluded so the same final input produces
-the same hash.
+`context_hash`는 redacted/truncated final payload와 stable metadata 기준으로 계산한다. `generated_at`은 hash material에서 제외한다.
 
 ## API
 
@@ -119,12 +90,11 @@ the same hash.
 - `GET /api/ai-sidecar/context/theme/{theme_id}`
 - `GET /api/ai-sidecar/context/no-trade/{trade_date}`
 
-All context endpoints are GET. PR AI-2 adds manual execution endpoints separately under
-`/api/ai-sidecar/run*`; those endpoints call the runner, not the context preview API.
+모든 context endpoint는 GET이다. AI execution endpoint는 별도의 `/api/ai-sidecar/run*`에 있다.
 
 ## Storage
 
-`ai_context_packets` stores the final context packet metadata and payload:
+`ai_context_packets`:
 
 - `context_id`
 - `task_type`
@@ -144,29 +114,11 @@ All context endpoints are GET. PR AI-2 adds manual execution endpoints separatel
 - `payload_json`
 - `created_at`
 
-`ai_context_build_errors` stores preview/build failures. Runner context failures are also recorded
-in `ai_requests` with `CONTEXT_ERROR`.
+`ai_context_build_errors`는 preview/build failure를 저장한다.
 
-## Dashboard Integration
+## 운영자 체크포인트
 
-Dashboard snapshot now includes context builder status in the AI Sidecar status section:
-
-- `context_builder_available=true`
-- `openai_client_available=false`
-- `execution_api_available=true`
-- `order_context_allowed=false`
-- `tools_enabled=false`
-- `order_tools_enabled=false`
-
-Dashboard UI remains display/status only. There is still no AI execution control or POST call from
-dashboard JavaScript.
-
-## Explicitly Out Of Scope
-
-- intraday AI worker
-- OMS
-- `OrderIntent`, `EntryPlan`, `PositionSizing`
-- `send_order`, `cancel_order`, `modify_order`
-- `POST /api/orders/enqueue`
-- GatewayCommand creation/transmission
-- automatic buy/sell/order decisions based on context
+- context preview는 AI 실행이 아니다.
+- `persist=true`는 audit 저장이지 trading action이 아니다.
+- order-context restriction이 켜져 있는지 확인한다.
+- AI context는 Strategy/Risk/OMS 자동 입력이 아니다.

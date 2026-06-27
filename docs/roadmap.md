@@ -1,191 +1,70 @@
 # Roadmap
 
-## Done: PR 0. Bootstrap
+## 요약
 
-- Create the project layout.
-- Add Python project configuration, lint/test settings, and environment examples.
-- Add FastAPI Core API with `GET /health` and `GET /api/status`.
-- Add settings defaults with `OBSERVE` mode and disabled live flags.
-- Add SQLite initialization with WAL, `busy_timeout`, `synchronous=NORMAL`, and `app_metadata`.
-- Document architecture boundaries, event contract direction, and excluded legacy scope.
+이 로드맵은 `suseok-trader-v2`가 어떤 순서로 안전한 관찰 파이프라인을 쌓아 왔는지 보여준다. PR12까지 진행되었지만, 이것이 `LIVE_REAL` 준비 완료를 뜻하지 않는다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
 
-## Done: PR 1. Broker-neutral Contract
+## 공통 안전 문구
 
-- Add typed contract models for `GatewayEvent`, `GatewayCommand`, `BrokerPriceTick`,
-  `BrokerOrderRequest`, and `BrokerExecutionEvent`.
-- Add serialization tests and idempotency field validation.
-- Keep contracts free of Kiwoom/PyQt runtime imports.
+- 기본은 `OBSERVE`다.
+- Dashboard는 읽기 전용이며 실행 버튼이 없다.
+- `MATCHED_OBSERVATION`은 매수 신호가 아니다.
+- `OBSERVE_PASS`는 주문 승인이 아니다.
+- `DRY_RUN`은 내부 모의 회계이며 브로커 주문이 아니다.
+- `LIVE_SIM`은 모의투자 전용이며 실계좌 주문이 아니다.
+- AI/RCA/Codex 결과는 Strategy/Risk/OMS 자동 입력이 아니다.
 
-## Done: PR 2A. Roadmap Reset + AI Sidecar Read-Only Contract
+## 완료된 PR
 
-- Reset the delivery roadmap around broker-neutral Core plus later Gateway transport.
-- Add the read-only AI Sidecar architecture and safety policy.
-- Add AI Sidecar task, schema, and policy contracts without OpenAI API calls.
-- Add additive SQLite tables for future prompt, request, insight, and evaluation records.
-- Expose read-only AI Sidecar status/task/insight list APIs only.
+| PR | 완료 여부 | 한글 설명 | 안전상 의미 |
+| --- | --- | --- | --- |
+| PR 0 Bootstrap | Done | project layout, FastAPI Core, settings, SQLite 초기화 | `TRADING_MODE=OBSERVE`, live flag disabled 기본값 확립 |
+| PR 1 Broker-neutral Contract | Done | `GatewayEvent`, `GatewayCommand`, `BrokerPriceTick`, `BrokerOrderRequest` 등 계약 모델 추가 | 계약은 데이터 모양이다. 실행 경로가 아니다. |
+| PR 2A Roadmap Reset + AI Sidecar Read-Only Contract | Done | AI Sidecar를 read-only/review-only 계약으로 제한 | OpenAI 호출이나 주문 연결 없이 안전 정책부터 고정 |
+| PR 2B Event Store + Gateway Transport Surface | Done | Gateway event ingest와 command polling surface 추가 | public order enqueue endpoint 없음 |
+| PR 3 Mock Gateway + Gateway Adapter Skeleton | Done | mock Gateway와 future Kiwoom Gateway skeleton 추가 | 실제 broker 없이 transport 검증 |
+| PR 4 Market Data Service | Done | tick/latest/bar/VWAP/readiness projection 추가 | 시장 데이터는 관찰 데이터이며 주문 판단이 아님 |
+| PR 5 Theme Membership + Theme Snapshot | Done | theme membership과 snapshot projection 추가 | theme state는 Candidate source input일 뿐 |
+| PR 6 Candidate FSM | Done | observe-only 후보 관찰 에피소드 상태머신 추가 | Candidate는 매수 후보가 아니라 관찰 에피소드 |
+| PR 7 Strategy Engine observe-only | Done | deterministic setup observation 추가 | `MATCHED_OBSERVATION`은 classifier 결과 |
+| PR 8 Risk Gate observe-only | Done | deterministic risk observation 추가 | `OBSERVE_PASS`는 주문 승인 아님 |
+| PR 9 Dashboard V1 | Done | read-only 운영 대시보드 추가 | 화면에서 실행하거나 주문하지 않음 |
+| PR AI-1 LLM Context Builder | Done | redacted context packet builder 추가 | 모델 호출 없이 AI 입력자료만 구성 |
+| PR AI-2 OpenAI Client + Structured Outputs | Done | optional OpenAI Responses client와 schema validation 추가 | tools/function calling/order tools disabled |
+| PR AI-3 No-trade RCA / Candidate Block RCA | Done | deterministic RCA report workflow 추가 | report artifact only |
+| PR AI-4 Dashboard AI Explanation Cards | Done | AI/RCA 결과를 Dashboard card로 표시 | display-only, execution control 없음 |
+| PR AI-5 Codex Prompt Generator | Done | 사람이 복사하는 Codex prompt draft 생성 | 자동 branch/commit/push/PR 생성 없음 |
+| PR 10 OMS + DRY_RUN | Done | 내부 `DryRunIntent`, `DryRunOrder`, `DryRunPosition` 회계 추가 | 브로커 주문과 Gateway command 없음 |
+| PR 11 Exit Engine | Done | DRY_RUN position의 simulated close accounting 추가 | 실제 매도 주문 아님 |
+| PR 12 LIVE_SIM Enablement | Done | simulation-account-only LIVE_SIM path 추가 | safety-gated `send_order`만 허용, LIVE_REAL 아님 |
+| PR AI-6 LIVE_SIM Review Sidecar | Done | LIVE_SIM session/order/reconcile/incident review report 추가 | 장후 복기용 review-only artifact |
 
-## Done: PR 2B. Event Store + Gateway Transport Surface
+## 현재 다음 후보
 
-- Add the Core event store and transport-facing Gateway API surface.
-- Store inbound Gateway events and command state in SQLite.
-- Add command idempotency and duplicate suppression tests.
-- Keep the surface broker-neutral and isolated from Kiwoom/PyQt imports.
-
-## Done: PR 3. Mock Gateway + Gateway Adapter Skeleton
-
-- Add a separate 32-bit Gateway package skeleton.
-- Keep Kiwoom OpenAPI+ and PyQt dependencies isolated from Core requirements.
-- Implement heartbeat and mock event posting before any broker action.
-
-## Done: PR 4. Market Data Service
-
-- Normalize price ticks, condition events, and TR-derived market snapshots.
-- Provide read-only market data access to strategy and dashboard surfaces.
-- Preserve broker-neutral market contracts.
-
-## Done: PR 5. Theme Membership + Theme Snapshot
-
-- Add source-typed theme membership import and query APIs.
-- Build read-only theme snapshots from Market Data Service projections.
-- Provide theme state, quality, leader/co-leader/follower observation context.
-- Keep theme data as observation input only with no Candidate, Strategy, Risk, OMS, or order path.
-
-## Done: PR 6. Candidate FSM
-
-- Add observe-only candidate lifecycle states and deterministic transitions.
-- Store candidate source events, source latest rows, state transitions, context latest rows, and
-  projection errors.
-- Connect condition observations, theme snapshots, and market readiness as candidate sources.
-- Keep Candidate FSM separate from Strategy, Risk, OMS, GatewayCommand, and order APIs.
-
-## Done: PR 7. Strategy Engine observe-only
-
-- Add deterministic setup observation in observe-only mode.
-- Read PR 6 Candidate context, Market Data projection, and Theme Snapshot rows.
-- Store StrategyObservation, SetupObservation, latest projection, run, and error rows.
-- Expose Strategy status, observation, setup, run, error, and evaluate APIs.
-- Keep `MATCHED_OBSERVATION` as a classifier result, not buy readiness.
-- Keep Risk, OMS, GatewayCommand creation, and order APIs out of scope.
-
-## Done: PR 8. Risk Gate observe-only
-
-- Add deterministic risk evaluation in observe-only mode.
-- Read StrategyObservation, Candidate context, Market Data, and Theme Snapshot rows.
-- Record risk check observations, latest risk observations, runs, and errors.
-- Expose read-only Risk APIs and CLI tools for operator review.
-- Do not enable order routing.
-
-## Done: PR 9. Dashboard V1
-
-- Add read-only operator dashboard views for status, events, candidates, themes, and risk notes.
-- Include AI Sidecar insight display areas without triggering AI execution.
-- Keep the default operating posture observable and non-trading.
-
-## Done: PR AI-1. LLM Context Builder
-
-- Build bounded, redacted, read-only context packets from Event Store and domain state.
-- Enforce max context size and order-context restrictions.
-- Do not call OpenAI APIs.
-
-## Done: PR AI-2. OpenAI Client + Structured Outputs
-
-- Add an optional OpenAI Responses API client behind explicit AI Sidecar enablement.
-- Use task-specific structured outputs and local schema validation.
-- Add prompt registry, output schema builder, manual runner, request store, and insight store.
-- Add manual execution API protected by the local token when configured.
-- Store invalid outputs as failures only; never feed outputs into trading automation.
-- Keep tools/function calling and order tools disabled.
-- Keep Dashboard display-only with no AI run button.
-
-## Done: PR AI-3. No-trade RCA / Candidate Block RCA
-
-- Add deterministic no-trade and candidate block RCA report workflows.
-- Persist `ai_rca_reports`, sections, links, and build errors.
-- Link valid AI-2 insights only when `run_ai=true` is explicitly requested.
-- Preserve deterministic reports when AI is disabled, unavailable, invalid, or policy rejected.
-- Expose report APIs and CLI tools without adding OMS/order/GatewayCommand behavior.
-- Add Dashboard snapshot summary for recent RCA reports without execution controls.
-- Keep reports out of Strategy, Risk, and OMS automatic decisions.
-
-## Done: PR AI-4. Dashboard AI Explanation Cards
-
-- Add read-only Dashboard AI Explanation Cards for RCA reports, AI insights, failed AI requests,
-  context build errors, and RCA build errors.
-- Include invalid/error/timeout/policy-rejected states with Korean-friendly labels.
-- Expose GET-only `/api/dashboard/ai-explanations*` endpoints.
-- Keep Dashboard free of AI/RCA execution controls and trading side effects.
-
-## Done: PR AI-5. Codex Prompt Generator
-
-- Generate human-copyable Codex prompt drafts from RCA reports, AI context packets, candidates,
-  no-trade context, ops incidents, and PR10 safety-review needs.
-- Persist `ai_codex_prompt_drafts`, sections, links, and build errors.
-- Keep deterministic draft generation available without OpenAI.
-- Optionally use the PR AI-2 `CODEX_PROMPT_DRAFT` runner only when `run_ai=true`.
-- Do not add automatic code changes, branch creation, commits, pushes, or PR creation.
-- Keep prompts reviewable and copy-only for the operator.
-- Add Dashboard display/copy-only cards without Codex execution, GitHub write, or apply controls.
-
-## Done: PR 10. OMS + DRY_RUN
-
-- Add DRY_RUN-only OMS domain models, SQLite tables, service, API, CLI tools, and Dashboard panel.
-- Create internal `DryRunIntent`, `DryRunOrder`, `DryRunExecution`, `DryRunPosition`, and ledger
-  records only after safety gate and eligibility checks pass.
-- Require latest `MATCHED_OBSERVATION`, latest `OBSERVE_PASS`, `CONTEXT_READY`, fresh latest tick,
-  duplicate checks, limits, enabled dry-run settings, and PR10 safety gate.
-- Keep broker order routing, Gateway order commands, LIVE_SIM, LIVE_REAL, and background workers
-  out of scope.
-- Keep AI Sidecar, RCA reports, and Codex prompt drafts review-only and never automatic OMS input.
-
-## Done: PR 11. Exit Engine
-
-- Add deterministic DRY_RUN position exit evaluation for stop-loss, take-profit, trailing stop,
-  max-hold, stale data caution, theme weakening, risk deterioration, and strategy invalidation.
-- Persist `DryRunExitEvaluation`, `DryRunExitSignal`, `DryRunExitIntent`, `DryRunExitOrder`,
-  `DryRunExitExecution`, run, error, and position metric records.
-- Add local-token protected manual simulation APIs and CLI tools for internal exit intent/order/fill
-  creation only.
-- Add read-only Dashboard DRY_RUN Exit display with no action buttons.
-- Keep GatewayCommand creation, BrokerOrderRequest transmission, broker sell paths, LIVE_SIM,
-  LIVE_REAL, account/holding lookup, AI-driven exits, and background exit workers out of scope.
-
-## Done: PR 12. LIVE_SIM Enablement
-
-- Add `domain/live_sim`, `services/live_sim`, SQLite tables, API routes, CLI tools, and Dashboard
-  read-only panels for simulation-account-only order enablement.
-- Require explicit LIVE_SIM settings, local token protected manual calls, fresh Gateway heartbeat,
-  Gateway orderability, simulation account/server/broker mode, notional/daily/active limits,
-  duplicate checks, DRY_RUN evidence, Strategy `MATCHED_OBSERVATION`, Risk `OBSERVE_PASS`,
-  Candidate `CONTEXT_READY`, and fresh ticks.
-- Allow `send_order` Gateway commands only from the LIVE_SIM service with `source=live_sim`,
-  `mode=LIVE_SIM`, required idempotency, and `live_sim_only=true` / `live_real_allowed=false`
-  metadata.
-- Add mock Gateway acceptance support for LIVE_SIM command ack and optional execution events.
-- Keep LIVE_REAL, generic order enqueue APIs, cancel/modify endpoints, Dashboard execution buttons,
-  background workers, and AI/RCA/Codex-output-driven orders out of scope.
-
-## Done: PR AI-6. LIVE_SIM Review Sidecar
-
-- Add read-only deterministic review reports for LIVE_SIM sessions, orders, reconcile snapshots,
-  and incidents.
-- Persist `ai_live_sim_review_reports`, sections, links, and build errors.
-- Summarize safety gate posture, intents, orders, command ack/failure, execution events,
-  rejections, reconcile snapshots, errors, and dashboard safety reminders.
-- Optionally link PR AI-2 `TRADE_REVIEW` or `OPS_INCIDENT_SUMMARY` insights only when
-  `run_ai=true` is explicitly requested.
-- Preserve deterministic reports when AI is disabled, unavailable, invalid, or policy rejected.
-- Add local-token protected report creation API, CLI tools, Dashboard snapshot fields, and
-  read-only AI Explanation Cards.
-- Keep review output out of Strategy, Risk, OMS, Gateway command queues, LIVE_SIM order mutation,
-  and LIVE_REAL enablement.
-
-## Next Candidates
-
-- PR13 LIVE_SIM Hardening
-- Broker Reconcile Pilot for simulation-account snapshots
-- Operator Kill Switch Drill and runbook checks
+| 후보 | 설명 | 주의 |
+| --- | --- | --- |
+| PR13 LIVE_SIM Hardening | LIVE_SIM safety gate와 acceptance runbook 강화 | 모의투자 전용 범위를 유지해야 함 |
+| Broker Reconcile Pilot | simulation-account snapshot 정합성 확인 | 실계좌 reconcile과 혼동 금지 |
+| Operator Kill Switch Drill | kill switch 절차와 운영 훈련 정리 | 버튼/자동 실행보다 확인 절차가 먼저 |
 
 ## Future: LIVE_REAL Safety Project
 
-- LIVE_REAL remains a separate future project with independent account guards, regulatory checks,
-  operator confirmations, and kill-switch reviews.
+`LIVE_REAL`은 이 로드맵의 다음 자동 단계가 아니다. 별도 프로젝트로 다음 조건을 독립 검토해야 한다.
+
+- 실계좌 account guard
+- 규제/운영 확인 절차
+- operator confirmation
+- kill switch drill
+- broker reconcile
+- cancel/modify policy
+- failure recovery
+- audit trail
+
+PR12 이후에도 바로 실계좌로 가면 안 된다.
+
+## 운영자 체크포인트
+
+- “Done”은 해당 관찰/검토 기능이 구현되었다는 뜻이지 실계좌 준비 완료가 아니다.
+- PR7/PR8 결과는 `MATCHED_OBSERVATION`, `OBSERVE_PASS`라는 관측 상태다.
+- PR10 `DRY_RUN`과 PR12 `LIVE_SIM`은 서로 다른 안전 경계다.
+- `LIVE_REAL`은 현재 미구현이며 별도 future safety project로만 다룬다.

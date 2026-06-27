@@ -1,42 +1,46 @@
 # Theme Service
 
-PR 5 adds a read-only theme observation layer. Theme membership and theme snapshots are derived
-context for later observation workflows. PR 6 Candidate FSM reads theme snapshots as observation
-source input, but Theme Service itself does not produce strategy decisions, risk decisions, order
-intents, broker commands, or order API calls.
+## 요약
 
-## Purpose
+Theme Service는 theme membership과 theme snapshot을 관리하는 read-only 관찰 계층이다. 운영자가 모든 테마를 손으로 묶어 운영하는 구조가 아니다. 수동 파일은 bootstrap/testing only이며, production membership은 나중에 legacy export, 외부 reference importer, condition-derived source 등으로 확장될 수 있다.
 
-- Store and query source-typed theme membership.
-- Aggregate Market Data Service projections at theme level.
-- Summarize coverage, rising ratio, trade-value flow, VWAP position, and member roles.
-- Provide PR 6 Candidate FSM with read-only observation context only.
+## 하는 일 / 하지 않는 일
 
-Manual/file-based seed data is bootstrap/testing only. It exists to verify the membership import
-contract and snapshot rebuild path. Production membership is expected to come later from legacy
-exports, external reference importers, or condition-derived sources; PR 5 does not implement those
-collectors and does not scrape external sites.
+| 구분 | 내용 |
+| --- | --- |
+| 하는 일 | theme membership 저장과 조회 |
+| 하는 일 | Market Data projection을 theme level snapshot으로 집계 |
+| 하는 일 | theme state, quality, leader/co-leader/follower 관찰 context 제공 |
+| 하지 않는 일 | 투자 추천, Strategy 판단, Risk 판단 |
+| 하지 않는 일 | `OrderIntent`, `GatewayCommand`, broker order 생성 |
 
 ## Membership Schema
 
-`themes` stores one row per theme:
+`themes`:
 
-- `theme_id`, `theme_name`
-- `source_type`, `source_name`
+- `theme_id`
+- `theme_name`
+- `source_type`
+- `source_name`
 - `active`
 - `metadata_json`
-- `created_at`, `updated_at`
+- `created_at`
+- `updated_at`
 
-`theme_members` stores one row per `(theme_id, code)`:
+`theme_members`:
 
-- `theme_id`, `code`, `name`
-- `source_type`, `source_name`
+- `theme_id`
+- `code`
+- `name`
+- `source_type`
+- `source_name`
 - `active`
 - `weight`
 - `metadata_json`
-- `created_at`, `updated_at`
+- `created_at`
+- `updated_at`
 
-`source_type` is required and supports:
+`source_type`:
 
 - `MANUAL`
 - `IMPORTED`
@@ -63,98 +67,71 @@ collectors and does not scrape external sites.
 }
 ```
 
-Import behavior:
+동작:
 
-- stock codes are normalized through the broker contract validator;
-- duplicate imports are idempotent upserts;
-- `replace=false` keeps existing members;
-- `replace=true` only inactivates members in the same theme/source scope before upserting the new
-  payload;
-- import batches are recorded in `theme_import_batches`;
-- invalid imports record an error batch when the source and theme list can be parsed.
+- stock code는 broker contract validator로 정규화된다.
+- duplicate import는 idempotent upsert다.
+- `replace=false`는 기존 member를 유지한다.
+- `replace=true`는 같은 theme/source scope의 member를 inactive 처리한 뒤 upsert한다.
+- import batch는 `theme_import_batches`에 기록된다.
 
-## Snapshot Tables
+## Snapshot Table
 
-- `theme_snapshots`: one persisted theme-level summary per `snapshot_id`.
-- `theme_snapshot_members`: per-member observation rows for each snapshot.
-- `theme_latest_snapshots`: latest snapshot pointer and summary per theme.
-- `theme_projection_errors`: member/theme projection errors that did not block other members.
+| Table | 의미 |
+| --- | --- |
+| `theme_snapshots` | theme-level summary |
+| `theme_snapshot_members` | snapshot별 member observation |
+| `theme_latest_snapshots` | theme별 latest snapshot pointer |
+| `theme_projection_errors` | member/theme projection error |
 
-Snapshots are rebuildable derived projections. Market Data Service and Event Store remain the
-source of truth.
+Snapshot은 파생 projection이다. Event Store와 Market Data Service가 source of truth다.
 
-## Snapshot Calculation
+## Snapshot 계산
 
-For active members, the service reads:
+읽는 데이터:
 
 - `market_ticks_latest`
-- latest `market_minute_bars` for 60, 180, and 300 seconds
+- 60/180/300 second `market_minute_bars`
 - `get_market_data_readiness()`
-- `market_condition_latest` as auxiliary observation metadata
+- `market_condition_latest`
 
-Member fields include latest price, change rate, cumulative trade value, 1/3/5 minute
-trade-value deltas, 1 minute volume delta, execution strength, VWAP, `above_vwap`, readiness,
-tick age, event timestamp, and member role.
+Theme summary:
 
-Theme fields include:
+- active/observed/fresh member count
+- fresh coverage ratio
+- rising count와 rising ratio
+- average/max change rate
+- total cumulative trade value
+- 1/3/5 minute trade-value delta
+- leading code/name
+- co-leader/follower list
+- state, quality, reason code
 
-- active/observed/fresh member counts;
-- fresh coverage ratio;
-- rising count and rising ratio;
-- average and max change rate;
-- total cumulative trade value;
-- 1/3/5 minute trade-value delta sums;
-- leading code/name;
-- co-leader and follower code lists;
-- state, quality, and reason codes.
+## Member Role
 
-## Member Score Formula
+| Role | 의미 |
+| --- | --- |
+| `LEADER_CANDIDATE` | fresh observed member 중 score 상위 |
+| `CO_LEADER_CANDIDATE` | leader score 대비 일정 비율 이상 |
+| `FOLLOWER_CANDIDATE` | fresh rising member |
+| `LAGGARD` | fresh observed but non-rising |
+| `STALE` | stale/degraded observed member |
+| `UNKNOWN` | missing member |
 
-PR 5 uses a deterministic observation score:
+`LEADER_CANDIDATE`는 매수 신호가 아니다. Candidate FSM으로 넘길 수 있는 관찰 source일 뿐이다.
 
-```text
-score =
-  change_rate * 100
-  + trade_value_delta_1m / 1,000,000
-  + trade_value_delta_3m / 3,000,000
-  + cumulative_trade_value / 1,000,000,000
-  + execution_strength / 100
-```
+## ThemeState
 
-If the member is observed but not fresh, the score is multiplied by `0.5`. Missing members score
-below observed members. The score is only for ranking the snapshot's observation roles.
+| State | 운영자 해석 |
+| --- | --- |
+| `DATA_WAIT` | membership 또는 fresh data 부족 |
+| `WATCH` | 관찰은 있으나 확산/주도 조건은 약함 |
+| `SPREADING` | theme 내 상승 확산 관찰 |
+| `LEADING` | leader와 rising ratio, trade value 조건 관찰 |
+| `FADING` | future hysteresis/time-based rule 예약 |
+| `ROTATED_OUT` | future rotation rule 예약 |
 
-Role assignment:
-
-- top fresh observed member: `LEADER_CANDIDATE`;
-- fresh observed members at or above `THEME_CO_LEADER_SCORE_RATIO` of leader score:
-  `CO_LEADER_CANDIDATE`;
-- other fresh rising members: `FOLLOWER_CANDIDATE`;
-- fresh observed non-rising members: `LAGGARD`;
-- stale/degraded observed members: `STALE`;
-- missing members: `UNKNOWN`.
-
-## ThemeState Rules
-
-Initial deterministic rules:
-
-- active members below `THEME_MIN_ACTIVE_MEMBERS`:
-  `DATA_WAIT`, `MISSING_MEMBERSHIP`, `INSUFFICIENT_MEMBERSHIP`
-- no observed members:
-  `DATA_WAIT`, `DATA_WAIT`, `NO_OBSERVED_MEMBERS`
-- fresh coverage below `THEME_MIN_FRESH_COVERAGE_RATIO`:
-  `DATA_WAIT`, `PARTIAL`, `LOW_FRESH_COVERAGE`
-- rising ratio at or above `THEME_LEADING_RISING_RATIO`, leader exists, leader change rate at or
-  above `THEME_LEADER_MIN_CHANGE_RATE`, leader 1 minute trade-value delta at or above
-  `THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M`, and total trade value at or above
-  `THEME_MIN_TOTAL_TRADE_VALUE`:
-  `LEADING`, `FRESH`
-- rising ratio at or above `THEME_SPREADING_RISING_RATIO`:
-  `SPREADING`, `FRESH`
-- otherwise, with observations:
-  `WATCH`, `FRESH`
-
-`FADING` and `ROTATED_OUT` are enum values reserved for later hysteresis/time-based rules.
+`SPREADING`, `LEADING`은 theme 관찰 상태다. 주문 상태가 아니다.
 
 ## API
 
@@ -170,28 +147,13 @@ Initial deterministic rules:
 - `POST /api/themes/import?replace=false`
 - `POST /api/themes/snapshots/rebuild?theme_id=semiconductor`
 
-POST endpoints are import/rebuild only and use the local token dependency when
-`TRADING_CORE_TOKEN` is set. There are no theme endpoints for buying, selling, strategy execution,
-risk execution, OMS behavior, or order enqueueing. Candidate episodes are rebuilt through
-`/api/candidates/rebuild`, which reads theme snapshots without mutating Theme Service state.
+POST endpoint는 import/rebuild 용도이며 주문 endpoint가 아니다.
 
-## Rebuild Procedure
-
-Import sample membership:
+## Rebuild
 
 ```powershell
 python -m tools.import_theme_memberships --file data/themes/sample_themes.json
-```
-
-Rebuild every active theme:
-
-```powershell
 python -m tools.rebuild_theme_snapshots
-```
-
-Rebuild one theme:
-
-```powershell
 python -m tools.rebuild_theme_snapshots --theme-id semiconductor
 ```
 
@@ -203,43 +165,15 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/themes/snapshots/rebuild?theme_id=s
   -Headers @{"X-Core-Token" = $env:TRADING_CORE_TOKEN}
 ```
 
-## Market Data Connection
+## Candidate FSM 연결
 
-The Theme Service reads Market Data Service projection tables. It does not ingest Gateway events
-directly and does not mutate market data. A typical local verification flow is:
+Candidate FSM은 `theme_latest_snapshots`와 `theme_snapshot_members`를 source context로 읽는다. 기본적으로 `LEADING`, `SPREADING` theme state와 `LEADER_CANDIDATE`, `CO_LEADER_CANDIDATE`, `FOLLOWER_CANDIDATE` role이 candidate source가 될 수 있다.
 
-```powershell
-python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
-python -m tools.import_theme_memberships --file data/themes/sample_themes.json
-python -m tools.rebuild_theme_snapshots --theme-id semiconductor
-Invoke-RestMethod http://127.0.0.1:8000/api/themes/snapshots/latest
-```
+이것은 후보 관찰 에피소드의 source attribution이다. `CONTEXT_READY`도 매수 준비가 아니라 Strategy 평가 입력 준비다.
 
-If only one member has a fresh tick, snapshots still persist with partial coverage/state according
-to the deterministic rules.
+## 운영자 체크포인트
 
-## Candidate FSM Connection
-
-PR 6 Candidate FSM reads `theme_latest_snapshots` and `theme_snapshot_members` as source context.
-Only configured theme states, default `LEADING` and `SPREADING`, and configured member roles,
-default `LEADER_CANDIDATE`, `CO_LEADER_CANDIDATE`, and `FOLLOWER_CANDIDATE`, become candidate
-source events. This is source attribution for an observation episode only. A leading theme member
-is not a buy signal, and a candidate in `CONTEXT_READY` only means PR 7 has enough read-only input
-to evaluate later.
-
-## Forbidden Scope
-
-PR 5 does not implement:
-
-- external web crawling or reference scraping;
-- broker runtime integration;
-- ActiveX or UI automation imports;
-- strategy engine;
-- risk gate;
-- OMS;
-- order intent;
-- send, cancel, or modify order paths;
-- public order enqueue endpoint;
-- OpenAI API calls;
-- AI Sidecar context builder;
-- automatic trading decisions from theme snapshots.
+- sample theme file은 bootstrap/testing only다.
+- `LEADING` theme를 투자 추천이나 주문 지시로 해석하지 않는다.
+- Theme snapshot이 비어 있으면 membership import와 market data freshness를 확인한다.
+- Theme Service는 `send_order`, `cancel_order`, `modify_order`를 만들지 않는다.

@@ -1,18 +1,18 @@
 # Candidate FSM
 
-PR 6 adds an observe-only Candidate FSM. A Candidate is an observation episode, not a buy
-candidate. PR 7 Strategy Engine reads `CONTEXT_READY` candidate context as a read-only input and
-stores strategy observations. PR 8 Risk Gate reads candidate context as read-only input for risk
-classification only. Candidate state still does not touch Gateway commands, OMS, or order APIs.
+## 요약
 
-## Purpose
+Candidate FSM은 observe-only 후보 관찰 에피소드를 관리한다. 여기서 `Candidate`는 매수 후보가 아니다. condition, theme, market source가 한 종목에 대해 관찰된 “에피소드”다. `CONTEXT_READY`는 매수 준비가 아니라 Strategy 평가 입력 준비다.
 
-- Convert condition signals, theme snapshots, and market observations into candidate sources.
-- Create deterministic `candidate_instance_id` episodes.
-- Track lifecycle state through a deterministic FSM.
-- Store source events, source latest rows, state transitions, context latest rows, and projection
-  errors.
-- Expose read-only Candidate context for Strategy observation evaluation.
+## 하는 일 / 하지 않는 일
+
+| 구분 | 내용 |
+| --- | --- |
+| 하는 일 | condition/theme/market/manual/mock source를 candidate source로 기록 |
+| 하는 일 | `candidate_instance_id`별 lifecycle 상태 저장 |
+| 하는 일 | Strategy/Risk가 읽을 context latest 저장 |
+| 하지 않는 일 | Strategy score, Risk approval, OrderIntent 생성 |
+| 하지 않는 일 | EntryPlan, PositionSizing, `GatewayCommand`, broker order 생성 |
 
 ## Source Types
 
@@ -26,58 +26,47 @@ classification only. Candidate state still does not touch Gateway commands, OMS,
 - `MANUAL_WATCH`
 - `MOCK`
 
-Condition sources are read from `market_condition_signals`. Theme sources are read from
-`theme_latest_snapshots` joined to `theme_snapshot_members`, filtered by
-`CANDIDATE_THEME_SOURCE_STATES` and `CANDIDATE_THEME_MEMBER_ROLES`.
+Condition source는 `market_condition_signals`에서 읽는다. Theme source는 `theme_latest_snapshots`와 `theme_snapshot_members`에서 읽고 `CANDIDATE_THEME_SOURCE_STATES`, `CANDIDATE_THEME_MEMBER_ROLES` 설정으로 필터링한다.
 
-## States
+## State
 
-- `DETECTED`: a source first observed the episode.
-- `HYDRATING`: latest tick, bar, readiness, and theme/source context are being gathered.
-- `WATCHING`: minimum observation data exists, before strategy setup evaluation.
-- `CONTEXT_READY`: read-only context is ready for PR 7 Strategy evaluation.
-- `DATA_WAIT`: required observation data is missing.
-- `BLOCKED_OBSERVATION`: observation should be excluded or held for a clear reason.
-- `STALE`: source or tick freshness exceeded configured stale thresholds.
-- `COOLDOWN`: reserved for episode churn control.
-- `CLOSED`: source exit, no active source, TTL expiry, or theme rotation ended the episode.
+| State | 의미 | 주문 관련 주의 |
+| --- | --- | --- |
+| `DETECTED` | source가 에피소드를 처음 관찰 | 매수 후보 확정 아님 |
+| `HYDRATING` | tick, bar, theme/source context 수집 중 | 데이터 준비 중 |
+| `WATCHING` | 최소 관찰 데이터 존재 | Strategy 입력 전 단계 |
+| `CONTEXT_READY` | Strategy 평가 입력 준비 | 매수 준비 아님 |
+| `DATA_WAIT` | 필요한 관찰 데이터 부족 | 주문 차단/승인 상태 아님 |
+| `BLOCKED_OBSERVATION` | 명확한 이유로 관찰 제외/보류 | 실행 command 아님 |
+| `STALE` | source 또는 tick freshness 초과 | 오래된 관찰 |
+| `COOLDOWN` | episode churn control 예약 | 주문 cooldown 아님 |
+| `CLOSED` | source exit, TTL, rotation 등으로 종료 | 주문 결과 아님 |
 
-`CONTEXT_READY` is not buy readiness. It only means the observation context can be read by PR 7
-Strategy Engine and PR 8 Risk Gate. PR 6 has no setup validation, entry readiness, score, order
-approval, order intent, or order command.
+## Identity
 
-## Identity And Generation
-
-The active episode key is `(trade_date, code)`. If no active episode exists, the service creates:
+active episode key는 `(trade_date, code)`다. active episode가 없으면 다음 형식으로 생성된다.
 
 ```text
 CAND-{trade_date}-{code}-{generation}
 ```
 
-Generation starts at `1` per `trade_date + code` and increments after a prior episode is
-`CLOSED`. If the same code is detected while an episode is active, the source is merged into the
-existing candidate.
+같은 code가 active 상태에서 다시 감지되면 기존 candidate에 source를 merge한다.
 
 ## Transition Rules
 
-- New source with no active candidate creates `DETECTED`, then moves to `HYDRATING`.
-- Duplicate source events are ignored by `source_event_id`.
-- `HYDRATING -> DATA_WAIT` when latest tick, market readiness, required bar, or required theme
-  context is missing.
-- `HYDRATING -> WATCHING` when latest tick, non-missing readiness, and source attribution exist.
-- `DATA_WAIT -> WATCHING` when missing data recovers.
-- `WATCHING -> CONTEXT_READY` when readiness is not missing/stale/invalid, 1m bar exists when
-  required, VWAP exists when required, and source-specific context is present.
-- Active states move to `STALE` when source or tick age exceeds candidate stale settings.
-- Active states move to `CLOSED` when active source count is zero, TTL expires, condition exit is
-  the only remaining source condition, an explicit close is requested internally, or a theme is
-  rotated out.
+| 전이 | 조건 |
+| --- | --- |
+| new source -> `DETECTED` -> `HYDRATING` | active candidate가 없을 때 |
+| `HYDRATING` -> `DATA_WAIT` | latest tick, readiness, required bar, required theme context 부족 |
+| `HYDRATING` -> `WATCHING` | latest tick, non-missing readiness, source attribution 존재 |
+| `DATA_WAIT` -> `WATCHING` | 부족한 데이터 회복 |
+| `WATCHING` -> `CONTEXT_READY` | readiness, 1m bar, VWAP, source context 조건 충족 |
+| active -> `STALE` | source/tick age가 stale threshold 초과 |
+| active -> `CLOSED` | active source 0, TTL, condition exit, theme rotation 등 |
 
-Repeated refreshes that do not change state do not create duplicate transition rows.
+state가 바뀌지 않는 반복 refresh는 duplicate transition row를 만들지 않는다.
 
 ## Storage
-
-PR 6 adds these SQLite tables:
 
 - `candidates`
 - `candidate_source_events`
@@ -86,39 +75,28 @@ PR 6 adds these SQLite tables:
 - `candidate_context_latest`
 - `candidate_projection_errors`
 
-`candidate_state_transitions` is the authoritative Candidate event log for PR 6. It is separate
-from Gateway transport events; Candidate FSM does not write `gateway_events` or enqueue
-`gateway_commands`.
+`candidate_state_transitions`는 Candidate FSM의 event log다. Gateway event log와 별도이며 `gateway_commands`를 만들지 않는다.
 
 ## Context Refresh
 
-`refresh_candidate_context()` reads:
+`refresh_candidate_context()`가 읽는 값:
 
-- latest tick and readiness from Market Data Service;
-- 60/180/300 second bar presence and VWAP readiness;
-- condition attribution from active condition sources;
-- theme snapshot/member rows for active theme sources;
-- active and total source counts.
+- latest tick과 readiness
+- 60/180/300 second bar 존재 여부
+- VWAP readiness
+- active condition source
+- active theme source의 snapshot/member row
+- active/total source count
 
-The resulting read-only context is stored in `candidate_context_latest` as `theme_context_json`,
-`market_context_json`, `source_context_json`, and `readiness_json`.
+결과는 `candidate_context_latest`의 `theme_context_json`, `market_context_json`, `source_context_json`, `readiness_json`에 저장된다.
 
-## PR 7 Strategy Connection
+## Strategy / Risk 연결
 
-Strategy Engine observe-only reads candidate rows and `candidate_context_latest` when evaluating
-candidate setup observations. It also reads Market Data projection rows and Theme Snapshot rows as
-read-only evidence. Strategy evaluation does not mutate Candidate state, does not convert
-`CONTEXT_READY` into buy readiness, and does not create Gateway commands or order API calls.
+Strategy Engine은 `CONTEXT_READY` candidate context를 읽어 `StrategyObservation`을 저장한다. Candidate state를 바꾸지 않는다.
 
-When a Strategy setup reaches `MATCHED_OBSERVATION`, the Candidate remains an observation episode.
-It is not converted to buy readiness.
+Risk Gate는 Candidate, Strategy, Market Data, Theme Snapshot을 읽어 `RiskObservation`을 저장한다. Candidate state를 바꾸지 않는다.
 
-## PR 8 Risk Gate Connection
-
-Risk Gate observe-only reads candidate rows and `candidate_context_latest` when evaluating risk
-observations. It also reads Market Data projection rows, Theme Snapshot rows, and Strategy
-observations. Risk evaluation does not mutate Candidate state, does not create Candidate
-transitions, and does not convert `CONTEXT_READY` into buy readiness.
+`MATCHED_OBSERVATION`은 매수 신호가 아니고 `OBSERVE_PASS`는 주문 승인이 아니다.
 
 ## API
 
@@ -131,50 +109,22 @@ transitions, and does not convert `CONTEXT_READY` into buy readiness.
 - `GET /api/candidates/projection-errors`
 - `POST /api/candidates/rebuild`
 
-`POST /api/candidates/rebuild` is a projection rebuild endpoint. It uses the local token dependency
-when `TRADING_CORE_TOKEN` is configured and does not create manual watch candidates.
+`POST /api/candidates/rebuild`는 projection rebuild endpoint다. 주문 endpoint가 아니다.
 
-## Rebuild
-
-CLI:
+## Rebuild / Inspect
 
 ```powershell
 python -m tools.rebuild_candidates
 ```
-
-HTTP:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:8000/api/candidates/rebuild `
-  -Method Post `
-  -Headers @{"X-Core-Token" = $env:TRADING_CORE_TOKEN}
-```
-
-Inspect one episode:
 
 ```powershell
 python -m tools.inspect_candidate --candidate-instance-id CAND-2026-06-27-005930-1 `
   --include-context --include-sources --include-transitions
 ```
 
-## Forbidden Scope
+## 운영자 체크포인트
 
-PR 6 does not implement:
-
-- Kiwoom OpenAPI+ runtime code;
-- PyQt5 or QAxWidget imports;
-- Strategy Engine;
-- Risk Gate;
-- OMS;
-- OrderIntent;
-- EntryPlan;
-- Position or position sizing;
-- send, cancel, or modify order paths;
-- public order enqueue endpoint;
-- GatewayCommand creation from Candidate FSM;
-- OpenAI API calls;
-- AI Sidecar context builder;
-- automatic buy/sell decisions from candidates.
-
-PR 7 and PR 8 keep this boundary: Strategy and Risk observations are stored in separate projection
-tables and never write Candidate states such as buy-ready or order-ready.
+- Candidate는 매수 후보가 아니라 관찰 에피소드다.
+- `CONTEXT_READY`는 Strategy 평가 입력 준비다.
+- Candidate FSM은 `GatewayCommand`, `OrderIntent`, `send_order`를 만들지 않는다.
+- Candidate가 막히면 readiness, source freshness, theme context를 먼저 확인한다.

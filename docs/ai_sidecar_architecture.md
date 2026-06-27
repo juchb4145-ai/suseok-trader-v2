@@ -1,70 +1,46 @@
 # AI Sidecar Architecture
 
-## Purpose
+## 요약
 
-The ChatGPT/OpenAI Sidecar is a read-only analysis assistant for `suseok-trader-v2`.
-It helps the operator understand market context, candidate blocks, no-trade sessions,
-trade reviews, operational incidents, and Codex prompt drafts.
+AI Sidecar는 `suseok-trader-v2`의 read-only 분석 보조자다. 시장 context, candidate block, no-trade session, trade review, ops incident, Codex prompt draft를 운영자가 이해하기 쉽게 정리한다. AI Sidecar는 매매 주체가 아니며 `OrderIntent`, `GatewayCommand`, `send_order`, `cancel_order`, `modify_order`를 만들거나 호출하지 않는다.
 
-The Sidecar is not a trading engine. It does not create `OrderIntent`, does not create
-`GatewayCommand`, and does not call or connect to `send_order`, `cancel_order`, or
-`modify_order`.
+## 위치와 경계
 
-## Boundaries
+| 영역 | 담당 |
+| --- | --- |
+| Core | configuration, API routing, storage initialization, system status |
+| Strategy | deterministic candidate setup observation |
+| Risk | deterministic risk observation |
+| OMS | DRY_RUN 내부 회계 또는 future order lifecycle |
+| Gateway | broker transport isolation |
+| AI Sidecar | context, structured insight, RCA, review, Codex prompt draft |
 
-Core owns configuration, API routing, storage initialization, and system status.
-Strategy owns deterministic candidate evaluation. Risk owns deterministic risk checks.
-OMS owns order lifecycle behavior in later PRs. Gateway owns broker transport isolation.
+AI Sidecar는 Strategy/Risk/OMS decision path 밖에 있다. Output은 Dashboard, Report, Operator Review, Codex Prompt Draft surface에만 표시된다.
 
-The Sidecar sits outside those decision paths. PR AI-1 adds a bounded, sanitized context
-builder that reads Event Store and projection state for operator preview. PR AI-2 adds a
-manual, optional structured-output execution layer. Strategy, Risk, and OMS must not use
-Sidecar output as automatic decision input.
+## Read-only 원칙
 
-## Read-only Principles
-
-- Sidecar output is for Dashboard, Report, Operator Review, and Codex Prompt Draft
-  surfaces only.
-- Sidecar output cannot change strategy thresholds, risk limits, trading mode, live
-  flags, or position sizes.
-- Sidecar output cannot enqueue, submit, cancel, or modify orders.
-- Every Sidecar output must pass schema validation before it can be stored as an
-  insight.
-- Validation failures must not produce normal insights. They may be rejected or
-  recorded only with an invalid-output status such as `AI_OUTPUT_INVALID`.
-- The default Sidecar posture is disabled.
+- Sidecar output은 Strategy threshold, Risk limit, trading mode, live flag, position size를 바꾸지 않는다.
+- Sidecar output은 order enqueue, submit, cancel, modify를 하지 않는다.
+- Sidecar output은 Strategy/Risk/OMS 자동 입력이 아니다.
+- 모든 output은 schema validation과 safety policy validation을 통과해야 insight로 저장된다.
+- validation 실패는 `AI_OUTPUT_INVALID` 같은 실패 상태로 기록될 수 있지만 정상 insight가 아니다.
+- 기본 posture는 disabled다.
 
 ## Context Builder
 
-PR AI-1 adds `AISidecarContextPacket` and a read-only Context Builder. The builder is not
-an OpenAI client and does not create insights. It creates bounded, redacted, deterministic,
-schema-versioned packets for:
+PR AI-1은 `AISidecarContextPacket`과 Context Builder를 추가한다. 이것은 OpenAI client가 아니다. 운영자가 AI에게 넘기기 전 정리된 입력자료를 만들 뿐이다.
 
-- Daily market brief
-- Theme brief
-- Candidate block RCA
-- No-trade RCA
-- Trade review placeholder context
-- Operations incident summary
-- Codex prompt context
+Context packet은 다음을 적용한다.
 
-Context packets enforce size limits, secret/path/account redaction, and order-context
-restriction. `persist=true` stores the final packet in `ai_context_packets` for audit only.
+- size limit
+- secret/path/account redaction
+- order-context restriction
+- deterministic hash
+- schema version
 
-## Event Store Analysis Shape
+`persist=true`는 packet을 `ai_context_packets`에 audit용으로 저장한다.
 
-The AI-2 Sidecar flow is:
-
-1. Deterministic services write market, candidate, risk, OMS, Gateway, and ops events.
-2. The Context Builder creates a bounded read-only packet for one allowed Sidecar task.
-3. The Prompt Registry builds a read-only system/user prompt from the redacted payload.
-4. The OpenAI Responses client adapter sends strict JSON Schema structured output metadata.
-5. The runner validates the model output locally against the task schema and domain policy.
-6. Valid insights are stored for read-only display.
-7. Invalid, timed out, or errored runs are recorded as failures without insight storage.
-
-This path is manual-only. There is no background worker, no dashboard run button, and no automatic
-connection to Strategy, Risk, Candidate, Gateway, or OMS mutation paths.
+## Structured Execution Flow
 
 ```mermaid
 flowchart LR
@@ -75,37 +51,55 @@ flowchart LR
     D --> F["AI Request Failure"]
 ```
 
-## Session Usage
+실행 흐름:
 
-Pre-market use cases include daily market briefs, theme summaries, and operator review
-notes. Intraday use is disabled by default and must remain read-only even when explicitly
-allowed later. Post-market use cases include no-trade RCA, candidate block RCA, trade
-review, operations incident summaries, and Codex prompt drafts.
+1. deterministic service가 market/candidate/risk/OMS/Gateway/ops state를 저장한다.
+2. Context Builder가 allowed task용 read-only packet을 만든다.
+3. Prompt Registry가 redacted payload로 prompt를 만든다.
+4. OpenAI Responses client가 strict JSON Schema metadata를 보낸다.
+5. runner가 model output을 local schema와 domain policy로 검증한다.
+6. valid insight만 read-only display용으로 저장한다.
+7. invalid/timeout/error는 insight 없이 failure로 기록한다.
 
-## Output Surfaces
+이 path는 manual-only다. background worker, Dashboard run button, Strategy/Risk/OMS mutation 연결이 없다.
 
-Dashboard cards may display validated Sidecar insights and error states. Reports may
-include summaries and suggested checks. Operator Review may use insights as human-readable
-context. Codex Prompt Draft output may provide text that a human copies into Codex, but
-it must not perform automatic code changes, branch creation, commits, pushes, or PR
-creation.
+## Output Surface
 
-## OpenAI Client
+| Surface | 의미 | 금지 |
+| --- | --- | --- |
+| Dashboard Cards | 저장된 insight/report/error 표시 | 실행 버튼 |
+| RCA Report | deterministic report와 optional AI summary | 주문 판단 |
+| Operator Review | 사람이 읽는 점검 자료 | 자동 정책 변경 |
+| Codex Prompt Draft | 사람이 복사하는 프롬프트 초안 | 자동 code change, branch, commit, push, PR |
+| LIVE_SIM Review | simulation activity 복기 | retry/cancel/modify/order input |
 
-The OpenAI client is optional and unavailable unless all availability checks pass:
+## OpenAI Client Availability
+
+OpenAI client는 다음 조건이 모두 맞을 때만 available이다.
 
 - `AI_SIDECAR_ENABLED=true`
-- `AI_SIDECAR_MODEL` is non-empty
-- the API key exists in `AI_SIDECAR_OPENAI_API_KEY_ENV`
-- the OpenAI SDK import succeeds
-- Responses API and structured outputs are enabled
-- tools/function calling and order tools remain disabled
+- `AI_SIDECAR_MODEL` non-empty
+- `AI_SIDECAR_OPENAI_API_KEY_ENV`가 가리키는 env var 존재
+- optional OpenAI SDK import 성공
+- Responses API와 structured output enabled
+- tools/function calling disabled
+- order tools disabled
 
-The system continues to boot, test, and serve status without an API key or SDK. Tests use the mock
-model client only.
+API key나 SDK가 없어도 Core startup, tests, `/health`, `/api/status`, context preview는 동작해야 한다.
 
 ## Disabled Tools
 
-PR AI-2 does not enable OpenAI tools/function calling, web search, code interpreter, MCP tool
-integration, or any order-related tool. The client adapter passes structured output schema metadata
-only.
+PR AI-2는 다음을 사용하지 않는다.
+
+- OpenAI tools/function calling
+- web search
+- code interpreter
+- MCP tool integration
+- order-related tool
+
+## 운영자 체크포인트
+
+- AI 결과는 분석 보조 자료다.
+- AI/RCA/Codex output은 Strategy/Risk/OMS 자동 입력이 아니다.
+- AI 실패는 Core 상태 조회를 깨지 않아야 한다.
+- AI가 만든 문구에 주문 관련 표현이 있어도 실행 field로 저장되면 안 된다.

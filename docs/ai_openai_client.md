@@ -1,46 +1,46 @@
 # AI OpenAI Client
 
-## Purpose
+## 요약
 
-PR AI-2 adds an optional OpenAI Responses API adapter for the read-only AI Sidecar. It consumes
-PR AI-1 context packets, builds task prompts, requests strict structured JSON, validates locally,
-and stores validated insights for operator review.
-
-The client does not create trading decisions, order intents, gateway commands, strategy mutations,
-risk mutations, candidate mutations, live-flag changes, or OMS actions.
+PR AI-2는 read-only AI Sidecar를 위한 optional OpenAI Responses API adapter를 추가한다. PR AI-1 context packet을 읽고 strict structured JSON을 요청한 뒤 local validation을 통과한 insight만 운영자 검토용으로 저장한다. OpenAI client는 trading decision, order intent, gateway command, strategy/risk/candidate mutation, live flag change, OMS action을 만들지 않는다.
 
 ## Availability
 
-The OpenAI client is available only when all of these are true:
+다음 조건이 모두 true일 때만 available이다.
 
 - `AI_SIDECAR_ENABLED=true`
-- `AI_SIDECAR_MODEL` is non-empty
-- the environment variable named by `AI_SIDECAR_OPENAI_API_KEY_ENV` exists
-- the optional OpenAI SDK import succeeds
+- `AI_SIDECAR_MODEL` non-empty
+- `AI_SIDECAR_OPENAI_API_KEY_ENV`가 가리키는 environment variable 존재
+- optional OpenAI SDK import 성공
 - `AI_SIDECAR_USE_RESPONSES_API=true`
 - `AI_SIDECAR_STRUCTURED_OUTPUTS_ENABLED=true`
 - `AI_SIDECAR_TOOLS_ENABLED=false`
 - `AI_SIDECAR_ORDER_TOOLS_ENABLED=false`
 
-API key or SDK absence does not break startup, `/health`, `/api/status`, context preview, dashboard
-snapshot, or tests. Unit tests use `MockAISidecarModelClient`.
+API key나 SDK가 없어도 startup, `/health`, `/api/status`, context preview, Dashboard snapshot, tests는 깨지면 안 된다.
 
-## Responses API
+## Responses API 사용 방식
 
-`OpenAIResponsesClient` uses the Responses API and sends:
+`OpenAIResponsesClient`가 보내는 것:
 
-- model name from settings
-- system prompt from the prompt registry
-- user prompt built from the redacted context payload
+- settings의 model name
+- prompt registry의 system prompt
+- redacted context payload 기반 user prompt
 - `text.format` JSON Schema metadata with `strict=true`
 - `store=false`
 
-The adapter does not send tool definitions, function calls, web search, code interpreter, MCP
-connections, or order tools.
+보내지 않는 것:
+
+- tool definitions
+- function calls
+- web search
+- code interpreter
+- MCP connection
+- order tools
 
 ## Structured Outputs
 
-`services/ai_sidecar/output_schema.py` provides task schemas:
+`services/ai_sidecar/output_schema.py`의 schema:
 
 - `daily_market_brief_output_v1`
 - `theme_brief_output_v1`
@@ -50,88 +50,50 @@ connections, or order tools.
 - `ops_incident_summary_output_v1`
 - `codex_prompt_draft_output_v1`
 
-Every schema is an object with `additionalProperties=false`, required fields, severity enum,
-read-only `operator_action` enum, `confidence` range `0..1`, and
-`forbidden_actions_confirmed=true`. `CODEX_PROMPT_DRAFT` additionally requires `prompt_draft`.
+공통 특성:
 
-Local validation runs after the model response. Domain policy validation then rejects forbidden
-trading/action shapes before any insight is saved.
+- `additionalProperties=false`
+- required fields
+- severity enum
+- read-only `operator_action` enum
+- `confidence` range `0..1`
+- `forbidden_actions_confirmed=true`
 
-PR AI-5 uses `CODEX_PROMPT_DRAFT` only as optional AI-assisted prompt drafting. The default Codex
-Prompt Generator path is deterministic. When `run_ai=true` is explicitly requested, the runner may
-produce a `prompt_draft`, but the PR AI-5 sanitizer rejects automatic Codex execution, GitHub
-branch/commit/push/PR creation, order execution, and live-flag changes before an insight is saved.
-
-PR AI-6 LIVE_SIM Review Sidecar reuses existing task types instead of adding a new model task.
-LIVE_SIM order reviews may call `TRADE_REVIEW`; session, reconcile, and incident reviews may call
-`OPS_INCIDENT_SUMMARY`. These calls happen only when `run_ai=true` is explicitly requested.
-The deterministic review report remains intact when AI is disabled, unavailable, invalid, or
-policy rejected.
-
-## Prompt Registry
-
-`services/ai_sidecar/prompt_registry.py` owns task prompts. Prompts require read-only analysis,
-schema-only JSON output, no tools/function calling, no order/account/live-mode changes, and allowed
-operator actions only:
-
-- `WATCH_ONLY`
-- `REVIEW_ONLY`
-- `CHECK_DATA`
-- `CHECK_PIPELINE`
-- `CHECK_POLICY`
-- `NO_ACTION`
-
-The user prompt uses the context packet's redacted payload and stable metadata. It does not expose
-raw headers, env values, local paths, secrets, or bypass fields.
+`CODEX_PROMPT_DRAFT`는 `prompt_draft`를 추가로 요구한다.
 
 ## Run Flow
 
-Manual execution uses `run_ai_sidecar_task`:
+`run_ai_sidecar_task` 흐름:
 
-1. Validate settings and task type.
-2. Create an `ai_requests` row.
-3. Load a stored context packet or build a new PR AI-1 packet.
-4. Reject order context when `AI_SIDECAR_ALLOW_ORDER_CONTEXT=false`.
-5. Build prompts and output schema metadata.
-6. Call the model client.
-7. Validate structured output locally.
-8. Re-run AI Sidecar domain policy checks.
-9. Save `ai_insights` only for valid output.
-10. Mark `ai_requests` completed or failed.
+1. settings와 task type 검증
+2. `ai_requests` row 생성
+3. stored context packet load 또는 새 packet build
+4. `AI_SIDECAR_ALLOW_ORDER_CONTEXT=false`이면 order context 거부
+5. prompt와 output schema metadata build
+6. model client call
+7. structured output local validation
+8. domain policy validation
+9. valid output만 `ai_insights` 저장
+10. `ai_requests` completed 또는 failed 기록
 
-The runner is manual-only. There is no intraday worker, dashboard run button, or automatic
-Strategy/Risk/OMS connection.
-
-## Persistence
-
-`ai_requests` records every attempt and failure. AI-2 adds:
-
-- `context_id`
-- `output_schema_name`
-- `latency_ms`
-- `input_chars`
-- `output_chars`
-- `validation_error`
-- `raw_response_json`
-- `metadata_json`
-
-`ai_insights` is written only after valid structured output and policy validation. It stores
-summary, root cause, severity, operator action, and `output_json`.
+이 runner는 manual-only다. intraday worker, Dashboard run button, Strategy/Risk/OMS 자동 연결이 없다.
 
 ## Failure Policy
 
-Failures do not create `ai_insights`.
+실패는 `ai_insights`를 만들지 않는다.
 
-- disabled manual execution: `AI_DISABLED`
-- missing API key: `API_KEY_MISSING`
-- unavailable SDK/model/config: `CLIENT_UNAVAILABLE`
-- timeout: `TIMEOUT`
-- model error: `MODEL_ERROR`
-- schema mismatch or invalid JSON shape: `AI_OUTPUT_INVALID`
-- forbidden action output or blocked order context: `POLICY_REJECTED`
-- context load/build failure: `CONTEXT_ERROR`
+| Status | 의미 |
+| --- | --- |
+| `AI_DISABLED` | manual execution disabled |
+| `API_KEY_MISSING` | API key 없음 |
+| `CLIENT_UNAVAILABLE` | SDK/model/config unavailable |
+| `TIMEOUT` | request timeout |
+| `MODEL_ERROR` | model call error |
+| `AI_OUTPUT_INVALID` | invalid JSON 또는 schema mismatch |
+| `POLICY_REJECTED` | forbidden action output 또는 blocked order context |
+| `CONTEXT_ERROR` | context load/build failure |
 
-OpenAI failures do not affect Core health/status endpoints.
+OpenAI failure는 Core health/status endpoint에 영향을 주지 않는다.
 
 ## Manual API
 
@@ -145,55 +107,23 @@ OpenAI failures do not affect Core health/status endpoints.
 - `GET /api/ai-sidecar/insights`
 - `GET /api/ai-sidecar/insights/{insight_id}`
 
-POST endpoints require the local token when `TRADING_CORE_TOKEN` is configured.
+POST endpoint는 `TRADING_CORE_TOKEN` 설정 시 local token이 필요하다. 이것은 분석 실행 endpoint이지 주문 endpoint가 아니다.
 
-## RCA Workflow Linkage
+## RCA / Codex / LIVE_SIM Review 연결
 
-PR AI-3 RCA workflows may call `run_ai_sidecar_task` manually when an operator explicitly passes
-`run_ai=true` or CLI `--run-ai`. The deterministic RCA report is built and saved regardless of
-AI availability.
+- RCA workflow는 `run_ai=true` 또는 `--run-ai`가 명시된 경우에만 AI runner를 호출한다.
+- Codex Prompt Generator는 `CODEX_PROMPT_DRAFT` task를 optional로 사용할 수 있다.
+- LIVE_SIM Review Sidecar는 `TRADE_REVIEW`, `OPS_INCIDENT_SUMMARY`를 optional review enrichment로 사용할 수 있다.
 
-When the runner returns a valid insight, the RCA report stores `ai_request_id`, `ai_insight_id`,
-and a short AI summary. When the runner returns disabled/unavailable/invalid/policy failure, the
-RCA report stores failure status and may link `ai_request_id`, but no `ai_insight_id` is recorded.
-
-AI output remains report context only. It is not Strategy input, Risk input, Candidate mutation,
-OMS input, order approval, OrderIntent, GatewayCommand, live-flag mutation, or automated trading
-decision input.
-
-## Codex Prompt Generator Linkage
-
-PR AI-5 may call `run_ai_sidecar_task` with `CODEX_PROMPT_DRAFT` only when an operator explicitly
-passes `run_ai=true` or CLI `--run-ai`. `run_ai=false` never calls OpenAI. Valid AI output can
-augment a deterministic prompt draft; invalid, unavailable, disabled, or policy-rejected output
-leaves the deterministic draft intact and does not create a normal insight for rejected output.
-
-Tools/function calling, web search, code interpreter, MCP connections, and order tools remain
-disabled for this task.
-
-## LIVE_SIM Review Sidecar Linkage
-
-PR AI-6 may call `run_ai_sidecar_task` with `TRADE_REVIEW` or `OPS_INCIDENT_SUMMARY` only for
-manual review enrichment. Valid output can link `ai_request_id` and `ai_insight_id` to a
-`LiveSimReviewReport`. Failed, invalid, unavailable, or policy-rejected output records request
-status without creating a normal insight.
-
-The AI insight is never Strategy input, Risk input, OMS input, LIVE_SIM order input, retry input,
-cancel/modify input, reconcile command input, GatewayCommand input, or LIVE_REAL enablement.
+모든 경우 AI output은 review-only다. Strategy input, Risk input, OMS input, LIVE_SIM order input, retry input, cancel/modify input, GatewayCommand input, LIVE_REAL enablement가 아니다.
 
 ## Dashboard Policy
 
-Dashboard can display AI Sidecar status, request counts, recent request rows, recent insight rows,
-last error metadata, and PR AI-4 AI Explanation Cards for stored insights and failed requests.
-Dashboard has no AI run button and `dashboard.js` sends no AI execution POST request.
+Dashboard는 AI request/insight 상태와 AI Explanation Cards를 표시할 수 있다. Dashboard에는 AI run button이 없고 `dashboard.js`는 AI execution POST를 보내지 않는다.
 
-PR AI-4 does not run models from Dashboard. It only reads persisted `ai_requests` and `ai_insights`
-and maps statuses such as `API_KEY_MISSING`, `TIMEOUT`, `MODEL_ERROR`, `AI_OUTPUT_INVALID`, and
-`POLICY_REJECTED` into operator-readable cards.
+## 운영자 체크포인트
 
-## Disabled Scope
-
-PR AI-2 explicitly does not implement OpenAI tools/function calling, web search, code interpreter,
-MCP tool servers, order tools, OMS, order enqueue APIs, order intents, entry plans, position sizing,
-gateway command creation, candidate mutation, strategy mutation, risk mutation, live flag mutation,
-or automatic trading decisions.
+- `run_ai=true`는 주문 요청이 아니다.
+- tools/function calling과 order tools가 disabled인지 확인한다.
+- invalid/policy-rejected output은 정상 insight가 아니다.
+- API key가 없어도 시스템 관찰 기능은 동작해야 한다.

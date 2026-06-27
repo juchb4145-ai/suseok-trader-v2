@@ -1,33 +1,19 @@
 # LIVE_SIM Review Sidecar
 
-PR AI-6 adds read-only operator review reports for LIVE_SIM activity. It helps answer why a
-simulation order was created, rejected, failed, filled, left unfilled, or mismatched during
-local-only reconcile.
+## 요약
 
-## Purpose
-
-- Summarize LIVE_SIM session, order, reconcile, and incident evidence.
-- Preserve deterministic review generation without OpenAI.
-- Optionally attach PR AI-2 insights when an operator explicitly passes `run_ai=true`.
-- Keep all outputs as after-the-fact review artifacts.
+PR AI-6 LIVE_SIM Review Sidecar는 LIVE_SIM session, order, reconcile, incident를 장후 복기하는 read-only report workflow다. simulation order가 왜 생성, 거부, 실패, ack, fill, unfilled, mismatch 상태가 되었는지 설명한다. Review output은 order input, retry instruction, cancel instruction, modify instruction, reconcile command가 아니다.
 
 ## Deterministic Review vs AI Insight
 
-Deterministic review always runs locally from SQLite rows and settings. It creates
-`LiveSimReviewReport` plus deterministic sections.
+| 구분 | 의미 |
+| --- | --- |
+| deterministic review | SQLite row와 settings로 항상 생성 가능한 report |
+| AI insight | `run_ai=true`를 명시했을 때만 optional로 연결되는 review enrichment |
 
-AI insight is optional:
+기본은 `run_ai=false`다. AI disabled, unavailable, invalid, policy rejected여도 deterministic report는 유지된다.
 
-- default is `run_ai=false`
-- session/order reviews may use `TRADE_REVIEW`
-- session/incident/reconcile reviews may use `OPS_INCIDENT_SUMMARY`
-- AI disabled, unavailable, invalid, or policy-rejected output does not discard the report
-- invalid/policy-rejected output may link `ai_request_id` but stores no `ai_insight_id`
-
-AI output is never an order input, retry instruction, cancel instruction, modify instruction, or
-reconcile command.
-
-## Workflows
+## Workflow
 
 - `build_live_sim_session_review(connection, trade_date, run_ai=false)`
 - `build_live_sim_order_review(connection, live_sim_order_id, run_ai=false)`
@@ -35,9 +21,7 @@ reconcile command.
 - `build_live_sim_incident_review(connection, trade_date=None, related_entity_id=None, run_ai=false)`
 - `build_live_sim_order_reviews_for_trade_date(connection, trade_date, limit=50, run_ai=false)`
 
-Sections cover safety/config posture, intents, orders, executions, rejections, reconcile snapshots,
-gateway command status, command ack/failure, execution events, errors, idempotency evidence, and
-dashboard safety reminders.
+Section은 safety/config posture, intents, orders, executions, rejections, reconcile snapshots, gateway command status, command ack/failure, execution events, errors, idempotency evidence, dashboard safety reminder를 포함한다.
 
 ## Root Cause Categories
 
@@ -59,18 +43,7 @@ dashboard safety reminders.
 - `AI_EXECUTION`
 - `UNKNOWN`
 
-Typical classification examples:
-
-- no activity: `CONFIGURATION`
-- safety or eligibility rejection: `SAFETY_GATE`, `ELIGIBILITY`, `LIMIT_GUARD`, `ACCOUNT_GUARD`
-- queued/dispatched without ack: `GATEWAY_TRANSPORT` or `BROKER_ACK`
-- broker reject: `BROKER_REJECTION`
-- acked but no execution: `NO_FILL`
-- partial execution: `PARTIAL_FILL`
-- reconcile mismatch: `RECONCILE_MISMATCH`
-- local-only reconcile without mismatch: `LOCAL_ONLY_RECONCILE`
-
-## Storage Tables
+## Storage
 
 - `ai_live_sim_review_reports`
 - `ai_live_sim_review_sections`
@@ -98,8 +71,7 @@ Reports enforce:
 - `GET /api/ai-sidecar/live-sim-review/reports/{review_id}`
 - `GET /api/ai-sidecar/live-sim-review/errors`
 
-POST endpoints require the local token when `TRADING_CORE_TOKEN` is configured. They create
-reports only and do not call LIVE_SIM order creation, Gateway command queue, or broker APIs.
+POST endpoint는 report만 생성한다. LIVE_SIM order creation, Gateway command queue, broker API를 호출하지 않는다.
 
 ## CLI
 
@@ -111,44 +83,33 @@ python tools/build_live_sim_incident_review.py --trade-date 2026-06-27
 python tools/build_live_sim_order_review_batch.py --trade-date 2026-06-27 --limit 20
 ```
 
-Add `--run-ai` only for an explicit manual AI insight attempt.
+`--run-ai`는 명시적 manual AI insight attempt가 필요할 때만 사용한다.
 
 ## Dashboard Display Policy
 
-Dashboard snapshot includes:
+Dashboard snapshot:
 
 - `live_sim.live_sim_review_available`
 - `live_sim.live_sim_review_report_count`
 - `live_sim.latest_live_sim_review_reports`
 - `live_sim.latest_live_sim_review_errors`
-- matching `ai_sidecar` summary fields
 
-AI Explanation Cards support:
+AI Explanation Cards:
 
 - `LIVE_SIM_SESSION_REVIEW`
 - `LIVE_SIM_ORDER_REVIEW`
 - `LIVE_SIM_RECONCILE_REVIEW`
 - `LIVE_SIM_INCIDENT_REVIEW`
 
-Dashboard remains read-only. It has no review generation button, AI run button, retry button,
-cancel button, modify button, or order execution button. `dashboard.js` does not call LIVE_SIM
-review POST endpoints.
+Dashboard는 read-only다. review generation button, AI run button, retry button, cancel button, modify button, order execution button이 없다.
 
 ## LIVE_REAL Boundary
 
-PR AI-6 is not a LIVE_REAL safety project. It does not enable real account mode, real server mode,
-Kiwoom real order calls, real broker order routing, or production readiness.
+PR AI-6은 LIVE_REAL safety project가 아니다. real account mode, real server mode, Kiwoom real order call, real broker order routing, production readiness를 enable하지 않는다.
 
-## Forbidden Scope
+## 운영자 체크포인트
 
-- LIVE_REAL implementation
-- real account orders
-- GatewayCommand creation or enqueue
-- order send/cancel/modify calls
-- generic `/api/orders/enqueue`
-- LIVE_SIM order retry/cancel/modify APIs
-- AI output to order creation
-- RCA/review output to Strategy/Risk/Candidate/OMS mutation
-- Dashboard execution controls
-- background automatic review worker
-- OpenAI tools/function calling, web search, code interpreter, MCP tools
+- LIVE_SIM Review는 복기 report다.
+- Review output으로 주문 retry, cancel, modify를 하지 않는다.
+- AI output은 review enrichment일 뿐이다.
+- LIVE_REAL은 현재 구현되어 있지 않다.

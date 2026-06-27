@@ -1,31 +1,19 @@
 # Risk Gate Observe-Only
 
-PR 8 adds a deterministic observe-only risk classification layer. It reads PR 7
-`StrategyObservation` rows plus Candidate, Market Data, and Theme Snapshot context, then stores
-read-only risk observations for PR 9 Dashboard and operator review.
+## 요약
 
-## Purpose
+Risk Gate는 PR7 `StrategyObservation`과 Candidate, Market Data, Theme Snapshot context를 읽어 deterministic risk observation을 저장한다. `OBSERVE_PASS`는 주문 승인이 아니다. Risk Gate는 OrderIntent, EntryPlan, PositionSizing, OMS state, GatewayCommand, send/cancel/modify order call을 만들지 않는다.
 
-- Convert strategy observations into deterministic risk observations.
-- Record data, market, theme, candidate, strategy, chase, liquidity, duplicate, and placeholder
-  risk notes.
-- Preserve a latest projection by `candidate_instance_id`.
-- Keep all results read-only before the later OMS and DRY_RUN work.
+## Observe-only 원칙
 
-## Observe-Only Principles
+- Risk observation은 `observe_only=true`로 직렬화된다.
+- `OBSERVE_PASS`는 주문 승인이 아니다.
+- `OBSERVE_CAUTION`은 운영자 검토 note다.
+- `OBSERVE_BLOCK`은 관찰된 block reason이지 execution command가 아니다.
+- AI Sidecar output은 Risk evaluation input이 아니다.
+- Risk threshold는 config/code-review 입력이지 intraday 자동 변경 값이 아니다.
 
-- Risk observations always serialize with `observe_only=true`.
-- `OBSERVE_PASS` is not order approval.
-- `OBSERVE_CAUTION` is an operator review note.
-- `OBSERVE_BLOCK` is an observed block reason, not an execution command.
-- Risk Gate does not create OrderIntent, EntryPlan, PositionSizing, OMS state, GatewayCommand
-  rows, public order APIs, send/cancel/modify order calls, or live flag changes.
-- AI Sidecar output is not an input to Risk evaluation.
-- Risk thresholds are configuration/code-review inputs and are not changed automatically intraday.
-
-## Strategy Engine Connection
-
-Risk evaluation reads:
+## 읽는 데이터
 
 - `strategy_observations_latest`
 - `strategy_observations`
@@ -37,84 +25,58 @@ Risk evaluation reads:
 - `theme_latest_snapshots`
 - `theme_snapshot_members`
 
-`MATCHED_OBSERVATION` remains a setup classifier result. Risk may record a pass-observed
-strategy-context check for it, but that does not make it buy readiness.
-
-## PR10 DRY_RUN Connection
-
-PR10 may read latest `OBSERVE_PASS` as one required input for DRY_RUN eligibility. That still is
-not live order approval. `OBSERVE_PASS` plus the PR10 dry-run safety gate can create only an
-internal `DryRunIntent` simulation record, and only when Candidate state, Strategy status, market
-freshness, duplicate checks, limits, and explicit dry-run settings also pass.
-
-Risk rows are not mutated by OMS/DRY_RUN output. AI Sidecar, RCA, and Codex prompt artifacts remain
-review-only and are not automatic Risk or OMS input.
+`MATCHED_OBSERVATION`은 Strategy classifier 결과다. Risk가 이를 strategy-context check로 기록해도 매수 준비가 아니다.
 
 ## RiskObservationStatus
 
-- `NOT_EVALUATED`: no meaningful evaluation was produced.
-- `DATA_WAIT`: critical observation data is missing.
-- `OBSERVE_PASS`: no block or caution was observed; not order approval.
-- `OBSERVE_CAUTION`: one or more caution checks were observed.
-- `OBSERVE_BLOCK`: one or more block checks were observed.
-- `INVALID_CONTEXT`: core context is inconsistent or missing.
-- `STALE_CONTEXT`: critical context is too old.
+| Status | 의미 | 주문 관련 주의 |
+| --- | --- | --- |
+| `NOT_EVALUATED` | 의미 있는 평가가 없음 | 주문 판단 아님 |
+| `DATA_WAIT` | 중요한 관찰 데이터 부족 | 데이터 대기 |
+| `OBSERVE_PASS` | block/caution이 관측되지 않음 | 주문 승인이 아님 |
+| `OBSERVE_CAUTION` | caution check 관측 | 검토 note |
+| `OBSERVE_BLOCK` | block check 관측 | 실행 명령 아님 |
+| `INVALID_CONTEXT` | context 불일치/누락 | 데이터 점검 |
+| `STALE_CONTEXT` | context가 오래됨 | freshness 점검 |
 
 ## RiskCategory
 
-- `DATA_QUALITY`
-- `MARKET_CONTEXT`
-- `THEME_CONTEXT`
-- `CANDIDATE_CONTEXT`
-- `STRATEGY_CONTEXT`
-- `CHASE_OVERHEAT`
-- `LIQUIDITY_SPREAD`
-- `DUPLICATE_COOLDOWN`
-- `PORTFOLIO_PLACEHOLDER`
+| Category | 보는 내용 |
+| --- | --- |
+| `DATA_QUALITY` | latest tick, readiness, 1m bar, VWAP |
+| `MARKET_CONTEXT` | market-wide context placeholder |
+| `THEME_CONTEXT` | theme state, coverage, rising ratio, leader evidence |
+| `CANDIDATE_CONTEXT` | `CONTEXT_READY`, stale/closed/data-wait, active source |
+| `STRATEGY_CONTEXT` | matched/forming/no-setup/stale/invalid strategy observation |
+| `CHASE_OVERHEAT` | high change rate, near-day-high, VWAP extension, shallow pullback |
+| `LIQUIDITY_SPREAD` | spread, trade-value flow, cumulative trade value, execution strength |
+| `DUPLICATE_COOLDOWN` | duplicate active candidate, recent risk observation cooldown |
+| `PORTFOLIO_PLACEHOLDER` | portfolio/holding context unavailable |
 
-## Check Rules
+## Check Rule 요약
 
-`DATA_QUALITY` observes missing latest tick, stale tick, missing/invalid/stale readiness, missing
-1m bars, and missing VWAP. Missing or stale critical data can move the overall observation to
-`DATA_WAIT` or `STALE_CONTEXT`.
+- `DATA_QUALITY`: critical data가 missing/stale이면 `DATA_WAIT` 또는 `STALE_CONTEXT`가 될 수 있다.
+- `THEME_CONTEXT`: weak theme state, low fresh coverage, weak rising ratio를 관찰한다.
+- `CANDIDATE_CONTEXT`: non-`CONTEXT_READY`, stale/closed/data-wait, active source 부족을 관찰한다.
+- `STRATEGY_CONTEXT`: `MATCHED_OBSERVATION` 여부를 읽지만 주문 승인으로 바꾸지 않는다.
+- `CHASE_OVERHEAT`: 과열/추격 위험처럼 보이는 관측치를 기록한다.
+- `LIQUIDITY_SPREAD`: 거래대금, spread, execution strength 부족을 관찰한다.
+- `DUPLICATE_COOLDOWN`: 같은 code의 중복 active candidate나 최근 observation을 관찰한다.
+- `PORTFOLIO_PLACEHOLDER`: PR10 이전 또는 portfolio 미구현 상태를 명시한다.
 
-`MARKET_CONTEXT` is a placeholder in PR 8. It records `MARKET_CONTEXT_UNAVAILABLE` as
-`NOT_EVALUATED` and does not block by itself.
+## PR10 DRY_RUN 연결
 
-`THEME_CONTEXT` observes missing theme context, weak theme states, low fresh coverage, weak rising
-ratio, and missing leader evidence.
+PR10 DRY_RUN은 latest `OBSERVE_PASS`를 eligibility input 중 하나로 읽을 수 있다. 그래도 live order approval이 아니다. Candidate state, Strategy status, fresh tick, duplicate check, limit, explicit DRY_RUN settings, PR10 safety gate가 모두 필요하며 결과는 내부 `DryRunIntent` simulation record뿐이다.
 
-`CANDIDATE_CONTEXT` observes non-`CONTEXT_READY` states, stale/closed/data-wait candidates, and
-missing active sources. It does not mutate Candidate state.
-
-`STRATEGY_CONTEXT` observes missing, stale, forming, not-matched, invalid, and matched strategy
-observations. Every result carries reminders that Risk Gate is not order approval.
-
-`CHASE_OVERHEAT` observes high change rate, near-day-high chase risk, high VWAP extension, shallow
-pullback evidence from strategy reasons, and unavailable VI data as a placeholder.
-
-`LIQUIDITY_SPREAD` observes wide spread, weak 1m trade-value flow, low cumulative trade value, and
-weak execution strength.
-
-`DUPLICATE_COOLDOWN` observes multiple active candidates for the same code and recent risk
-observations inside the configured cooldown window. It does not mutate Candidate or Strategy rows.
-
-`PORTFOLIO_PLACEHOLDER` records `PORTFOLIO_CONTEXT_UNAVAILABLE` as `NOT_EVALUATED` because
-positions, holdings, balances, and OMS are intentionally absent before PR 10.
+AI Sidecar, RCA, Codex Prompt Draft는 review-only이며 Risk나 OMS 자동 입력이 아니다.
 
 ## Storage
-
-PR 8 adds these SQLite tables:
 
 - `risk_observations`
 - `risk_observations_latest`
 - `risk_check_observations`
 - `risk_evaluation_runs`
 - `risk_evaluation_errors`
-
-History rows are inserted into `risk_observations`. Latest rows are upserted by
-`candidate_instance_id`. Check rows are stored per risk observation. Runs and per-target errors are
-recorded so batch evaluation can continue when one candidate fails.
 
 ## API
 
@@ -128,58 +90,21 @@ recorded so batch evaluation can continue when one candidate fails.
 - `GET /api/risk/errors`
 - `POST /api/risk/evaluate`
 
-`POST /api/risk/evaluate` is an observation projection endpoint. It requires the local token when
-`TRADING_CORE_TOKEN` is set and returns `order_routing_enabled=false`.
+`POST /api/risk/evaluate`는 observation projection endpoint다. response는 `order_routing_enabled=false`를 유지한다.
 
 ## CLI
 
-Evaluate current matched strategy observations:
-
 ```powershell
 python -m tools.evaluate_risk
-```
-
-Evaluate one candidate:
-
-```powershell
 python -m tools.evaluate_risk --candidate-instance-id CAND-2026-06-27-005930-1
-```
-
-Evaluate one strategy observation:
-
-```powershell
 python -m tools.evaluate_risk --strategy-observation-id strategy_observation_xxx
-```
-
-Inspect latest risk observation:
-
-```powershell
 python -m tools.inspect_risk_observation `
   --candidate-instance-id CAND-2026-06-27-005930-1
 ```
 
-Inspect by risk observation id:
+## 운영자 체크포인트
 
-```powershell
-python -m tools.inspect_risk_observation `
-  --risk-observation-id risk_observation_xxx
-```
-
-## Forbidden Scope
-
-PR 8 does not implement:
-
-- Kiwoom OpenAPI+ runtime code;
-- PyQt5 or QAxWidget imports;
-- OMS;
-- live OrderIntent;
-- EntryPlan;
-- PositionSizing;
-- Position or Portfolio services;
-- send, cancel, or modify order paths;
-- public order enqueue endpoint;
-- GatewayCommand creation from Risk;
-- OpenAI API calls;
-- AI Sidecar context builder;
-- automatic buy or sell decisions from risk observations;
-- LIVE_SIM or LIVE_REAL flag changes from risk observations.
+- `OBSERVE_PASS`를 주문 승인으로 해석하지 않는다.
+- `OBSERVE_BLOCK`을 주문 취소나 execution command로 해석하지 않는다.
+- Risk가 비어 있으면 Strategy latest observation이 있는지 먼저 본다.
+- Risk Gate는 `OrderIntent`, `GatewayCommand`, `send_order`, `cancel_order`, `modify_order`를 만들지 않는다.

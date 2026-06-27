@@ -1,79 +1,60 @@
 # DRY_RUN Exit Engine
 
-PR11 adds deterministic exit evaluation and simulated close accounting for existing
-`dry_run_positions`. It is not a broker sell path.
+## 요약
 
-## Purpose
+PR11 DRY_RUN Exit Engine은 existing `dry_run_positions`에 대해 deterministic exit evaluation과 simulated close accounting을 수행한다. 실제 매도 주문이 아니다. stop-loss, take-profit, trailing stop, max-hold는 simulated exit signal일 뿐이며 broker sell approval이 아니다.
 
-- Evaluate active DRY_RUN positions with deterministic exit rules.
-- Persist `DryRunExitEvaluation` and `DryRunExitSignal` rows for operator review.
-- Allow internal `DryRunExitIntent`, `DryRunExitOrder`, and `DryRunExitExecution` creation only by
-  explicit local-token API or CLI calls.
-- Reduce or close DRY_RUN positions through simulated exit fills only.
-- Keep PR12 LIVE_SIM as a separate future project.
+## DRY_RUN-only 원칙
 
-## DRY_RUN-only Principles
+- `DRY_RUN_EXIT_ENGINE_ENABLED=false`가 기본이다.
+- `DRY_RUN_EXIT_INTENT_CREATION_ENABLED=false`가 기본이다.
+- `DRY_RUN_EXIT_ORDER_CREATION_ENABLED=false`가 기본이다.
+- `DRY_RUN_EXIT_SIMULATED_FILL_ENABLED=false`가 기본이다.
+- `DRY_RUN_EXIT_ORDER_ROUTING_ENABLED=false`
+- `DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED=false`
+- `DRY_RUN_EXIT_ALLOW_SHORT=false`
+- `DRY_RUN_EXIT_ALLOW_SELL_CLOSE_ONLY=true`
 
-- `DRY_RUN_EXIT_ENGINE_ENABLED=false` by default.
-- `DRY_RUN_EXIT_INTENT_CREATION_ENABLED=false` by default.
-- `DRY_RUN_EXIT_ORDER_CREATION_ENABLED=false` by default.
-- `DRY_RUN_EXIT_SIMULATED_FILL_ENABLED=false` by default.
-- `DRY_RUN_EXIT_ORDER_ROUTING_ENABLED=false` and
-  `DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED=false` are enforced by config validation.
-- `DRY_RUN_EXIT_ALLOW_SHORT=false` and `DRY_RUN_EXIT_ALLOW_SELL_CLOSE_ONLY=true` are enforced.
-- Exit records carry `dry_run_only=true`, `close_only=true`, `live_order_allowed=false`,
-  `gateway_command_allowed=false`, and `broker_order_sent=false`.
+Exit record는 `dry_run_only=true`, `close_only=true`, `live_order_allowed=false`, `gateway_command_allowed=false`, `broker_order_sent=false`를 가진다.
 
 ## Exit Rules
 
-- `STOP_LOSS`: latest price <= average price * `(1 - stop_loss_pct)`.
-- `TAKE_PROFIT`: latest price >= average price * `(1 + take_profit_pct)`.
-- `TRAILING_STOP`: latest price has drawn down from the position high watermark by at least
-  `trailing_stop_pct`.
-- `MAX_HOLD`: position age is at least `max_hold_sec`.
-- `DATA_STALE_EXIT_CAUTION`: latest tick age exceeds `stale_tick_sec`.
-- `THEME_WEAKENING`: related latest theme is `DATA_WAIT`, `WATCH`, `FADING`, `ROTATED_OUT`, or its
-  fresh coverage/rising ratio weakens below configured thresholds.
-- `RISK_DETERIORATION`: latest risk observation for code/trade date is `OBSERVE_BLOCK` or
-  `OBSERVE_CAUTION`.
-- `STRATEGY_INVALIDATED`: latest strategy observation for code/trade date is `DATA_WAIT`,
-  `NO_SETUP`, `STALE_CONTEXT`, or `INVALID_CONTEXT`.
-- `MANUAL_REVIEW`: placeholder reason for operator review; it does not auto-fill.
+| Signal | 의미 |
+| --- | --- |
+| `STOP_LOSS` | latest price <= average price * `(1 - stop_loss_pct)` |
+| `TAKE_PROFIT` | latest price >= average price * `(1 + take_profit_pct)` |
+| `TRAILING_STOP` | position high watermark 대비 drawdown이 threshold 이상 |
+| `MAX_HOLD` | position age가 `max_hold_sec` 이상 |
+| `DATA_STALE_EXIT_CAUTION` | latest tick age가 stale threshold 초과 |
+| `THEME_WEAKENING` | related theme state/coverage/rising ratio 약화 |
+| `RISK_DETERIORATION` | latest risk observation이 `OBSERVE_BLOCK` 또는 `OBSERVE_CAUTION` |
+| `STRATEGY_INVALIDATED` | latest strategy observation이 `DATA_WAIT`, `NO_SETUP`, `STALE_CONTEXT`, `INVALID_CONTEXT` |
+| `MANUAL_REVIEW` | 운영자 검토 placeholder |
 
-`STOP_LOSS`, `TAKE_PROFIT`, `TRAILING_STOP`, and `MAX_HOLD` are simulated exit signals only. They do
-not approve or send live sell orders.
+모든 signal은 simulated exit signal이다. 실제 매도 주문이 아니다.
 
 ## Lifecycle
 
-1. `evaluate_dry_run_exit_for_position` reads one active DRY_RUN position, latest tick, optional
-   position metrics, latest theme/strategy/risk context, and stores one evaluation plus signal rows.
-2. `evaluate_all_dry_run_exits` evaluates active positions and records `dry_run_exit_runs` plus
-   per-position errors.
-3. `create_dry_run_exit_intent` requires engine and intent flags, PR11 safety gate, an active
-   closeable position, and an `EXIT_SIGNAL_OBSERVED` evaluation. It creates an internal intent only.
-4. `convert_exit_intent_to_dry_run_order` requires order creation enablement and creates an
-   internal exit order only.
-5. `simulate_fill_dry_run_exit_order` requires simulated fill enablement, uses the latest tick as
-   fill price, inserts a simulated execution, marks the order filled, and reduces or closes the
-   paper position.
+1. `evaluate_dry_run_exit_for_position`이 active DRY_RUN position, latest tick, optional metrics, theme/strategy/risk context를 읽고 evaluation/signal row 저장
+2. `evaluate_all_dry_run_exits`가 active position batch를 평가하고 run/error row 저장
+3. `create_dry_run_exit_intent`가 engine/intent flag, PR11 safety gate, closeable position, `EXIT_SIGNAL_OBSERVED` evaluation을 확인하고 내부 intent 생성
+4. `convert_exit_intent_to_dry_run_order`가 내부 exit order 생성
+5. `simulate_fill_dry_run_exit_order`가 latest tick을 fill price로 사용해 simulated execution 저장, paper position reduce/close
 
-There is no automatic background exit worker.
+background automatic exit worker는 없다.
 
 ## Safety Gate
 
-The PR11 exit safety gate extends the PR10 safety gate and confirms:
+PR11 safety gate는 PR10 safety gate를 확장해 다음을 확인한다.
 
-- trading mode is `OBSERVE`;
-- live flags are disabled;
-- exit order routing is disabled;
-- exit gateway command creation is disabled;
-- sell close-only is true;
-- short selling is disabled;
-- broker order sent stays false;
-- AI Sidecar/RCA/Codex outputs are not used as automatic exit inputs.
-
-Failures block manual intent/order/fill creation and are recorded in `dry_run_exit_errors` or as a
-rejected exit intent.
+- `TRADING_MODE=OBSERVE`
+- live flag disabled
+- exit order routing disabled
+- exit gateway command creation disabled
+- sell close-only true
+- short selling disabled
+- `broker_order_sent=false`
+- AI/RCA/Codex output을 automatic exit input으로 사용하지 않음
 
 ## DB Tables
 
@@ -86,8 +67,7 @@ rejected exit intent.
 - `dry_run_exit_errors`
 - `dry_run_position_metrics`
 
-The existing `dry_run_ledger` receives `EXIT_EVALUATION`, `EXIT_INTENT_CREATED`,
-`EXIT_ORDER_CREATED`, `SIMULATED_EXIT_FILL`, `POSITION_CLOSED`, and `POSITION_REDUCED` events.
+기존 `dry_run_ledger`에는 `EXIT_EVALUATION`, `EXIT_INTENT_CREATED`, `EXIT_ORDER_CREATED`, `SIMULATED_EXIT_FILL`, `POSITION_CLOSED`, `POSITION_REDUCED` event가 저장된다.
 
 ## API
 
@@ -105,14 +85,14 @@ Read-only:
 - `GET /api/dry-run/exits/runs`
 - `GET /api/dry-run/exits/errors`
 
-Manual local-token protected simulation endpoints:
+Manual local-token protected simulation:
 
 - `POST /api/dry-run/exits/evaluate`
 - `POST /api/dry-run/exits/intents/from-position/{dry_run_position_id}`
 - `POST /api/dry-run/exits/orders/from-intent/{dry_run_exit_intent_id}`
 - `POST /api/dry-run/exits/orders/{dry_run_exit_order_id}/simulate-fill`
 
-Every POST remains simulation-only and returns safe flags.
+POST response도 simulation-only safe flag를 유지한다.
 
 ## CLI
 
@@ -125,33 +105,19 @@ python tools/simulate_dry_run_exit_fill.py --dry-run-exit-order-id dry_run_exit_
 python tools/inspect_dry_run_exit.py --exit-evaluation-id dry_run_exit_eval_x
 ```
 
-The CLI never sends broker orders and never creates Gateway commands.
+CLI는 broker order를 보내지 않고 Gateway command를 만들지 않는다.
 
 ## Dashboard Policy
 
-Dashboard V1 shows a read-only DRY_RUN Exit panel under the DRY_RUN section. It displays status
-counts, recent evaluations, and recent signals. It has no sell, close, fill, cancel, modify, or
-exit execution buttons and does not call DRY_RUN Exit POST endpoints.
+Dashboard는 DRY_RUN section 아래 read-only DRY_RUN Exit panel을 보여준다. sell, close, fill, cancel, modify, exit execution 버튼이 없다.
 
 ## PR12 Boundary
 
-PR11 is a prerequisite for simulated exit accounting only. PR12 LIVE_SIM adds a separate
-simulation-account-only safety gate and command queue path for small buy-side acceptance tests.
-PR12 does not convert DRY_RUN exits to broker exits by default. LIVE_SIM sell and exit-sell remain
-disabled unless a later safety review explicitly enables them. LIVE_REAL remains disabled.
+PR12 LIVE_SIM은 별도의 simulation-account-only buy-side acceptance path다. PR12는 DRY_RUN exit을 broker exit으로 변환하지 않는다. LIVE_SIM sell과 exit-sell은 later safety review 없이는 disabled다. LIVE_REAL은 disabled다.
 
-## Forbidden Scope
+## 운영자 체크포인트
 
-- Kiwoom OpenAPI+ actual order code
-- PyQt5/QAxWidget imports
-- 32-bit ActiveX order code
-- `GatewayCommand` creation or transmission
-- `BrokerOrderRequest` transmission
-- DRY_RUN `send_order`, `cancel_order`, or `modify_order`
-- `POST /api/orders/enqueue`
-- LIVE_REAL implementation
-- automatic DRY_RUN-to-LIVE_SIM exit promotion
-- real account, balance, holding, or broker execution mutation
-- AI/RCA/Codex-output-driven exit/order intent creation
-- Dashboard exit action buttons
-- background automatic exit workers
+- exit signal은 실제 매도 주문이 아니다.
+- simulated fill은 paper position 회계 처리다.
+- `GatewayCommand`, `BrokerOrderRequest`가 생성되면 안 된다.
+- AI/RCA/Codex output으로 exit/order intent를 자동 생성하지 않는다.

@@ -1,22 +1,23 @@
 # LIVE_SIM Enablement
 
-PR12 enables a narrow Kiwoom mock-trading path. It is simulation-account-only, disabled by default,
-manual only, and separated from DRY_RUN and LIVE_REAL.
+## 요약
+
+PR12 `LIVE_SIM`은 Kiwoom mock-trading acceptance test를 위한 simulation-account-only path다. 기본 disabled, manual only, safety-gated이며 DRY_RUN과 LIVE_REAL과 분리된다. LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아니다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
 
 ## Boundary
 
-- LIVE_SIM may enqueue a broker command only through the Gateway command queue.
-- LIVE_REAL remains disabled and out of scope.
-- DRY_RUN evidence can be a prerequisite, but DRY_RUN never auto-creates LIVE_SIM intents.
-- AI Sidecar, RCA reports, and Codex prompt drafts are review-only and never order inputs.
-- LIVE_SIM Review Sidecar reports are 장후 복기 artifacts and never order inputs.
-- Dashboard is read-only and has no buy, sell, cancel, modify, reconcile, or queue buttons.
+- LIVE_SIM은 Gateway command queue를 통해서만 broker command를 enqueue할 수 있다.
+- 허용 command는 safety gate를 통과한 `send_order`로 제한된다.
+- `cancel_order`와 `modify_order`는 disabled다.
+- DRY_RUN evidence는 prerequisite이 될 수 있지만 DRY_RUN이 LIVE_SIM intent를 자동 생성하지 않는다.
+- AI Sidecar, RCA, Codex prompt draft, LIVE_SIM Review report는 review-only이며 order input이 아니다.
+- Dashboard는 read-only이며 buy, sell, cancel, modify, reconcile, queue button이 없다.
 
 ## Safety Gate
 
-`check_live_sim_safety_gate(connection, settings)` blocks unless all critical checks pass:
+`check_live_sim_safety_gate(connection, settings)`는 다음을 확인한다.
 
-- `TRADING_MODE=LIVE_SIM` or explicit LIVE_SIM enablement
+- `TRADING_MODE=LIVE_SIM` 또는 explicit LIVE_SIM enablement
 - `TRADING_ALLOW_LIVE_SIM=true`
 - `TRADING_ALLOW_LIVE_REAL=false`
 - `LIVE_SIM_ENABLED=true`
@@ -25,53 +26,67 @@ manual only, and separated from DRY_RUN and LIVE_REAL.
 - `LIVE_SIM_KILL_SWITCH=false`
 - fresh Gateway heartbeat
 - Gateway orderable status
-- simulation-like configured and reported account/server/broker mode
+- simulation-like configured/reported account/server/broker mode
 - configured simulation account ID
 - positive notional and daily limits
 - daily order count remaining
 - Gateway queue healthy
 - AI tools and AI order tools disabled
 
-Any failure creates no intent and no Gateway command. Intent creation failures are recorded in
-`live_sim_rejections`.
+실패하면 intent와 Gateway command가 생성되지 않는다. rejection은 `live_sim_rejections`에 기록된다.
 
 ## Eligibility
 
-`evaluate_live_sim_eligibility` additionally requires:
+`evaluate_live_sim_eligibility`는 추가로 다음을 요구한다.
 
-- Candidate is `CONTEXT_READY`
-- latest Strategy is `MATCHED_OBSERVATION`
-- latest Risk is `OBSERVE_PASS`
-- latest tick exists and is fresh
-- DRY_RUN evidence exists when `LIVE_SIM_REQUIRE_DRY_RUN_EVIDENCE=true`
-- no duplicate active LIVE_SIM intent/order for the code
-- per-order notional, daily count, daily notional, active order, and active position limits pass
-- buy is allowed, market order is disabled by default, sell/exit-sell are disabled by default
+- Candidate가 `CONTEXT_READY`
+- latest Strategy가 `MATCHED_OBSERVATION`
+- latest Risk가 `OBSERVE_PASS`
+- latest tick 존재 및 fresh
+- `LIVE_SIM_REQUIRE_DRY_RUN_EVIDENCE=true`이면 DRY_RUN evidence 존재
+- same code duplicate active LIVE_SIM intent/order 없음
+- per-order notional, daily count, daily notional, active order, active position limit 통과
+- buy allowed
+- market order disabled by default
+- sell/exit-sell disabled by default
+
+`MATCHED_OBSERVATION`은 매수 신호가 아니고 `OBSERVE_PASS`는 주문 승인이 아니다. LIVE_SIM eligibility는 모의투자 전용 gate다.
+
+## Required Environment for Local Acceptance
+
+```powershell
+$env:TRADING_MODE = "LIVE_SIM"
+$env:TRADING_ALLOW_LIVE_SIM = "true"
+$env:TRADING_ALLOW_LIVE_REAL = "false"
+$env:LIVE_SIM_ENABLED = "true"
+$env:LIVE_SIM_ORDER_ROUTING_ENABLED = "true"
+$env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "true"
+$env:LIVE_SIM_ACCOUNT_ID = "SIM-ACCOUNT-ID"
+$env:LIVE_SIM_KILL_SWITCH = "false"
+```
 
 ## Command Flow
 
-Manual flow:
+1. API 또는 CLI로 eligibility 평가
+2. `LiveSimIntent` 생성
+3. intent에서 `LiveSimOrderRecord` queue
+4. Gateway가 command polling
+5. Mock Gateway가 `command_started`, `command_ack` 전송
+6. optional mock execution event가 `live_sim_executions` row 기록
+7. reconcile이 local-only `live_sim_reconcile_snapshots` row 저장
 
-1. Evaluate eligibility with API or CLI.
-2. Create a `LiveSimIntent`.
-3. Queue a `LiveSimOrderRecord` from that intent.
-4. Gateway polls the command.
-5. Mock Gateway emits `command_started` and `command_ack`.
-6. Optional mock execution event records a `live_sim_executions` row.
-7. Reconcile stores a local-only `live_sim_reconcile_snapshots` row.
+Queued command 조건:
 
-The queued command is `send_order` and must include:
-
+- `command_type=send_order`
 - `source=live_sim`
-- `mode=LIVE_SIM` and `live_mode=LIVE_SIM`
+- `mode=LIVE_SIM`
+- `live_mode=LIVE_SIM`
 - command-level and payload `idempotency_key`
-- simulation-like `account_mode`, `broker_env`, and `server_mode`
+- simulation-like `account_mode`, `broker_env`, `server_mode`
 - `metadata.live_sim_only=true`
 - `metadata.live_real_allowed=false`
 - `metadata.live_sim_intent_id`
-- BUY side only in PR12
-
-`cancel_order` and `modify_order` remain disabled.
+- PR12에서는 BUY side only
 
 ## DB Tables
 
@@ -104,8 +119,7 @@ Manual local-token protected:
 - `POST /api/live-sim/orders/from-intent/{live_sim_intent_id}`
 - `POST /api/live-sim/reconcile`
 
-Every POST response includes `live_sim_only=true`, `live_real_allowed=false`,
-`broker_order_path=LIVE_SIM_ONLY`, and `real_order_allowed=false`.
+POST response는 `live_sim_only=true`, `live_real_allowed=false`, `broker_order_path=LIVE_SIM_ONLY`, `real_order_allowed=false`를 포함한다.
 
 ## CLI
 
@@ -113,62 +127,42 @@ Every POST response includes `live_sim_only=true`, `live_real_allowed=false`,
 python tools/evaluate_live_sim_eligibility.py --candidate-instance-id CANDIDATE_ID
 python tools/create_live_sim_intent.py --candidate-instance-id CANDIDATE_ID
 python tools/queue_live_sim_order.py --live-sim-intent-id live_sim_intent_x
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
 python tools/reconcile_live_sim.py
 ```
 
-CLI tools never bypass the safety gate and never create LIVE_REAL orders.
-
-## Dashboard
-
-Dashboard snapshot includes `live_sim` with status, safety gate, counts, recent intents, orders,
-executions, rejections, and reconcile snapshots. The browser UI renders these read-only and performs
-no LIVE_SIM POST calls.
-
-## LIVE_SIM Review Sidecar
-
-PR AI-6 adds deterministic session/order/reconcile/incident review reports under
-`/api/ai-sidecar/live-sim-review`. The review sidecar reads LIVE_SIM intents, orders, executions,
-rejections, gateway command status, command ack/failure events, reconcile snapshots, and errors.
-It stores operator review artifacts in `ai_live_sim_review_*` tables.
-
-The review sidecar does not create `LiveSimIntent`, does not enqueue `GatewayCommand`, does not
-call order send/cancel/modify paths, and does not mutate LIVE_SIM order state. `run_ai=false` is
-the default and works without OpenAI. `run_ai=true` can link an AI insight for review only.
-
-Dashboard displays latest LIVE_SIM review reports as read-only cards and still performs no POST
-calls to LIVE_SIM review endpoints.
+CLI는 safety gate를 우회하지 않고 LIVE_REAL order를 만들지 않는다.
 
 ## Mock Gateway Acceptance
 
-The mock Gateway accepts `send_order` only when the LIVE_SIM metadata is present and simulation-like.
-It emits `command_started` and `command_ack` with a mock broker order number. Tests may request an
-optional execution event through mock metadata. `apps/kiwoom_gateway.py` remains a placeholder; Core
-does not import PyQt5/QAxWidget or call Kiwoom order APIs.
+Mock Gateway는 LIVE_SIM metadata가 있고 simulation-like인 `send_order`만 수락한다. `command_started`, `command_ack`를 mock broker order number와 함께 전송한다. Core는 PyQt5/QAxWidget을 import하지 않고 Kiwoom real order API를 호출하지 않는다.
 
 ## Reconcile Policy
 
-PR12 reconcile is local-only. It compares local open LIVE_SIM orders with Gateway command state and
-stores `LOCAL_ONLY` or `RECONCILE_MISMATCH`. Broker account snapshots are marked unavailable until a
-separate simulation-account reconcile command is reviewed.
+PR12 reconcile은 local-only다. local open LIVE_SIM order와 Gateway command state를 비교해 `LOCAL_ONLY` 또는 `RECONCILE_MISMATCH`를 저장한다. broker account snapshot은 별도 simulation-account reconcile command review 전까지 unavailable로 표시한다.
 
 ## Rollback
 
-1. Set `LIVE_SIM_KILL_SWITCH=true`.
-2. Set `LIVE_SIM_ORDER_ROUTING_ENABLED=false`.
-3. Set `LIVE_SIM_GATEWAY_COMMAND_ENABLED=false`.
-4. Set `LIVE_SIM_ENABLED=false` and `TRADING_ALLOW_LIVE_SIM=false`.
-5. Confirm `/api/live-sim/status` safety gate is blocked.
-6. Inspect `live_sim_orders`, `gateway_commands`, and `live_sim_reconcile_snapshots`.
+```powershell
+$env:LIVE_SIM_KILL_SWITCH = "true"
+$env:LIVE_SIM_ORDER_ROUTING_ENABLED = "false"
+$env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "false"
+$env:LIVE_SIM_ENABLED = "false"
+$env:TRADING_ALLOW_LIVE_SIM = "false"
+Invoke-RestMethod http://127.0.0.1:8000/api/live-sim/status
+```
 
-## Forbidden Scope
+추가 확인:
 
-- LIVE_REAL implementation
-- real account mode or real server mode
-- real Kiwoom/PyQt order calls in Core
-- generic `/api/orders/enqueue`
-- cancel/modify endpoints
-- background automatic LIVE_SIM workers
-- Dashboard order execution controls
-- AI/RCA/Codex-output-driven order creation
-- idempotency-free order commands
-- safety gate bypass
+- `live_sim_orders`
+- `gateway_commands`
+- `live_sim_reconcile_snapshots`
+- `live_sim_errors`
+
+## 운영자 체크포인트
+
+- LIVE_SIM은 모의투자 전용이다.
+- LIVE_REAL은 현재 구현되어 있지 않다.
+- `send_order`는 LIVE_SIM service safety-gated path에서만 허용된다.
+- `cancel_order`, `modify_order`는 disabled다.
+- Dashboard에는 LIVE_SIM 실행 버튼이 없다.

@@ -1,124 +1,77 @@
 # Market Data Service
 
-PR 4 adds a read-only market data projection over accepted Gateway observations. The Event Store
-is the source of truth. Market data tables are derived state and can be rebuilt from
-`gateway_events` at any time.
+## 요약
 
-## Purpose
+Market Data Service는 accepted Gateway event에서 tick/latest/bar/VWAP/readiness를 만드는 read-only projection이다. Event Store가 source of truth이고, market data table은 언제든 rebuild 가능한 파생 상태다. 이 기능은 실계좌 주문을 의미하지 않는다.
 
-- Normalize accepted `price_tick`, `condition_event`, and `tr_response` Gateway events.
-- Keep latest tick, tick samples, 1/3/5 minute bars, VWAP, condition signals, TR snapshots, and
-  projection errors in SQLite.
-- Provide stable read APIs for Theme Snapshot, Candidate FSM, future Strategy, and Dashboard work.
-- Avoid strategy, risk, OMS, order intent, and broker order side effects.
+## 하는 일 / 하지 않는 일
 
-## Projection Tables
+| 구분 | 내용 |
+| --- | --- |
+| 하는 일 | `price_tick`, `condition_event`, `tr_response`를 정규화해 SQLite projection으로 저장 |
+| 하는 일 | latest tick, tick sample, 1/3/5 minute bar, VWAP, readiness, condition latest 제공 |
+| 하지 않는 일 | Strategy 판단, Risk 판단, OMS 생성, `GatewayCommand` 생성 |
+| 하지 않는 일 | `send_order`, `cancel_order`, `modify_order` 호출 |
 
-- `market_ticks_latest`: one latest normalized tick per stock code.
-- `market_tick_samples`: append-only per-event tick sample rows.
-- `market_minute_bars`: OHLCV-style bars keyed by `(code, interval_sec, bucket_start)`.
-- `market_condition_signals`: append-only condition enter/exit observations.
-- `market_condition_latest`: latest condition state per `(condition_id, code)`.
-- `market_tr_snapshots`: append-only TR response rows.
-- `market_projection_errors`: projection failures that did not block event ingest.
+## Projection Table
 
-## Price Tick Handling
+| Table | 의미 |
+| --- | --- |
+| `market_ticks_latest` | code별 최신 normalized tick |
+| `market_tick_samples` | event별 append-only tick sample |
+| `market_minute_bars` | `(code, interval_sec, bucket_start)` 기준 bar |
+| `market_condition_signals` | condition ENTER/EXIT append-only signal |
+| `market_condition_latest` | `(condition_id, code)`별 최신 condition state |
+| `market_tr_snapshots` | TR response row snapshot |
+| `market_projection_errors` | projection 실패 기록 |
 
-`process_gateway_event()` sends `price_tick` events to `BrokerPriceTick.from_dict()` first. The
-broker-neutral contract validates code, numeric fields, spread, day range, and timestamps.
+## Price Tick 처리
 
-For accepted ticks the service:
+`process_gateway_event()`는 `price_tick` payload를 먼저 `BrokerPriceTick.from_dict()`로 검증한다.
 
-- upserts `market_ticks_latest`;
-- inserts one `market_tick_samples` row using `event_id` as the dedupe key;
-- computes `volume_delta` and `trade_value_delta` against the previous latest tick;
-- clamps negative deltas to zero for reset-like cumulative values;
-- updates configured minute bars, defaulting to `60,180,300` seconds;
-- stores quality as `FRESH`, `DEGRADED`, or `INVALID` according to tick shape.
+저장/계산 내용:
 
-## Condition Event Handling
+- `market_ticks_latest` upsert
+- `market_tick_samples` insert
+- 이전 latest tick 대비 `volume_delta`, `trade_value_delta` 계산
+- cumulative 값 reset처럼 보이는 negative delta는 0으로 clamp
+- `MARKET_DATA_BAR_INTERVALS_SEC` 기준 bar 업데이트
+- tick shape에 따라 `FRESH`, `DEGRADED`, `INVALID` quality 저장
 
-`condition_event` payloads are validated by `BrokerConditionEvent.from_dict()`. The service stores
-the raw signal in `market_condition_signals`, then upserts `market_condition_latest` for the same
-condition/code pair. `ENTER` and `EXIT` actions are preserved exactly as observations. Metadata is
-stored as canonical JSON.
+## Minute Bar와 VWAP
 
-## TR Response Handling
+bar bucket은 tick trade time 기준이다.
 
-`tr_response` payloads are validated by `BrokerTrResponse.from_dict()`. Each row is stored in
-`market_tr_snapshots`. If a row contains `code`, `stock_code`, or `종목코드`, the value is normalized
-to a 6-digit domestic stock code when valid.
+| 값 | 의미 |
+| --- | --- |
+| `open` | bucket 첫 가격 |
+| `high` | bucket 최고가 |
+| `low` | bucket 최저가 |
+| `close` | bucket 마지막 가격 |
+| `volume_delta` | bucket 내 volume delta 합 |
+| `trade_value_delta` | bucket 내 trade value delta 합 |
+| `tick_count` | projected tick 수 |
+| `vwap` | 가능하면 cumulative trade value / cumulative volume |
 
-TR rows never overwrite latest tick data. They are market observations only.
+VWAP이 없다는 것은 가격 위치 판단의 입력이 부족하다는 뜻이다. 주문 금지나 주문 승인 상태가 아니다.
 
-## Minute Bars And VWAP
+## Readiness
 
-Minute buckets are calculated from the tick trade time. For each configured interval, the service
-keeps:
+`get_market_data_readiness()`는 운영자가 “데이터가 충분한가”를 보는 값이다.
 
-- `open`: first price in the bucket;
-- `high`: max price in the bucket;
-- `low`: min price in the bucket;
-- `close`: latest price in the bucket;
-- `volume_delta` and `trade_value_delta`: sum of tick deltas in the bucket;
-- `tick_count`: number of projected ticks in the bucket;
-- `vwap`: cumulative trade value divided by cumulative volume when possible, otherwise bar
-  trade-value delta divided by bar volume delta.
+| 상태 | 의미 |
+| --- | --- |
+| `MISSING` | latest tick 없음 |
+| `FRESH` | tick age가 `MARKET_DATA_TICK_STALE_SEC` 이내 |
+| `STALE` | stale threshold 초과, degraded threshold 이내 |
+| `DEGRADED` | degraded threshold 초과 |
+| `INVALID` | tick shape가 유효하지 않음 |
 
-## Freshness And Readiness
+또한 1m/3m/5m bar 존재 여부, VWAP 가능 여부, `BAR_MISSING`, `BAR_MISSING_60`, `VWAP_MISSING` 같은 reason code를 함께 준다.
 
-Readiness is calculated dynamically by `get_market_data_readiness()`:
+데이터 부족은 중요하다. Candidate, Strategy, Risk가 모두 이 projection을 읽기 때문에 tick이나 bar가 부족하면 다음 단계가 `DATA_WAIT`로 남을 수 있다.
 
-- no latest tick: `MISSING` with `TICK_MISSING`;
-- latest tick age within `MARKET_DATA_TICK_STALE_SEC`: `FRESH`;
-- age past stale threshold but within `MARKET_DATA_DEGRADED_TICK_STALE_SEC`: `STALE`;
-- age past degraded threshold: `DEGRADED`;
-- invalid tick shape: `INVALID`.
-
-Readiness also reports whether 1m, 3m, and 5m bars exist, whether any VWAP is available, and
-reason codes such as `BAR_MISSING`, `BAR_MISSING_60`, and `VWAP_MISSING`.
-
-## Theme Snapshot Connection
-
-PR 5 Theme Service reads Market Data Service projections as a downstream derived projection. It
-aggregates latest ticks, minute bars, readiness, VWAP, and latest condition observations by theme
-membership. Market Data Service remains read-only and does not know about theme state, candidate
-state, strategy decisions, risk decisions, or order routing.
-
-Theme snapshots are rebuilt separately through:
-
-```powershell
-python -m tools.rebuild_theme_snapshots
-```
-
-## Candidate FSM Connection
-
-PR 6 Candidate FSM reads Market Data Service projections as read-only context. It uses
-`market_condition_signals` for condition source events, `market_condition_latest` for condition
-attribution, `market_ticks_latest` for latest tick age, `market_minute_bars` for 1/3/5 minute bar
-and VWAP readiness, and `get_market_data_readiness()` for status and reason codes.
-
-Market Data Service still does not create candidate state itself, does not enqueue commands, and
-does not make strategy, risk, or order decisions.
-
-## Rebuild
-
-Use the CLI to replay accepted market events:
-
-```powershell
-python -m tools.rebuild_market_data_projection
-```
-
-This default mode is non-destructive and skips already projected events. To clear projection
-tables first:
-
-```powershell
-python -m tools.rebuild_market_data_projection --clear-projection
-```
-
-The underlying service requires an explicit clear guard before deleting projection rows.
-
-## Read-Only API
+## API
 
 - `GET /api/market-data/status`
 - `GET /api/market-data/ticks/latest`
@@ -129,19 +82,35 @@ The underlying service requires an explicit clear guard before deleting projecti
 - `GET /api/market-data/tr-snapshots/recent`
 - `GET /api/market-data/projection-errors`
 
-There are no POST, PUT, DELETE, order, strategy, risk, or OMS endpoints in Market Data Service.
+Market Data Service에는 POST, PUT, DELETE, order, strategy, risk, OMS endpoint가 없다.
 
-## Forbidden Scope
+## Rebuild
 
-PR 4 does not implement:
+비파괴 replay:
 
-- Kiwoom OpenAPI+ runtime code;
-- PyQt5 or QAxWidget imports;
-- strategy engine;
-- risk gate;
-- OMS;
-- order intent;
-- candidate FSM;
-- send, cancel, or modify order paths;
-- OpenAI API calls;
-- AI Sidecar context builder.
+```powershell
+python -m tools.rebuild_market_data_projection
+```
+
+projection table을 clear하고 replay:
+
+```powershell
+python -m tools.rebuild_market_data_projection --clear-projection
+```
+
+## Downstream 연결
+
+| 다음 단계 | 읽는 데이터 |
+| --- | --- |
+| Theme Service | latest tick, minute bar, VWAP, readiness, condition latest |
+| Candidate FSM | condition signal, readiness, latest tick, bar/VWAP readiness |
+| Strategy Engine | candidate context와 market projection |
+| Risk Gate | market freshness, liquidity, spread, VWAP extension |
+| Dashboard | status, counts, errors, latest values |
+
+## 운영자 체크포인트
+
+- Dashboard가 비어 있으면 먼저 `/api/market-data/status`를 본다.
+- code별 `readiness`에서 `MISSING`, `STALE`, `DEGRADED`, `INVALID` 이유를 확인한다.
+- bar/VWAP 부족은 다음 단계의 `DATA_WAIT` 원인이 될 수 있다.
+- Market Data Service는 주문 판단을 하지 않는다.

@@ -1,55 +1,94 @@
 # suseok-trader-v2 Architecture
 
-This project starts as a new codebase. The existing `juchb4145-ai/suseok_ai` repository is
-used only as a reference for boundary and safety principles. Runtime code, legacy strategy
-logic, and Kiwoom/PyQt integration are intentionally not copied into this repository.
+## 요약
 
-## Target Process Split
+`suseok-trader-v2`는 Gateway와 Core를 분리한 국내 주식 자동매매 기반 시스템이다. 현재 구현의 핵심은 **관찰, 저장, 검토, 안전 경계**다. Core는 PyQt5, QAxWidget, Kiwoom OpenAPI+ concrete client를 import하지 않는다. Gateway는 broker 통신을 담당하지만 전략 판단과 리스크 판단을 하지 않는다.
 
-- 32-bit Kiwoom Gateway: future process that owns Kiwoom OpenAPI+ ActiveX/QAxWidget access.
-- 64-bit Core/API/Web Dashboard: future process family that owns state, persistence, risk
-  policy, APIs, and operator-facing views.
+## 전체 흐름
 
-The Core must not import PyQt5, QAxWidget, or a concrete Kiwoom client. It should depend only
-on broker-neutral contracts. The Gateway should capture Kiwoom communication, real-time ticks,
-condition search, TR responses, order requests, and execution events, but it must not make
-strategy decisions.
+```text
+Gateway
+  -> Event Store
+  -> Market Data Service
+  -> Theme Service
+  -> Candidate FSM
+  -> Strategy Observation
+  -> Risk Observation
+  -> Dashboard
+  -> AI Sidecar / RCA / Codex Prompt Draft
+  -> DRY_RUN OMS
+  -> DRY_RUN Exit Engine
+  -> LIVE_SIM
+```
 
-## Intended Transport
+## 프로세스 분리 원칙
 
-The future Gateway/Core transport is HTTP-based:
+| 영역 | 담당 | 금지 |
+| --- | --- | --- |
+| 32-bit Kiwoom Gateway | Kiwoom OpenAPI+ ActiveX/QAxWidget 접근, broker event 수집, command polling | 전략 판단, 리스크 판단, 임의 주문 생성 |
+| 64-bit Core/API/Web Dashboard | state, persistence, projection, policy, API, operator view | PyQt5, QAxWidget, concrete Kiwoom client import |
+| AI Sidecar | context, RCA, review, Codex prompt draft | Strategy/Risk/OMS 자동 입력, order tool |
+
+기존 `juchb4145-ai/suseok_ai`는 경계와 안전 원칙 참고용이다. runtime code, legacy strategy logic, Kiwoom/PyQt integration을 이 저장소로 복사하지 않는다.
+
+## Gateway/Core Transport
 
 - Gateway to Core: `POST /api/gateway/events`
-- Core to Gateway: `GET /api/gateway/commands` using long-polling
+- Core to Gateway: `GET /api/gateway/commands`
 
-PR 2B implements these Core endpoints as a broker-neutral transport surface. The concrete
-Kiwoom/PyQt Gateway process remains future work.
+PR 2B부터 Core는 broker-neutral HTTP surface를 제공한다. 실제 Kiwoom/PyQt Gateway는 Core 밖에 있어야 한다.
 
-## Safety Defaults
+## Domain 경계
 
-- `TRADING_MODE` defaults to `OBSERVE`.
-- `TRADING_ALLOW_LIVE_SIM` defaults to `false`.
-- `TRADING_ALLOW_LIVE_REAL` defaults to `false`.
-- There is no order, buy, sell, strategy, or Kiwoom execution path in PR 2B.
-- Future order-related commands must use `command_id`, `request_id`, and `idempotency_key`
-  before any live-like path can be considered.
+| 도메인 | 역할 | 주문 관련 경계 |
+| --- | --- | --- |
+| Event Store | Gateway event 원본과 정규화 event 저장 | 실행하지 않음 |
+| Market Data Service | tick/latest/bar/VWAP/readiness projection | 주문 판단하지 않음 |
+| Theme Service | membership과 snapshot | 투자 추천이나 주문 판단 아님 |
+| Candidate FSM | 후보 관찰 에피소드 상태 관리 | 매수 후보 확정 아님 |
+| Strategy Engine | setup observation 저장 | `MATCHED_OBSERVATION`은 매수 신호 아님 |
+| Risk Gate | risk observation 저장 | `OBSERVE_PASS`는 주문 승인 아님 |
+| OMS DRY_RUN | 내부 모의 회계 | 브로커 주문 아님 |
+| LIVE_SIM | 키움 모의투자 전용 queue path | 실계좌 주문 아님 |
+| AI Sidecar | review-only 분석 보조 | 자동 주문 입력 아님 |
 
 ## Project Layout
 
-- `apps/`: executable application entrypoints.
-- `api/`: FastAPI route modules and HTTP-facing code.
-- `domain/`: broker-neutral domain models and policies.
-- `infrastructure/`: external adapters, added only when needed.
-- `services/`: application services such as settings.
-- `storage/`: database connection and persistence helpers.
-- `web/`: future dashboard assets.
-- `tests/`: automated tests.
-- `docs/`: architecture, contracts, and roadmap.
-- `tools/`: local scripts.
+- `apps/`: 실행 entrypoint
+- `api/`: FastAPI route module
+- `domain/`: broker-neutral domain model과 policy
+- `infrastructure/`: 필요할 때 추가되는 external adapter
+- `services/`: application service
+- `storage/`: SQLite connection과 persistence helper
+- `web/`: Dashboard template/static asset
+- `tests/`: automated tests
+- `docs/`: architecture, contract, runbook
+- `tools/`: local script
 
-## Explicitly Excluded Legacy Scope
+## 안전 기본값
 
-This bootstrap does not copy `runtime_factory.py`, legacy runtime code, hybrid strategy code,
-dirty/shadow variants, threshold A/B machinery, or any Kiwoom OpenAPI+/PyQt implementation.
-Those concepts may inform future trade-off discussions, but they are not part of this new
-project foundation.
+- `TRADING_MODE=OBSERVE`
+- `TRADING_ALLOW_LIVE_SIM=false`
+- `TRADING_ALLOW_LIVE_REAL=false`
+- `AI_SIDECAR_ENABLED=false`
+- `DRY_RUN_OMS_ENABLED=false`
+- `LIVE_SIM_ENABLED=false`
+- `LIVE_SIM_KILL_SWITCH=true`
+
+이 문서의 기능은 실계좌 주문을 의미하지 않는다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
+
+## 명시적으로 제외된 legacy scope
+
+- `runtime_factory.py`
+- legacy runtime code
+- hybrid strategy code
+- dirty/shadow variant
+- threshold A/B machinery
+- Core 내부 Kiwoom OpenAPI+/PyQt implementation
+
+## 운영자 체크포인트
+
+- Core에서 PyQt/QAxWidget/Kiwoom concrete import가 보이면 경계 위반으로 본다.
+- Gateway가 broker 통신 외 전략/리스크 판단을 시작하면 경계 위반이다.
+- Dashboard와 AI Sidecar는 실행 주체가 아니다.
+- Strategy/Risk/DRY_RUN/LIVE_SIM의 안전 경계를 서로 섞어 해석하지 않는다.

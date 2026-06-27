@@ -1,26 +1,17 @@
 # AI Codex Prompt Generator
 
-## Purpose
+## 요약
 
-PR AI-5 adds a read-only generator for human-copyable Codex prompt drafts. Drafts can be built
-from RCA reports, candidate context, no-trade context, ops incident context, AI context packets,
-AI insights, or manual safety-review notes.
-
-The generator does not call Codex, does not create branches, commits, pushes, or PRs, and does not
-modify repository files. A draft is text for a human operator to review and copy.
+PR AI-5는 사람이 복사할 수 있는 Codex prompt draft를 생성한다. draft는 RCA report, candidate context, no-trade context, ops incident, AI context packet, AI insight, manual safety-review note에서 만들 수 있다. Generator는 Codex를 호출하지 않고, branch/commit/push/PR을 만들지 않고, repository file을 수정하지 않는다.
 
 ## Deterministic vs AI-assisted Draft
 
-Deterministic mode is the default and works without an OpenAI API key:
+| mode | 설명 |
+| --- | --- |
+| deterministic | 기본값. OpenAI API key 없이 동작 |
+| AI-assisted | `--run-ai` 또는 `run_ai=true`가 명시된 경우에만 PR AI-2 `CODEX_PROMPT_DRAFT` task 사용 |
 
-```powershell
-python tools/build_codex_prompt_from_no_trade.py --trade-date 2026-06-27
-```
-
-AI-assisted mode is optional. It runs only when `--run-ai` or `run_ai=true` is explicitly passed.
-It uses the PR AI-2 `CODEX_PROMPT_DRAFT` structured-output task. If AI is disabled, unavailable,
-invalid, or policy rejected, the deterministic draft remains saved and linked to the failure
-status.
+AI가 disabled, unavailable, invalid, policy rejected이면 deterministic draft가 그대로 저장된다.
 
 ## Source Types
 
@@ -34,14 +25,25 @@ status.
 
 ## Target Area Inference
 
-The generator maps RCA root-cause categories and reason codes to areas such as
-`GATEWAY_TRANSPORT`, `MARKET_DATA`, `THEME_SERVICE`, `CANDIDATE_FSM`, `STRATEGY_ENGINE`,
-`RISK_GATE`, `DASHBOARD`, `AI_SIDECAR`, `RCA_WORKFLOW`, `TESTING`, `DOCS`, and `SAFETY_REVIEW`.
-Unknown evidence falls back to `UNKNOWN`.
+Generator는 root-cause category와 reason code를 다음 target area로 매핑한다.
+
+- `GATEWAY_TRANSPORT`
+- `MARKET_DATA`
+- `THEME_SERVICE`
+- `CANDIDATE_FSM`
+- `STRATEGY_ENGINE`
+- `RISK_GATE`
+- `DASHBOARD`
+- `AI_SIDECAR`
+- `RCA_WORKFLOW`
+- `TESTING`
+- `DOCS`
+- `SAFETY_REVIEW`
+- `UNKNOWN`
 
 ## Prompt Format
 
-Every `prompt_text` uses Korean section headings:
+`prompt_text`는 한국어 section heading을 사용한다.
 
 1. 역할
 2. 대상 저장소
@@ -55,22 +57,25 @@ Every `prompt_text` uses Korean section headings:
 10. 완료 기준
 11. 작업 후 보고 형식
 
-Required safety text includes:
+Prompt draft에는 다음 safety text가 포함되어야 한다.
 
 - 자동 주문/매수/매도 기능을 추가하지 말 것
-- OrderIntent, GatewayCommand, send_order/cancel_order/modify_order를 만들지 말 것
+- `OrderIntent`, `GatewayCommand`, `send_order`, `cancel_order`, `modify_order`를 만들지 말 것
 - Strategy/Risk/OMS 자동 판단으로 AI/RCA output을 사용하지 말 것
 - GitHub branch/commit/push/PR을 자동 생성하지 말 것
-- 파일 수정은 Codex가 사용자의 명시적 작업 범위 안에서만 수행하며, 이 draft generator는 파일을 수정하지 않는다
-- 테스트와 문서 업데이트를 포함할 것
+- draft generator는 파일을 수정하지 않는다
 
 ## Safety Sanitizer
 
-The sanitizer allows forbidden action names only in explicit negation or review-only contexts. It
-rejects prompt lines that instruct order execution, live-flag changes, Codex execution, GitHub
-branch/commit/push/PR creation, or automatic apply behavior.
+Sanitizer는 forbidden action name을 명시적 부정 또는 review-only context에서만 허용한다. 다음 instruction은 reject한다.
 
-Stored drafts must keep:
+- order execution 지시
+- live-flag 변경 지시
+- Codex execution 지시
+- GitHub branch/commit/push/PR 생성 지시
+- automatic apply behavior
+
+Stored draft는 다음 flag를 유지한다.
 
 - `observe_only=true`
 - `human_review_required=true`
@@ -79,17 +84,12 @@ Stored drafts must keep:
 - `codex_execution_allowed=false`
 - `no_trading_side_effects=true`
 
-## Storage Tables
-
-PR AI-5 adds additive SQLite tables:
+## Storage
 
 - `ai_codex_prompt_drafts`
 - `ai_codex_prompt_sections`
 - `ai_codex_prompt_links`
 - `ai_codex_prompt_errors`
-
-Draft links connect related RCA reports, context packets, AI requests, AI insights, and related
-entities when present.
 
 ## API
 
@@ -104,8 +104,7 @@ entities when present.
 - `GET /api/ai-sidecar/codex-prompts/{draft_id}/text`
 - `GET /api/ai-sidecar/codex-prompts/errors`
 
-POST endpoints create draft artifacts only. They are not Codex execution APIs and are not GitHub
-write APIs.
+POST endpoint는 draft artifact 생성용이다. Codex execution API나 GitHub write API가 아니다.
 
 ## CLI
 
@@ -117,32 +116,19 @@ python tools/build_codex_safety_review_prompt.py
 python tools/inspect_codex_prompt.py --draft-id ai_codex_prompt_x --text
 ```
 
-CLI tools do not create branches, commits, pushes, PRs, or code patches.
+CLI tool은 branch, commit, push, PR, code patch를 만들지 않는다.
 
-## Dashboard Display / Copy-only Policy
+## Dashboard Display
 
-Dashboard snapshot includes Codex prompt draft counts, latest drafts, latest errors, and safety
-flags. AI explanation cards include `CODEX_PROMPT_DRAFT` cards with read-only text areas.
-
-The browser clipboard copy button is allowed. The Dashboard JavaScript does not POST to Codex
-prompt endpoints and does not expose Codex execution, GitHub write, branch, commit, push, PR,
-automatic apply, or order controls.
+Dashboard는 prompt draft count, latest draft, latest errors, safety flags를 read-only로 표시한다. clipboard copy button은 허용된다. Codex 실행, GitHub write, branch, commit, push, PR, automatic apply, order control은 없다.
 
 ## PR10 Safety Review Prompt
 
-`tools/build_codex_safety_review_prompt.py` creates a PR10 OMS + DRY_RUN safety-review prompt. It
-asks Codex to confirm that Sidecar/RCA/Codex prompt artifacts remain review-only before any
-OrderIntent/OMS path is introduced.
+`tools/build_codex_safety_review_prompt.py`는 PR10 OMS + DRY_RUN safety-review prompt를 만든다. 이 draft는 사람이 검토하는 문서이며 DRY_RUN intent, order, simulated fill, Candidate/Strategy/Risk mutation을 만들지 않는다.
 
-After PR10, Codex prompt artifacts remain review-only. The PR10 safety gate can require that a
-safety-review draft exists, but it does not use draft text as an OMS signal. Codex prompt drafts do
-not create DRY_RUN intents, do not convert orders, do not simulate fills, and do not mutate
-Candidate, Strategy, or Risk rows.
+## 운영자 체크포인트
 
-## Forbidden Scope
-
-PR AI-5 does not implement OMS, OrderIntent, EntryPlan, PositionSizing,
-send_order/cancel_order/modify_order, `POST /api/orders/enqueue`, GatewayCommand creation,
-OpenAI tools/function calling, web search, code interpreter, MCP tool servers, order tools,
-background workers, AI/Codex-prompt-driven candidate/strategy/risk mutation, live flag mutation,
-or automated trading decisions.
+- Codex prompt draft는 사람이 복사하는 초안이다.
+- 자동 branch/commit/push/PR 생성이 아니다.
+- prompt draft는 주문/전략 자동 입력이 아니다.
+- draft text가 존재해도 OMS signal로 사용하지 않는다.
