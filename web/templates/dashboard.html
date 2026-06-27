@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Suseok Trader Dashboard V1</title>
+    <link rel="stylesheet" href="/static/dashboard.css" />
+  </head>
+  <body>
+    <div class="app-shell" data-dashboard-root>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Suseok Trader V2</p>
+          <h1>운영 관찰 대시보드</h1>
+        </div>
+        <div class="topbar-meta">
+          <span id="generated-at">generated_at: -</span>
+          <span id="refresh-state">5초 자동 갱신</span>
+        </div>
+      </header>
+
+      <section id="error-banner" class="error-banner hidden" aria-live="polite"></section>
+
+      <section id="safety-panel" class="safety-banner">
+        <div>
+          <p class="eyebrow">Safety</p>
+          <h2>현재 Dashboard는 읽기 전용이며 주문 기능이 없습니다</h2>
+        </div>
+        <div id="safety-badges" class="badge-row"></div>
+        <ul id="safety-warnings" class="warning-list">
+          <li>OBSERVE_PASS는 주문 승인이 아닙니다.</li>
+          <li>MATCHED_OBSERVATION은 매수 신호가 아닙니다.</li>
+          <li>AI Sidecar는 read-only 표시 전용이며 이번 PR에서 실행하지 않습니다.</li>
+        </ul>
+      </section>
+
+      <main class="dashboard-grid">
+        <section class="panel panel-wide" id="system-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">System</p>
+              <h2>시스템 상태</h2>
+            </div>
+          </div>
+          <div id="system-cards" class="metric-grid"></div>
+        </section>
+
+        <section class="panel panel-wide" id="pipeline-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Pipeline</p>
+              <h2>관찰 파이프라인</h2>
+            </div>
+          </div>
+          <div id="pipeline-funnel" class="funnel"></div>
+        </section>
+
+        <section class="panel" id="themes-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Themes</p>
+              <h2>테마 보드</h2>
+            </div>
+            <div id="theme-state-counts" class="badge-row"></div>
+          </div>
+          <div id="themes-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="candidates-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Candidates</p>
+              <h2>후보 Funnel</h2>
+            </div>
+            <div id="candidate-state-counts" class="badge-row"></div>
+          </div>
+          <div id="candidates-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="strategy-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Strategy</p>
+              <h2>전략 관찰</h2>
+            </div>
+            <div id="strategy-status-counts" class="badge-row"></div>
+          </div>
+          <p class="notice">MATCHED_OBSERVATION은 매수 신호가 아닙니다.</p>
+          <div id="strategy-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="risk-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Risk</p>
+              <h2>리스크 노트</h2>
+            </div>
+            <div id="risk-status-counts" class="badge-row"></div>
+          </div>
+          <p class="notice">OBSERVE_PASS는 주문 승인이 아닙니다.</p>
+          <div id="risk-table" class="table-wrap"></div>
+        </section>
+
+        <section class="panel" id="events-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">Events</p>
+              <h2>최근 이벤트와 오류</h2>
+            </div>
+          </div>
+          <div id="events-errors" class="stack"></div>
+        </section>
+
+        <section class="panel" id="ai-section">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">AI Sidecar</p>
+              <h2>Insight 표시 영역</h2>
+            </div>
+          </div>
+          <p class="notice">AI Sidecar는 read-only 표시 전용이며 이번 PR에서 실행하지 않습니다.</p>
+          <div id="ai-status" class="metric-grid"></div>
+          <div id="ai-insights" class="stack"></div>
+        </section>
+      </main>
+    </div>
+    <script src="/static/dashboard.js" defer></script>
+  </body>
+</html>

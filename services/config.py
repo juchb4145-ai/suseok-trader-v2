@@ -105,6 +105,12 @@ class Settings:
     risk_gate_duplicate_active_candidate_limit: int = 1
     risk_gate_observation_cooldown_sec: int = 60
     risk_gate_config_version: str = "observe_v1"
+    dashboard_enabled: bool = True
+    dashboard_refresh_sec: int = 5
+    dashboard_snapshot_default_limit: int = 50
+    dashboard_max_limit: int = 200
+    dashboard_show_raw_json: bool = True
+    dashboard_route_enabled: bool = True
 
     def __post_init__(self) -> None:
         if self.market_data_degraded_tick_stale_sec < self.market_data_tick_stale_sec:
@@ -238,6 +244,15 @@ class Settings:
             "risk_gate_config_version",
             _require_non_empty_config(self.risk_gate_config_version),
         )
+        for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.dashboard_max_limit < 1:
+            raise ValueError("DASHBOARD_MAX_LIMIT must be >= 1")
+        if self.dashboard_snapshot_default_limit > self.dashboard_max_limit:
+            raise ValueError(
+                "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT must be <= DASHBOARD_MAX_LIMIT"
+            )
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -543,6 +558,24 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=0,
         ),
         risk_gate_config_version=env.get("RISK_GATE_CONFIG_VERSION", "observe_v1"),
+        dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
+        dashboard_refresh_sec=_parse_int(
+            env.get("DASHBOARD_REFRESH_SEC", "5"),
+            "DASHBOARD_REFRESH_SEC",
+            min_value=1,
+        ),
+        dashboard_snapshot_default_limit=_parse_int(
+            env.get("DASHBOARD_SNAPSHOT_DEFAULT_LIMIT", "50"),
+            "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT",
+            min_value=1,
+        ),
+        dashboard_max_limit=_parse_int(
+            env.get("DASHBOARD_MAX_LIMIT", "200"),
+            "DASHBOARD_MAX_LIMIT",
+            min_value=1,
+        ),
+        dashboard_show_raw_json=_parse_bool(env.get("DASHBOARD_SHOW_RAW_JSON", "true")),
+        dashboard_route_enabled=_parse_bool(env.get("DASHBOARD_ROUTE_ENABLED", "true")),
     )
 
 

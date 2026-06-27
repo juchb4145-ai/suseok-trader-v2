@@ -6,9 +6,10 @@ The project currently contains the Core API bootstrap, settings loading, SQLite 
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
 plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4 read-only
 Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
-the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, and the
-PR 8 observe-only Risk Gate layer. It intentionally does not contain Kiwoom or PyQt imports,
-risk-driven order approval, OMS behavior, OpenAI API calls, or live order APIs.
+the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, the
+PR 8 observe-only Risk Gate layer, and the PR 9 read-only Dashboard V1 operator surface.
+It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
+behavior, OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -304,6 +305,50 @@ Invoke-RestMethod http://127.0.0.1:8000/api/risk/observations/latest
 
 See `docs/risk_gate_observe.md` for the check rules, storage tables, API details, CLI usage,
 and safety scope.
+
+## Dashboard V1
+
+PR 9 adds a read-only operator dashboard for the current observation pipeline:
+
+- `GET /`
+- `GET /dashboard`
+- `GET /api/dashboard/status`
+- `GET /api/dashboard/snapshot`
+- `GET /api/dashboard/funnel`
+- `GET /api/dashboard/errors`
+
+The dashboard shows Safety, System Status, Gateway, Market Data, Theme, Candidate, Strategy,
+Risk, Recent Events/Errors, and AI Sidecar insight display sections. It uses only read-only GET
+endpoints and does not add order controls, OMS behavior, Gateway command creation, AI execution,
+or OpenAI API calls. `MATCHED_OBSERVATION` remains a setup classifier result, not a buy signal.
+`OBSERVE_PASS` remains an observation result, not order approval.
+
+Run Core and open the dashboard:
+
+```powershell
+python -m uvicorn apps.core_api:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Then visit:
+
+- `http://127.0.0.1:8000/`
+- `http://127.0.0.1:8000/dashboard`
+
+Check the mock observe flow and dashboard counts:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+python -m tools.rebuild_theme_snapshots
+python -m tools.rebuild_candidates
+python -m tools.rebuild_candidates
+python -m tools.evaluate_strategy
+python -m tools.evaluate_risk
+Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/status
+Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/snapshot
+```
+
+See `docs/dashboard_v1.md` for the snapshot structure, UI sections, runbook, and safety policy.
 
 ## Mock Gateway
 

@@ -75,17 +75,19 @@
 - Expose read-only Risk APIs and CLI tools for operator review.
 - Do not enable order routing.
 
-## Next: PR 9. Dashboard V1
+## Done: PR 9. Dashboard V1
 
 - Add read-only operator dashboard views for status, events, candidates, themes, and risk notes.
 - Include AI Sidecar insight display areas without triggering AI execution.
 - Keep the default operating posture observable and non-trading.
 
-## PR AI-1. LLM Context Builder
+## Next: PR AI-1. LLM Context Builder
 
 - Build bounded, redacted, read-only context packets from Event Store and domain state.
 - Enforce max context size and order-context restrictions.
 - Do not call OpenAI APIs.
+- Recommended next: do PR AI-1 before PR 10 so the dashboard can show safer explanatory
+  context before OMS + DRY_RUN introduces order-management state.
 
 ## PR AI-2. OpenAI Client + Structured Outputs
 

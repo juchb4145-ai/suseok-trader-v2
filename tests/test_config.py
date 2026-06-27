@@ -75,6 +75,12 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.risk_gate_duplicate_active_candidate_limit == 1
     assert settings.risk_gate_observation_cooldown_sec == 60
     assert settings.risk_gate_config_version == "observe_v1"
+    assert settings.dashboard_enabled is True
+    assert settings.dashboard_refresh_sec == 5
+    assert settings.dashboard_snapshot_default_limit == 50
+    assert settings.dashboard_max_limit == 200
+    assert settings.dashboard_show_raw_json is True
+    assert settings.dashboard_route_enabled is True
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -177,3 +183,24 @@ def test_risk_gate_settings_are_validated() -> None:
         assert "RISK_GATE_MAX_CHANGE_RATE" in str(exc)
     else:
         raise AssertionError("expected invalid risk negative setting")
+
+
+def test_dashboard_settings_are_validated() -> None:
+    try:
+        load_settings({"DASHBOARD_REFRESH_SEC": "0"})
+    except ValueError as exc:
+        assert "DASHBOARD_REFRESH_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid dashboard refresh setting")
+
+    try:
+        load_settings(
+            {
+                "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT": "201",
+                "DASHBOARD_MAX_LIMIT": "200",
+            }
+        )
+    except ValueError as exc:
+        assert "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT" in str(exc)
+    else:
+        raise AssertionError("expected invalid dashboard limit setting")

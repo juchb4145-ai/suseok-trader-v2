@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from api.routes.ai_sidecar import router as ai_sidecar_router
 from api.routes.candidates import router as candidates_router
+from api.routes.dashboard import router as dashboard_router
+from api.routes.dashboard_page import router as dashboard_page_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.market_data import router as market_data_router
@@ -12,8 +15,12 @@ from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
 from api.routes.themes import router as themes_router
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from services.config import load_settings
 from storage.sqlite import initialize_database
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+STATIC_DIR = ROOT_DIR / "web" / "static"
 
 
 @asynccontextmanager
@@ -38,6 +45,9 @@ def create_app() -> FastAPI:
     application.include_router(candidates_router)
     application.include_router(strategy_router)
     application.include_router(risk_router)
+    application.include_router(dashboard_router)
+    application.include_router(dashboard_page_router)
+    application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return application
 
 
