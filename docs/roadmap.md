@@ -137,15 +137,22 @@
   out of scope.
 - Keep AI Sidecar, RCA reports, and Codex prompt drafts review-only and never automatic OMS input.
 
-## Next: PR 11. Exit Engine
+## Done: PR 11. Exit Engine
 
-- Add deterministic exit evaluation and DRY_RUN exit order handling.
-- Record exit rationale and risk checks.
-- Keep broker execution paths gated.
+- Add deterministic DRY_RUN position exit evaluation for stop-loss, take-profit, trailing stop,
+  max-hold, stale data caution, theme weakening, risk deterioration, and strategy invalidation.
+- Persist `DryRunExitEvaluation`, `DryRunExitSignal`, `DryRunExitIntent`, `DryRunExitOrder`,
+  `DryRunExitExecution`, run, error, and position metric records.
+- Add local-token protected manual simulation APIs and CLI tools for internal exit intent/order/fill
+  creation only.
+- Add read-only Dashboard DRY_RUN Exit display with no action buttons.
+- Keep GatewayCommand creation, BrokerOrderRequest transmission, broker sell paths, LIVE_SIM,
+  LIVE_REAL, account/holding lookup, AI-driven exits, and background exit workers out of scope.
 
-## PR 12. LIVE_SIM Enablement
+## Next: PR 12. LIVE_SIM Enablement
 
-- Enable LIVE_SIM only behind explicit configuration, risk gates, and acceptance tests.
+- Enable LIVE_SIM only behind explicit configuration, separate safety gates, and acceptance tests.
+- Treat PR11 as a prerequisite for simulated exit accounting, not as a live order path.
 - Keep LIVE_REAL disabled.
 - Verify Gateway isolation and operator observability.
 

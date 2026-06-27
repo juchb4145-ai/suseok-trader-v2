@@ -149,6 +149,23 @@ class Settings:
     dry_run_order_routing_enabled: bool = False
     dry_run_gateway_command_enabled: bool = False
     dry_run_allow_without_safety_draft_for_tests: bool = False
+    dry_run_exit_engine_enabled: bool = False
+    dry_run_exit_intent_creation_enabled: bool = False
+    dry_run_exit_order_creation_enabled: bool = False
+    dry_run_exit_simulated_fill_enabled: bool = False
+    dry_run_exit_require_safety_gate: bool = True
+    dry_run_exit_stop_loss_pct: float = 2.0
+    dry_run_exit_take_profit_pct: float = 5.0
+    dry_run_exit_trailing_stop_pct: float = 3.0
+    dry_run_exit_max_hold_sec: int = 1800
+    dry_run_exit_stale_tick_sec: int = 30
+    dry_run_exit_min_hold_sec: int = 0
+    dry_run_exit_intent_ttl_sec: int = 300
+    dry_run_exit_allow_sell_close_only: bool = True
+    dry_run_exit_allow_short: bool = False
+    dry_run_exit_order_routing_enabled: bool = False
+    dry_run_exit_gateway_command_enabled: bool = False
+    dry_run_exit_config_version: str = "exit_dry_run_v1"
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -318,6 +335,31 @@ class Settings:
             raise ValueError("DRY_RUN_GATEWAY_COMMAND_ENABLED must remain false in PR10")
         if self.dry_run_allow_short:
             raise ValueError("DRY_RUN_ALLOW_SHORT must remain false in PR10")
+        for field_name in (
+            "dry_run_exit_stop_loss_pct",
+            "dry_run_exit_take_profit_pct",
+            "dry_run_exit_trailing_stop_pct",
+            "dry_run_exit_max_hold_sec",
+            "dry_run_exit_stale_tick_sec",
+            "dry_run_exit_intent_ttl_sec",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name.upper()} must be > 0")
+        if self.dry_run_exit_min_hold_sec < 0:
+            raise ValueError("DRY_RUN_EXIT_MIN_HOLD_SEC must be >= 0")
+        if not self.dry_run_exit_allow_sell_close_only:
+            raise ValueError("DRY_RUN_EXIT_ALLOW_SELL_CLOSE_ONLY must remain true in PR11")
+        if self.dry_run_exit_order_routing_enabled:
+            raise ValueError("DRY_RUN_EXIT_ORDER_ROUTING_ENABLED must remain false in PR11")
+        if self.dry_run_exit_gateway_command_enabled:
+            raise ValueError("DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED must remain false in PR11")
+        if self.dry_run_exit_allow_short:
+            raise ValueError("DRY_RUN_EXIT_ALLOW_SHORT must remain false in PR11")
+        object.__setattr__(
+            self,
+            "dry_run_exit_config_version",
+            _require_non_empty_config(self.dry_run_exit_config_version),
+        )
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -816,6 +858,70 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         dry_run_allow_without_safety_draft_for_tests=_parse_bool(
             env.get("DRY_RUN_ALLOW_WITHOUT_SAFETY_DRAFT_FOR_TESTS", "false")
+        ),
+        dry_run_exit_engine_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_ENGINE_ENABLED", "false")
+        ),
+        dry_run_exit_intent_creation_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_INTENT_CREATION_ENABLED", "false")
+        ),
+        dry_run_exit_order_creation_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_ORDER_CREATION_ENABLED", "false")
+        ),
+        dry_run_exit_simulated_fill_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_SIMULATED_FILL_ENABLED", "false")
+        ),
+        dry_run_exit_require_safety_gate=_parse_bool(
+            env.get("DRY_RUN_EXIT_REQUIRE_SAFETY_GATE", "true")
+        ),
+        dry_run_exit_stop_loss_pct=_parse_float(
+            env.get("DRY_RUN_EXIT_STOP_LOSS_PCT", "2.0"),
+            "DRY_RUN_EXIT_STOP_LOSS_PCT",
+            min_value=0.0,
+        ),
+        dry_run_exit_take_profit_pct=_parse_float(
+            env.get("DRY_RUN_EXIT_TAKE_PROFIT_PCT", "5.0"),
+            "DRY_RUN_EXIT_TAKE_PROFIT_PCT",
+            min_value=0.0,
+        ),
+        dry_run_exit_trailing_stop_pct=_parse_float(
+            env.get("DRY_RUN_EXIT_TRAILING_STOP_PCT", "3.0"),
+            "DRY_RUN_EXIT_TRAILING_STOP_PCT",
+            min_value=0.0,
+        ),
+        dry_run_exit_max_hold_sec=_parse_int(
+            env.get("DRY_RUN_EXIT_MAX_HOLD_SEC", "1800"),
+            "DRY_RUN_EXIT_MAX_HOLD_SEC",
+            min_value=1,
+        ),
+        dry_run_exit_stale_tick_sec=_parse_int(
+            env.get("DRY_RUN_EXIT_STALE_TICK_SEC", "30"),
+            "DRY_RUN_EXIT_STALE_TICK_SEC",
+            min_value=1,
+        ),
+        dry_run_exit_min_hold_sec=_parse_int(
+            env.get("DRY_RUN_EXIT_MIN_HOLD_SEC", "0"),
+            "DRY_RUN_EXIT_MIN_HOLD_SEC",
+            min_value=0,
+        ),
+        dry_run_exit_intent_ttl_sec=_parse_int(
+            env.get("DRY_RUN_EXIT_INTENT_TTL_SEC", "300"),
+            "DRY_RUN_EXIT_INTENT_TTL_SEC",
+            min_value=1,
+        ),
+        dry_run_exit_allow_sell_close_only=_parse_bool(
+            env.get("DRY_RUN_EXIT_ALLOW_SELL_CLOSE_ONLY", "true")
+        ),
+        dry_run_exit_allow_short=_parse_bool(env.get("DRY_RUN_EXIT_ALLOW_SHORT", "false")),
+        dry_run_exit_order_routing_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_ORDER_ROUTING_ENABLED", "false")
+        ),
+        dry_run_exit_gateway_command_enabled=_parse_bool(
+            env.get("DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED", "false")
+        ),
+        dry_run_exit_config_version=env.get(
+            "DRY_RUN_EXIT_CONFIG_VERSION",
+            "exit_dry_run_v1",
         ),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(

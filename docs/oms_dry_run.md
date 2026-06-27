@@ -9,6 +9,8 @@ order path.
   duplicate, limit, configuration, and safety checks all pass.
 - Convert an intent to an internal `DryRunOrder` only by explicit API or CLI call.
 - Simulate fills and paper positions only when `DRY_RUN_SIMULATED_FILL_ENABLED=true`.
+- From PR11, reduce or close existing paper positions only through DRY_RUN Exit Engine simulated
+  exit fills.
 - Keep Strategy, Risk, Candidate, Gateway, AI Sidecar, RCA, and Codex prompt artifacts isolated
   from automated trading side effects.
 
@@ -63,6 +65,27 @@ record.
 5. `update_dry_run_positions_mark_to_market` updates paper PnL from latest ticks.
 6. `dry_run_ledger` records `INTENT_CREATED`, `ORDER_CREATED`, `SIMULATED_FILL`,
    `POSITION_OPENED` or `POSITION_UPDATED`, and optional `MARK_TO_MARKET` events.
+
+## PR11 Exit Engine Link
+
+PR11 adds `ExitEngineDryRun` for existing `dry_run_positions`. It evaluates deterministic exit
+conditions and can create internal `DryRunExitIntent`, `DryRunExitOrder`, and
+`DryRunExitExecution` rows only through explicit local-token API or CLI calls. The exit path is
+close-only and sell-side in name, but it remains a DRY_RUN simulation:
+
+- no broker sell request is built;
+- no Gateway command is created;
+- no LIVE_SIM or LIVE_REAL route is enabled;
+- no actual account, balance, or holding lookup is performed;
+- Strategy, Risk, Candidate, AI Sidecar, RCA, and Codex prompt rows are not mutated or consumed as
+  automatic order input.
+
+When `simulate_fill_dry_run_exit_order` runs with `DRY_RUN_EXIT_SIMULATED_FILL_ENABLED=true`, it
+calculates realized PnL as `(fill_price - avg_price) * quantity - commission - tax`, inserts a
+`dry_run_exit_executions` row, marks the exit order `SIMULATED_FILLED`, and reduces the paper
+position quantity. If remaining quantity reaches zero, the position becomes `CLOSED` and
+`closed_at` is set. Ledger events include `EXIT_EVALUATION`, `EXIT_INTENT_CREATED`,
+`EXIT_ORDER_CREATED`, `SIMULATED_EXIT_FILL`, and `POSITION_CLOSED` or `POSITION_REDUCED`.
 
 ## DB Tables
 
@@ -130,5 +153,6 @@ background automatic order workers.
 
 ## PR11 And PR12
 
-PR11 can add deterministic exit evaluation for DRY_RUN positions. PR12 LIVE_SIM remains a separate
-future safety-gated project and is not enabled by PR10.
+PR11 is now the deterministic DRY_RUN-only Exit Engine described in
+`docs/exit_engine_dry_run.md`. PR12 LIVE_SIM remains a separate future safety-gated project and is
+not enabled by PR10 or PR11.

@@ -306,6 +306,9 @@ const renderDryRun = (snapshot) => {
   const status = dryRun.status || {};
   const intents = dryRun.recent_intents || [];
   const positions = dryRun.positions || [];
+  const exitEngine = dryRun.exit_engine || {};
+  const exitEvaluations = exitEngine.recent_exit_evaluations || [];
+  const exitSignals = exitEngine.recent_exit_signals || [];
   document.getElementById("dry-run-badges").innerHTML = [
     badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
     badge("OBSERVE", `intent ${status.intent_creation_enabled}`),
@@ -391,6 +394,91 @@ const renderDryRun = (snapshot) => {
       </table>
     `
     : emptyState("DRY_RUN position이 없습니다.");
+  document.getElementById("dry-run-exit-badges").innerHTML = [
+    badge(exitEngine.enabled ? "ENABLED" : "OBSERVE", `enabled ${exitEngine.enabled}`),
+    badge("OBSERVE", `intent ${exitEngine.intent_creation_enabled}`),
+    badge("OBSERVE", `order ${exitEngine.order_creation_enabled}`),
+    badge("OBSERVE", `fill ${exitEngine.simulated_fill_enabled}`),
+    badge("OBSERVE", `broker sent ${exitEngine.broker_order_sent}`),
+  ].join("");
+  document.getElementById("dry-run-exit-status").innerHTML = [
+    metric("evaluations", exitEngine.evaluation_count || 0),
+    metric("signals", exitEngine.signal_count || 0),
+    metric("exit intents", exitEngine.exit_intent_count || 0),
+    metric("exit orders", exitEngine.exit_order_count || 0),
+    metric("exit executions", exitEngine.exit_execution_count || 0),
+    metric("gateway allowed", exitEngine[`gateway${"_"}command_allowed`]),
+  ].join("");
+  document.getElementById("dry-run-exit-evaluations").innerHTML = exitEvaluations.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>evaluation</th>
+            <th>position</th>
+            <th>종목</th>
+            <th>status</th>
+            <th>primary</th>
+            <th>손익</th>
+            <th>hold_sec</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${exitEvaluations
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.exit_evaluation_id)}</td>
+                  <td class="code-cell">${escapeHtml(row.dry_run_position_id)}</td>
+                  <td>${escapeHtml(row.name)}<br /><span class="muted">${escapeHtml(row.code)}</span></td>
+                  <td>${badge(row.status)}</td>
+                  <td>${badge(row.primary_signal_type || "NONE")}</td>
+                  <td>${number(row.unrealized_pnl)} / ${number(row.unrealized_pnl_pct)}%</td>
+                  <td>${number(row.hold_sec)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("DRY_RUN exit evaluation이 없습니다.");
+  document.getElementById("dry-run-exit-signals").innerHTML = exitSignals.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>signal</th>
+            <th>position</th>
+            <th>type</th>
+            <th>severity</th>
+            <th>price / threshold</th>
+            <th>reason</th>
+            <th>observed_at</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${exitSignals
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.exit_signal_id)}</td>
+                  <td class="code-cell">${escapeHtml(row.dry_run_position_id)}</td>
+                  <td>${badge(row.signal_type)}</td>
+                  <td>${badge(row.severity)}</td>
+                  <td>${number(row.current_price)} / ${number(row.threshold_value)}</td>
+                  <td>${reasonList(row.reason_codes)}</td>
+                  <td>${escapeHtml(row.observed_at)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("DRY_RUN exit signal이 없습니다.");
 };
 
 const renderErrors = (snapshot) => {
@@ -404,6 +492,7 @@ const renderErrors = (snapshot) => {
     ["Strategy errors", errors.strategy_errors || []],
     ["Risk errors", errors.risk_errors || []],
     ["DRY_RUN errors", errors.dry_run_errors || []],
+    ["DRY_RUN exit errors", errors.dry_run_exit_errors || []],
     ["Gateway problem events", errors.gateway_problem_events || []],
     ["Gateway command failures", errors[`gateway${"_"}command_failures`] || []],
   ];

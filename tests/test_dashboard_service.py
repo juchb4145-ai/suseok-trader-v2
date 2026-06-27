@@ -28,6 +28,10 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["safety"]["observe_only_pipeline"] is True
     assert "OBSERVE_PASS는 주문 승인이 아닙니다." in snapshot["safety"]["warnings"]
     assert "MATCHED_OBSERVATION은 매수 신호가 아닙니다." in snapshot["safety"]["warnings"]
+    assert snapshot["dry_run"]["exit_engine"]["enabled"] is False
+    assert snapshot["dry_run"]["exit_engine"]["gateway_command_allowed"] is False
+    assert snapshot["dry_run"]["exit_engine"]["broker_order_sent"] is False
+    assert snapshot["pipeline_summary"]["dry_run"]["exit_evaluation_count"] == 0
     assert {
         "gateway",
         "market_data",
@@ -61,6 +65,8 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert "setup_observations" in snapshot["strategy"]["latest_observations"][0]
     assert snapshot["risk"]["latest_observations"]
     assert "check_observations" in snapshot["risk"]["latest_observations"][0]
+    assert "exit_engine" in snapshot["dry_run"]
+    assert snapshot["dry_run"]["exit_engine"]["live_order_allowed"] is False
     assert snapshot["errors"]["market_projection_errors"]
     assert snapshot["errors"]["theme_projection_errors"]
     assert snapshot["errors"]["candidate_projection_errors"]

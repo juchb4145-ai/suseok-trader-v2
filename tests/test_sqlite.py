@@ -56,8 +56,7 @@ def test_sqlite_initialization_adds_ai_request_execution_columns(tmp_path) -> No
     connection = initialize_database(db_path)
 
     columns = {
-        row["name"]
-        for row in connection.execute("PRAGMA table_info(ai_requests)").fetchall()
+        row["name"] for row in connection.execute("PRAGMA table_info(ai_requests)").fetchall()
     }
     connection.close()
 
@@ -414,5 +413,61 @@ def test_sqlite_initialization_creates_dry_run_oms_tables(tmp_path) -> None:
         "risk_observations_latest",
         "strategy_observations_latest",
         "candidates",
+        "gateway_commands",
+    }
+
+
+def test_sqlite_initialization_creates_dry_run_exit_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'dry_run_exit_evaluations',
+                'dry_run_exit_signals',
+                'dry_run_exit_intents',
+                'dry_run_exit_orders',
+                'dry_run_exit_executions',
+                'dry_run_exit_runs',
+                'dry_run_exit_errors',
+                'dry_run_position_metrics'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'dry_run_positions',
+                'dry_run_ledger',
+                'risk_observations_latest',
+                'strategy_observations_latest',
+                'gateway_commands'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "dry_run_exit_evaluations",
+        "dry_run_exit_signals",
+        "dry_run_exit_intents",
+        "dry_run_exit_orders",
+        "dry_run_exit_executions",
+        "dry_run_exit_runs",
+        "dry_run_exit_errors",
+        "dry_run_position_metrics",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "dry_run_positions",
+        "dry_run_ledger",
+        "risk_observations_latest",
+        "strategy_observations_latest",
         "gateway_commands",
     }

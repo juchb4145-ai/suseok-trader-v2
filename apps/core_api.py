@@ -10,6 +10,7 @@ from api.routes.ai_sidecar import router as ai_sidecar_router
 from api.routes.candidates import router as candidates_router
 from api.routes.dashboard import router as dashboard_router
 from api.routes.dashboard_page import router as dashboard_page_router
+from api.routes.dry_run_exit import router as dry_run_exit_router
 from api.routes.dry_run_oms import router as dry_run_oms_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     application.include_router(strategy_router)
     application.include_router(risk_router)
     application.include_router(dry_run_oms_router)
+    application.include_router(dry_run_exit_router)
     application.include_router(dashboard_router)
     application.include_router(dashboard_page_router)
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

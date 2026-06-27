@@ -10,7 +10,8 @@ the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation 
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
 PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, PR AI-3
 No-trade RCA / Candidate Block RCA reports, PR AI-4 Dashboard AI Explanation Cards, and
-PR AI-5 human-copyable Codex Prompt Generator drafts, and PR10 DRY_RUN-only OMS simulation.
+PR AI-5 human-copyable Codex Prompt Generator drafts, PR10 DRY_RUN-only OMS simulation, and
+PR11 DRY_RUN-only Exit Engine evaluation/simulated close accounting.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
 broker routing behavior, automatic OpenAI calls, or live order APIs.
 
@@ -105,6 +106,58 @@ positions. It has no DRY_RUN execution buttons and does not POST to dry-run endp
 
 See `docs/oms_dry_run.md` for the safety gate, eligibility rules, DB tables, lifecycle, and
 forbidden scope. PR12 LIVE_SIM remains a separate future safety-gated project.
+
+## DRY_RUN Exit Engine
+
+PR11 adds deterministic exit evaluation for existing `DryRunPosition` rows. It observes
+stop-loss, take-profit, trailing stop, max-hold, stale tick caution, theme weakening, risk
+deterioration, strategy invalidation, and manual-review placeholders. An exit signal is not a
+broker sell approval. It can only lead to internal `DryRunExitIntent`, `DryRunExitOrder`,
+`DryRunExitExecution`, and simulated position close/reduce accounting when explicit local-token
+API or CLI calls are made and the PR11 safety gate passes.
+
+Defaults are disabled:
+
+- `DRY_RUN_EXIT_ENGINE_ENABLED=false`
+- `DRY_RUN_EXIT_INTENT_CREATION_ENABLED=false`
+- `DRY_RUN_EXIT_ORDER_CREATION_ENABLED=false`
+- `DRY_RUN_EXIT_SIMULATED_FILL_ENABLED=false`
+- `DRY_RUN_EXIT_ORDER_ROUTING_ENABLED=false`
+- `DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED=false`
+- `DRY_RUN_EXIT_ALLOW_SHORT=false`
+
+Exit API:
+
+- `GET /api/dry-run/exits/status`
+- `GET /api/dry-run/exits/evaluations`
+- `GET /api/dry-run/exits/evaluations/{exit_evaluation_id}`
+- `GET /api/dry-run/exits/signals`
+- `GET /api/dry-run/exits/intents`
+- `GET /api/dry-run/exits/intents/{dry_run_exit_intent_id}`
+- `GET /api/dry-run/exits/orders`
+- `GET /api/dry-run/exits/orders/{dry_run_exit_order_id}`
+- `GET /api/dry-run/exits/executions`
+- `GET /api/dry-run/exits/runs`
+- `GET /api/dry-run/exits/errors`
+- `POST /api/dry-run/exits/evaluate`
+- `POST /api/dry-run/exits/intents/from-position/{dry_run_position_id}`
+- `POST /api/dry-run/exits/orders/from-intent/{dry_run_exit_intent_id}`
+- `POST /api/dry-run/exits/orders/{dry_run_exit_order_id}/simulate-fill`
+
+Exit CLI:
+
+```powershell
+python tools/evaluate_dry_run_exits.py --dry-run-position-id dry_run_position_x
+python tools/create_dry_run_exit_intent.py --dry-run-position-id dry_run_position_x
+python tools/create_dry_run_exit_order.py --dry-run-exit-intent-id dry_run_exit_intent_x
+python tools/simulate_dry_run_exit_fill.py --dry-run-exit-order-id dry_run_exit_order_x
+python tools/inspect_dry_run_exit.py --dry-run-position-id dry_run_position_x
+```
+
+Dashboard shows a read-only DRY_RUN Exit panel under the DRY_RUN section. It displays evaluation
+and signal rows but has no sell, close, fill, cancel, modify, or exit execution buttons. PR11 does
+not create `GatewayCommand`, does not send `BrokerOrderRequest`, and does not implement LIVE_SIM or
+LIVE_REAL. See `docs/exit_engine_dry_run.md`.
 
 ## Broker Contract
 

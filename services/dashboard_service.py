@@ -42,6 +42,15 @@ from services.candidate_service import (
 )
 from services.config import Settings
 from services.dashboard_ai_explanations import build_ai_explanation_cards
+from services.exit_engine import (
+    get_exit_status,
+    list_exit_errors,
+    list_exit_evaluations,
+    list_exit_executions,
+    list_exit_intents,
+    list_exit_orders,
+    list_exit_signals,
+)
 from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
@@ -129,6 +138,7 @@ def build_dashboard_snapshot(
     strategy_status = get_strategy_status(connection, settings)
     risk_status = get_risk_status(connection, settings)
     dry_run_status = get_dry_run_status(connection, settings)
+    exit_status = get_exit_status(connection, settings)
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
@@ -154,6 +164,11 @@ def build_dashboard_snapshot(
     dry_run_intents = list_dry_run_intents(connection, limit=min(bounded_limit, 10))
     dry_run_orders = list_dry_run_orders(connection, limit=min(bounded_limit, 10))
     dry_run_positions = list_dry_run_positions(connection, limit=min(bounded_limit, 10))
+    exit_evaluations = list_exit_evaluations(connection, limit=min(bounded_limit, 10))
+    exit_signals = list_exit_signals(connection, limit=min(bounded_limit, 10))
+    exit_intents = list_exit_intents(connection, limit=min(bounded_limit, 10))
+    exit_orders = list_exit_orders(connection, limit=min(bounded_limit, 10))
+    exit_executions = list_exit_executions(connection, limit=min(bounded_limit, 10))
     ai_explanations = build_ai_explanation_cards(
         connection,
         settings,
@@ -195,6 +210,7 @@ def build_dashboard_snapshot(
         ai_request_status_counts=ai_request_status_counts,
         codex_draft_count=codex_draft_count,
         dry_run_status=dry_run_status,
+        exit_status=exit_status,
         settings=settings,
     )
 
@@ -264,6 +280,30 @@ def build_dashboard_snapshot(
             "recent_intents": dry_run_intents,
             "recent_orders": dry_run_orders,
             "positions": dry_run_positions,
+            "exit_engine": {
+                "enabled": exit_status["enabled"],
+                "intent_creation_enabled": exit_status["intent_creation_enabled"],
+                "order_creation_enabled": exit_status["order_creation_enabled"],
+                "simulated_fill_enabled": exit_status["simulated_fill_enabled"],
+                "broker_order_sent": False,
+                "gateway_command_allowed": False,
+                "live_order_allowed": False,
+                "evaluation_count": exit_status["evaluation_count"],
+                "signal_count": exit_status["signal_count"],
+                "exit_intent_count": exit_status["exit_intent_count"],
+                "exit_order_count": exit_status["exit_order_count"],
+                "exit_execution_count": exit_status["exit_execution_count"],
+                "recent_exit_evaluations": exit_evaluations,
+                "recent_exit_signals": exit_signals,
+                "recent_exit_intents": exit_intents,
+                "recent_exit_orders": exit_orders,
+                "recent_exit_executions": exit_executions,
+                "warnings": [
+                    "DRY_RUN Exit Engine은 simulated close 판단과 기록만 표시합니다.",
+                    "Dashboard에는 exit 실행 버튼이 없습니다.",
+                    "Exit Engine은 Gateway 명령이나 broker 주문을 만들지 않습니다.",
+                ],
+            },
             "warnings": [
                 "DRY_RUN OMS는 내부 시뮬레이션 기록만 생성합니다.",
                 "DRY_RUN OMS는 Gateway 명령이나 broker 주문을 만들지 않습니다.",
@@ -412,6 +452,7 @@ def build_dashboard_errors(
         "strategy_errors": list_strategy_errors(connection, limit=bounded_limit),
         "risk_errors": list_risk_errors(connection, limit=bounded_limit),
         "dry_run_errors": list_dry_run_errors(connection, limit=bounded_limit),
+        "dry_run_exit_errors": list_exit_errors(connection, limit=bounded_limit),
         "gateway_problem_events": gateway_problem_events,
         "gateway_command_failures": _list_gateway_command_failures(
             connection,
@@ -499,6 +540,7 @@ def _pipeline_summary(
     ai_request_status_counts: dict[str, int],
     codex_draft_count: int,
     dry_run_status: dict[str, Any],
+    exit_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -539,6 +581,8 @@ def _pipeline_summary(
             "order_count": dry_run_status["order_count"],
             "execution_count": dry_run_status["execution_count"],
             "active_position_count": dry_run_status["active_position_count"],
+            "exit_evaluation_count": exit_status["evaluation_count"],
+            "exit_signal_count": exit_status["signal_count"],
             "order_routing_enabled": False,
             "gateway_command_enabled": False,
             "live_order_allowed": False,

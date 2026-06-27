@@ -119,6 +119,23 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dry_run_allow_market_sim is True
     assert settings.dry_run_order_routing_enabled is False
     assert settings.dry_run_gateway_command_enabled is False
+    assert settings.dry_run_exit_engine_enabled is False
+    assert settings.dry_run_exit_intent_creation_enabled is False
+    assert settings.dry_run_exit_order_creation_enabled is False
+    assert settings.dry_run_exit_simulated_fill_enabled is False
+    assert settings.dry_run_exit_require_safety_gate is True
+    assert settings.dry_run_exit_stop_loss_pct == 2.0
+    assert settings.dry_run_exit_take_profit_pct == 5.0
+    assert settings.dry_run_exit_trailing_stop_pct == 3.0
+    assert settings.dry_run_exit_max_hold_sec == 1800
+    assert settings.dry_run_exit_stale_tick_sec == 30
+    assert settings.dry_run_exit_min_hold_sec == 0
+    assert settings.dry_run_exit_intent_ttl_sec == 300
+    assert settings.dry_run_exit_allow_sell_close_only is True
+    assert settings.dry_run_exit_allow_short is False
+    assert settings.dry_run_exit_order_routing_enabled is False
+    assert settings.dry_run_exit_gateway_command_enabled is False
+    assert settings.dry_run_exit_config_version == "exit_dry_run_v1"
     assert settings.dashboard_enabled is True
     assert settings.dashboard_refresh_sec == 5
     assert settings.dashboard_snapshot_default_limit == 50
@@ -277,6 +294,35 @@ def test_dry_run_oms_settings_are_validated() -> None:
         assert "DRY_RUN_DEFAULT_POSITION_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid dry-run notional range")
+
+
+def test_dry_run_exit_settings_are_validated() -> None:
+    invalid_cases = {
+        "DRY_RUN_EXIT_ORDER_ROUTING_ENABLED": "true",
+        "DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED": "true",
+        "DRY_RUN_EXIT_ALLOW_SHORT": "true",
+        "DRY_RUN_EXIT_ALLOW_SELL_CLOSE_ONLY": "false",
+        "DRY_RUN_EXIT_STOP_LOSS_PCT": "0",
+        "DRY_RUN_EXIT_TAKE_PROFIT_PCT": "0",
+        "DRY_RUN_EXIT_TRAILING_STOP_PCT": "0",
+        "DRY_RUN_EXIT_MAX_HOLD_SEC": "0",
+        "DRY_RUN_EXIT_STALE_TICK_SEC": "0",
+        "DRY_RUN_EXIT_INTENT_TTL_SEC": "0",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid dry-run exit setting: {key}")
+
+    try:
+        load_settings({"DRY_RUN_EXIT_MIN_HOLD_SEC": "-1"})
+    except ValueError as exc:
+        assert "DRY_RUN_EXIT_MIN_HOLD_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid dry-run exit min hold setting")
 
 
 def test_ai_context_settings_are_validated() -> None:

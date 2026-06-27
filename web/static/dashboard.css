@@ -142,6 +142,16 @@ h2 {
   margin-bottom: 12px;
 }
 
+.compact-heading {
+  margin-bottom: 10px;
+}
+
+.subpanel {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
