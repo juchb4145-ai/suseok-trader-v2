@@ -301,6 +301,98 @@ const renderRisk = (snapshot) => {
   `;
 };
 
+const renderDryRun = (snapshot) => {
+  const dryRun = snapshot.dry_run || {};
+  const status = dryRun.status || {};
+  const intents = dryRun.recent_intents || [];
+  const positions = dryRun.positions || [];
+  document.getElementById("dry-run-badges").innerHTML = [
+    badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
+    badge("OBSERVE", `intent ${status.intent_creation_enabled}`),
+    badge("OBSERVE", `fill ${status.simulated_fill_enabled}`),
+    badge("OBSERVE", `routing ${status.order_routing_enabled}`),
+    badge("OBSERVE", `broker sent ${status.broker_order_sent}`),
+  ].join("");
+  document.getElementById("dry-run-status").innerHTML = [
+    metric("active positions", status.active_position_count || 0),
+    metric("intents", status.intent_count || 0),
+    metric("orders", status.order_count || 0),
+    metric("executions", status.execution_count || 0),
+    metric("safety gate", (status.safety_gate || {}).status || "UNKNOWN"),
+    metric("gateway command enabled", status[`gateway${"_"}command_enabled`]),
+  ].join("");
+  document.getElementById("dry-run-intents").innerHTML = intents.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>intent</th>
+            <th>종목</th>
+            <th>status</th>
+            <th>수량 / 금액</th>
+            <th>source</th>
+            <th>created_at</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${intents
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.dry_run_intent_id)}</td>
+                  <td>${escapeHtml(row.name)}<br /><span class="muted">${escapeHtml(row.code)}</span></td>
+                  <td>${badge(row.status)}</td>
+                  <td>${number(row.quantity)} / ${number(row.notional)}</td>
+                  <td>${escapeHtml(row.source)}</td>
+                  <td>${escapeHtml(row.created_at)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("DRY_RUN intent가 없습니다.");
+  document.getElementById("dry-run-positions").innerHTML = positions.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>position</th>
+            <th>종목</th>
+            <th>status</th>
+            <th>수량</th>
+            <th>평균가 / 현재가</th>
+            <th>평가손익</th>
+            <th>updated_at</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${positions
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.dry_run_position_id)}</td>
+                  <td>${escapeHtml(row.name)}<br /><span class="muted">${escapeHtml(row.code)}</span></td>
+                  <td>${badge(row.status)}</td>
+                  <td>${number(row.quantity)}</td>
+                  <td>${number(row.avg_price)} / ${number(row.last_price)}</td>
+                  <td>${number(row.unrealized_pnl)}</td>
+                  <td>${escapeHtml(row.updated_at)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("DRY_RUN position이 없습니다.");
+};
+
 const renderErrors = (snapshot) => {
   const recent = ((snapshot.recent_events || {}).gateway_events || []).slice(0, 8);
   const errors = snapshot.errors || {};
@@ -311,6 +403,7 @@ const renderErrors = (snapshot) => {
     ["Candidate projection errors", errors.candidate_projection_errors || []],
     ["Strategy errors", errors.strategy_errors || []],
     ["Risk errors", errors.risk_errors || []],
+    ["DRY_RUN errors", errors.dry_run_errors || []],
     ["Gateway problem events", errors.gateway_problem_events || []],
     ["Gateway command failures", errors[`gateway${"_"}command_failures`] || []],
   ];
@@ -562,6 +655,7 @@ const renderSnapshot = (snapshot) => {
   renderCandidates(snapshot);
   renderStrategy(snapshot);
   renderRisk(snapshot);
+  renderDryRun(snapshot);
   renderErrors(snapshot);
   renderAi(snapshot);
   renderAiExplanations(snapshot);

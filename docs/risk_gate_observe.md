@@ -40,6 +40,16 @@ Risk evaluation reads:
 `MATCHED_OBSERVATION` remains a setup classifier result. Risk may record a pass-observed
 strategy-context check for it, but that does not make it buy readiness.
 
+## PR10 DRY_RUN Connection
+
+PR10 may read latest `OBSERVE_PASS` as one required input for DRY_RUN eligibility. That still is
+not live order approval. `OBSERVE_PASS` plus the PR10 dry-run safety gate can create only an
+internal `DryRunIntent` simulation record, and only when Candidate state, Strategy status, market
+freshness, duplicate checks, limits, and explicit dry-run settings also pass.
+
+Risk rows are not mutated by OMS/DRY_RUN output. AI Sidecar, RCA, and Codex prompt artifacts remain
+review-only and are not automatic Risk or OMS input.
+
 ## RiskObservationStatus
 
 - `NOT_EVALUATED`: no meaningful evaluation was produced.
@@ -162,7 +172,7 @@ PR 8 does not implement:
 - Kiwoom OpenAPI+ runtime code;
 - PyQt5 or QAxWidget imports;
 - OMS;
-- OrderIntent;
+- live OrderIntent;
 - EntryPlan;
 - PositionSizing;
 - Position or Portfolio services;

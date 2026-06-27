@@ -47,6 +47,13 @@ from services.market_data_service import (
     list_latest_ticks,
     list_projection_errors,
 )
+from services.oms.dry_run_service import (
+    get_dry_run_status,
+    list_dry_run_errors,
+    list_dry_run_intents,
+    list_dry_run_orders,
+    list_dry_run_positions,
+)
 from services.risk_gate import (
     get_risk_status,
     list_latest_risk_observations,
@@ -76,6 +83,7 @@ DASHBOARD_SECTIONS = [
     "candidates",
     "strategy",
     "risk",
+    "dry_run",
     "ai_sidecar",
     "ai_explanations",
     "recent_events",
@@ -120,6 +128,7 @@ def build_dashboard_snapshot(
     candidate_status = get_candidate_status(connection, settings=settings)
     strategy_status = get_strategy_status(connection, settings)
     risk_status = get_risk_status(connection, settings)
+    dry_run_status = get_dry_run_status(connection, settings)
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
@@ -142,6 +151,9 @@ def build_dashboard_snapshot(
         limit=min(bounded_limit, 10),
     )
     codex_draft_count = count_codex_prompt_drafts(connection)
+    dry_run_intents = list_dry_run_intents(connection, limit=min(bounded_limit, 10))
+    dry_run_orders = list_dry_run_orders(connection, limit=min(bounded_limit, 10))
+    dry_run_positions = list_dry_run_positions(connection, limit=min(bounded_limit, 10))
     ai_explanations = build_ai_explanation_cards(
         connection,
         settings,
@@ -182,6 +194,7 @@ def build_dashboard_snapshot(
         ai_insights=ai_insights,
         ai_request_status_counts=ai_request_status_counts,
         codex_draft_count=codex_draft_count,
+        dry_run_status=dry_run_status,
         settings=settings,
     )
 
@@ -234,6 +247,28 @@ def build_dashboard_snapshot(
             "reason_code_counts": _reason_code_counts(risk_observations),
             "notice": "OBSERVE_PASS는 주문 승인이 아닙니다.",
             "details_included": include_detail,
+        },
+        "dry_run": {
+            "status": dry_run_status,
+            "enabled": dry_run_status["enabled"],
+            "intent_creation_enabled": dry_run_status["intent_creation_enabled"],
+            "simulated_fill_enabled": dry_run_status["simulated_fill_enabled"],
+            "order_routing_enabled": False,
+            "gateway_command_enabled": False,
+            "live_order_allowed": False,
+            "broker_order_sent": False,
+            "active_position_count": dry_run_status["active_position_count"],
+            "intent_count": dry_run_status["intent_count"],
+            "order_count": dry_run_status["order_count"],
+            "execution_count": dry_run_status["execution_count"],
+            "recent_intents": dry_run_intents,
+            "recent_orders": dry_run_orders,
+            "positions": dry_run_positions,
+            "warnings": [
+                "DRY_RUN OMS는 내부 시뮬레이션 기록만 생성합니다.",
+                "DRY_RUN OMS는 Gateway 명령이나 broker 주문을 만들지 않습니다.",
+                "Dashboard는 DRY_RUN 실행 컨트롤 없이 읽기 전용으로 표시합니다.",
+            ],
         },
         "ai_sidecar": {
             "status": build_ai_sidecar_status(settings),
@@ -296,6 +331,8 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         "AI Sidecar tools/function calling은 비활성화되어 있습니다.",
         "AI Sidecar에는 주문 tool이 없습니다.",
+        "PR10 OMS는 DRY_RUN-only이며 broker 주문을 전송하지 않습니다.",
+        "DRY_RUN에서도 Gateway 주문 명령은 비활성화되어 있습니다.",
     ]
     if settings.live_sim_allowed or settings.live_real_allowed:
         warnings.append(
@@ -308,6 +345,9 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "order_routing_enabled": False,
         "order_controls_available": False,
         "gateway_order_commands_allowed": False,
+        "dry_run_only": True,
+        "dry_run_order_controls_available": False,
+        "broker_order_sent": False,
         "ai_sidecar_enabled": settings.ai_sidecar_enabled,
         "ai_context_builder_available": True,
         "ai_context_preview_available": settings.ai_sidecar_context_builder_enabled,
@@ -371,6 +411,7 @@ def build_dashboard_errors(
         ),
         "strategy_errors": list_strategy_errors(connection, limit=bounded_limit),
         "risk_errors": list_risk_errors(connection, limit=bounded_limit),
+        "dry_run_errors": list_dry_run_errors(connection, limit=bounded_limit),
         "gateway_problem_events": gateway_problem_events,
         "gateway_command_failures": _list_gateway_command_failures(
             connection,
@@ -457,6 +498,7 @@ def _pipeline_summary(
     ai_insights: list[dict[str, Any]],
     ai_request_status_counts: dict[str, int],
     codex_draft_count: int,
+    dry_run_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -490,6 +532,16 @@ def _pipeline_summary(
             "observe_pass_count": risk_status["observe_pass_count"],
             "caution_count": risk_status["caution_count"],
             "block_count": risk_status["block_count"],
+        },
+        "dry_run": {
+            "enabled": dry_run_status["enabled"],
+            "intent_count": dry_run_status["intent_count"],
+            "order_count": dry_run_status["order_count"],
+            "execution_count": dry_run_status["execution_count"],
+            "active_position_count": dry_run_status["active_position_count"],
+            "order_routing_enabled": False,
+            "gateway_command_enabled": False,
+            "live_order_allowed": False,
         },
         "ai_sidecar": {
             "enabled": settings.ai_sidecar_enabled,
@@ -535,6 +587,11 @@ def _pipeline_summary(
                 "key": "risk_observations",
                 "label": "Risk Observations",
                 "count": risk_status["latest_observation_count"],
+            },
+            {
+                "key": "dry_run_intents",
+                "label": "DRY_RUN Intents",
+                "count": dry_run_status["intent_count"],
             },
         ],
     }

@@ -10,9 +10,9 @@ the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation 
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
 PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, PR AI-3
 No-trade RCA / Candidate Block RCA reports, PR AI-4 Dashboard AI Explanation Cards, and
-PR AI-5 human-copyable Codex Prompt Generator drafts.
+PR AI-5 human-copyable Codex Prompt Generator drafts, and PR10 DRY_RUN-only OMS simulation.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
-behavior, automatic OpenAI calls, or live order APIs.
+broker routing behavior, automatic OpenAI calls, or live order APIs.
 
 ## Codex Prompt Generator
 
@@ -51,6 +51,60 @@ python tools/inspect_codex_prompt.py --draft-id ai_codex_prompt_x --text
 
 Dashboard shows stored Codex prompt drafts as read-only AI explanation cards. Browser clipboard
 copy is allowed; Codex execution, GitHub actions, generation buttons, and apply controls are not.
+
+## OMS + DRY_RUN
+
+PR10 adds an internal DRY_RUN-only OMS simulation. It can store `DryRunIntent`, `DryRunOrder`,
+`DryRunExecution`, `DryRunPosition`, and ledger records in SQLite, but it never sends broker
+orders and never creates Gateway order commands. Defaults are disabled:
+
+- `DRY_RUN_OMS_ENABLED=false`
+- `DRY_RUN_INTENT_CREATION_ENABLED=false`
+- `DRY_RUN_SIMULATED_FILL_ENABLED=false`
+- `DRY_RUN_ORDER_ROUTING_ENABLED=false`
+- `DRY_RUN_GATEWAY_COMMAND_ENABLED=false`
+
+Intent creation requires the PR10 safety gate plus latest `MATCHED_OBSERVATION`, latest
+`OBSERVE_PASS`, Candidate `CONTEXT_READY`, fresh latest tick, duplicate checks, limit checks, and
+explicit dry-run enablement. Passing those checks creates only an internal simulation record.
+
+DRY_RUN API:
+
+- `GET /api/dry-run/status`
+- `GET /api/dry-run/eligibility`
+- `GET /api/dry-run/intents`
+- `GET /api/dry-run/intents/{dry_run_intent_id}`
+- `GET /api/dry-run/orders`
+- `GET /api/dry-run/orders/{dry_run_order_id}`
+- `GET /api/dry-run/executions`
+- `GET /api/dry-run/positions`
+- `GET /api/dry-run/ledger`
+- `GET /api/dry-run/errors`
+- `POST /api/dry-run/evaluate`
+- `POST /api/dry-run/intents/from-candidate/{candidate_instance_id}`
+- `POST /api/dry-run/orders/from-intent/{dry_run_intent_id}`
+- `POST /api/dry-run/orders/{dry_run_order_id}/simulate-fill`
+- `POST /api/dry-run/positions/mark-to-market`
+
+POST endpoints require the local token when `TRADING_CORE_TOKEN` is configured and return
+`dry_run_only=true`, `live_order_allowed=false`, `gateway_command_allowed=false`, and
+`broker_order_sent=false`.
+
+CLI:
+
+```powershell
+python tools/evaluate_dry_run_eligibility.py --candidate-instance-id CAND-2026-06-27-005930-1
+python tools/create_dry_run_intent.py --candidate-instance-id CAND-2026-06-27-005930-1
+python tools/create_dry_run_order.py --dry-run-intent-id dry_run_intent_x
+python tools/simulate_dry_run_fill.py --dry-run-order-id dry_run_order_x
+python tools/mark_to_market_dry_run_positions.py
+```
+
+Dashboard shows a read-only DRY_RUN panel with status, counts, recent intents/orders, and paper
+positions. It has no DRY_RUN execution buttons and does not POST to dry-run endpoints.
+
+See `docs/oms_dry_run.md` for the safety gate, eligibility rules, DB tables, lifecycle, and
+forbidden scope. PR12 LIVE_SIM remains a separate future safety-gated project.
 
 ## Broker Contract
 

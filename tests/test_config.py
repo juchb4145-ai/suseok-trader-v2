@@ -97,6 +97,28 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.risk_gate_duplicate_active_candidate_limit == 1
     assert settings.risk_gate_observation_cooldown_sec == 60
     assert settings.risk_gate_config_version == "observe_v1"
+    assert settings.dry_run_oms_enabled is False
+    assert settings.dry_run_intent_creation_enabled is False
+    assert settings.dry_run_simulated_fill_enabled is False
+    assert settings.dry_run_require_safety_gate is True
+    assert settings.dry_run_require_strategy_matched is True
+    assert settings.dry_run_require_risk_observe_pass is True
+    assert settings.dry_run_require_candidate_context_ready is True
+    assert settings.dry_run_max_daily_intents == 20
+    assert settings.dry_run_max_active_positions == 5
+    assert settings.dry_run_max_position_notional == 1_000_000
+    assert settings.dry_run_default_position_notional == 1_000_000
+    assert settings.dry_run_min_quantity == 1
+    assert settings.dry_run_intent_ttl_sec == 300
+    assert settings.dry_run_duplicate_cooldown_sec == 300
+    assert settings.dry_run_stale_tick_sec == 30
+    assert settings.dry_run_commission_rate == 0
+    assert settings.dry_run_tax_rate == 0
+    assert settings.dry_run_allow_sell is False
+    assert settings.dry_run_allow_short is False
+    assert settings.dry_run_allow_market_sim is True
+    assert settings.dry_run_order_routing_enabled is False
+    assert settings.dry_run_gateway_command_enabled is False
     assert settings.dashboard_enabled is True
     assert settings.dashboard_refresh_sec == 5
     assert settings.dashboard_snapshot_default_limit == 50
@@ -226,6 +248,35 @@ def test_dashboard_settings_are_validated() -> None:
         assert "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid dashboard limit setting")
+
+
+def test_dry_run_oms_settings_are_validated() -> None:
+    invalid_cases = {
+        "DRY_RUN_ORDER_ROUTING_ENABLED": "true",
+        "DRY_RUN_GATEWAY_COMMAND_ENABLED": "true",
+        "DRY_RUN_ALLOW_SHORT": "true",
+        "DRY_RUN_MIN_QUANTITY": "0",
+        "DRY_RUN_MAX_DAILY_INTENTS": "0",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid dry-run setting: {key}")
+
+    try:
+        load_settings(
+            {
+                "DRY_RUN_DEFAULT_POSITION_NOTIONAL": "2000000",
+                "DRY_RUN_MAX_POSITION_NOTIONAL": "1000000",
+            }
+        )
+    except ValueError as exc:
+        assert "DRY_RUN_DEFAULT_POSITION_NOTIONAL" in str(exc)
+    else:
+        raise AssertionError("expected invalid dry-run notional range")
 
 
 def test_ai_context_settings_are_validated() -> None:

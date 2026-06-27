@@ -21,6 +21,12 @@ def test_dashboard_api_endpoints_are_get_read_only_without_token(tmp_path, monke
     assert status.json()["ai_execution_available"] is False
     assert snapshot.status_code == 200
     assert snapshot.json()["safety"]["order_routing_enabled"] is False
+    assert snapshot.json()["safety"]["dry_run_order_controls_available"] is False
+    assert snapshot.json()["safety"]["broker_order_sent"] is False
+    assert snapshot.json()["dry_run"]["order_routing_enabled"] is False
+    assert snapshot.json()["dry_run"]["gateway_command_enabled"] is False
+    assert snapshot.json()["dry_run"]["live_order_allowed"] is False
+    assert snapshot.json()["dry_run"]["broker_order_sent"] is False
     assert snapshot.json()["safety"]["ai_context_builder_available"] is True
     assert snapshot.json()["ai_sidecar"]["status"]["context_builder_available"] is True
     assert snapshot.json()["ai_sidecar"]["status"]["openai_client_available"] is False

@@ -25,6 +25,7 @@ def test_dashboard_page_and_static_assets_are_served(tmp_path, monkeypatch) -> N
     assert "data-dashboard-root" in root.text
     assert "safety-panel" in root.text
     assert "pipeline-section" in root.text
+    assert "dry-run-section" in root.text
     assert "MATCHED_OBSERVATION은 매수 신호가 아닙니다." in root.text
     assert "OBSERVE_PASS는 주문 승인이 아닙니다." in root.text
 

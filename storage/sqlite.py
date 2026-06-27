@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 APP_NAME = "suseok-trader-v2"
 
 
@@ -38,6 +38,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_candidate_projection_tables(connection)
     _create_strategy_projection_tables(connection)
     _create_risk_projection_tables(connection)
+    _create_dry_run_oms_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -1339,5 +1340,238 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_risk_errors_created_at
         ON risk_evaluation_errors (created_at)
+        """
+    )
+
+
+def _create_dry_run_oms_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_intents (
+            dry_run_intent_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            strategy_observation_id TEXT NOT NULL,
+            risk_observation_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            intended_price REAL NOT NULL,
+            quantity INTEGER NOT NULL,
+            notional REAL NOT NULL,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            source TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            dry_run_only INTEGER NOT NULL DEFAULT 1,
+            live_order_allowed INTEGER NOT NULL DEFAULT 0,
+            gateway_command_allowed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_orders (
+            dry_run_order_id TEXT PRIMARY KEY,
+            dry_run_intent_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            requested_price REAL NOT NULL,
+            simulated_fill_price REAL,
+            filled_quantity INTEGER NOT NULL DEFAULT 0,
+            remaining_quantity INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            dry_run_only INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            simulated_submitted_at TEXT,
+            simulated_filled_at TEXT,
+            expires_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_executions (
+            dry_run_execution_id TEXT PRIMARY KEY,
+            dry_run_order_id TEXT NOT NULL,
+            dry_run_intent_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            price REAL NOT NULL,
+            notional REAL NOT NULL,
+            commission REAL NOT NULL DEFAULT 0,
+            tax REAL NOT NULL DEFAULT 0,
+            executed_at TEXT NOT NULL,
+            execution_type TEXT NOT NULL DEFAULT 'SIMULATED',
+            dry_run_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_positions (
+            dry_run_position_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            avg_price REAL NOT NULL,
+            invested_notional REAL NOT NULL,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            last_price REAL,
+            status TEXT NOT NULL,
+            opened_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            closed_at TEXT,
+            dry_run_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_ledger (
+            ledger_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            related_entity_type TEXT NOT NULL,
+            related_entity_id TEXT NOT NULL,
+            code TEXT,
+            amount REAL NOT NULL DEFAULT 0,
+            quantity INTEGER NOT NULL DEFAULT 0,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_eligibility_checks (
+            check_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            eligible INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            safety_gate_json TEXT NOT NULL DEFAULT '{}',
+            computed_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_intent_rejections (
+            rejection_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            trade_date TEXT,
+            code TEXT,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            evaluated_count INTEGER NOT NULL DEFAULT 0,
+            eligible_count INTEGER NOT NULL DEFAULT 0,
+            intent_count INTEGER NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            execution_count INTEGER NOT NULL DEFAULT 0,
+            rejection_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dry_run_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            candidate_instance_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_intents_trade_status
+        ON dry_run_intents (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_intents_code_trade
+        ON dry_run_intents (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_orders_trade_status
+        ON dry_run_orders (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_orders_code_trade
+        ON dry_run_orders (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_executions_code_trade
+        ON dry_run_executions (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_positions_code_trade_status
+        ON dry_run_positions (code, trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_ledger_trade_event
+        ON dry_run_ledger (trade_date, event_type)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_eligibility_candidate_computed
+        ON dry_run_eligibility_checks (candidate_instance_id, computed_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_dry_run_errors_created_at
+        ON dry_run_errors (created_at)
         """
     )

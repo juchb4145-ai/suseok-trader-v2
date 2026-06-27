@@ -126,6 +126,29 @@ class Settings:
     risk_gate_duplicate_active_candidate_limit: int = 1
     risk_gate_observation_cooldown_sec: int = 60
     risk_gate_config_version: str = "observe_v1"
+    dry_run_oms_enabled: bool = False
+    dry_run_intent_creation_enabled: bool = False
+    dry_run_simulated_fill_enabled: bool = False
+    dry_run_require_safety_gate: bool = True
+    dry_run_require_strategy_matched: bool = True
+    dry_run_require_risk_observe_pass: bool = True
+    dry_run_require_candidate_context_ready: bool = True
+    dry_run_max_daily_intents: int = 20
+    dry_run_max_active_positions: int = 5
+    dry_run_max_position_notional: float = 1_000_000
+    dry_run_default_position_notional: float = 1_000_000
+    dry_run_min_quantity: int = 1
+    dry_run_intent_ttl_sec: int = 300
+    dry_run_duplicate_cooldown_sec: int = 300
+    dry_run_stale_tick_sec: int = 30
+    dry_run_commission_rate: float = 0.0
+    dry_run_tax_rate: float = 0.0
+    dry_run_allow_sell: bool = False
+    dry_run_allow_short: bool = False
+    dry_run_allow_market_sim: bool = True
+    dry_run_order_routing_enabled: bool = False
+    dry_run_gateway_command_enabled: bool = False
+    dry_run_allow_without_safety_draft_for_tests: bool = False
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -265,6 +288,36 @@ class Settings:
             "risk_gate_config_version",
             _require_non_empty_config(self.risk_gate_config_version),
         )
+        for field_name in (
+            "dry_run_max_daily_intents",
+            "dry_run_max_active_positions",
+            "dry_run_min_quantity",
+            "dry_run_intent_ttl_sec",
+            "dry_run_duplicate_cooldown_sec",
+            "dry_run_stale_tick_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        for field_name in (
+            "dry_run_max_position_notional",
+            "dry_run_default_position_notional",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name.upper()} must be > 0")
+        if self.dry_run_default_position_notional > self.dry_run_max_position_notional:
+            raise ValueError(
+                "DRY_RUN_DEFAULT_POSITION_NOTIONAL must be <= "
+                "DRY_RUN_MAX_POSITION_NOTIONAL"
+            )
+        for field_name in ("dry_run_commission_rate", "dry_run_tax_rate"):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.dry_run_order_routing_enabled:
+            raise ValueError("DRY_RUN_ORDER_ROUTING_ENABLED must remain false in PR10")
+        if self.dry_run_gateway_command_enabled:
+            raise ValueError("DRY_RUN_GATEWAY_COMMAND_ENABLED must remain false in PR10")
+        if self.dry_run_allow_short:
+            raise ValueError("DRY_RUN_ALLOW_SHORT must remain false in PR10")
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -683,6 +736,87 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=0,
         ),
         risk_gate_config_version=env.get("RISK_GATE_CONFIG_VERSION", "observe_v1"),
+        dry_run_oms_enabled=_parse_bool(env.get("DRY_RUN_OMS_ENABLED", "false")),
+        dry_run_intent_creation_enabled=_parse_bool(
+            env.get("DRY_RUN_INTENT_CREATION_ENABLED", "false")
+        ),
+        dry_run_simulated_fill_enabled=_parse_bool(
+            env.get("DRY_RUN_SIMULATED_FILL_ENABLED", "false")
+        ),
+        dry_run_require_safety_gate=_parse_bool(
+            env.get("DRY_RUN_REQUIRE_SAFETY_GATE", "true")
+        ),
+        dry_run_require_strategy_matched=_parse_bool(
+            env.get("DRY_RUN_REQUIRE_STRATEGY_MATCHED", "true")
+        ),
+        dry_run_require_risk_observe_pass=_parse_bool(
+            env.get("DRY_RUN_REQUIRE_RISK_OBSERVE_PASS", "true")
+        ),
+        dry_run_require_candidate_context_ready=_parse_bool(
+            env.get("DRY_RUN_REQUIRE_CANDIDATE_CONTEXT_READY", "true")
+        ),
+        dry_run_max_daily_intents=_parse_int(
+            env.get("DRY_RUN_MAX_DAILY_INTENTS", "20"),
+            "DRY_RUN_MAX_DAILY_INTENTS",
+            min_value=1,
+        ),
+        dry_run_max_active_positions=_parse_int(
+            env.get("DRY_RUN_MAX_ACTIVE_POSITIONS", "5"),
+            "DRY_RUN_MAX_ACTIVE_POSITIONS",
+            min_value=1,
+        ),
+        dry_run_max_position_notional=_parse_float(
+            env.get("DRY_RUN_MAX_POSITION_NOTIONAL", "1000000"),
+            "DRY_RUN_MAX_POSITION_NOTIONAL",
+            min_value=0.0,
+        ),
+        dry_run_default_position_notional=_parse_float(
+            env.get("DRY_RUN_DEFAULT_POSITION_NOTIONAL", "1000000"),
+            "DRY_RUN_DEFAULT_POSITION_NOTIONAL",
+            min_value=0.0,
+        ),
+        dry_run_min_quantity=_parse_int(
+            env.get("DRY_RUN_MIN_QUANTITY", "1"),
+            "DRY_RUN_MIN_QUANTITY",
+            min_value=1,
+        ),
+        dry_run_intent_ttl_sec=_parse_int(
+            env.get("DRY_RUN_INTENT_TTL_SEC", "300"),
+            "DRY_RUN_INTENT_TTL_SEC",
+            min_value=1,
+        ),
+        dry_run_duplicate_cooldown_sec=_parse_int(
+            env.get("DRY_RUN_DUPLICATE_COOLDOWN_SEC", "300"),
+            "DRY_RUN_DUPLICATE_COOLDOWN_SEC",
+            min_value=1,
+        ),
+        dry_run_stale_tick_sec=_parse_int(
+            env.get("DRY_RUN_STALE_TICK_SEC", "30"),
+            "DRY_RUN_STALE_TICK_SEC",
+            min_value=1,
+        ),
+        dry_run_commission_rate=_parse_float(
+            env.get("DRY_RUN_COMMISSION_RATE", "0"),
+            "DRY_RUN_COMMISSION_RATE",
+            min_value=0.0,
+        ),
+        dry_run_tax_rate=_parse_float(
+            env.get("DRY_RUN_TAX_RATE", "0"),
+            "DRY_RUN_TAX_RATE",
+            min_value=0.0,
+        ),
+        dry_run_allow_sell=_parse_bool(env.get("DRY_RUN_ALLOW_SELL", "false")),
+        dry_run_allow_short=_parse_bool(env.get("DRY_RUN_ALLOW_SHORT", "false")),
+        dry_run_allow_market_sim=_parse_bool(env.get("DRY_RUN_ALLOW_MARKET_SIM", "true")),
+        dry_run_order_routing_enabled=_parse_bool(
+            env.get("DRY_RUN_ORDER_ROUTING_ENABLED", "false")
+        ),
+        dry_run_gateway_command_enabled=_parse_bool(
+            env.get("DRY_RUN_GATEWAY_COMMAND_ENABLED", "false")
+        ),
+        dry_run_allow_without_safety_draft_for_tests=_parse_bool(
+            env.get("DRY_RUN_ALLOW_WITHOUT_SAFETY_DRAFT_FOR_TESTS", "false")
+        ),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(
             env.get("DASHBOARD_REFRESH_SEC", "5"),

@@ -49,6 +49,16 @@ a `PASS_OBSERVED` strategy-context risk check, but that still means only that th
 matched and the risk observation was recorded. It is not buy readiness, order approval, position
 sizing input, or an OMS instruction.
 
+## PR10 DRY_RUN Connection
+
+PR10 may read latest `MATCHED_OBSERVATION` as one required input for DRY_RUN eligibility. It is
+only one classifier result among several gates: latest Risk must be `OBSERVE_PASS`, Candidate must
+be `CONTEXT_READY`, latest tick must be fresh, duplicates and limits must pass, dry-run settings
+must be explicitly enabled, and the PR10 safety gate must pass.
+
+Even then, the output is an internal `DryRunIntent` simulation record, not a live buy signal or
+broker instruction. OMS/DRY_RUN output does not mutate Strategy rows.
+
 ## Setup Types
 
 - `THEME_LEADER_PULLBACK`: observes whether a leader, co-leader, or follower in a leading or
@@ -169,7 +179,7 @@ PR 7 and PR 8 do not implement:
 - Kiwoom OpenAPI+ runtime code;
 - PyQt5 or QAxWidget imports;
 - OMS;
-- OrderIntent;
+- live OrderIntent;
 - EntryPlan;
 - Position or position sizing;
 - send, cancel, or modify order paths;

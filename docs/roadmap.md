@@ -126,16 +126,18 @@
 - Keep prompts reviewable and copy-only for the operator.
 - Add Dashboard display/copy-only cards without Codex execution, GitHub write, or apply controls.
 
-## Next: PR 10. OMS + DRY_RUN
+## Done: PR 10. OMS + DRY_RUN
 
-- Add order management contracts and DRY_RUN-only flow.
-- Require deterministic Strategy and Risk decisions before any order intent can be created.
-- Keep live flags disabled by default.
-- Proceed only after a safety review prompt/report confirms Sidecar/RCA/Codex prompt remains
-  review-only.
-- Require an explicit safety gate before introducing OrderIntent/DRY_RUN behavior.
+- Add DRY_RUN-only OMS domain models, SQLite tables, service, API, CLI tools, and Dashboard panel.
+- Create internal `DryRunIntent`, `DryRunOrder`, `DryRunExecution`, `DryRunPosition`, and ledger
+  records only after safety gate and eligibility checks pass.
+- Require latest `MATCHED_OBSERVATION`, latest `OBSERVE_PASS`, `CONTEXT_READY`, fresh latest tick,
+  duplicate checks, limits, enabled dry-run settings, and PR10 safety gate.
+- Keep broker order routing, Gateway order commands, LIVE_SIM, LIVE_REAL, and background workers
+  out of scope.
+- Keep AI Sidecar, RCA reports, and Codex prompt drafts review-only and never automatic OMS input.
 
-## PR 11. Exit Engine
+## Next: PR 11. Exit Engine
 
 - Add deterministic exit evaluation and DRY_RUN exit order handling.
 - Record exit rationale and risk checks.

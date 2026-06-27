@@ -360,3 +360,59 @@ def test_sqlite_initialization_creates_risk_projection_tables(tmp_path) -> None:
         "market_ticks_latest",
         "theme_latest_snapshots",
     }
+
+
+def test_sqlite_initialization_creates_dry_run_oms_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'dry_run_intents',
+                'dry_run_orders',
+                'dry_run_executions',
+                'dry_run_positions',
+                'dry_run_ledger',
+                'dry_run_eligibility_checks',
+                'dry_run_intent_rejections',
+                'dry_run_runs',
+                'dry_run_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'risk_observations_latest',
+                'strategy_observations_latest',
+                'candidates',
+                'gateway_commands'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "dry_run_intents",
+        "dry_run_orders",
+        "dry_run_executions",
+        "dry_run_positions",
+        "dry_run_ledger",
+        "dry_run_eligibility_checks",
+        "dry_run_intent_rejections",
+        "dry_run_runs",
+        "dry_run_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "risk_observations_latest",
+        "strategy_observations_latest",
+        "candidates",
+        "gateway_commands",
+    }

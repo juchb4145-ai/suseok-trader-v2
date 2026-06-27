@@ -11,8 +11,8 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
 - Dashboard는 Core API의 read-only GET endpoint만 사용한다.
 - Dashboard API에는 POST endpoint가 없다.
 - Dashboard UI에는 주문, 매수, 매도, 취소, 정정, rebuild, evaluate, import 실행 버튼이 없다.
-- Dashboard는 `OrderIntent`, OMS, `GatewayCommand`, `send_order`, `cancel_order`,
-  `modify_order`를 만들거나 전송하지 않는다.
+- Dashboard는 DRY_RUN intent/order/fill을 생성하지 않는다.
+- Dashboard는 live `OrderIntent`, `GatewayCommand`, broker order path를 만들거나 전송하지 않는다.
 - Dashboard는 Strategy, Risk, Candidate 상태를 변경하지 않는다.
 - Dashboard는 `LIVE_SIM`, `LIVE_REAL` flag를 변경하지 않는다.
 - Dashboard는 OpenAI API를 호출하지 않고 AI 실행 POST도 보내지 않는다.
@@ -28,6 +28,8 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
 - Candidate Funnel: candidate state count와 후보 관찰 episode 목록을 표시한다.
 - Strategy Observations: latest strategy observation과 setup classifier 결과를 표시한다.
 - Risk Notes: latest risk observation, severity, block/caution/pass count, reason code를 표시한다.
+- DRY_RUN OMS: PR10부터 internal simulation status, recent intents/orders, and paper positions를
+  read-only로 표시한다.
 - Recent Events / Errors: Gateway recent events와 각 projection/evaluation error를 최근 N개 표시한다.
 - AI Sidecar Insight: 저장된 request/insight 상태를 표시하되 실행 컨트롤은 제공하지 않는다.
 - AI RCA Reports: PR AI-3부터 최근 RCA report/error를 read-only로 표시할 수 있다.
@@ -54,6 +56,7 @@ Top-level sections:
 - `candidates`
 - `strategy`
 - `risk`
+- `dry_run`
 - `ai_sidecar`
 - `ai_explanations`
 - `recent_events`
@@ -86,6 +89,9 @@ Safety section은 다음 값을 항상 명시한다.
 - `ai_execution_available=false`
 - `openai_client_available`
 - `observe_only_pipeline=true`
+- `dry_run_only=true`
+- `dry_run_order_controls_available=false`
+- `broker_order_sent=false`
 
 필수 경고 문구:
 
@@ -130,13 +136,25 @@ hash/ID 표시만 사용한다. No-trade deep link는
 `GET /api/dashboard/ai-explanations/no-trade/{trade_date}`와 trade date 표시만 사용한다. 두 경로
 모두 read-only 조회이며 report 생성이나 AI 실행을 하지 않는다.
 
+## DRY_RUN 표시 정책
+
+PR10부터 Dashboard snapshot은 `dry_run` section을 포함한다. 표시 항목은 DRY_RUN enable flags,
+safety gate status, active position count, intent/order/execution counts, recent intents, recent
+orders, paper positions, and warnings이다.
+
+Dashboard JavaScript는 `/api/dashboard/snapshot` GET만 사용해 이 section을 렌더링한다. Dashboard
+에는 DRY_RUN intent creation, order creation, simulated fill, mark-to-market, buy, sell, cancel,
+or modify 버튼이 없다. DRY_RUN API의 POST endpoints는 CLI/API 수동 조작용이며 Dashboard에서 호출하지
+않는다.
+
 ## 금지 범위
 
 - Kiwoom OpenAPI+ 실제 구현 없음
 - PyQt5/QAxWidget import 없음
 - 32-bit ActiveX 코드 없음
-- OMS 구현 없음
-- `OrderIntent`, `EntryPlan`, `PositionSizing`, Position/Portfolio 구현 없음
+- live OMS/order routing 구현 없음
+- live `OrderIntent`, `EntryPlan`, `PositionSizing`, Position/Portfolio 구현 없음
+- DRY_RUN 실행 컨트롤 없음
 - `send_order`, `cancel_order`, `modify_order` 구현 없음
 - `POST /api/orders/enqueue` 없음
 - Dashboard에서 Gateway command 생성/전송 없음

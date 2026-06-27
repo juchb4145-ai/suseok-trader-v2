@@ -134,6 +134,11 @@ automatic apply, or order controls.
 asks Codex to confirm that Sidecar/RCA/Codex prompt artifacts remain review-only before any
 OrderIntent/OMS path is introduced.
 
+After PR10, Codex prompt artifacts remain review-only. The PR10 safety gate can require that a
+safety-review draft exists, but it does not use draft text as an OMS signal. Codex prompt drafts do
+not create DRY_RUN intents, do not convert orders, do not simulate fills, and do not mutate
+Candidate, Strategy, or Risk rows.
+
 ## Forbidden Scope
 
 PR AI-5 does not implement OMS, OrderIntent, EntryPlan, PositionSizing,
