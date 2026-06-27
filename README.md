@@ -8,8 +8,8 @@ plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4
 Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
 the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, the
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
-PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, and PR AI-3
-No-trade RCA / Candidate Block RCA reports.
+PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, PR AI-3
+No-trade RCA / Candidate Block RCA reports, and PR AI-4 Dashboard AI Explanation Cards.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
 behavior, automatic OpenAI calls, or live order APIs.
 
@@ -318,12 +318,18 @@ PR 9 adds a read-only operator dashboard for the current observation pipeline:
 - `GET /api/dashboard/snapshot`
 - `GET /api/dashboard/funnel`
 - `GET /api/dashboard/errors`
+- `GET /api/dashboard/ai-explanations`
+- `GET /api/dashboard/ai-explanations/status`
+- `GET /api/dashboard/ai-explanations/candidate/{candidate_instance_id}`
+- `GET /api/dashboard/ai-explanations/no-trade/{trade_date}`
 
 The dashboard shows Safety, System Status, Gateway, Market Data, Theme, Candidate, Strategy,
-Risk, Recent Events/Errors, and AI Sidecar insight display sections. It uses only read-only GET
-endpoints and does not add order controls, OMS behavior, Gateway command creation, AI execution,
-or OpenAI API calls. `MATCHED_OBSERVATION` remains a setup classifier result, not a buy signal.
-`OBSERVE_PASS` remains an observation result, not order approval.
+Risk, Recent Events/Errors, AI Sidecar insight display sections, and PR AI-4 AI Explanation Cards.
+The cards present stored RCA reports, AI insights, AI request failures, and AI/context build
+warnings with Korean-friendly labels. They use only read-only GET endpoints and do not add order
+controls, OMS behavior, Gateway command creation, AI execution, RCA creation, or OpenAI API calls.
+`MATCHED_OBSERVATION` remains a setup classifier result, not a buy signal. `OBSERVE_PASS` remains an
+observation result, not order approval.
 
 Run Core and open the dashboard:
 
@@ -348,9 +354,12 @@ python -m tools.evaluate_strategy
 python -m tools.evaluate_risk
 Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/status
 Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/snapshot
+Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/ai-explanations
+Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/ai-explanations/status
 ```
 
-See `docs/dashboard_v1.md` for the snapshot structure, UI sections, runbook, and safety policy.
+See `docs/dashboard_v1.md` and `docs/dashboard_ai_explanation_cards.md` for the snapshot structure,
+UI sections, card labels, runbook, and safety policy.
 
 ## AI Sidecar Context + Structured Execution
 
@@ -464,8 +473,10 @@ python tools/build_candidate_block_rca.py --candidate-instance-id CAND-2026-06-2
 python tools/build_candidate_block_rca_batch.py --trade-date 2026-06-27 --limit 20
 ```
 
-Add `--run-ai` only for an explicit manual AI run. Dashboard snapshot can show recent RCA reports
-and errors, but Dashboard still has no RCA execution button and sends no RCA POST request.
+Add `--run-ai` only for an explicit manual AI run. Dashboard snapshot and
+`/api/dashboard/ai-explanations` can show recent RCA reports, AI insights, failed AI requests, and
+invalid/error/timeout/policy-rejected states as read-only cards. Dashboard still has no RCA creation
+button, no AI execution button, and sends no RCA POST request.
 
 See `docs/ai_rca_workflows.md` for storage tables, root-cause categories, API, CLI, AI linking,
 and forbidden scope.

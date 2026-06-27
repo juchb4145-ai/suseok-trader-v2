@@ -31,6 +31,8 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
 - Recent Events / Errors: Gateway recent events와 각 projection/evaluation error를 최근 N개 표시한다.
 - AI Sidecar Insight: 저장된 request/insight 상태를 표시하되 실행 컨트롤은 제공하지 않는다.
 - AI RCA Reports: PR AI-3부터 최근 RCA report/error를 read-only로 표시할 수 있다.
+- AI Explanation Cards: PR AI-4부터 RCA report, AI insight, failed AI request,
+  context/RCA build error를 한글 친화적인 카드로 표시한다.
 
 ## Snapshot API
 
@@ -53,6 +55,7 @@ Top-level sections:
 - `strategy`
 - `risk`
 - `ai_sidecar`
+- `ai_explanations`
 - `recent_events`
 - `errors`
 - `pipeline_summary`
@@ -62,6 +65,10 @@ Additional endpoints:
 - `GET /api/dashboard/status`
 - `GET /api/dashboard/funnel`
 - `GET /api/dashboard/errors`
+- `GET /api/dashboard/ai-explanations`
+- `GET /api/dashboard/ai-explanations/status`
+- `GET /api/dashboard/ai-explanations/candidate/{candidate_instance_id}`
+- `GET /api/dashboard/ai-explanations/no-trade/{trade_date}`
 - `GET /`
 - `GET /dashboard`
 
@@ -109,6 +116,20 @@ PR AI-3부터 Dashboard snapshot의 `ai_sidecar` section은 `rca_available`, `rc
 `latest_rca_reports`, `latest_rca_errors`를 포함할 수 있다. Dashboard는 이 데이터를 표시만 하며
 `/api/ai-sidecar/rca/*` POST endpoint를 호출하지 않는다. RCA 실행 버튼도 없다.
 
+PR AI-4부터 Dashboard snapshot은 `ai_explanations` section을 포함한다. 이 section은 저장된
+`ai_rca_reports`, `ai_rca_sections`, `ai_insights`, `ai_requests`, `ai_context_build_errors`,
+`ai_rca_report_errors`를 카드로 정규화한다. 카드 종류는 `NO_TRADE_RCA`,
+`CANDIDATE_BLOCK_RCA`, `AI_INSIGHT`, `AI_REQUEST_FAILURE`, `AI_CONTEXT_WARNING`이며,
+`COMPLETED`, `PARTIAL`, `FAILED`, `AI_DISABLED`, `API_KEY_MISSING`, `TIMEOUT`,
+`MODEL_ERROR`, `AI_OUTPUT_INVALID`, `POLICY_REJECTED`, `CONTEXT_ERROR` 같은 상태를 표시한다.
+모든 카드는 `observe_only=true`, `no_trading_side_effects=true`,
+`actions_available=false`, `execution_controls_available=false`를 가진다.
+
+Candidate deep link는 `GET /api/dashboard/ai-explanations/candidate/{candidate_instance_id}`와
+hash/ID 표시만 사용한다. No-trade deep link는
+`GET /api/dashboard/ai-explanations/no-trade/{trade_date}`와 trade date 표시만 사용한다. 두 경로
+모두 read-only 조회이며 report 생성이나 AI 실행을 하지 않는다.
+
 ## 금지 범위
 
 - Kiwoom OpenAPI+ 실제 구현 없음
@@ -123,6 +144,7 @@ PR AI-3부터 Dashboard snapshot의 `ai_sidecar` section은 `rca_available`, `rc
 - OpenAI API 직접 호출 없음
 - AI Sidecar request/insight status 표시만 가능
 - AI RCA report/error read-only 표시만 가능
+- AI Explanation Card read-only 표시만 가능
 - Dashboard AI 실행 버튼 없음
 - Dashboard RCA 실행 버튼 없음
 - Dashboard JavaScript의 AI 실행 POST 없음

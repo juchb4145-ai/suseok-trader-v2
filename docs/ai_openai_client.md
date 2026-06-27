@@ -153,8 +153,12 @@ decision input.
 ## Dashboard Policy
 
 Dashboard can display AI Sidecar status, request counts, recent request rows, recent insight rows,
-and last error metadata. Dashboard has no AI run button and `dashboard.js` sends no AI execution
-POST request.
+last error metadata, and PR AI-4 AI Explanation Cards for stored insights and failed requests.
+Dashboard has no AI run button and `dashboard.js` sends no AI execution POST request.
+
+PR AI-4 does not run models from Dashboard. It only reads persisted `ai_requests` and `ai_insights`
+and maps statuses such as `API_KEY_MISSING`, `TIMEOUT`, `MODEL_ERROR`, `AI_OUTPUT_INVALID`, and
+`POLICY_REJECTED` into operator-readable cards.
 
 ## Disabled Scope
 

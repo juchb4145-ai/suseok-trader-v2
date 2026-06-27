@@ -139,9 +139,16 @@ Dashboard snapshot includes:
 - `rca_report_count`
 - `latest_rca_reports`
 - `latest_rca_errors`
+- `ai_explanations.latest_cards`
+- `ai_explanations.status_counts`
+- `ai_explanations.severity_counts`
 
-Dashboard may display recent RCA reports read-only. It has no RCA execution button and no RCA
-POST call.
+PR AI-4 turns recent RCA reports, linked AI insights, failed AI requests, and RCA/context errors
+into Dashboard AI Explanation Cards. Dashboard displays these cards read-only through
+`GET /api/dashboard/snapshot` and `GET /api/dashboard/ai-explanations*`.
+
+RCA report creation remains manual through the PR AI-3 CLI/API. Dashboard has no RCA execution
+button, no RCA creation button, and no RCA POST call.
 
 ## Forbidden Scope
 

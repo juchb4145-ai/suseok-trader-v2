@@ -36,6 +36,7 @@ from services.candidate_service import (
     list_candidates,
 )
 from services.config import Settings
+from services.dashboard_ai_explanations import build_ai_explanation_cards
 from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
@@ -71,6 +72,7 @@ DASHBOARD_SECTIONS = [
     "strategy",
     "risk",
     "ai_sidecar",
+    "ai_explanations",
     "recent_events",
     "errors",
     "pipeline_summary",
@@ -126,6 +128,12 @@ def build_dashboard_snapshot(
     latest_rca_reports = list_rca_reports(connection, limit=min(bounded_limit, 10))
     latest_rca_errors = list_rca_report_errors(connection, limit=min(bounded_limit, 10))
     rca_report_count = count_rca_reports(connection)
+    ai_explanations = build_ai_explanation_cards(
+        connection,
+        settings,
+        limit=bounded_limit if include_detail else min(bounded_limit, 8),
+        candidate_limit=bounded_limit if include_detail else min(bounded_limit, 8),
+    )
 
     strategy_status_counts = _enum_counts(
         connection,
@@ -230,6 +238,7 @@ def build_dashboard_snapshot(
             "execution_controls_available": False,
             "notice": "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         },
+        "ai_explanations": ai_explanations,
         "recent_events": {
             "gateway_events": gateway_recent_events,
         },

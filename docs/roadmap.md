@@ -107,13 +107,15 @@
 - Add Dashboard snapshot summary for recent RCA reports without execution controls.
 - Keep reports out of Strategy, Risk, and OMS automatic decisions.
 
-## Next: PR AI-4. Dashboard AI Explanation Cards
+## Done: PR AI-4. Dashboard AI Explanation Cards
 
-- Display validated AI insights in Dashboard cards.
-- Include invalid/error/timeout states.
-- Avoid any execution controls in AI cards.
+- Add read-only Dashboard AI Explanation Cards for RCA reports, AI insights, failed AI requests,
+  context build errors, and RCA build errors.
+- Include invalid/error/timeout/policy-rejected states with Korean-friendly labels.
+- Expose GET-only `/api/dashboard/ai-explanations*` endpoints.
+- Keep Dashboard free of AI/RCA execution controls and trading side effects.
 
-## PR AI-5. Codex Prompt Generator
+## Next: PR AI-5. Codex Prompt Generator
 
 - Generate human-copyable Codex prompt drafts from validated context.
 - Do not add automatic code changes, branch creation, commits, pushes, or PR creation.
@@ -124,7 +126,7 @@
 - Add order management contracts and DRY_RUN-only flow.
 - Require deterministic Strategy and Risk decisions before any order intent can be created.
 - Keep live flags disabled by default.
-- Proceed only after PR AI-4/AI-5 or a separate safety review confirms RCA/Sidecar reports remain
+- Proceed only after PR AI-5 or a separate safety review confirms RCA/Sidecar reports remain
   review-only.
 
 ## PR 11. Exit Engine

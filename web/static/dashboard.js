@@ -23,6 +23,12 @@ const badgeClass = (value) => `badge badge-${text(value).replace(/[^A-Za-z0-9_-]
 const badge = (value, label = null) =>
   `<span class="${badgeClass(value)}">${escapeHtml(label ?? value)}</span>`;
 
+const cssToken = (value) =>
+  text(value)
+    .toLowerCase()
+    .replaceAll("_", "-")
+    .replace(/[^a-z0-9-]/g, "-");
+
 const metric = (label, value) => `
   <div class="metric">
     <div class="metric-label">${escapeHtml(label)}</div>
@@ -306,7 +312,7 @@ const renderErrors = (snapshot) => {
     ["Strategy errors", errors.strategy_errors || []],
     ["Risk errors", errors.risk_errors || []],
     ["Gateway problem events", errors.gateway_problem_events || []],
-    ["Gateway command failures", errors.gateway_command_failures || []],
+    ["Gateway command failures", errors[`gateway${"_"}command_failures`] || []],
   ];
   document.getElementById("events-errors").innerHTML = groups
     .map(([title, rows]) => logGroup(title, rows))
@@ -376,6 +382,112 @@ const renderAi = (snapshot) => {
   document.getElementById("ai-requests").innerHTML = `${rcaCards}${requestCards}`;
 };
 
+const renderAiExplanations = (snapshot) => {
+  const explanations = snapshot.ai_explanations || {};
+  const cards = explanations.latest_cards || explanations.cards || [];
+  const statusEntries = Object.entries(explanations.status_counts || {}).filter(
+    ([, count]) => Number(count) > 0,
+  );
+  document.getElementById("ai-explanation-counts").innerHTML = [
+    badge("OBSERVE", "읽기 전용"),
+    badge("OBSERVE", "거래 영향 없음"),
+    badge("OBSERVE", "실행 버튼 없음"),
+    badge("OBSERVE", `cards ${cards.length}`),
+    ...statusEntries.map(([key, count]) => badge(key, `${key} ${count}`)),
+  ].join("");
+  document.getElementById("ai-explanation-status").innerHTML = [
+    metric("rca_report_count", explanations.rca_report_count || 0),
+    metric("ai_insight_count", explanations.ai_insight_count || 0),
+    metric("ai_request_failure_count", explanations.ai_request_failure_count || 0),
+    metric("context_warning_count", explanations.context_warning_count || 0),
+  ].join("");
+  document.getElementById("ai-explanation-cards").innerHTML = cards.length
+    ? cards.map((card) => aiExplanationCard(card)).join("")
+    : emptyState("아직 RCA/AI insight가 없습니다. CLI 또는 API에서 report를 생성하면 여기에 표시됩니다.");
+};
+
+const aiExplanationCard = (card) => {
+  const statusClass = `status-${cssToken(card.status)}`;
+  const severityClass = `severity-${cssToken(card.severity)}`;
+  const checks = Array.isArray(card.suggested_checks) ? card.suggested_checks : [];
+  const warnings = Array.isArray(card.warnings) ? card.warnings : [];
+  const sections = Array.isArray(card.report_sections) ? card.report_sections : [];
+  return `
+    <article class="ai-explanation-card ${statusClass} ${severityClass}" id="${escapeHtml(card.card_id)}">
+      <div class="ai-card-topline">
+        <div>
+          <p class="eyebrow">${escapeHtml(card.card_type_label || card.card_type)}</p>
+          <h3>${escapeHtml(card.title)}</h3>
+          <p class="muted">${escapeHtml(card.subtitle)}</p>
+        </div>
+        <div class="ai-card-badges">
+          <span class="ai-status-badge ${statusClass}">${escapeHtml(card.status_label || card.status)}</span>
+          <span class="ai-status-badge ${severityClass}">${escapeHtml(card.severity_label || card.severity)}</span>
+          <span class="readonly-badge">${escapeHtml(card.read_only_badge || "읽기 전용")}</span>
+          <span class="no-side-effect-badge">${escapeHtml(card.no_side_effect_badge || "거래 영향 없음")}</span>
+        </div>
+      </div>
+      <p class="ai-card-summary">${escapeHtml(card.summary)}</p>
+      <div class="ai-card-meta">
+        <span>${escapeHtml(card.root_cause_category_label || card.root_cause_category)}</span>
+        <span>${escapeHtml(card.related_entity_type)}:${escapeHtml(card.related_entity_id)}</span>
+        <span>${escapeHtml(card.trade_date)}</span>
+        <span>${escapeHtml(card.generated_at)}</span>
+      </div>
+      ${card.root_cause ? `<p class="muted">${escapeHtml(card.root_cause)}</p>` : ""}
+      ${aiCardList("점검", checks)}
+      ${aiCardList("주의", warnings)}
+      <div class="ai-card-links">
+        ${card.rca_report_id ? `<span>report ${escapeHtml(card.rca_report_id)}</span>` : ""}
+        ${card.ai_insight_id ? `<span>insight ${escapeHtml(card.ai_insight_id)}</span>` : ""}
+        ${card.ai_request_id ? `<span>request ${escapeHtml(card.ai_request_id)}</span>` : ""}
+        ${card.context_id ? `<span>context ${escapeHtml(card.context_id)}</span>` : ""}
+      </div>
+      ${aiReportSections(sections)}
+      ${rawJson(card)}
+    </article>
+  `;
+};
+
+const aiCardList = (title, items) => {
+  if (!items.length) {
+    return "";
+  }
+  return `
+    <div class="ai-card-list">
+      <strong>${escapeHtml(title)}</strong>
+      <ul>
+        ${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}
+      </ul>
+    </div>
+  `;
+};
+
+const aiReportSections = (sections) => {
+  if (!sections.length) {
+    return "";
+  }
+  return `
+    <details class="ai-section-details">
+      <summary>세부 보기</summary>
+      <div class="ai-section-list">
+        ${sections
+          .map(
+            (section) => `
+              <div class="ai-section-row">
+                <strong>${escapeHtml(section.section_name)}</strong>
+                <span>${badge(section.status)}</span>
+                <span>${badge(section.severity)}</span>
+                <p>${escapeHtml(section.summary)}</p>
+              </div>
+            `,
+          )
+          .join("")}
+      </div>
+    </details>
+  `;
+};
+
 const logGroup = (title, rows) => `
   <article class="log-card">
     <h3>${escapeHtml(title)} <span class="muted">(${rows.length})</span></h3>
@@ -438,6 +550,7 @@ const renderSnapshot = (snapshot) => {
   renderRisk(snapshot);
   renderErrors(snapshot);
   renderAi(snapshot);
+  renderAiExplanations(snapshot);
 };
 
 const refreshDashboard = async () => {
