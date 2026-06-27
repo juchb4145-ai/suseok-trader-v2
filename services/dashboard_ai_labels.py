@@ -41,6 +41,17 @@ RCA_CATEGORY_LABELS = {
     "STRATEGY_EVALUATION": "전략 평가",
     "RISK_EVALUATION": "리스크 평가",
     "AI_EXECUTION": "AI 실행 기록",
+    "MARKET_DATA": "시세 데이터",
+    "THEME_SERVICE": "테마 서비스",
+    "CANDIDATE_FSM": "후보 FSM",
+    "STRATEGY_ENGINE": "전략 엔진",
+    "RISK_GATE": "리스크 게이트",
+    "DASHBOARD": "대시보드",
+    "AI_SIDECAR": "AI 사이드카",
+    "RCA_WORKFLOW": "RCA 워크플로",
+    "TESTING": "테스트",
+    "DOCS": "문서",
+    "SAFETY_REVIEW": "안전 검토",
     "UNKNOWN": "미분류",
 }
 
@@ -48,6 +59,7 @@ CARD_TYPE_LABELS = {
     "NO_TRADE_RCA": "매수/주문 없음 RCA",
     "CANDIDATE_BLOCK_RCA": "후보 차단 RCA",
     "AI_INSIGHT": "AI 인사이트",
+    "CODEX_PROMPT_DRAFT": "Codex 프롬프트 초안",
     "AI_REQUEST_FAILURE": "AI 요청 오류",
     "AI_CONTEXT_WARNING": "AI 컨텍스트 경고",
 }

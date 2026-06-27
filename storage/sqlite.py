@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 APP_NAME = "suseok-trader-v2"
 
 
@@ -31,6 +31,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     )
     _create_ai_sidecar_tables(connection)
     _create_ai_rca_tables(connection)
+    _create_ai_codex_prompt_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
@@ -333,6 +334,129 @@ def _create_ai_rca_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ai_rca_report_errors_created_at
         ON ai_rca_report_errors (created_at)
+        """
+    )
+
+
+def _create_ai_codex_prompt_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_codex_prompt_drafts (
+            draft_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            target_area TEXT NOT NULL,
+            status TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            rca_report_id TEXT,
+            context_id TEXT,
+            ai_request_id TEXT,
+            ai_insight_id TEXT,
+            summary TEXT NOT NULL,
+            prompt_text TEXT NOT NULL,
+            safety_notes_json TEXT NOT NULL DEFAULT '[]',
+            acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+            forbidden_scope_json TEXT NOT NULL DEFAULT '[]',
+            test_plan_json TEXT NOT NULL DEFAULT '[]',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            generated_by TEXT NOT NULL,
+            run_ai INTEGER NOT NULL DEFAULT 0,
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            human_review_required INTEGER NOT NULL DEFAULT 1,
+            auto_apply_allowed INTEGER NOT NULL DEFAULT 0,
+            github_write_allowed INTEGER NOT NULL DEFAULT 0,
+            codex_execution_allowed INTEGER NOT NULL DEFAULT 0,
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1,
+            generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_codex_prompt_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id TEXT NOT NULL,
+            section_name TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            required INTEGER NOT NULL DEFAULT 1,
+            order_index INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_codex_prompt_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            draft_id TEXT NOT NULL,
+            link_type TEXT NOT NULL,
+            related_entity_type TEXT NOT NULL,
+            related_entity_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_codex_prompt_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_type TEXT,
+            target_area TEXT,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_drafts_source_generated
+        ON ai_codex_prompt_drafts (source_type, generated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_drafts_target_generated
+        ON ai_codex_prompt_drafts (target_area, generated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_drafts_related_entity
+        ON ai_codex_prompt_drafts (related_entity_type, related_entity_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_drafts_rca_report
+        ON ai_codex_prompt_drafts (rca_report_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_sections_draft
+        ON ai_codex_prompt_sections (draft_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_links_draft
+        ON ai_codex_prompt_links (draft_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_errors_created_at
+        ON ai_codex_prompt_errors (created_at)
         """
     )
 

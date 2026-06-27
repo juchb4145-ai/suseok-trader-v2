@@ -18,6 +18,11 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 
+from services.ai_sidecar.codex_prompt_store import (
+    count_codex_prompt_drafts,
+    list_codex_prompt_drafts,
+    list_codex_prompt_errors,
+)
 from services.ai_sidecar.openai_client import get_openai_client_status
 from services.ai_sidecar.rca_report_store import (
     count_rca_reports,
@@ -128,6 +133,15 @@ def build_dashboard_snapshot(
     latest_rca_reports = list_rca_reports(connection, limit=min(bounded_limit, 10))
     latest_rca_errors = list_rca_report_errors(connection, limit=min(bounded_limit, 10))
     rca_report_count = count_rca_reports(connection)
+    latest_codex_prompt_drafts = list_codex_prompt_drafts(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
+    latest_codex_prompt_errors = list_codex_prompt_errors(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
+    codex_draft_count = count_codex_prompt_drafts(connection)
     ai_explanations = build_ai_explanation_cards(
         connection,
         settings,
@@ -167,6 +181,7 @@ def build_dashboard_snapshot(
         risk_status_counts=risk_status_counts,
         ai_insights=ai_insights,
         ai_request_status_counts=ai_request_status_counts,
+        codex_draft_count=codex_draft_count,
         settings=settings,
     )
 
@@ -235,6 +250,16 @@ def build_dashboard_snapshot(
             "latest_rca_errors": latest_rca_errors,
             "latest_rca_report_count": len(latest_rca_reports),
             "latest_rca_error_count": len(latest_rca_errors),
+            "codex_prompt_generator_available": True,
+            "codex_draft_count": codex_draft_count,
+            "latest_codex_prompt_drafts": latest_codex_prompt_drafts,
+            "latest_codex_prompt_errors": latest_codex_prompt_errors,
+            "latest_codex_prompt_draft_count": len(latest_codex_prompt_drafts),
+            "latest_codex_prompt_error_count": len(latest_codex_prompt_errors),
+            "auto_apply_allowed": False,
+            "github_write_allowed": False,
+            "codex_execution_allowed": False,
+            "no_trading_side_effects": True,
             "execution_controls_available": False,
             "notice": "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         },
@@ -431,6 +456,7 @@ def _pipeline_summary(
     risk_status_counts: dict[str, int],
     ai_insights: list[dict[str, Any]],
     ai_request_status_counts: dict[str, int],
+    codex_draft_count: int,
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -469,6 +495,8 @@ def _pipeline_summary(
             "enabled": settings.ai_sidecar_enabled,
             "insight_count": len(ai_insights),
             "rca_available": True,
+            "codex_prompt_generator_available": True,
+            "codex_draft_count": codex_draft_count,
             "request_status_counts": ai_request_status_counts,
             "execution_api_available": True,
             "context_builder_available": True,

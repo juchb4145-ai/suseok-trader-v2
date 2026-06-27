@@ -9,9 +9,48 @@ Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snap
 the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, the
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
 PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, PR AI-3
-No-trade RCA / Candidate Block RCA reports, and PR AI-4 Dashboard AI Explanation Cards.
+No-trade RCA / Candidate Block RCA reports, PR AI-4 Dashboard AI Explanation Cards, and
+PR AI-5 human-copyable Codex Prompt Generator drafts.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
 behavior, automatic OpenAI calls, or live order APIs.
+
+## Codex Prompt Generator
+
+PR AI-5 adds a read-only Codex Prompt Generator. It turns RCA reports, candidates, no-trade
+context, ops incidents, and PR10 safety-review needs into human-copyable prompt drafts. The
+deterministic generator works without an OpenAI API key. Passing `--run-ai` or `run_ai=true`
+explicitly may call the PR AI-2 `CODEX_PROMPT_DRAFT` runner, but invalid/unavailable/policy
+rejected AI output leaves the deterministic draft intact.
+
+Codex prompt drafts are review artifacts only. They do not call Codex, do not create GitHub
+branches, commits, pushes, or PRs, do not modify repository files, do not create `OrderIntent` or
+`GatewayCommand`, and do not feed Strategy/Risk/OMS automatic decisions.
+
+API:
+
+- `GET /api/ai-sidecar/codex-prompts/status`
+- `POST /api/ai-sidecar/codex-prompts/from-rca/{report_id}?run_ai=false`
+- `POST /api/ai-sidecar/codex-prompts/from-candidate/{candidate_instance_id}?run_ai=false`
+- `POST /api/ai-sidecar/codex-prompts/from-no-trade/{trade_date}?run_ai=false`
+- `POST /api/ai-sidecar/codex-prompts/from-ops-incident`
+- `POST /api/ai-sidecar/codex-prompts/safety-review`
+- `GET /api/ai-sidecar/codex-prompts`
+- `GET /api/ai-sidecar/codex-prompts/{draft_id}`
+- `GET /api/ai-sidecar/codex-prompts/{draft_id}/text`
+- `GET /api/ai-sidecar/codex-prompts/errors`
+
+CLI:
+
+```powershell
+python tools/build_codex_prompt_from_rca.py --report-id ai_rca_report_x
+python tools/build_codex_prompt_from_candidate.py --candidate-instance-id candidate-1
+python tools/build_codex_prompt_from_no_trade.py --trade-date 2026-06-27
+python tools/build_codex_safety_review_prompt.py
+python tools/inspect_codex_prompt.py --draft-id ai_codex_prompt_x --text
+```
+
+Dashboard shows stored Codex prompt drafts as read-only AI explanation cards. Browser clipboard
+copy is allowed; Codex execution, GitHub actions, generation buttons, and apply controls are not.
 
 ## Broker Contract
 

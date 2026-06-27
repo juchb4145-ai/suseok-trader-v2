@@ -331,6 +331,7 @@ const renderAi = (snapshot) => {
     metric("recent_request_count", ai.recent_request_count || 0),
     metric("insight_count", ai.insight_count || 0),
     metric("rca_report_count", ai.rca_report_count || 0),
+    metric("codex_draft_count", ai.codex_draft_count || 0),
   ].join("");
 
   const insights = ai.insights || [];
@@ -412,6 +413,7 @@ const aiExplanationCard = (card) => {
   const checks = Array.isArray(card.suggested_checks) ? card.suggested_checks : [];
   const warnings = Array.isArray(card.warnings) ? card.warnings : [];
   const sections = Array.isArray(card.report_sections) ? card.report_sections : [];
+  const codexPrompt = card.card_type === "CODEX_PROMPT_DRAFT" ? codexPromptBlock(card) : "";
   return `
     <article class="ai-explanation-card ${statusClass} ${severityClass}" id="${escapeHtml(card.card_id)}">
       <div class="ai-card-topline">
@@ -438,14 +440,26 @@ const aiExplanationCard = (card) => {
       ${aiCardList("점검", checks)}
       ${aiCardList("주의", warnings)}
       <div class="ai-card-links">
+        ${card.draft_id ? `<span>draft ${escapeHtml(card.draft_id)}</span>` : ""}
         ${card.rca_report_id ? `<span>report ${escapeHtml(card.rca_report_id)}</span>` : ""}
         ${card.ai_insight_id ? `<span>insight ${escapeHtml(card.ai_insight_id)}</span>` : ""}
         ${card.ai_request_id ? `<span>request ${escapeHtml(card.ai_request_id)}</span>` : ""}
         ${card.context_id ? `<span>context ${escapeHtml(card.context_id)}</span>` : ""}
       </div>
+      ${codexPrompt}
       ${aiReportSections(sections)}
       ${rawJson(card)}
     </article>
+  `;
+};
+
+const codexPromptBlock = (card) => {
+  const textareaId = `${cssToken(card.card_id)}-text`;
+  return `
+    <div class="codex-prompt-block">
+      <textarea id="${escapeHtml(textareaId)}" readonly spellcheck="false">${escapeHtml(card.prompt_text || card.prompt_preview || "")}</textarea>
+      <button type="button" class="copy-button" data-copy-target="${escapeHtml(textareaId)}">텍스트 복사</button>
+    </div>
   `;
 };
 
@@ -570,5 +584,25 @@ const refreshDashboard = async () => {
 };
 
 window.addEventListener("DOMContentLoaded", () => {
+  document.addEventListener("click", async (event) => {
+    const button = event.target.closest("[data-copy-target]");
+    if (!button) {
+      return;
+    }
+    const target = document.getElementById(button.dataset.copyTarget);
+    if (!target) {
+      return;
+    }
+    target.select();
+    try {
+      await navigator.clipboard.writeText(target.value);
+      button.textContent = "복사됨";
+      window.setTimeout(() => {
+        button.textContent = "텍스트 복사";
+      }, 1200);
+    } catch {
+      document.execCommand("copy");
+    }
+  });
   refreshDashboard();
 });

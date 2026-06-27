@@ -7,6 +7,11 @@ from typing import Any
 
 from domain.ai_sidecar.policy import contains_forbidden_action
 
+from services.ai_sidecar.codex_prompt_store import (
+    count_codex_prompt_drafts,
+    list_codex_prompt_drafts,
+    list_codex_prompt_errors,
+)
 from services.ai_sidecar.context_store import list_context_build_errors
 from services.ai_sidecar.rca_report_store import (
     count_rca_reports,
@@ -56,6 +61,7 @@ AI_REQUEST_FAILURE_STATUSES = tuple(
 AI_EXPLANATION_WARNINGS = [
     "AI 설명 카드는 읽기 전용입니다.",
     "AI/RCA 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
+    "Codex prompt draft는 사람이 검토하고 복사하는 텍스트입니다.",
     "Dashboard에는 AI 실행 버튼이 없습니다.",
 ]
 
@@ -158,6 +164,7 @@ def build_ai_explanation_status(
         "execution_controls_available": False,
         "run_buttons_available": False,
         "rca_report_count": count_rca_reports(connection),
+        "codex_prompt_draft_count": count_codex_prompt_drafts(connection),
         "ai_insight_count": count_ai_insights(connection),
         "ai_request_failure_count": _count_ai_request_failures(connection),
         "context_warning_count": _count_context_warnings(connection),
@@ -207,10 +214,21 @@ def _build_all_cards(
     return [
         *build_no_trade_rca_cards(connection, settings, limit=min(5, bounded_limit)),
         *build_candidate_rca_cards(connection, settings, limit=candidate_limit),
+        *build_codex_prompt_draft_cards(connection, settings, limit=bounded_limit),
         *build_ai_insight_cards(connection, settings, limit=bounded_limit),
         *build_ai_request_failure_cards(connection, settings, limit=bounded_limit),
         *_build_ai_context_warning_cards(connection, settings, limit=bounded_limit),
     ]
+
+
+def build_codex_prompt_draft_cards(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = list_codex_prompt_drafts(connection, limit=_bounded_limit(limit, settings))
+    return [_codex_prompt_draft_card(row) for row in rows]
 
 
 def _rca_report_card(
@@ -251,6 +269,52 @@ def _rca_report_card(
             "report_sections": report.get("deterministic_sections", []),
             "links": report.get("links", []),
             "metadata": report.get("metadata", {}),
+        }
+    )
+
+
+def _codex_prompt_draft_card(row: Mapping[str, Any]) -> dict[str, Any]:
+    warnings = _strings(row.get("warnings"))
+    warnings.extend(
+        [
+            "Codex prompt draft는 Dashboard에서 실행되지 않습니다.",
+            "복사는 browser clipboard 동작이며 Codex/GitHub/API 실행이 아닙니다.",
+        ]
+    )
+    prompt_text = str(row.get("prompt_text") or "")
+    return _decorate_card(
+        {
+            "card_id": f"codex-prompt:{row['draft_id']}",
+            "card_type": "CODEX_PROMPT_DRAFT",
+            "title": map_card_type_label("CODEX_PROMPT_DRAFT"),
+            "subtitle": str(row.get("title") or row.get("source_type") or "-"),
+            "status": str(row.get("status") or "COMPLETED"),
+            "severity": "INFO",
+            "root_cause_category": row.get("target_area"),
+            "root_cause": row.get("summary"),
+            "summary": row.get("summary"),
+            "suggested_checks": _strings(row.get("acceptance_criteria")),
+            "warnings": _unique(warnings),
+            "related_entity_type": row.get("related_entity_type"),
+            "related_entity_id": row.get("related_entity_id"),
+            "trade_date": row.get("trade_date"),
+            "generated_at": row.get("generated_at"),
+            "ai_request_id": row.get("ai_request_id"),
+            "ai_insight_id": row.get("ai_insight_id"),
+            "rca_report_id": row.get("rca_report_id"),
+            "context_id": row.get("context_id"),
+            "source": "ai_codex_prompt_drafts",
+            "draft_id": row.get("draft_id"),
+            "target_area": row.get("target_area"),
+            "source_type": row.get("source_type"),
+            "prompt_text": prompt_text,
+            "prompt_preview": prompt_text[:800],
+            "acceptance_criteria": row.get("acceptance_criteria", []),
+            "forbidden_scope": row.get("forbidden_scope", []),
+            "test_plan": row.get("test_plan", []),
+            "auto_apply_allowed": False,
+            "github_write_allowed": False,
+            "codex_execution_allowed": False,
         }
     )
 
@@ -336,8 +400,10 @@ def _build_ai_context_warning_cards(
     bounded_limit = _bounded_limit(limit, settings)
     context_errors = list_context_build_errors(connection, limit=bounded_limit)
     rca_errors = list_rca_report_errors(connection, limit=bounded_limit)
+    codex_prompt_errors = list_codex_prompt_errors(connection, limit=bounded_limit)
     cards = [_context_error_card(error) for error in context_errors]
     cards.extend(_rca_error_card(error) for error in rca_errors)
+    cards.extend(_codex_prompt_error_card(error) for error in codex_prompt_errors)
     return cards
 
 
@@ -403,6 +469,42 @@ def _rca_error_card(error: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _codex_prompt_error_card(error: Mapping[str, Any]) -> dict[str, Any]:
+    return _decorate_card(
+        {
+            "card_id": f"codex-prompt-error:{error['id']}",
+            "card_type": "AI_CONTEXT_WARNING",
+            "title": "Codex prompt draft 오류",
+            "subtitle": str(error.get("source_type") or "codex_prompt"),
+            "status": "FAILED",
+            "severity": "HIGH",
+            "root_cause_category": "AI_EXECUTION",
+            "root_cause": error.get("error_message"),
+            "summary": (
+                "Codex prompt draft 생성 오류가 기록되었습니다: "
+                f"{error.get('error_message')}"
+            ),
+            "suggested_checks": [
+                "입력 report/candidate/trade_date와 관련 context packet 상태를 확인하세요.",
+                "deterministic prompt generator는 실패해도 자동 실행/적용을 하지 않습니다.",
+            ],
+            "warnings": [
+                "Codex prompt error card는 표시 전용이며 Dashboard에서 재실행하지 않습니다."
+            ],
+            "related_entity_type": error.get("related_entity_type"),
+            "related_entity_id": error.get("related_entity_id"),
+            "trade_date": error.get("trade_date"),
+            "generated_at": error.get("created_at"),
+            "ai_request_id": None,
+            "ai_insight_id": None,
+            "rca_report_id": None,
+            "context_id": None,
+            "source": "ai_codex_prompt_errors",
+            "payload": error.get("payload", {}),
+        }
+    )
+
+
 def _decorate_card(card: dict[str, Any]) -> dict[str, Any]:
     status = str(card.get("status") or "UNKNOWN").upper()
     severity = str(card.get("severity") or "INFO").upper()
@@ -459,7 +561,10 @@ def _count_context_warnings(connection: sqlite3.Connection) -> int:
         "SELECT COUNT(*) AS count FROM ai_context_build_errors"
     ).fetchone()
     rca_row = connection.execute("SELECT COUNT(*) AS count FROM ai_rca_report_errors").fetchone()
-    return int(context_row["count"]) + int(rca_row["count"])
+    codex_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM ai_codex_prompt_errors"
+    ).fetchone()
+    return int(context_row["count"]) + int(rca_row["count"]) + int(codex_row["count"])
 
 
 def _policy_warnings(

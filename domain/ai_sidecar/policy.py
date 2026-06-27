@@ -4,6 +4,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from domain.ai_sidecar.codex_prompt import ensure_codex_prompt_policy
 from domain.ai_sidecar.schemas import (
     AISidecarBaseOutput,
     AISidecarValidationError,
@@ -93,6 +94,8 @@ def validate_output_schema(
         raise AISidecarValidationError("output must be a mapping or expected output model")
 
     assert_no_trading_action(validated.to_dict())
+    if task is AISidecarTaskType.CODEX_PROMPT_DRAFT:
+        ensure_codex_prompt_policy(validated.to_dict()["prompt_draft"])
     return validated
 
 

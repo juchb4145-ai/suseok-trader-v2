@@ -394,7 +394,8 @@ def _model_failure_status(status: str | None) -> AIRequestStatus:
 
 
 def _validation_status(exc: AISidecarValidationError) -> AIRequestStatus:
-    if "forbidden trading action" in str(exc).lower():
+    message = str(exc).lower()
+    if "forbidden trading action" in message or "unsafe codex prompt instruction" in message:
         return AIRequestStatus.POLICY_REJECTED
     return AIRequestStatus.AI_OUTPUT_INVALID
 

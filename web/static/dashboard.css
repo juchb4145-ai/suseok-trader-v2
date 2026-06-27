@@ -463,6 +463,36 @@ td {
   font-size: 12px;
 }
 
+.codex-prompt-block {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.codex-prompt-block textarea {
+  width: 100%;
+  min-height: 220px;
+  resize: vertical;
+  padding: 10px;
+  border: 1px solid #2b4250;
+  border-radius: 8px;
+  background: #071016;
+  color: var(--soft);
+  font: 12px/1.5 Consolas, "Cascadia Mono", monospace;
+}
+
+.copy-button {
+  justify-self: start;
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid rgba(125, 211, 252, 0.58);
+  border-radius: 8px;
+  background: rgba(125, 211, 252, 0.12);
+  color: #d7f3ff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 .ai-explanation-card.status-completed {
   border-left-color: var(--ok);
 }

@@ -57,6 +57,11 @@ read-only `operator_action` enum, `confidence` range `0..1`, and
 Local validation runs after the model response. Domain policy validation then rejects forbidden
 trading/action shapes before any insight is saved.
 
+PR AI-5 uses `CODEX_PROMPT_DRAFT` only as optional AI-assisted prompt drafting. The default Codex
+Prompt Generator path is deterministic. When `run_ai=true` is explicitly requested, the runner may
+produce a `prompt_draft`, but the PR AI-5 sanitizer rejects automatic Codex execution, GitHub
+branch/commit/push/PR creation, order execution, and live-flag changes before an insight is saved.
+
 ## Prompt Registry
 
 `services/ai_sidecar/prompt_registry.py` owns task prompts. Prompts require read-only analysis,
@@ -149,6 +154,16 @@ RCA report stores failure status and may link `ai_request_id`, but no `ai_insigh
 AI output remains report context only. It is not Strategy input, Risk input, Candidate mutation,
 OMS input, order approval, OrderIntent, GatewayCommand, live-flag mutation, or automated trading
 decision input.
+
+## Codex Prompt Generator Linkage
+
+PR AI-5 may call `run_ai_sidecar_task` with `CODEX_PROMPT_DRAFT` only when an operator explicitly
+passes `run_ai=true` or CLI `--run-ai`. `run_ai=false` never calls OpenAI. Valid AI output can
+augment a deterministic prompt draft; invalid, unavailable, disabled, or policy-rejected output
+leaves the deterministic draft intact and does not create a normal insight for rejected output.
+
+Tools/function calling, web search, code interpreter, MCP connections, and order tools remain
+disabled for this task.
 
 ## Dashboard Policy
 

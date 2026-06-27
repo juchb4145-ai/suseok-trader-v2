@@ -115,19 +115,25 @@
 - Expose GET-only `/api/dashboard/ai-explanations*` endpoints.
 - Keep Dashboard free of AI/RCA execution controls and trading side effects.
 
-## Next: PR AI-5. Codex Prompt Generator
+## Done: PR AI-5. Codex Prompt Generator
 
-- Generate human-copyable Codex prompt drafts from validated context.
+- Generate human-copyable Codex prompt drafts from RCA reports, AI context packets, candidates,
+  no-trade context, ops incidents, and PR10 safety-review needs.
+- Persist `ai_codex_prompt_drafts`, sections, links, and build errors.
+- Keep deterministic draft generation available without OpenAI.
+- Optionally use the PR AI-2 `CODEX_PROMPT_DRAFT` runner only when `run_ai=true`.
 - Do not add automatic code changes, branch creation, commits, pushes, or PR creation.
-- Keep prompts reviewable by the operator.
+- Keep prompts reviewable and copy-only for the operator.
+- Add Dashboard display/copy-only cards without Codex execution, GitHub write, or apply controls.
 
-## PR 10. OMS + DRY_RUN
+## Next: PR 10. OMS + DRY_RUN
 
 - Add order management contracts and DRY_RUN-only flow.
 - Require deterministic Strategy and Risk decisions before any order intent can be created.
 - Keep live flags disabled by default.
-- Proceed only after PR AI-5 or a separate safety review confirms RCA/Sidecar reports remain
+- Proceed only after a safety review prompt/report confirms Sidecar/RCA/Codex prompt remains
   review-only.
+- Require an explicit safety gate before introducing OrderIntent/DRY_RUN behavior.
 
 ## PR 11. Exit Engine
 

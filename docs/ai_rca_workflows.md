@@ -150,6 +150,16 @@ into Dashboard AI Explanation Cards. Dashboard displays these cards read-only th
 RCA report creation remains manual through the PR AI-3 CLI/API. Dashboard has no RCA execution
 button, no RCA creation button, and no RCA POST call.
 
+## Codex Prompt Generator Linkage
+
+PR AI-5 can use an RCA report as a Codex prompt source. The prompt generator reads
+`ai_rca_reports`, `ai_rca_sections`, links, related context packets, and linked AI insights to
+create a human-copyable prompt draft.
+
+This does not change the RCA contract. RCA reports and Codex prompt drafts are still operator
+review artifacts only. They are not Strategy input, Risk input, OMS input, OrderIntent,
+GatewayCommand, buy/sell signals, live-mode controls, or automatic code-change triggers.
+
 ## Forbidden Scope
 
 PR AI-3 does not implement OMS, `OrderIntent`, `EntryPlan`, `PositionSizing`,
