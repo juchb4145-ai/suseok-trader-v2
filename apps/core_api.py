@@ -14,6 +14,7 @@ from api.routes.dry_run_exit import router as dry_run_exit_router
 from api.routes.dry_run_oms import router as dry_run_oms_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
+from api.routes.live_sim import router as live_sim_router
 from api.routes.market_data import router as market_data_router
 from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
@@ -53,6 +54,7 @@ def create_app() -> FastAPI:
     application.include_router(risk_router)
     application.include_router(dry_run_oms_router)
     application.include_router(dry_run_exit_router)
+    application.include_router(live_sim_router)
     application.include_router(dashboard_router)
     application.include_router(dashboard_page_router)
     application.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

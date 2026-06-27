@@ -6,6 +6,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
+from services.live_sim.live_sim_service import handle_live_sim_gateway_event
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
 from storage.event_store import (
     append_gateway_event,
@@ -47,6 +48,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         ):
             projection_result = process_gateway_event(connection, event, settings=settings)
             projection_status = projection_result.status
+        if result.status == "ACCEPTED" and not result.duplicate:
+            handle_live_sim_gateway_event(connection, event, settings=settings)
     finally:
         connection.close()
 

@@ -5,7 +5,7 @@ from typing import Any
 
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import normalize_payload
+from domain.broker.utils import datetime_to_wire, normalize_payload, utc_now
 
 from gateway.event_factory import (
     make_command_ack_event,
@@ -56,6 +56,8 @@ class GatewayCommandHandler:
 
     def handle(self, command: GatewayCommand) -> list[GatewayEvent]:
         command_type = command.command_type.strip().lower()
+        if command_type == "send_order":
+            return self._handle_live_sim_send_order(command)
         if _is_forbidden_order_command(command_type):
             return [
                 make_command_failed_event(
@@ -111,6 +113,66 @@ class GatewayCommandHandler:
                 source=self.source,
             )
         ]
+
+    def _handle_live_sim_send_order(self, command: GatewayCommand) -> list[GatewayEvent]:
+        error_message = _validate_live_sim_order_payload(command)
+        if error_message is not None:
+            return [make_command_failed_event(command, error_message, source=self.source)]
+
+        broker_order_no = f"MOCKSIM-{command.command_id[-12:]}"
+        events = [make_command_started_event(command, source=self.source)]
+        events.append(
+            make_command_ack_event(
+                command,
+                source=self.source,
+                message="mock LIVE_SIM order accepted",
+                details={
+                    "accepted": True,
+                    "broker_order_no": broker_order_no,
+                    "broker_result_code": "0",
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                },
+            )
+        )
+        metadata = _mapping_value(command.payload, "metadata")
+        if (
+            command.payload.get("mock_emit_execution") is True
+            or metadata.get("mock_emit_execution") is True
+        ):
+            events.append(
+                GatewayEvent(
+                    event_type="execution_event",
+                    source=self.source,
+                    command_id=command.command_id,
+                    idempotency_key=command.idempotency_key,
+                    payload={
+                        "execution_id": f"exec-{command.command_id}",
+                        "broker_order_id": broker_order_no,
+                        "broker_order_no": broker_order_no,
+                        "client_order_id": command.command_id,
+                        "account_id": command.payload["account_id"],
+                        "code": command.payload["code"],
+                        "side": command.payload["side"],
+                        "quantity": int(command.payload["quantity"]),
+                        "price": int(
+                            command.payload.get("price") or command.payload["limit_price"]
+                        ),
+                        "remaining_quantity": 0,
+                        "executed_at": datetime_to_wire(utc_now()),
+                        "metadata": {
+                            "live_sim_only": True,
+                            "live_real_allowed": False,
+                            "broker_env": command.payload["broker_env"],
+                            "account_mode": command.payload["account_mode"],
+                            "server_mode": command.payload["server_mode"],
+                            "live_sim_intent_id": metadata["live_sim_intent_id"],
+                            "gateway_command_id": command.command_id,
+                        },
+                    },
+                )
+            )
+        return events
 
     def _handle_request_tr(self, command: GatewayCommand) -> list[GatewayEvent]:
         payload = command.payload
@@ -196,3 +258,41 @@ def _string_value(payload: Mapping[str, Any], key: str, default: str) -> str:
     if value is None:
         return default
     return str(value)
+
+
+def _validate_live_sim_order_payload(command: GatewayCommand) -> str | None:
+    payload = command.payload
+    metadata = _mapping_value(payload, "metadata")
+    if command.source.strip().lower() != "live_sim":
+        return "mock order command disabled except live_sim source"
+    if not command.idempotency_key:
+        return "mock send_order requires idempotency_key"
+    if str(payload.get("mode", "")).upper() != "LIVE_SIM":
+        return "mock send_order requires mode=LIVE_SIM"
+    if metadata.get("live_sim_only") is not True:
+        return "mock send_order requires metadata.live_sim_only=true"
+    if metadata.get("live_real_allowed") is not False:
+        return "mock send_order requires metadata.live_real_allowed=false"
+    if not metadata.get("live_sim_intent_id"):
+        return "mock send_order requires live_sim_intent_id"
+    if str(payload.get("side", "")).upper() != "BUY":
+        return "mock PR12 send_order allows BUY only"
+    for field_name in ("account_mode", "broker_env", "server_mode"):
+        if not _is_simulation_like(payload.get(field_name)):
+            return f"mock send_order requires simulation-like {field_name}"
+    return None
+
+
+def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = payload.get(key)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _is_simulation_like(value: object) -> bool:
+    return str(value or "").strip().upper() in {
+        "SIMULATION",
+        "MOCK",
+        "PAPER",
+        "MOCK_TRADING",
+        "LIVE_SIM",
+    }

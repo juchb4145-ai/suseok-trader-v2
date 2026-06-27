@@ -1,0 +1,207 @@
+from __future__ import annotations
+
+from domain.broker.events import GatewayEvent
+from domain.broker.utils import datetime_to_wire, utc_now
+from domain.live_sim.reasons import LiveSimReasonCode
+from domain.live_sim.status import LiveSimIntentStatus, LiveSimOrderStatus
+from gateway.command_handlers import GatewayCommandHandler
+from services.config import Settings, TradingMode
+from services.live_sim.live_sim_service import (
+    create_live_sim_intent,
+    evaluate_live_sim_eligibility,
+    get_live_sim_order,
+    handle_live_sim_gateway_event,
+    queue_live_sim_order_command,
+    reconcile_live_sim,
+)
+from services.live_sim.safety_gate import check_live_sim_safety_gate
+from services.oms.dry_run_service import create_dry_run_intent
+from storage.gateway_command_store import poll_commands
+from storage.sqlite import initialize_database
+from tests.test_oms_dry_run import _prepared_connection
+from tests.test_oms_dry_run import _settings as _dry_run_settings
+
+
+def test_live_sim_schema_and_config_defaults(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-schema.sqlite3")
+    table_names = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    connection.close()
+    settings = Settings()
+
+    assert {
+        "live_sim_intents",
+        "live_sim_orders",
+        "live_sim_executions",
+        "live_sim_rejections",
+        "live_sim_runs",
+        "live_sim_reconcile_snapshots",
+        "live_sim_errors",
+    }.issubset(table_names)
+    assert settings.live_sim_enabled is False
+    assert settings.live_sim_order_routing_enabled is False
+    assert settings.live_sim_gateway_command_enabled is False
+    assert settings.live_sim_kill_switch is True
+    assert settings.live_real_allowed is False
+
+
+def test_live_sim_safety_gate_defaults_and_simulation_pass(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-safety.sqlite3")
+
+    blocked = check_live_sim_safety_gate(connection, Settings())
+    _mark_gateway_ready(connection)
+    passed = check_live_sim_safety_gate(connection, _live_sim_settings())
+    live_real = check_live_sim_safety_gate(
+        connection,
+        _live_sim_settings(trading_allow_live_real=True),
+    )
+    connection.close()
+
+    assert blocked.passed is False
+    assert LiveSimReasonCode.LIVE_SIM_DISABLED.value in blocked.reason_codes
+    assert LiveSimReasonCode.LIVE_SIM_KILL_SWITCH_ACTIVE.value in blocked.reason_codes
+    assert passed.passed is True
+    assert passed.live_real_disabled is True
+    assert live_real.passed is False
+    assert LiveSimReasonCode.LIVE_REAL_NOT_ALLOWED.value in live_real.reason_codes
+
+
+def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-flow.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+
+    eligibility = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    commands = poll_commands(connection)
+    events = GatewayCommandHandler().handle(commands[0])
+    for event in events:
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    execution_event = _execution_event(
+        command_id=commands[0].command_id,
+        idempotency_key=commands[0].idempotency_key,
+        broker_order_no=stored_order["broker_order_no"],
+        live_sim_intent_id=intent.live_sim_intent_id,
+        account_id=settings.live_sim_account_id,
+    )
+    execution_result = handle_live_sim_gateway_event(connection, execution_event, settings=settings)
+    filled_order = get_live_sim_order(connection, order.live_sim_order_id)
+    snapshot = reconcile_live_sim(connection, settings=settings)
+    command_row = connection.execute(
+        "SELECT command_type, source, idempotency_key, payload_json FROM gateway_commands"
+    ).fetchone()
+    connection.close()
+
+    assert eligibility.eligible is True
+    assert intent.status is LiveSimIntentStatus.CREATED
+    assert order.status is LiveSimOrderStatus.COMMAND_QUEUED
+    assert command_row["command_type"] == "send_order"
+    assert command_row["source"] == "live_sim"
+    assert command_row["idempotency_key"] == intent.idempotency_key
+    assert stored_order["status"] == LiveSimOrderStatus.BROKER_ACKED.value
+    assert stored_order["broker_order_no"].startswith("MOCKSIM-")
+    assert execution_result["handled"] is True
+    assert filled_order["status"] == LiveSimOrderStatus.FILLED.value
+    assert snapshot.status == "LOCAL_ONLY"
+
+
+def test_live_sim_default_disabled_creates_rejection_no_command(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-disabled.sqlite3")
+
+    intent = create_live_sim_intent(connection, candidate_id, settings=Settings())
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    rejection_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM live_sim_rejections"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert intent.status is LiveSimIntentStatus.REJECTED
+    assert command_count == 0
+    assert rejection_count == 1
+    assert intent.live_real_allowed is False
+
+
+def _live_sim_settings(**overrides) -> Settings:
+    values = {
+        "trading_mode": TradingMode.LIVE_SIM,
+        "trading_allow_live_sim": True,
+        "live_sim_enabled": True,
+        "live_sim_order_routing_enabled": True,
+        "live_sim_gateway_command_enabled": True,
+        "live_sim_account_id": "SIM-12345678",
+        "live_sim_kill_switch": False,
+        "live_sim_stale_tick_sec": 999_999_999,
+        "live_sim_max_order_notional": 100_000,
+        "live_sim_max_daily_notional": 300_000,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def _mark_gateway_ready(connection) -> None:
+    now = datetime_to_wire(utc_now())
+    for key, value in {
+        "last_heartbeat_at": now,
+        "gateway_orderable": "true",
+        "account_mode": "SIMULATION",
+        "broker_env": "SIMULATION",
+        "server_mode": "SIMULATION",
+        "command_queue_healthy": "true",
+    }.items():
+        connection.execute(
+            """
+            INSERT INTO gateway_status (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (key, value, now),
+        )
+    connection.commit()
+
+
+def _execution_event(
+    *,
+    command_id: str,
+    idempotency_key: str,
+    broker_order_no: str,
+    live_sim_intent_id: str,
+    account_id: str,
+) -> GatewayEvent:
+    return GatewayEvent(
+        event_type="execution_event",
+        source="mock_gateway",
+        command_id=command_id,
+        idempotency_key=idempotency_key,
+        payload={
+            "execution_id": "exec-live-sim-1",
+            "broker_order_id": broker_order_no,
+            "broker_order_no": broker_order_no,
+            "account_id": account_id,
+            "code": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "price": 97000,
+            "remaining_quantity": 0,
+            "executed_at": datetime_to_wire(utc_now()),
+            "metadata": {
+                "live_sim_only": True,
+                "live_real_allowed": False,
+                "broker_env": "SIMULATION",
+                "account_mode": "SIMULATION",
+                "server_mode": "SIMULATION",
+                "live_sim_intent_id": live_sim_intent_id,
+                "gateway_command_id": command_id,
+            },
+        },
+    )

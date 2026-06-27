@@ -166,6 +166,36 @@ class Settings:
     dry_run_exit_order_routing_enabled: bool = False
     dry_run_exit_gateway_command_enabled: bool = False
     dry_run_exit_config_version: str = "exit_dry_run_v1"
+    live_sim_enabled: bool = False
+    live_sim_order_routing_enabled: bool = False
+    live_sim_gateway_command_enabled: bool = False
+    live_sim_account_id: str = ""
+    live_sim_account_mode: str = "SIMULATION"
+    live_sim_broker_env: str = "SIMULATION"
+    live_sim_server_mode: str = "SIMULATION"
+    live_sim_kill_switch: bool = True
+    live_sim_max_order_notional: float = 100_000
+    live_sim_max_daily_order_count: int = 3
+    live_sim_max_daily_notional: float = 300_000
+    live_sim_max_active_orders: int = 1
+    live_sim_max_active_positions: int = 1
+    live_sim_duplicate_cooldown_sec: int = 600
+    live_sim_order_ttl_sec: int = 60
+    live_sim_require_dry_run_evidence: bool = True
+    live_sim_require_risk_observe_pass: bool = True
+    live_sim_require_strategy_matched: bool = True
+    live_sim_require_candidate_context_ready: bool = True
+    live_sim_require_fresh_tick: bool = True
+    live_sim_stale_tick_sec: int = 15
+    live_sim_allow_buy: bool = True
+    live_sim_allow_sell: bool = False
+    live_sim_allow_exit_sell: bool = False
+    live_sim_allow_market_order: bool = False
+    live_sim_allow_limit_order: bool = True
+    live_sim_default_order_type: str = "LIMIT"
+    live_sim_default_hoga: str = "00"
+    live_sim_price_offset_ticks: int = 0
+    live_sim_config_version: str = "live_sim_v1"
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -359,6 +389,70 @@ class Settings:
             self,
             "dry_run_exit_config_version",
             _require_non_empty_config(self.dry_run_exit_config_version),
+        )
+        for field_name in (
+            "live_sim_max_order_notional",
+            "live_sim_max_daily_notional",
+        ):
+            if getattr(self, field_name) <= 0:
+                raise ValueError(f"{field_name.upper()} must be > 0")
+        for field_name in (
+            "live_sim_max_daily_order_count",
+            "live_sim_max_active_orders",
+            "live_sim_max_active_positions",
+            "live_sim_duplicate_cooldown_sec",
+            "live_sim_order_ttl_sec",
+            "live_sim_stale_tick_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.live_sim_max_daily_notional < self.live_sim_max_order_notional:
+            raise ValueError(
+                "LIVE_SIM_MAX_DAILY_NOTIONAL must be >= LIVE_SIM_MAX_ORDER_NOTIONAL"
+            )
+        if self.live_sim_price_offset_ticks < 0:
+            raise ValueError("LIVE_SIM_PRICE_OFFSET_TICKS must be >= 0")
+        object.__setattr__(
+            self,
+            "live_sim_account_mode",
+            _normalize_non_empty(self.live_sim_account_mode),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_broker_env",
+            _normalize_non_empty(self.live_sim_broker_env),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_server_mode",
+            _normalize_non_empty(self.live_sim_server_mode),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_default_order_type",
+            _normalize_non_empty(self.live_sim_default_order_type),
+        )
+        if self.live_sim_default_order_type not in {"LIMIT", "MARKET"}:
+            raise ValueError("LIVE_SIM_DEFAULT_ORDER_TYPE must be LIMIT or MARKET")
+        if self.live_sim_default_order_type == "MARKET" and not self.live_sim_allow_market_order:
+            raise ValueError(
+                "LIVE_SIM_DEFAULT_ORDER_TYPE cannot be MARKET when "
+                "LIVE_SIM_ALLOW_MARKET_ORDER is false"
+            )
+        if self.live_sim_default_order_type == "LIMIT" and not self.live_sim_allow_limit_order:
+            raise ValueError(
+                "LIVE_SIM_DEFAULT_ORDER_TYPE cannot be LIMIT when "
+                "LIVE_SIM_ALLOW_LIMIT_ORDER is false"
+            )
+        object.__setattr__(
+            self,
+            "live_sim_default_hoga",
+            _require_non_empty_config(self.live_sim_default_hoga),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_config_version",
+            _require_non_empty_config(self.live_sim_config_version),
         )
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
@@ -923,6 +1017,88 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "DRY_RUN_EXIT_CONFIG_VERSION",
             "exit_dry_run_v1",
         ),
+        live_sim_enabled=_parse_bool(env.get("LIVE_SIM_ENABLED", "false")),
+        live_sim_order_routing_enabled=_parse_bool(
+            env.get("LIVE_SIM_ORDER_ROUTING_ENABLED", "false")
+        ),
+        live_sim_gateway_command_enabled=_parse_bool(
+            env.get("LIVE_SIM_GATEWAY_COMMAND_ENABLED", "false")
+        ),
+        live_sim_account_id=env.get("LIVE_SIM_ACCOUNT_ID", ""),
+        live_sim_account_mode=env.get("LIVE_SIM_ACCOUNT_MODE", "SIMULATION"),
+        live_sim_broker_env=env.get("LIVE_SIM_BROKER_ENV", "SIMULATION"),
+        live_sim_server_mode=env.get("LIVE_SIM_SERVER_MODE", "SIMULATION"),
+        live_sim_kill_switch=_parse_bool(env.get("LIVE_SIM_KILL_SWITCH", "true")),
+        live_sim_max_order_notional=_parse_float(
+            env.get("LIVE_SIM_MAX_ORDER_NOTIONAL", "100000"),
+            "LIVE_SIM_MAX_ORDER_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_max_daily_order_count=_parse_int(
+            env.get("LIVE_SIM_MAX_DAILY_ORDER_COUNT", "3"),
+            "LIVE_SIM_MAX_DAILY_ORDER_COUNT",
+            min_value=1,
+        ),
+        live_sim_max_daily_notional=_parse_float(
+            env.get("LIVE_SIM_MAX_DAILY_NOTIONAL", "300000"),
+            "LIVE_SIM_MAX_DAILY_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_max_active_orders=_parse_int(
+            env.get("LIVE_SIM_MAX_ACTIVE_ORDERS", "1"),
+            "LIVE_SIM_MAX_ACTIVE_ORDERS",
+            min_value=1,
+        ),
+        live_sim_max_active_positions=_parse_int(
+            env.get("LIVE_SIM_MAX_ACTIVE_POSITIONS", "1"),
+            "LIVE_SIM_MAX_ACTIVE_POSITIONS",
+            min_value=1,
+        ),
+        live_sim_duplicate_cooldown_sec=_parse_int(
+            env.get("LIVE_SIM_DUPLICATE_COOLDOWN_SEC", "600"),
+            "LIVE_SIM_DUPLICATE_COOLDOWN_SEC",
+            min_value=1,
+        ),
+        live_sim_order_ttl_sec=_parse_int(
+            env.get("LIVE_SIM_ORDER_TTL_SEC", "60"),
+            "LIVE_SIM_ORDER_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_require_dry_run_evidence=_parse_bool(
+            env.get("LIVE_SIM_REQUIRE_DRY_RUN_EVIDENCE", "true")
+        ),
+        live_sim_require_risk_observe_pass=_parse_bool(
+            env.get("LIVE_SIM_REQUIRE_RISK_OBSERVE_PASS", "true")
+        ),
+        live_sim_require_strategy_matched=_parse_bool(
+            env.get("LIVE_SIM_REQUIRE_STRATEGY_MATCHED", "true")
+        ),
+        live_sim_require_candidate_context_ready=_parse_bool(
+            env.get("LIVE_SIM_REQUIRE_CANDIDATE_CONTEXT_READY", "true")
+        ),
+        live_sim_require_fresh_tick=_parse_bool(
+            env.get("LIVE_SIM_REQUIRE_FRESH_TICK", "true")
+        ),
+        live_sim_stale_tick_sec=_parse_int(
+            env.get("LIVE_SIM_STALE_TICK_SEC", "15"),
+            "LIVE_SIM_STALE_TICK_SEC",
+            min_value=1,
+        ),
+        live_sim_allow_buy=_parse_bool(env.get("LIVE_SIM_ALLOW_BUY", "true")),
+        live_sim_allow_sell=_parse_bool(env.get("LIVE_SIM_ALLOW_SELL", "false")),
+        live_sim_allow_exit_sell=_parse_bool(env.get("LIVE_SIM_ALLOW_EXIT_SELL", "false")),
+        live_sim_allow_market_order=_parse_bool(
+            env.get("LIVE_SIM_ALLOW_MARKET_ORDER", "false")
+        ),
+        live_sim_allow_limit_order=_parse_bool(env.get("LIVE_SIM_ALLOW_LIMIT_ORDER", "true")),
+        live_sim_default_order_type=env.get("LIVE_SIM_DEFAULT_ORDER_TYPE", "LIMIT"),
+        live_sim_default_hoga=env.get("LIVE_SIM_DEFAULT_HOGA", "00"),
+        live_sim_price_offset_ticks=_parse_int(
+            env.get("LIVE_SIM_PRICE_OFFSET_TICKS", "0"),
+            "LIVE_SIM_PRICE_OFFSET_TICKS",
+            min_value=0,
+        ),
+        live_sim_config_version=env.get("LIVE_SIM_CONFIG_VERSION", "live_sim_v1"),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(
             env.get("DASHBOARD_REFRESH_SEC", "5"),

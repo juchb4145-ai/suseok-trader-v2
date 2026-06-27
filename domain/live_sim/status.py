@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class LiveSimIntentStatus(StrEnum):
+    CREATED = "CREATED"
+    REJECTED = "REJECTED"
+    COMMAND_QUEUED = "COMMAND_QUEUED"
+    EXPIRED = "EXPIRED"
+    CANCELLED = "CANCELLED"
+
+
+class LiveSimOrderStatus(StrEnum):
+    INTENT_CREATED = "INTENT_CREATED"
+    COMMAND_QUEUED = "COMMAND_QUEUED"
+    COMMAND_DISPATCHED = "COMMAND_DISPATCHED"
+    BROKER_ACKED = "BROKER_ACKED"
+    BROKER_REJECTED = "BROKER_REJECTED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+    EXPIRED = "EXPIRED"
+    RECONCILE_MISMATCH = "RECONCILE_MISMATCH"
+
+
+class LiveSimSide(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+
+class LiveSimOrderType(StrEnum):
+    LIMIT = "LIMIT"
+    MARKET = "MARKET"
+
+
+class BrokerSimulationMode(StrEnum):
+    SIMULATION = "SIMULATION"
+    MOCK = "MOCK"
+    PAPER = "PAPER"
+    MOCK_TRADING = "MOCK_TRADING"

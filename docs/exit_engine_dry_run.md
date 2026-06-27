@@ -135,9 +135,10 @@ exit execution buttons and does not call DRY_RUN Exit POST endpoints.
 
 ## PR12 Boundary
 
-PR11 is a prerequisite for simulated exit accounting only. PR12 LIVE_SIM must add separate safety
-gates, acceptance tests, operator controls, and Gateway isolation reviews. LIVE_REAL remains
-disabled.
+PR11 is a prerequisite for simulated exit accounting only. PR12 LIVE_SIM adds a separate
+simulation-account-only safety gate and command queue path for small buy-side acceptance tests.
+PR12 does not convert DRY_RUN exits to broker exits by default. LIVE_SIM sell and exit-sell remain
+disabled unless a later safety review explicitly enables them. LIVE_REAL remains disabled.
 
 ## Forbidden Scope
 
@@ -146,9 +147,10 @@ disabled.
 - 32-bit ActiveX order code
 - `GatewayCommand` creation or transmission
 - `BrokerOrderRequest` transmission
-- `send_order`, `cancel_order`, or `modify_order`
+- DRY_RUN `send_order`, `cancel_order`, or `modify_order`
 - `POST /api/orders/enqueue`
-- LIVE_SIM or LIVE_REAL implementation
+- LIVE_REAL implementation
+- automatic DRY_RUN-to-LIVE_SIM exit promotion
 - real account, balance, holding, or broker execution mutation
 - AI/RCA/Codex-output-driven exit/order intent creation
 - Dashboard exit action buttons

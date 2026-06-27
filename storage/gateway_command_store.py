@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -68,7 +69,7 @@ def enqueue_command(
     payload_json = canonical_json(command.payload)
     payload_hash = hash_payload_json(payload_json)
 
-    safety_error = validate_command_type_allowed(command_type)
+    safety_error = validate_command_type_allowed(command_type, command=command)
     if safety_error is not None:
         return EnqueueCommandResult(
             accepted=False,
@@ -276,12 +277,57 @@ def expire_queued_commands(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
-def validate_command_type_allowed(command_type: str) -> str | None:
+def validate_command_type_allowed(
+    command_type: str,
+    *,
+    command: GatewayCommand | None = None,
+) -> str | None:
     normalized = _normalize_command_type(command_type)
+    if normalized == "send_order":
+        return _validate_live_sim_send_order_allowed(command)
+    if normalized in {"cancel_order", "modify_order"}:
+        return f"{command_type} is disabled for PR12 LIVE_SIM"
     if normalized in FORBIDDEN_ORDER_COMMAND_TYPES or "order" in normalized:
         return f"Order command_type is disabled for PR 2B: {command_type}"
     if normalized not in ALLOWED_COMMAND_TYPES:
         return f"Unsupported gateway command_type for PR 2B: {command_type}"
+    return None
+
+
+def _validate_live_sim_send_order_allowed(command: GatewayCommand | None) -> str | None:
+    if command is None:
+        return "send_order requires LIVE_SIM command envelope validation"
+    if command.source.strip().lower() != "live_sim":
+        return "send_order disabled except live_sim source"
+    if not command.idempotency_key:
+        return "send_order LIVE_SIM requires idempotency_key"
+
+    payload = command.payload
+    metadata = _mapping_value(payload, "metadata")
+    if str(payload.get("mode", payload.get("live_mode", ""))).upper() != "LIVE_SIM":
+        return "send_order payload mode must be LIVE_SIM"
+    if str(payload.get("live_mode", payload.get("mode", ""))).upper() != "LIVE_SIM":
+        return "send_order payload live_mode must be LIVE_SIM"
+    if payload.get("idempotency_key") != command.idempotency_key:
+        return "send_order payload idempotency_key must match command idempotency_key"
+    if str(metadata.get("source", "live_sim")).lower() != "live_sim":
+        return "send_order metadata source must be live_sim"
+    if metadata.get("live_sim_only") is not True:
+        return "send_order metadata.live_sim_only must be true"
+    if metadata.get("live_real_allowed") is not False:
+        return "send_order metadata.live_real_allowed must be false"
+    if not metadata.get("live_sim_intent_id") and not payload.get("live_sim_intent_id"):
+        return "send_order requires live_sim_intent_id"
+    if metadata.get("idempotency_key") != command.idempotency_key:
+        return "send_order metadata idempotency_key must match command idempotency_key"
+    if not _is_simulation_like(payload.get("account_mode")):
+        return "send_order account_mode must be simulation-like"
+    if not _is_simulation_like(payload.get("broker_env")):
+        return "send_order broker_env must be simulation-like"
+    if not _is_simulation_like(payload.get("server_mode")):
+        return "send_order server_mode must be simulation-like"
+    if str(payload.get("side", "")).upper() != "BUY":
+        return "send_order LIVE_SIM PR12 allows BUY only"
     return None
 
 
@@ -423,6 +469,21 @@ def _optional_timestamp(value: datetime | str | None) -> str | None:
 
 def _normalize_command_type(command_type: str) -> str:
     return command_type.strip().lower()
+
+
+def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = payload.get(key)
+    return value if isinstance(value, Mapping) else {}
+
+
+def _is_simulation_like(value: object) -> bool:
+    return str(value or "").strip().upper() in {
+        "SIMULATION",
+        "MOCK",
+        "PAPER",
+        "MOCK_TRADING",
+        "LIVE_SIM",
+    }
 
 
 _COMPLETED_STATUSES = {

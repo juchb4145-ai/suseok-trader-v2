@@ -154,5 +154,9 @@ background automatic order workers.
 ## PR11 And PR12
 
 PR11 is now the deterministic DRY_RUN-only Exit Engine described in
-`docs/exit_engine_dry_run.md`. PR12 LIVE_SIM remains a separate future safety-gated project and is
-not enabled by PR10 or PR11.
+`docs/exit_engine_dry_run.md`. PR12 LIVE_SIM is now a separate safety-gated simulation-account-only
+path described in `docs/live_sim_enablement.md`.
+
+DRY_RUN evidence can be required before LIVE_SIM intent creation, but DRY_RUN never automatically
+creates or promotes a LIVE_SIM intent/order. DRY_RUN still does not create `GatewayCommand` rows and
+does not transmit broker orders.

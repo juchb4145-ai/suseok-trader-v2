@@ -147,12 +147,14 @@ When `TRADING_CORE_TOKEN` is set, Gateway write/poll endpoints require either:
 
 `GET /health`, `GET /api/status`, and read-only Gateway status/list endpoints remain token-free.
 
-## Order Command Disabled Policy
+## Order Command Policy
 
-Order commands are disabled until later OMS/Risk PRs create a reviewed order path. PR 2B rejects
-order-like command types including:
+Order commands remain rejected by default. PR12 adds one narrow exception: `send_order` can be
+queued only by the LIVE_SIM service after its safety gate passes and only when the command envelope
+and payload prove simulation-only routing.
 
-- `send_order`
+Still rejected:
+
 - `submit_order`
 - `cancel_order`
 - `modify_order`
@@ -161,8 +163,20 @@ order-like command types including:
 - `gateway_order`
 - `live_order`
 
-`GET /api/gateway/status` always returns `order_commands_allowed=false` in PR 2B.
+Allowed only for LIVE_SIM:
 
-PR 3 keeps this policy in the mock Gateway. If an order-like command reaches the mock handler,
-the handler emits `command_failed` with an `error_message` containing `order command disabled`
-and performs no order side effect.
+- `command_type=send_order`
+- `source=live_sim`
+- command and payload `idempotency_key`
+- `mode=LIVE_SIM` and `live_mode=LIVE_SIM`
+- simulation-like `account_mode`, `broker_env`, `server_mode`
+- `metadata.live_sim_only=true`
+- `metadata.live_real_allowed=false`
+- `metadata.live_sim_intent_id`
+- BUY side only in PR12
+
+There is still no public enqueue endpoint. `/api/orders/enqueue` is intentionally absent.
+
+PR12 mock Gateway keeps the default rejection policy for malformed or non-LIVE_SIM order commands.
+For valid LIVE_SIM mock commands it emits `command_started` and `command_ack` with a mock broker
+order number and performs no real broker side effect.

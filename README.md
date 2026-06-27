@@ -682,6 +682,63 @@ Invoke-RestMethod http://127.0.0.1:8000/api/risk/status
 `apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX
 runtime and prints a safe message directing operators to the mock Gateway for transport tests.
 
+## PR12 LIVE_SIM Enablement
+
+PR12 adds a simulation-account-only order path for Kiwoom mock trading acceptance tests. It is not
+LIVE_REAL and it does not add real account order submission. LIVE_SIM defaults to disabled and also
+requires the kill switch to be off, a simulation account ID, simulation-like account/server/broker
+mode, a fresh Gateway heartbeat, Gateway orderability, limits, duplicate checks, and manual local
+token protected API or CLI calls.
+
+Required environment flags for a local acceptance run:
+
+```powershell
+$env:TRADING_MODE = "LIVE_SIM"
+$env:TRADING_ALLOW_LIVE_SIM = "true"
+$env:TRADING_ALLOW_LIVE_REAL = "false"
+$env:LIVE_SIM_ENABLED = "true"
+$env:LIVE_SIM_ORDER_ROUTING_ENABLED = "true"
+$env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "true"
+$env:LIVE_SIM_ACCOUNT_ID = "SIM-ACCOUNT-ID"
+$env:LIVE_SIM_KILL_SWITCH = "false"
+```
+
+Manual flow:
+
+```powershell
+python tools/evaluate_live_sim_eligibility.py --candidate-instance-id CANDIDATE_ID
+python tools/create_live_sim_intent.py --candidate-instance-id CANDIDATE_ID
+python tools/queue_live_sim_order.py --live-sim-intent-id live_sim_intent_x
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+python tools/reconcile_live_sim.py
+```
+
+LIVE_SIM commands are written only to the Gateway command queue as `send_order` with
+`source=live_sim`, `mode=LIVE_SIM`, a required `idempotency_key`, and metadata requiring
+`live_sim_only=true` and `live_real_allowed=false`. There is still no `/api/orders/enqueue`, no
+cancel/modify endpoint, no background live-sim worker, no Dashboard order button, and no AI/RCA/Codex
+output-to-order path.
+
+Read-only API:
+
+- `GET /api/live-sim/status`
+- `GET /api/live-sim/intents`
+- `GET /api/live-sim/orders`
+- `GET /api/live-sim/executions`
+- `GET /api/live-sim/rejections`
+- `GET /api/live-sim/reconcile`
+- `GET /api/live-sim/errors`
+
+Manual local-token protected API:
+
+- `POST /api/live-sim/evaluate`
+- `POST /api/live-sim/intents/from-candidate/{candidate_instance_id}`
+- `POST /api/live-sim/orders/from-intent/{live_sim_intent_id}`
+- `POST /api/live-sim/reconcile`
+
+See `docs/live_sim_enablement.md` for the full safety gate, eligibility, command, reconcile, and
+rollback policy.
+
 ## Local Token
 
 Set `TRADING_CORE_TOKEN` to require local token auth for Gateway event ingest and command

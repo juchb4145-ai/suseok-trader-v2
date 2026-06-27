@@ -51,6 +51,15 @@ from services.exit_engine import (
     list_exit_orders,
     list_exit_signals,
 )
+from services.live_sim.live_sim_service import (
+    get_live_sim_status,
+    list_live_sim_errors,
+    list_live_sim_executions,
+    list_live_sim_intents,
+    list_live_sim_orders,
+    list_live_sim_reconcile_snapshots,
+    list_live_sim_rejections,
+)
 from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
@@ -93,6 +102,7 @@ DASHBOARD_SECTIONS = [
     "strategy",
     "risk",
     "dry_run",
+    "live_sim",
     "ai_sidecar",
     "ai_explanations",
     "recent_events",
@@ -139,6 +149,7 @@ def build_dashboard_snapshot(
     risk_status = get_risk_status(connection, settings)
     dry_run_status = get_dry_run_status(connection, settings)
     exit_status = get_exit_status(connection, settings)
+    live_sim_status = get_live_sim_status(connection, settings)
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
@@ -164,6 +175,14 @@ def build_dashboard_snapshot(
     dry_run_intents = list_dry_run_intents(connection, limit=min(bounded_limit, 10))
     dry_run_orders = list_dry_run_orders(connection, limit=min(bounded_limit, 10))
     dry_run_positions = list_dry_run_positions(connection, limit=min(bounded_limit, 10))
+    live_sim_intents = list_live_sim_intents(connection, limit=min(bounded_limit, 10))
+    live_sim_orders = list_live_sim_orders(connection, limit=min(bounded_limit, 10))
+    live_sim_executions = list_live_sim_executions(connection, limit=min(bounded_limit, 10))
+    live_sim_rejections = list_live_sim_rejections(connection, limit=min(bounded_limit, 10))
+    live_sim_reconcile = list_live_sim_reconcile_snapshots(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
     exit_evaluations = list_exit_evaluations(connection, limit=min(bounded_limit, 10))
     exit_signals = list_exit_signals(connection, limit=min(bounded_limit, 10))
     exit_intents = list_exit_intents(connection, limit=min(bounded_limit, 10))
@@ -211,6 +230,7 @@ def build_dashboard_snapshot(
         codex_draft_count=codex_draft_count,
         dry_run_status=dry_run_status,
         exit_status=exit_status,
+        live_sim_status=live_sim_status,
         settings=settings,
     )
 
@@ -310,6 +330,37 @@ def build_dashboard_snapshot(
                 "Dashboard는 DRY_RUN 실행 컨트롤 없이 읽기 전용으로 표시합니다.",
             ],
         },
+        "live_sim": {
+            "status": live_sim_status,
+            "enabled": live_sim_status["enabled"],
+            "order_routing_enabled": live_sim_status["order_routing_enabled"],
+            "gateway_command_enabled": live_sim_status["gateway_command_enabled"],
+            "kill_switch": live_sim_status["kill_switch"],
+            "live_real_allowed": False,
+            "account_mode": live_sim_status["account_mode"],
+            "broker_env": live_sim_status["broker_env"],
+            "server_mode": live_sim_status["server_mode"],
+            "safety_gate": live_sim_status["safety_gate"],
+            "intent_count": live_sim_status["intent_count"],
+            "order_count": live_sim_status["order_count"],
+            "execution_count": live_sim_status["execution_count"],
+            "rejection_count": live_sim_status["rejection_count"],
+            "open_order_count": live_sim_status["open_order_count"],
+            "recent_intents": live_sim_intents,
+            "recent_orders": live_sim_orders,
+            "recent_executions": live_sim_executions,
+            "recent_rejections": live_sim_rejections,
+            "reconcile_status": live_sim_reconcile[0] if live_sim_reconcile else None,
+            "recent_reconcile_snapshots": live_sim_reconcile,
+            "warnings": [
+                "LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아닙니다.",
+                "LIVE_REAL은 비활성화되어 있습니다.",
+                "Dashboard는 PR12에서 LIVE_SIM 실행 버튼을 제공하지 않습니다.",
+            ],
+            "order_controls_available": False,
+            "execution_controls_available": False,
+            "read_only": True,
+        },
         "ai_sidecar": {
             "status": build_ai_sidecar_status(settings),
             "insights": ai_insights,
@@ -373,6 +424,8 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "AI Sidecar에는 주문 tool이 없습니다.",
         "PR10 OMS는 DRY_RUN-only이며 broker 주문을 전송하지 않습니다.",
         "DRY_RUN에서도 Gateway 주문 명령은 비활성화되어 있습니다.",
+        "LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아닙니다.",
+        "LIVE_REAL은 비활성화되어 있습니다.",
     ]
     if settings.live_sim_allowed or settings.live_real_allowed:
         warnings.append(
@@ -386,6 +439,10 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "order_controls_available": False,
         "gateway_order_commands_allowed": False,
         "dry_run_only": True,
+        "live_sim_enabled": settings.live_sim_enabled,
+        "live_sim_order_routing_enabled": settings.live_sim_order_routing_enabled,
+        "live_sim_gateway_command_configured": settings.live_sim_gateway_command_enabled,
+        "live_sim_order_controls_available": False,
         "dry_run_order_controls_available": False,
         "broker_order_sent": False,
         "ai_sidecar_enabled": settings.ai_sidecar_enabled,
@@ -453,6 +510,7 @@ def build_dashboard_errors(
         "risk_errors": list_risk_errors(connection, limit=bounded_limit),
         "dry_run_errors": list_dry_run_errors(connection, limit=bounded_limit),
         "dry_run_exit_errors": list_exit_errors(connection, limit=bounded_limit),
+        "live_sim_errors": list_live_sim_errors(connection, limit=bounded_limit),
         "gateway_problem_events": gateway_problem_events,
         "gateway_command_failures": _list_gateway_command_failures(
             connection,
@@ -521,6 +579,7 @@ def _gateway_status_section(
         "recent_event_count": recent_event_count,
         "token_required": bool(settings.trading_core_token),
         "order_commands_allowed": False,
+        "live_sim_order_command_allowed": settings.live_sim_gateway_command_enabled,
         "command_status_counts": command_counts,
     }
 
@@ -541,6 +600,7 @@ def _pipeline_summary(
     codex_draft_count: int,
     dry_run_status: dict[str, Any],
     exit_status: dict[str, Any],
+    live_sim_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -586,6 +646,17 @@ def _pipeline_summary(
             "order_routing_enabled": False,
             "gateway_command_enabled": False,
             "live_order_allowed": False,
+        },
+        "live_sim": {
+            "enabled": live_sim_status["enabled"],
+            "intent_count": live_sim_status["intent_count"],
+            "order_count": live_sim_status["order_count"],
+            "execution_count": live_sim_status["execution_count"],
+            "rejection_count": live_sim_status["rejection_count"],
+            "open_order_count": live_sim_status["open_order_count"],
+            "safety_gate_status": live_sim_status["safety_gate"]["status"],
+            "live_real_allowed": False,
+            "order_controls_available": False,
         },
         "ai_sidecar": {
             "enabled": settings.ai_sidecar_enabled,
@@ -636,6 +707,11 @@ def _pipeline_summary(
                 "key": "dry_run_intents",
                 "label": "DRY_RUN Intents",
                 "count": dry_run_status["intent_count"],
+            },
+            {
+                "key": "live_sim_orders",
+                "label": "LIVE_SIM Orders",
+                "count": live_sim_status["order_count"],
             },
         ],
     }

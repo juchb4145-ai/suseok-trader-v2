@@ -149,15 +149,28 @@
 - Keep GatewayCommand creation, BrokerOrderRequest transmission, broker sell paths, LIVE_SIM,
   LIVE_REAL, account/holding lookup, AI-driven exits, and background exit workers out of scope.
 
-## Next: PR 12. LIVE_SIM Enablement
+## Done: PR 12. LIVE_SIM Enablement
 
-- Enable LIVE_SIM only behind explicit configuration, separate safety gates, and acceptance tests.
-- Treat PR11 as a prerequisite for simulated exit accounting, not as a live order path.
-- Keep LIVE_REAL disabled.
-- Verify Gateway isolation and operator observability.
+- Add `domain/live_sim`, `services/live_sim`, SQLite tables, API routes, CLI tools, and Dashboard
+  read-only panels for simulation-account-only order enablement.
+- Require explicit LIVE_SIM settings, local token protected manual calls, fresh Gateway heartbeat,
+  Gateway orderability, simulation account/server/broker mode, notional/daily/active limits,
+  duplicate checks, DRY_RUN evidence, Strategy `MATCHED_OBSERVATION`, Risk `OBSERVE_PASS`,
+  Candidate `CONTEXT_READY`, and fresh ticks.
+- Allow `send_order` Gateway commands only from the LIVE_SIM service with `source=live_sim`,
+  `mode=LIVE_SIM`, required idempotency, and `live_sim_only=true` / `live_real_allowed=false`
+  metadata.
+- Add mock Gateway acceptance support for LIVE_SIM command ack and optional execution events.
+- Keep LIVE_REAL, generic order enqueue APIs, cancel/modify endpoints, Dashboard execution buttons,
+  background workers, and AI/RCA/Codex-output-driven orders out of scope.
 
-## PR AI-6. LIVE_SIM Review Sidecar
+## Next: PR AI-6. LIVE_SIM Review Sidecar
 
 - Add read-only Sidecar review reports for LIVE_SIM sessions.
 - Summarize behavior, incidents, no-trade causes, and trade reviews.
 - Preserve the rule that Sidecar output never drives automated trading decisions.
+
+## Future: LIVE_REAL Safety Project
+
+- LIVE_REAL remains a separate future project with independent account guards, regulatory checks,
+  operator confirmations, and kill-switch reviews.

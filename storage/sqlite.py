@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 APP_NAME = "suseok-trader-v2"
 
 
@@ -40,6 +40,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_risk_projection_tables(connection)
     _create_dry_run_oms_tables(connection)
     _create_dry_run_exit_tables(connection)
+    _create_live_sim_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -1798,5 +1799,212 @@ def _create_dry_run_exit_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_dry_run_exit_errors_created_at
         ON dry_run_exit_errors (created_at)
+        """
+    )
+
+
+def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_intents (
+            live_sim_intent_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            strategy_observation_id TEXT NOT NULL,
+            risk_observation_id TEXT NOT NULL,
+            dry_run_intent_id TEXT,
+            dry_run_order_id TEXT,
+            trade_date TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            limit_price REAL,
+            notional REAL NOT NULL,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            idempotency_key TEXT NOT NULL UNIQUE,
+            gateway_command_id TEXT,
+            live_sim_only INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0,
+            broker_order_sent INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            expires_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_orders (
+            live_sim_order_id TEXT PRIMARY KEY,
+            live_sim_intent_id TEXT NOT NULL,
+            gateway_command_id TEXT,
+            trade_date TEXT NOT NULL,
+            account_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL,
+            order_type TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            limit_price REAL,
+            notional REAL NOT NULL,
+            status TEXT NOT NULL,
+            broker_order_no TEXT,
+            broker_result_code TEXT,
+            broker_message TEXT,
+            filled_quantity INTEGER NOT NULL DEFAULT 0,
+            remaining_quantity INTEGER NOT NULL DEFAULT 0,
+            avg_fill_price REAL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            live_sim_only INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            command_queued_at TEXT,
+            command_dispatched_at TEXT,
+            broker_acked_at TEXT,
+            last_event_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_executions (
+            live_sim_execution_id TEXT PRIMARY KEY,
+            live_sim_order_id TEXT,
+            live_sim_intent_id TEXT,
+            broker_order_no TEXT,
+            account_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            price REAL NOT NULL,
+            notional REAL NOT NULL,
+            executed_at TEXT NOT NULL,
+            raw_event_json TEXT NOT NULL DEFAULT '{}',
+            live_sim_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_rejections (
+            rejection_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            trade_date TEXT,
+            account_id TEXT,
+            code TEXT,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            evaluated_count INTEGER NOT NULL DEFAULT 0,
+            eligible_count INTEGER NOT NULL DEFAULT 0,
+            intent_count INTEGER NOT NULL DEFAULT 0,
+            command_count INTEGER NOT NULL DEFAULT 0,
+            rejection_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_reconcile_snapshots (
+            reconcile_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            trade_date TEXT,
+            code TEXT,
+            broker_open_order_count INTEGER NOT NULL DEFAULT 0,
+            broker_position_count INTEGER NOT NULL DEFAULT 0,
+            local_open_order_count INTEGER NOT NULL DEFAULT 0,
+            local_position_count INTEGER NOT NULL DEFAULT 0,
+            mismatch_count INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            live_sim_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            live_sim_intent_id TEXT,
+            live_sim_order_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_intents_trade_status
+        ON live_sim_intents (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_intents_code_trade
+        ON live_sim_intents (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_orders_trade_status
+        ON live_sim_orders (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_orders_code_trade
+        ON live_sim_orders (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_orders_gateway_command
+        ON live_sim_orders (gateway_command_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_orders_broker_order_no
+        ON live_sim_orders (broker_order_no)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_executions_code_executed
+        ON live_sim_executions (code, executed_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_reconcile_created
+        ON live_sim_reconcile_snapshots (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_errors_created
+        ON live_sim_errors (created_at)
         """
     )

@@ -481,6 +481,110 @@ const renderDryRun = (snapshot) => {
     : emptyState("DRY_RUN exit signal이 없습니다.");
 };
 
+const renderLiveSim = (snapshot) => {
+  const liveSim = snapshot.live_sim || {};
+  const status = liveSim.status || {};
+  const safetyGate = liveSim.safety_gate || {};
+  const intents = liveSim.recent_intents || [];
+  const orders = liveSim.recent_orders || [];
+  const executions = liveSim.recent_executions || [];
+  const rejections = liveSim.recent_rejections || [];
+  const reconcile = liveSim.recent_reconcile_snapshots || [];
+  document.getElementById("live-sim-badges").innerHTML = [
+    badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
+    badge(status.kill_switch ? "BLOCKED" : "OBSERVE", `kill ${status.kill_switch}`),
+    badge("OBSERVE", `routing ${status.order_routing_enabled}`),
+    badge("OBSERVE", `gateway ${status[`gateway${"_"}command_enabled`]}`),
+    badge("OBSERVE", "LIVE_REAL false"),
+    badge(safetyGate.status || "UNKNOWN", `gate ${safetyGate.status || "UNKNOWN"}`),
+  ].join("");
+  document.getElementById("live-sim-status").innerHTML = [
+    metric("account mode", status.account_mode),
+    metric("broker env", status.broker_env),
+    metric("server mode", status.server_mode),
+    metric("intents", status.intent_count || 0),
+    metric("orders", status.order_count || 0),
+    metric("executions", status.execution_count || 0),
+    metric("rejections", status.rejection_count || 0),
+    metric("open orders", status.open_order_count || 0),
+    metric("max order notional", number(status.max_order_notional)),
+    metric("order controls", liveSim.order_controls_available),
+  ].join("");
+  document.getElementById("live-sim-intents").innerHTML = intents.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>intent</th>
+            <th>종목</th>
+            <th>status</th>
+            <th>side/type</th>
+            <th>수량 / 금액</th>
+            <th>idempotency</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${intents
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.live_sim_intent_id)}</td>
+                  <td>${escapeHtml(row.name)}<br /><span class="muted">${escapeHtml(row.code)}</span></td>
+                  <td>${badge(row.status)}</td>
+                  <td>${escapeHtml(row.side)} / ${escapeHtml(row.order_type)}</td>
+                  <td>${number(row.quantity)} / ${number(row.notional)}</td>
+                  <td class="code-cell">${escapeHtml(row.idempotency_key)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("LIVE_SIM intent가 없습니다.");
+  document.getElementById("live-sim-orders").innerHTML = orders.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>order</th>
+            <th>command</th>
+            <th>종목</th>
+            <th>status</th>
+            <th>수량 / 체결</th>
+            <th>broker_order_no</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${orders
+            .map(
+              (row) => `
+                <tr>
+                  <td class="code-cell">${escapeHtml(row.live_sim_order_id)}</td>
+                  <td class="code-cell">${escapeHtml(row[`gateway${"_"}command_id`])}</td>
+                  <td>${escapeHtml(row.name)}<br /><span class="muted">${escapeHtml(row.code)}</span></td>
+                  <td>${badge(row.status)}</td>
+                  <td>${number(row.quantity)} / ${number(row.filled_quantity)}</td>
+                  <td>${escapeHtml(row.broker_order_no)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("LIVE_SIM order가 없습니다.");
+  document.getElementById("live-sim-events").innerHTML = [
+    logGroup("LIVE_SIM executions", executions),
+    logGroup("LIVE_SIM rejections", rejections),
+    logGroup("LIVE_SIM reconcile", reconcile),
+  ].join("");
+};
+
 const renderErrors = (snapshot) => {
   const recent = ((snapshot.recent_events || {}).gateway_events || []).slice(0, 8);
   const errors = snapshot.errors || {};
@@ -493,6 +597,7 @@ const renderErrors = (snapshot) => {
     ["Risk errors", errors.risk_errors || []],
     ["DRY_RUN errors", errors.dry_run_errors || []],
     ["DRY_RUN exit errors", errors.dry_run_exit_errors || []],
+    ["LIVE_SIM errors", errors.live_sim_errors || []],
     ["Gateway problem events", errors.gateway_problem_events || []],
     ["Gateway command failures", errors[`gateway${"_"}command_failures`] || []],
   ];
@@ -745,6 +850,7 @@ const renderSnapshot = (snapshot) => {
   renderStrategy(snapshot);
   renderRisk(snapshot);
   renderDryRun(snapshot);
+  renderLiveSim(snapshot);
   renderErrors(snapshot);
   renderAi(snapshot);
   renderAiExplanations(snapshot);
