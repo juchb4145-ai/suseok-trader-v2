@@ -1,0 +1,60 @@
+{
+  "source_type": "MOCK",
+  "source_name": "sample_theme_seed",
+  "metadata": {
+    "purpose": "PR5 bootstrap/testing only; not investment advice"
+  },
+  "themes": [
+    {
+      "theme_id": "semiconductor",
+      "theme_name": "반도체",
+      "metadata": {
+        "purpose": "membership contract test fixture"
+      },
+      "members": [
+        {
+          "code": "005930",
+          "name": "삼성전자"
+        },
+        {
+          "code": "000660",
+          "name": "SK하이닉스"
+        }
+      ]
+    },
+    {
+      "theme_id": "secondary_battery",
+      "theme_name": "2차전지",
+      "metadata": {
+        "purpose": "membership contract test fixture"
+      },
+      "members": [
+        {
+          "code": "373220",
+          "name": "LG에너지솔루션"
+        },
+        {
+          "code": "006400",
+          "name": "삼성SDI"
+        }
+      ]
+    },
+    {
+      "theme_id": "robotics",
+      "theme_name": "로봇",
+      "metadata": {
+        "purpose": "membership contract test fixture"
+      },
+      "members": [
+        {
+          "code": "277810",
+          "name": "레인보우로보틱스"
+        },
+        {
+          "code": "108490",
+          "name": "로보티즈"
+        }
+      ]
+    }
+  ]
+}

@@ -5,8 +5,9 @@ Broker-neutral foundation for a Kiwoom OpenAPI+ based domestic stock trading sys
 The project currently contains the Core API bootstrap, settings loading, SQLite initialization,
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
 plus Gateway transport surface, the PR 3 mock Gateway process skeleton, and the PR 4 read-only
-Market Data Service projection. It intentionally does not contain Kiwoom or PyQt imports,
-strategy decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
+Market Data Service projection, and the PR 5 read-only Theme Membership + Theme Snapshot layer.
+It intentionally does not contain Kiwoom or PyQt imports, candidate FSM behavior, strategy
+decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -72,6 +73,57 @@ python -m tools.rebuild_market_data_projection --clear-projection
 ```
 
 Omit `--clear-projection` to run a non-destructive replay that skips already projected events.
+
+## Theme Service
+
+PR 5 adds read-only theme membership and snapshot projections over Market Data Service rows.
+Theme membership stores `source_type` so later importers can distinguish `MANUAL`, `IMPORTED`,
+`NAVER_REFERENCE`, `CONDITION_DERIVED`, and `MOCK` sources. The bundled sample file is only a
+bootstrap/testing seed for verifying the import and snapshot contract; it is not an operator
+workflow for maintaining all production theme membership by hand and is not investment advice.
+
+Theme endpoints:
+
+- `GET /api/themes/status`
+- `GET /api/themes`
+- `GET /api/themes/{theme_id}`
+- `GET /api/themes/{theme_id}/members`
+- `GET /api/themes/by-code/{code}`
+- `GET /api/themes/snapshots/latest`
+- `GET /api/themes/{theme_id}/snapshot/latest`
+- `GET /api/themes/{theme_id}/snapshots`
+- `GET /api/themes/projection-errors`
+- `POST /api/themes/import`
+- `POST /api/themes/snapshots/rebuild`
+
+Import the sample theme membership:
+
+```powershell
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+```
+
+Rebuild snapshots from the current market data projection:
+
+```powershell
+python -m tools.rebuild_theme_snapshots
+```
+
+Check the mock-to-theme flow:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+python -m tools.rebuild_theme_snapshots --theme-id semiconductor
+Invoke-RestMethod http://127.0.0.1:8000/api/themes/status
+Invoke-RestMethod http://127.0.0.1:8000/api/themes/snapshots/latest
+```
+
+Theme snapshots aggregate latest ticks, readiness, 1/3/5 minute trade-value deltas, VWAP, and
+condition observations. They classify a theme as `DATA_WAIT`, `WATCH`, `SPREADING`, or `LEADING`
+with deterministic observation rules. They do not create candidates, strategy decisions, risk
+decisions, order intents, or broker commands.
+
+See `docs/theme_service.md` for the schema, score formula, state rules, and API details.
 
 ## Mock Gateway
 

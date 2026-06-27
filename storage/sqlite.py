@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 APP_NAME = "suseok-trader-v2"
 
 
@@ -32,6 +32,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_sidecar_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
+    _create_theme_projection_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -377,5 +378,180 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_projection_errors_created_at
         ON market_projection_errors (created_at)
+        """
+    )
+
+
+def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS themes (
+            theme_id TEXT PRIMARY KEY,
+            theme_name TEXT NOT NULL UNIQUE,
+            source_type TEXT NOT NULL,
+            source_name TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_members (
+            theme_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_name TEXT,
+            active INTEGER NOT NULL DEFAULT 1,
+            weight REAL NOT NULL DEFAULT 1.0,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (theme_id, code)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            theme_id TEXT NOT NULL,
+            theme_name TEXT NOT NULL,
+            calculated_at TEXT NOT NULL,
+            member_count INTEGER NOT NULL,
+            active_member_count INTEGER NOT NULL,
+            observed_member_count INTEGER NOT NULL,
+            fresh_member_count INTEGER NOT NULL,
+            fresh_coverage_ratio REAL NOT NULL,
+            rising_member_count INTEGER NOT NULL,
+            rising_ratio REAL NOT NULL,
+            avg_change_rate REAL NOT NULL,
+            max_change_rate REAL NOT NULL,
+            total_trade_value REAL NOT NULL,
+            trade_value_delta_1m REAL NOT NULL,
+            trade_value_delta_3m REAL NOT NULL,
+            trade_value_delta_5m REAL NOT NULL,
+            leading_code TEXT,
+            leading_name TEXT,
+            co_leader_codes_json TEXT NOT NULL,
+            follower_codes_json TEXT NOT NULL,
+            state TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_snapshot_members (
+            snapshot_id TEXT NOT NULL,
+            theme_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            price INTEGER,
+            change_rate REAL,
+            cumulative_trade_value REAL,
+            volume_delta_1m INTEGER NOT NULL DEFAULT 0,
+            trade_value_delta_1m REAL NOT NULL DEFAULT 0,
+            trade_value_delta_3m REAL NOT NULL DEFAULT 0,
+            trade_value_delta_5m REAL NOT NULL DEFAULT 0,
+            execution_strength REAL,
+            vwap REAL,
+            above_vwap INTEGER NOT NULL DEFAULT 0,
+            readiness_status TEXT NOT NULL,
+            member_role TEXT NOT NULL,
+            tick_age_sec REAL,
+            event_ts TEXT,
+            calculated_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (snapshot_id, code)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_latest_snapshots (
+            theme_id TEXT PRIMARY KEY,
+            snapshot_id TEXT NOT NULL,
+            theme_name TEXT NOT NULL,
+            calculated_at TEXT NOT NULL,
+            state TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            leading_code TEXT,
+            leading_name TEXT,
+            fresh_coverage_ratio REAL NOT NULL,
+            rising_ratio REAL NOT NULL,
+            total_trade_value REAL NOT NULL,
+            trade_value_delta_1m REAL NOT NULL,
+            trade_value_delta_3m REAL NOT NULL,
+            trade_value_delta_5m REAL NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_import_batches (
+            batch_id TEXT PRIMARY KEY,
+            source_type TEXT NOT NULL,
+            source_name TEXT,
+            imported_at TEXT NOT NULL DEFAULT (datetime('now')),
+            theme_count INTEGER NOT NULL,
+            member_count INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT,
+            payload_hash TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_projection_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            theme_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_members_code
+        ON theme_members (code)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_members_theme_active
+        ON theme_members (theme_id, active)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_snapshots_theme_calculated
+        ON theme_snapshots (theme_id, calculated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_snapshot_members_code
+        ON theme_snapshot_members (code)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_latest_snapshots_state
+        ON theme_latest_snapshots (state)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_projection_errors_created_at
+        ON theme_projection_errors (created_at)
         """
     )

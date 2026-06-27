@@ -130,3 +130,55 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
         "ai_requests",
         "ai_insights",
     }
+
+
+def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'themes',
+                'theme_members',
+                'theme_snapshots',
+                'theme_snapshot_members',
+                'theme_latest_snapshots',
+                'theme_import_batches',
+                'theme_projection_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'market_ticks_latest',
+                'market_minute_bars',
+                'gateway_events',
+                'ai_requests'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "themes",
+        "theme_members",
+        "theme_snapshots",
+        "theme_snapshot_members",
+        "theme_latest_snapshots",
+        "theme_import_batches",
+        "theme_projection_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "market_ticks_latest",
+        "market_minute_bars",
+        "gateway_events",
+        "ai_requests",
+    }

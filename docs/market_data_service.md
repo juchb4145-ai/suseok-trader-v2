@@ -9,7 +9,7 @@ is the source of truth. Market data tables are derived state and can be rebuilt 
 - Normalize accepted `price_tick`, `condition_event`, and `tr_response` Gateway events.
 - Keep latest tick, tick samples, 1/3/5 minute bars, VWAP, condition signals, TR snapshots, and
   projection errors in SQLite.
-- Provide stable read APIs for future Theme, Candidate, Strategy, and Dashboard work.
+- Provide stable read APIs for Theme Snapshot, future Candidate, Strategy, and Dashboard work.
 - Avoid strategy, risk, OMS, order intent, and broker order side effects.
 
 ## Projection Tables
@@ -78,6 +78,19 @@ Readiness is calculated dynamically by `get_market_data_readiness()`:
 Readiness also reports whether 1m, 3m, and 5m bars exist, whether any VWAP is available, and
 reason codes such as `BAR_MISSING`, `BAR_MISSING_60`, and `VWAP_MISSING`.
 
+## Theme Snapshot Connection
+
+PR 5 Theme Service reads Market Data Service projections as a downstream derived projection. It
+aggregates latest ticks, minute bars, readiness, VWAP, and latest condition observations by theme
+membership. Market Data Service remains read-only and does not know about theme state, candidate
+state, strategy decisions, risk decisions, or order routing.
+
+Theme snapshots are rebuilt separately through:
+
+```powershell
+python -m tools.rebuild_theme_snapshots
+```
+
 ## Rebuild
 
 Use the CLI to replay accepted market events:
@@ -119,7 +132,6 @@ PR 4 does not implement:
 - OMS;
 - order intent;
 - candidate FSM;
-- theme engine;
 - send, cancel, or modify order paths;
 - OpenAI API calls;
 - AI Sidecar context builder.

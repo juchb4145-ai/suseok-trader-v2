@@ -36,12 +36,38 @@ class Settings:
     market_data_bar_intervals_sec: tuple[int, ...] = (60, 180, 300)
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
+    theme_service_enabled: bool = True
+    theme_min_active_members: int = 2
+    theme_min_fresh_coverage_ratio: float = 0.3
+    theme_leading_rising_ratio: float = 0.5
+    theme_spreading_rising_ratio: float = 0.35
+    theme_min_total_trade_value: float = 0.0
+    theme_leader_min_change_rate: float = 0.0
+    theme_leader_min_trade_value_delta_1m: float = 0.0
+    theme_co_leader_score_ratio: float = 0.8
+    theme_snapshot_max_members: int = 200
+    theme_import_allow_replace: bool = False
 
     def __post_init__(self) -> None:
         if self.market_data_degraded_tick_stale_sec < self.market_data_tick_stale_sec:
             raise ValueError(
                 "MARKET_DATA_DEGRADED_TICK_STALE_SEC must be >= MARKET_DATA_TICK_STALE_SEC"
             )
+        for field_name in (
+            "theme_min_fresh_coverage_ratio",
+            "theme_leading_rising_ratio",
+            "theme_spreading_rising_ratio",
+            "theme_co_leader_score_ratio",
+        ):
+            _validate_ratio(getattr(self, field_name), field_name.upper())
+        if self.theme_min_active_members < 1:
+            raise ValueError("THEME_MIN_ACTIVE_MEMBERS must be >= 1")
+        if self.theme_snapshot_max_members < 1:
+            raise ValueError("THEME_SNAPSHOT_MAX_MEMBERS must be >= 1")
+        if self.theme_min_total_trade_value < 0:
+            raise ValueError("THEME_MIN_TOTAL_TRADE_VALUE must be >= 0")
+        if self.theme_leader_min_trade_value_delta_1m < 0:
+            raise ValueError("THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M must be >= 0")
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -117,6 +143,48 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "MARKET_DATA_MAX_RECENT_TICKS",
             min_value=1,
         ),
+        theme_service_enabled=_parse_bool(env.get("THEME_SERVICE_ENABLED", "true")),
+        theme_min_active_members=_parse_int(
+            env.get("THEME_MIN_ACTIVE_MEMBERS", "2"),
+            "THEME_MIN_ACTIVE_MEMBERS",
+            min_value=1,
+        ),
+        theme_min_fresh_coverage_ratio=_parse_float(
+            env.get("THEME_MIN_FRESH_COVERAGE_RATIO", "0.3"),
+            "THEME_MIN_FRESH_COVERAGE_RATIO",
+        ),
+        theme_leading_rising_ratio=_parse_float(
+            env.get("THEME_LEADING_RISING_RATIO", "0.5"),
+            "THEME_LEADING_RISING_RATIO",
+        ),
+        theme_spreading_rising_ratio=_parse_float(
+            env.get("THEME_SPREADING_RISING_RATIO", "0.35"),
+            "THEME_SPREADING_RISING_RATIO",
+        ),
+        theme_min_total_trade_value=_parse_float(
+            env.get("THEME_MIN_TOTAL_TRADE_VALUE", "0"),
+            "THEME_MIN_TOTAL_TRADE_VALUE",
+            min_value=0.0,
+        ),
+        theme_leader_min_change_rate=_parse_float(
+            env.get("THEME_LEADER_MIN_CHANGE_RATE", "0.0"),
+            "THEME_LEADER_MIN_CHANGE_RATE",
+        ),
+        theme_leader_min_trade_value_delta_1m=_parse_float(
+            env.get("THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M", "0"),
+            "THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M",
+            min_value=0.0,
+        ),
+        theme_co_leader_score_ratio=_parse_float(
+            env.get("THEME_CO_LEADER_SCORE_RATIO", "0.8"),
+            "THEME_CO_LEADER_SCORE_RATIO",
+        ),
+        theme_snapshot_max_members=_parse_int(
+            env.get("THEME_SNAPSHOT_MAX_MEMBERS", "200"),
+            "THEME_SNAPSHOT_MAX_MEMBERS",
+            min_value=1,
+        ),
+        theme_import_allow_replace=_parse_bool(env.get("THEME_IMPORT_ALLOW_REPLACE", "false")),
     )
 
 
@@ -148,6 +216,23 @@ def _parse_int(value: str, field_name: str, *, min_value: int | None = None) -> 
     if min_value is not None and parsed < min_value:
         raise ValueError(f"{field_name} must be >= {min_value}")
     return parsed
+
+
+def _parse_float(value: str, field_name: str, *, min_value: float | None = None) -> float:
+    normalized = value.strip()
+    try:
+        parsed = float(normalized)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported float value for {field_name}: {value!r}") from exc
+
+    if min_value is not None and parsed < min_value:
+        raise ValueError(f"{field_name} must be >= {min_value}")
+    return parsed
+
+
+def _validate_ratio(value: float, field_name: str) -> None:
+    if value < 0 or value > 1:
+        raise ValueError(f"{field_name} must be a ratio between 0 and 1")
 
 
 def _parse_intervals(value: str) -> tuple[int, ...]:

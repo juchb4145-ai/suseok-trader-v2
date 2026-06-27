@@ -59,3 +59,15 @@ def test_order_execution_functions_strategy_risk_and_oms_are_not_implemented() -
     assert "class RiskGate" not in combined_source
     assert "class OMS" not in combined_source
     assert "class Oms" not in combined_source
+
+
+def test_pr5_does_not_add_candidate_or_ai_execution_surfaces() -> None:
+    paths = {route.path for route in app.routes}
+    combined_source = project_python_source()
+
+    assert "/api/candidates" not in paths
+    assert "class CandidateFSM" not in combined_source
+    assert "class CandidateStateMachine" not in combined_source
+    assert "class AISidecarContextBuilder" not in combined_source
+    assert "def build_ai_sidecar_context" not in combined_source
+    assert "def call_openai" not in combined_source

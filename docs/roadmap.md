@@ -43,13 +43,14 @@
 - Provide read-only market data access to strategy and dashboard surfaces.
 - Preserve broker-neutral market contracts.
 
-## Next: PR 5. Theme Membership + Theme Snapshot
+## Done: PR 5. Theme Membership + Theme Snapshot
 
-- Track theme membership and daily theme snapshots.
-- Connect condition and market data observations to theme-level context.
-- Keep theme data as observation input only.
+- Add source-typed theme membership import and query APIs.
+- Build read-only theme snapshots from Market Data Service projections.
+- Provide theme state, quality, leader/co-leader/follower observation context.
+- Keep theme data as observation input only with no Candidate, Strategy, Risk, OMS, or order path.
 
-## PR 6. Candidate FSM
+## Next: PR 6. Candidate FSM
 
 - Add candidate lifecycle states and deterministic transitions.
 - Store candidate state changes through the event store.

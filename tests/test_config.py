@@ -15,6 +15,12 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
+    assert settings.theme_service_enabled is True
+    assert settings.theme_min_active_members == 2
+    assert settings.theme_min_fresh_coverage_ratio == 0.3
+    assert settings.theme_leading_rising_ratio == 0.5
+    assert settings.theme_spreading_rising_ratio == 0.35
+    assert settings.theme_import_allow_replace is False
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -39,3 +45,12 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "minute-aligned" in str(exc)
     else:
         raise AssertionError("expected invalid market data interval configuration")
+
+
+def test_theme_ratio_settings_are_validated() -> None:
+    try:
+        load_settings({"THEME_MIN_FRESH_COVERAGE_RATIO": "1.5"})
+    except ValueError as exc:
+        assert "ratio between 0 and 1" in str(exc)
+    else:
+        raise AssertionError("expected invalid theme ratio configuration")
