@@ -87,17 +87,19 @@
 - Enforce max context size and order-context restrictions.
 - Do not call OpenAI APIs.
 
-## Next: PR AI-2. OpenAI Client + Structured Outputs
+## Done: PR AI-2. OpenAI Client + Structured Outputs
 
-- Add the OpenAI client behind explicit AI Sidecar enablement.
-- Use structured outputs and schema validation.
+- Add an optional OpenAI Responses API client behind explicit AI Sidecar enablement.
+- Use task-specific structured outputs and local schema validation.
+- Add prompt registry, output schema builder, manual runner, request store, and insight store.
+- Add manual execution API protected by the local token when configured.
 - Store invalid outputs as failures only; never feed outputs into trading automation.
-- Keep order tools and order context disabled unless a later safety review explicitly enables them.
-- Keep OMS + DRY_RUN for a later PR after separate safety review.
+- Keep tools/function calling and order tools disabled.
+- Keep Dashboard display-only with no AI run button.
 
-## PR AI-3. No-trade RCA / Candidate Block RCA
+## Next: PR AI-3. No-trade RCA / Candidate Block RCA
 
-- Add Sidecar tasks for no-trade and candidate block explanations.
+- Expand the no-trade and candidate block explanation workflow on top of the AI-2 runner.
 - Surface results in reports and operator review.
 - Keep results out of Strategy, Risk, and OMS automatic decisions.
 

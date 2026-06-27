@@ -17,9 +17,9 @@ Strategy owns deterministic candidate evaluation. Risk owns deterministic risk c
 OMS owns order lifecycle behavior in later PRs. Gateway owns broker transport isolation.
 
 The Sidecar sits outside those decision paths. PR AI-1 adds a bounded, sanitized context
-builder that reads Event Store and projection state for operator preview. Later PRs may
-use those packets for model execution, but Strategy, Risk, and OMS must not use Sidecar
-output as automatic decision input.
+builder that reads Event Store and projection state for operator preview. PR AI-2 adds a
+manual, optional structured-output execution layer. Strategy, Risk, and OMS must not use
+Sidecar output as automatic decision input.
 
 ## Read-only Principles
 
@@ -53,17 +53,27 @@ restriction. `persist=true` stores the final packet in `ai_context_packets` for 
 
 ## Event Store Analysis Shape
 
-The intended Sidecar flow is:
+The AI-2 Sidecar flow is:
 
 1. Deterministic services write market, candidate, risk, OMS, Gateway, and ops events.
 2. The Context Builder creates a bounded read-only packet for one allowed Sidecar task.
-3. A later OpenAI client may consume that packet behind explicit enablement.
-4. The Sidecar validates the requested task and output schema.
-5. Valid insights are stored for read-only display.
-6. Invalid, timed out, or errored runs are recorded as failures without insight storage.
+3. The Prompt Registry builds a read-only system/user prompt from the redacted payload.
+4. The OpenAI Responses client adapter sends strict JSON Schema structured output metadata.
+5. The runner validates the model output locally against the task schema and domain policy.
+6. Valid insights are stored for read-only display.
+7. Invalid, timed out, or errored runs are recorded as failures without insight storage.
 
-PR AI-1 stops at step 2. It does not implement OpenAI calls, prompt runners, structured
-output parsing, or insight generation.
+This path is manual-only. There is no background worker, no dashboard run button, and no automatic
+connection to Strategy, Risk, Candidate, Gateway, or OMS mutation paths.
+
+```mermaid
+flowchart LR
+    A["Context Builder"] --> B["Prompt Registry"]
+    B --> C["OpenAI Responses Client Adapter"]
+    C --> D["Structured Output Validator"]
+    D --> E["AI Insight Store"]
+    D --> F["AI Request Failure"]
+```
 
 ## Session Usage
 
@@ -80,8 +90,22 @@ context. Codex Prompt Draft output may provide text that a human copies into Cod
 it must not perform automatic code changes, branch creation, commits, pushes, or PR
 creation.
 
-## OpenAI Client Timing
+## OpenAI Client
 
-OpenAI API integration is intentionally out of scope for PR AI-1. PR AI-2 may add an OpenAI
-client with structured outputs, explicit enablement, timeout handling, and schema validation.
-The system must continue to boot, test, and serve status without an API key.
+The OpenAI client is optional and unavailable unless all availability checks pass:
+
+- `AI_SIDECAR_ENABLED=true`
+- `AI_SIDECAR_MODEL` is non-empty
+- the API key exists in `AI_SIDECAR_OPENAI_API_KEY_ENV`
+- the OpenAI SDK import succeeds
+- Responses API and structured outputs are enabled
+- tools/function calling and order tools remain disabled
+
+The system continues to boot, test, and serve status without an API key or SDK. Tests use the mock
+model client only.
+
+## Disabled Tools
+
+PR AI-2 does not enable OpenAI tools/function calling, web search, code interpreter, MCP tool
+integration, or any order-related tool. The client adapter passes structured output schema metadata
+only.

@@ -4,7 +4,8 @@
 
 The AI Sidecar is disabled by default. The Core API must operate normally without an
 OpenAI API key, SDK initialization, or model call. PR AI-1 adds read-only context preview
-endpoints, but still has no model execution path.
+endpoints. PR AI-2 adds an optional manual model execution path, but it remains disabled by
+default and produces read-only structured insights only.
 
 ## Forbidden Actions
 
@@ -40,8 +41,8 @@ Allowed output is limited to Dashboard, Report, Operator Review, and Codex Promp
 surfaces.
 
 PR AI-1 additionally allows bounded, redacted context packet previews for the same task list.
-Those packets are input material for future human-reviewed model execution, not trading signals
-and not strategy/risk/OMS automatic input.
+PR AI-2 may use those packets as model input for manual execution. Context packets and AI insights
+are not trading signals and not strategy/risk/OMS automatic input.
 
 ## Schema Validation
 
@@ -59,12 +60,12 @@ contain or represent a trading action.
 
 ## Timeout And Error Handling
 
-Future model calls must use bounded request timeouts and must degrade to a non-trading
+Model calls must use bounded request timeouts and must degrade to a non-trading
 failure state. Timeouts, unavailable API keys, model errors, schema errors, and policy
 errors must not block the Core API from serving health/status endpoints and must not
 create trading side effects.
 
 ## API Key Handling
 
-An OpenAI API key is optional until a later explicit integration PR. Missing keys must
-leave `openai_client_available=false` and must not fail app startup or tests.
+An OpenAI API key is optional. Missing keys must leave `openai_client_available=false`,
+record manual run attempts as failures, and must not fail app startup or tests.

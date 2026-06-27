@@ -18,6 +18,12 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 
+from services.ai_sidecar.openai_client import get_openai_client_status
+from services.ai_sidecar.request_store import (
+    get_ai_request_status_counts,
+    get_last_ai_request_error,
+    list_ai_requests,
+)
 from services.candidate_service import (
     get_candidate,
     get_candidate_status,
@@ -109,6 +115,9 @@ def build_dashboard_snapshot(
     strategy_observations = list_latest_strategy_observations(connection, limit=bounded_limit)
     risk_observations = list_latest_risk_observations(connection, limit=bounded_limit)
     ai_insights = list_ai_insights(connection, limit=bounded_limit)
+    ai_requests = list_ai_requests(connection, limit=bounded_limit)
+    ai_request_status_counts = get_ai_request_status_counts(connection)
+    ai_last_error = get_last_ai_request_error(connection)
 
     strategy_status_counts = _enum_counts(
         connection,
@@ -141,6 +150,7 @@ def build_dashboard_snapshot(
         risk_status=risk_status,
         risk_status_counts=risk_status_counts,
         ai_insights=ai_insights,
+        ai_request_status_counts=ai_request_status_counts,
         settings=settings,
     )
 
@@ -198,8 +208,13 @@ def build_dashboard_snapshot(
             "status": build_ai_sidecar_status(settings),
             "insights": ai_insights,
             "insight_count": len(ai_insights),
+            "requests": ai_requests,
+            "request_status_counts": ai_request_status_counts,
+            "recent_request_count": len(ai_requests),
+            "recent_insight_count": len(ai_insights),
+            "last_error": ai_last_error,
             "execution_controls_available": False,
-            "notice": "AI Sidecar는 read-only 표시 전용이며 이번 PR에서 실행하지 않습니다.",
+            "notice": "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         },
         "recent_events": {
             "gateway_events": gateway_recent_events,
@@ -230,6 +245,9 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "현재 Dashboard는 읽기 전용이며 주문 기능이 없습니다.",
         "OBSERVE_PASS는 주문 승인이 아닙니다.",
         "MATCHED_OBSERVATION은 매수 신호가 아닙니다.",
+        "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
+        "AI Sidecar tools/function calling은 비활성화되어 있습니다.",
+        "AI Sidecar에는 주문 tool이 없습니다.",
     ]
     if settings.live_sim_allowed or settings.live_real_allowed:
         warnings.append(
@@ -246,7 +264,7 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "ai_context_builder_available": True,
         "ai_context_preview_available": settings.ai_sidecar_context_builder_enabled,
         "ai_execution_available": False,
-        "openai_client_available": False,
+        "openai_client_available": get_openai_client_status(settings)["available"],
         "order_context_allowed": settings.ai_sidecar_order_context_allowed,
         "observe_only_pipeline": True,
         "warnings": warnings,
@@ -254,6 +272,7 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
 
 
 def build_ai_sidecar_status(settings: Settings) -> dict[str, Any]:
+    client_status = get_openai_client_status(settings)
     return {
         "enabled": settings.ai_sidecar_enabled,
         "allow_intraday": settings.ai_sidecar_intraday_allowed,
@@ -261,12 +280,19 @@ def build_ai_sidecar_status(settings: Settings) -> dict[str, Any]:
         "model": settings.ai_sidecar_model,
         "allowed_tasks": get_allowed_tasks(),
         "forbidden_actions": get_forbidden_actions(),
-        "openai_client_available": False,
-        "execution_api_available": False,
+        "openai_client_available": client_status["available"],
+        "execution_api_available": True,
         "context_builder_available": True,
         "context_builder_enabled": settings.ai_sidecar_context_builder_enabled,
-        "ai_execution_available": False,
+        "ai_execution_available": (
+            settings.ai_sidecar_enabled and settings.ai_sidecar_allow_manual_run
+        ),
         "order_context_allowed": settings.ai_sidecar_order_context_allowed,
+        "responses_api_enabled": settings.ai_sidecar_use_responses_api,
+        "structured_outputs_enabled": settings.ai_sidecar_structured_outputs_enabled,
+        "strict_schema": settings.ai_sidecar_strict_schema,
+        "tools_enabled": False,
+        "order_tools_enabled": False,
         "max_context_chars": settings.ai_sidecar_max_context_chars,
         "context_schema_version": settings.ai_sidecar_context_schema_version,
     }
@@ -381,6 +407,7 @@ def _pipeline_summary(
     risk_status: dict[str, Any],
     risk_status_counts: dict[str, int],
     ai_insights: list[dict[str, Any]],
+    ai_request_status_counts: dict[str, int],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -418,10 +445,13 @@ def _pipeline_summary(
         "ai_sidecar": {
             "enabled": settings.ai_sidecar_enabled,
             "insight_count": len(ai_insights),
-            "execution_api_available": False,
+            "request_status_counts": ai_request_status_counts,
+            "execution_api_available": True,
             "context_builder_available": True,
-            "openai_client_available": False,
+            "openai_client_available": get_openai_client_status(settings)["available"],
             "order_context_allowed": settings.ai_sidecar_order_context_allowed,
+            "tools_enabled": False,
+            "order_tools_enabled": False,
         },
         "funnel": [
             {

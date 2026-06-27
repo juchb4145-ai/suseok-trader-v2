@@ -239,12 +239,16 @@ def test_ai_context_api_endpoints_are_get_read_only_without_api_key(tmp_path, mo
     assert no_trade.json()["task_type"] == "NO_TRADE_RCA"
 
 
-def test_safety_regression_no_ai_execution_or_order_routes() -> None:
+def test_safety_regression_ai_execution_is_manual_run_only_and_no_order_routes() -> None:
     route_methods = {
         route.path: route.methods
         for route in app.routes
         if route.path.startswith("/api/ai-sidecar")
     }
 
-    assert "/api/ai-sidecar/run" not in route_methods
-    assert all("POST" not in methods for methods in route_methods.values())
+    assert "/api/ai-sidecar/run" in route_methods
+    assert all(
+        "POST" not in methods or path.startswith("/api/ai-sidecar/run")
+        for path, methods in route_methods.items()
+    )
+    assert "/api/orders/enqueue" not in {route.path for route in app.routes}

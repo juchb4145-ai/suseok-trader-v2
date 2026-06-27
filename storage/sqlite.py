@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 APP_NAME = "suseok-trader-v2"
 
 
@@ -70,13 +70,21 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
             trade_date TEXT,
             related_entity_type TEXT,
             related_entity_id TEXT,
+            context_id TEXT,
             prompt_hash TEXT,
             context_hash TEXT,
+            output_schema_name TEXT,
             model TEXT,
             status TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             completed_at TEXT,
-            error_message TEXT
+            error_message TEXT,
+            validation_error TEXT,
+            latency_ms REAL,
+            input_chars INTEGER,
+            output_chars INTEGER,
+            raw_response_json TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )
@@ -97,6 +105,38 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
             schema_version TEXT NOT NULL,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "ai_requests",
+        {
+            "context_id": "TEXT",
+            "output_schema_name": "TEXT",
+            "validation_error": "TEXT",
+            "latency_ms": "REAL",
+            "input_chars": "INTEGER",
+            "output_chars": "INTEGER",
+            "raw_response_json": "TEXT",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_task_status_created
+        ON ai_requests (task_type, status, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_requests_related_entity
+        ON ai_requests (related_entity_type, related_entity_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_insights_task_created
+        ON ai_insights (task_type, created_at)
         """
     )
     connection.execute(
@@ -186,6 +226,20 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
         ON ai_context_build_errors (created_at)
         """
     )
+
+
+def _ensure_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: dict[str, str],
+) -> None:
+    existing = {
+        str(row["name"])
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for column_name, definition in columns.items():
+        if column_name not in existing:
+            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
 def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:

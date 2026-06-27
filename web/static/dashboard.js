@@ -320,10 +320,28 @@ const renderAi = (snapshot) => {
     metric("enabled", status.enabled),
     metric("execution_api_available", status.execution_api_available),
     metric("openai_client_available", status.openai_client_available),
+    metric("tools_enabled", status.tools_enabled),
+    metric("order_tools_enabled", status.order_tools_enabled),
+    metric("recent_request_count", ai.recent_request_count || 0),
     metric("insight_count", ai.insight_count || 0),
   ].join("");
 
   const insights = ai.insights || [];
+  const requests = ai.requests || [];
+  const requestCards = requests.length
+    ? requests
+        .slice(0, 5)
+        .map(
+          (item) => `
+            <article class="log-card">
+              <h3>${escapeHtml(item.task_type)} · ${escapeHtml(item.status)}</h3>
+              <p class="muted">${escapeHtml(item.created_at)}</p>
+              ${rawJson(item)}
+            </article>
+          `,
+        )
+        .join("")
+    : emptyState("표시할 AI request가 없습니다.");
   document.getElementById("ai-insights").innerHTML = insights.length
     ? insights
         .map(
@@ -338,6 +356,7 @@ const renderAi = (snapshot) => {
         )
         .join("")
     : emptyState("표시할 AI insight가 없습니다.");
+  document.getElementById("ai-requests").innerHTML = requestCards;
 };
 
 const logGroup = (title, rows) => `

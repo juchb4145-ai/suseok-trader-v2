@@ -11,6 +11,20 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.ai_sidecar_enabled is False
     assert settings.ai_sidecar_intraday_allowed is False
     assert settings.ai_sidecar_order_context_allowed is False
+    assert settings.ai_sidecar_model == ""
+    assert settings.ai_sidecar_openai_api_key_env == "OPENAI_API_KEY"
+    assert settings.ai_sidecar_openai_base_url == ""
+    assert settings.ai_sidecar_use_responses_api is True
+    assert settings.ai_sidecar_structured_outputs_enabled is True
+    assert settings.ai_sidecar_strict_schema is True
+    assert settings.ai_sidecar_tools_enabled is False
+    assert settings.ai_sidecar_order_tools_enabled is False
+    assert settings.ai_sidecar_max_output_chars == 6000
+    assert settings.ai_sidecar_max_retries == 1
+    assert settings.ai_sidecar_store_raw_response is False
+    assert settings.ai_sidecar_allow_manual_run is True
+    assert settings.ai_sidecar_request_retention_days == 30
+    assert settings.ai_sidecar_default_operator_action == "REVIEW_ONLY"
     assert settings.ai_sidecar_context_builder_enabled is True
     assert settings.ai_sidecar_context_default_limit == 50
     assert settings.ai_sidecar_context_max_limit == 200
@@ -226,3 +240,18 @@ def test_ai_context_settings_are_validated() -> None:
         assert "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid AI context limit setting")
+
+    for field_name in ("AI_SIDECAR_TOOLS_ENABLED", "AI_SIDECAR_ORDER_TOOLS_ENABLED"):
+        try:
+            load_settings({field_name: "true"})
+        except ValueError as exc:
+            assert field_name in str(exc)
+        else:
+            raise AssertionError(f"expected invalid {field_name} setting")
+
+    try:
+        load_settings({"AI_SIDECAR_MAX_RETRIES": "4"})
+    except ValueError as exc:
+        assert "AI_SIDECAR_MAX_RETRIES" in str(exc)
+    else:
+        raise AssertionError("expected invalid AI retry setting")

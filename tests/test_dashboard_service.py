@@ -67,8 +67,11 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert snapshot["errors"]["strategy_errors"]
     assert snapshot["errors"]["risk_errors"]
     assert snapshot["ai_sidecar"]["insight_count"] == 1
-    assert snapshot["ai_sidecar"]["status"]["execution_api_available"] is False
+    assert snapshot["ai_sidecar"]["status"]["execution_api_available"] is True
     assert snapshot["ai_sidecar"]["status"]["context_builder_available"] is True
+    assert snapshot["ai_sidecar"]["execution_controls_available"] is False
+    assert snapshot["ai_sidecar"]["status"]["tools_enabled"] is False
+    assert snapshot["ai_sidecar"]["status"]["order_tools_enabled"] is False
 
 
 def _build_observe_pipeline_fixture(connection, settings: Settings) -> None:

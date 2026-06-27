@@ -351,12 +351,15 @@ Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/snapshot
 
 See `docs/dashboard_v1.md` for the snapshot structure, UI sections, runbook, and safety policy.
 
-## AI Sidecar Context Builder
+## AI Sidecar Context + Structured Execution
 
 PR AI-1 adds a bounded, redacted, deterministic context packet builder for the read-only AI
-Sidecar. It prepares operator-review context before any future model call, but it does not call
-OpenAI APIs, create AI insights, create prompts, enqueue work, or connect to Strategy/Risk/OMS
-automatic decisions.
+Sidecar. PR AI-2 adds an optional OpenAI Responses API adapter, prompt registry, strict structured
+output schema builder, manual runner, and request/insight persistence layer.
+
+The AI Sidecar remains read-only. Valid AI output is stored only as an operator-review insight for
+Dashboard, reports, and review workflows. It is not Strategy input, Risk input, OMS input, candidate
+state mutation, live-flag mutation, or order intent.
 
 Context endpoints:
 
@@ -369,6 +372,18 @@ Context endpoints:
 - `GET /api/ai-sidecar/context/theme/{theme_id}`
 - `GET /api/ai-sidecar/context/no-trade/{trade_date}`
 
+Execution and audit endpoints:
+
+- `GET /api/ai-sidecar/execution/status`
+- `POST /api/ai-sidecar/run`
+- `POST /api/ai-sidecar/run/candidate/{candidate_instance_id}`
+- `POST /api/ai-sidecar/run/no-trade/{trade_date}`
+- `POST /api/ai-sidecar/run/theme/{theme_id}`
+- `GET /api/ai-sidecar/requests`
+- `GET /api/ai-sidecar/requests/{request_id}`
+- `GET /api/ai-sidecar/insights`
+- `GET /api/ai-sidecar/insights/{insight_id}`
+
 Preview example:
 
 ```powershell
@@ -376,16 +391,41 @@ Invoke-RestMethod "http://127.0.0.1:8000/api/ai-sidecar/context/preview?task_typ
 Invoke-RestMethod "http://127.0.0.1:8000/api/ai-sidecar/context/preview?task_type=CANDIDATE_BLOCK_RCA&related_entity_id=CAND-2026-06-27-005930-1"
 ```
 
-`persist=true` stores the final context packet in `ai_context_packets` for audit/review. It is
-still not AI execution and does not write `ai_requests` or `ai_insights`. Context packets remove
+`persist=true` stores the final context packet in `ai_context_packets` for audit/review. Context
+preview is still not AI execution and does not write `ai_requests` or `ai_insights`. Context packets remove
 secrets, account-like values, local absolute paths, raw headers/env values, and order/action-like
 fields by default. `AI_SIDECAR_ALLOW_ORDER_CONTEXT=false` remains the default.
 
-The dashboard AI section now reports context builder status only. It still has no AI execution
-button and no OpenAI client.
+Manual execution requires `AI_SIDECAR_ENABLED=true`, `AI_SIDECAR_MODEL`, an API key in
+`AI_SIDECAR_OPENAI_API_KEY_ENV` (default `OPENAI_API_KEY`), the optional OpenAI SDK, and the local
+token when `TRADING_CORE_TOKEN` is configured. API key absence never breaks startup, `/health`,
+`/api/status`, context preview, or unit tests. Model calls are tested with `MockAISidecarModelClient`.
 
-See `docs/ai_context_builder.md` for task sections, redaction, order-context restriction,
-truncation, hash, API, storage, and dashboard details.
+Run example:
+
+```powershell
+$headers = @{ "X-Local-Token" = "change-me-local-token" }
+$body = @{
+  task_type = "NO_TRADE_RCA"
+  trade_date = "2026-06-27"
+  persist_context = $true
+} | ConvertTo-Json
+Invoke-RestMethod "http://127.0.0.1:8000/api/ai-sidecar/run" -Method POST -Headers $headers -Body $body -ContentType "application/json"
+```
+
+Structured outputs use task-specific JSON Schema with `additionalProperties=false`, required
+fields, read-only `operator_action` enums, `confidence` range `0..1`, and
+`forbidden_actions_confirmed=true`. The runner validates locally after the model response. Invalid
+JSON, schema mismatch, timeout, model error, missing API key, and forbidden action output update
+`ai_requests` only; `ai_insights` is written only for validated output.
+
+OpenAI tools/function calling, web search, code interpreter, MCP tool integration, and order tools
+are disabled. The dashboard AI section can show request/insight status, but it has no AI execution
+button and no POST call from `dashboard.js`.
+
+See `docs/ai_context_builder.md`, `docs/ai_openai_client.md`, and
+`docs/ai_sidecar_architecture.md` for context, prompt, client, validation, persistence, and safety
+details.
 
 ## Mock Gateway
 

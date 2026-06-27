@@ -51,6 +51,28 @@ def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:
     }
 
 
+def test_sqlite_initialization_adds_ai_request_execution_columns(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(ai_requests)").fetchall()
+    }
+    connection.close()
+
+    assert {
+        "context_id",
+        "output_schema_name",
+        "validation_error",
+        "latency_ms",
+        "input_chars",
+        "output_chars",
+        "raw_response_json",
+        "metadata_json",
+    }.issubset(columns)
+
+
 def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> None:
     db_path = tmp_path / "app.sqlite3"
     connection = initialize_database(db_path)

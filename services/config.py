@@ -32,6 +32,19 @@ class Settings:
     ai_sidecar_model: str = ""
     ai_sidecar_max_context_chars: int = 12000
     ai_sidecar_request_timeout_sec: int = 30
+    ai_sidecar_openai_api_key_env: str = "OPENAI_API_KEY"
+    ai_sidecar_openai_base_url: str = ""
+    ai_sidecar_use_responses_api: bool = True
+    ai_sidecar_structured_outputs_enabled: bool = True
+    ai_sidecar_strict_schema: bool = True
+    ai_sidecar_tools_enabled: bool = False
+    ai_sidecar_order_tools_enabled: bool = False
+    ai_sidecar_max_output_chars: int = 6000
+    ai_sidecar_max_retries: int = 1
+    ai_sidecar_store_raw_response: bool = False
+    ai_sidecar_allow_manual_run: bool = True
+    ai_sidecar_request_retention_days: int = 30
+    ai_sidecar_default_operator_action: str = "REVIEW_ONLY"
     ai_sidecar_context_builder_enabled: bool = True
     ai_sidecar_context_default_limit: int = 50
     ai_sidecar_context_max_limit: int = 200
@@ -268,6 +281,28 @@ class Settings:
             raise ValueError(
                 "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT must be <= AI_SIDECAR_CONTEXT_MAX_LIMIT"
             )
+        if self.ai_sidecar_request_timeout_sec < 1:
+            raise ValueError("AI_SIDECAR_REQUEST_TIMEOUT_SEC must be >= 1")
+        if self.ai_sidecar_max_output_chars < 1:
+            raise ValueError("AI_SIDECAR_MAX_OUTPUT_CHARS must be >= 1")
+        if self.ai_sidecar_max_retries < 0 or self.ai_sidecar_max_retries > 3:
+            raise ValueError("AI_SIDECAR_MAX_RETRIES must be between 0 and 3")
+        if self.ai_sidecar_request_retention_days < 1:
+            raise ValueError("AI_SIDECAR_REQUEST_RETENTION_DAYS must be >= 1")
+        if self.ai_sidecar_tools_enabled:
+            raise ValueError("AI_SIDECAR_TOOLS_ENABLED must remain false in PR AI-2")
+        if self.ai_sidecar_order_tools_enabled:
+            raise ValueError("AI_SIDECAR_ORDER_TOOLS_ENABLED must remain false in PR AI-2")
+        object.__setattr__(
+            self,
+            "ai_sidecar_openai_api_key_env",
+            _require_non_empty_config(self.ai_sidecar_openai_api_key_env),
+        )
+        object.__setattr__(
+            self,
+            "ai_sidecar_default_operator_action",
+            _normalize_non_empty(self.ai_sidecar_default_operator_action),
+        )
         object.__setattr__(
             self,
             "ai_sidecar_context_schema_version",
@@ -323,6 +358,47 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("AI_SIDECAR_REQUEST_TIMEOUT_SEC", "30"),
             "AI_SIDECAR_REQUEST_TIMEOUT_SEC",
             min_value=1,
+        ),
+        ai_sidecar_openai_api_key_env=env.get(
+            "AI_SIDECAR_OPENAI_API_KEY_ENV",
+            "OPENAI_API_KEY",
+        ),
+        ai_sidecar_openai_base_url=env.get("AI_SIDECAR_OPENAI_BASE_URL", ""),
+        ai_sidecar_use_responses_api=_parse_bool(
+            env.get("AI_SIDECAR_USE_RESPONSES_API", "true")
+        ),
+        ai_sidecar_structured_outputs_enabled=_parse_bool(
+            env.get("AI_SIDECAR_STRUCTURED_OUTPUTS_ENABLED", "true")
+        ),
+        ai_sidecar_strict_schema=_parse_bool(env.get("AI_SIDECAR_STRICT_SCHEMA", "true")),
+        ai_sidecar_tools_enabled=_parse_bool(env.get("AI_SIDECAR_TOOLS_ENABLED", "false")),
+        ai_sidecar_order_tools_enabled=_parse_bool(
+            env.get("AI_SIDECAR_ORDER_TOOLS_ENABLED", "false")
+        ),
+        ai_sidecar_max_output_chars=_parse_int(
+            env.get("AI_SIDECAR_MAX_OUTPUT_CHARS", "6000"),
+            "AI_SIDECAR_MAX_OUTPUT_CHARS",
+            min_value=1,
+        ),
+        ai_sidecar_max_retries=_parse_int(
+            env.get("AI_SIDECAR_MAX_RETRIES", "1"),
+            "AI_SIDECAR_MAX_RETRIES",
+            min_value=0,
+        ),
+        ai_sidecar_store_raw_response=_parse_bool(
+            env.get("AI_SIDECAR_STORE_RAW_RESPONSE", "false")
+        ),
+        ai_sidecar_allow_manual_run=_parse_bool(
+            env.get("AI_SIDECAR_ALLOW_MANUAL_RUN", "true")
+        ),
+        ai_sidecar_request_retention_days=_parse_int(
+            env.get("AI_SIDECAR_REQUEST_RETENTION_DAYS", "30"),
+            "AI_SIDECAR_REQUEST_RETENTION_DAYS",
+            min_value=1,
+        ),
+        ai_sidecar_default_operator_action=env.get(
+            "AI_SIDECAR_DEFAULT_OPERATOR_ACTION",
+            "REVIEW_ONLY",
         ),
         ai_sidecar_context_builder_enabled=_parse_bool(
             env.get("AI_SIDECAR_CONTEXT_BUILDER_ENABLED", "true")

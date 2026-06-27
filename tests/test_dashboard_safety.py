@@ -51,3 +51,11 @@ def test_dashboard_code_has_no_trading_or_ai_execution_path() -> None:
     assert "import openai" not in dashboard_source
     assert "from openai" not in dashboard_source
     assert "OpenAI(" not in dashboard_source
+
+
+def test_dashboard_javascript_has_no_ai_run_post() -> None:
+    dashboard_js = (ROOT / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert 'method: "POST"' not in dashboard_js
+    assert "method: 'POST'" not in dashboard_js
+    assert "/api/ai-sidecar/run" not in dashboard_js

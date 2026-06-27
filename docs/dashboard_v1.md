@@ -15,7 +15,7 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
   `modify_order`를 만들거나 전송하지 않는다.
 - Dashboard는 Strategy, Risk, Candidate 상태를 변경하지 않는다.
 - Dashboard는 `LIVE_SIM`, `LIVE_REAL` flag를 변경하지 않는다.
-- Dashboard는 OpenAI API를 호출하지 않는다.
+- Dashboard는 OpenAI API를 호출하지 않고 AI 실행 POST도 보내지 않는다.
 
 ## 화면 구성
 
@@ -29,7 +29,7 @@ Dashboard V1은 Gateway → Market Data → Theme → Candidate → Strategy →
 - Strategy Observations: latest strategy observation과 setup classifier 결과를 표시한다.
 - Risk Notes: latest risk observation, severity, block/caution/pass count, reason code를 표시한다.
 - Recent Events / Errors: Gateway recent events와 각 projection/evaluation error를 최근 N개 표시한다.
-- AI Sidecar Insight: 저장된 insight를 표시하되 실행 컨트롤은 제공하지 않는다.
+- AI Sidecar Insight: 저장된 request/insight 상태를 표시하되 실행 컨트롤은 제공하지 않는다.
 
 ## Snapshot API
 
@@ -76,7 +76,7 @@ Safety section은 다음 값을 항상 명시한다.
 - `gateway_order_commands_allowed=false`
 - `ai_sidecar_enabled`
 - `ai_execution_available=false`
-- `openai_client_available=false`
+- `openai_client_available`
 - `observe_only_pipeline=true`
 
 필수 경고 문구:
@@ -96,10 +96,12 @@ entry plan, risk approval, position sizing이 아니다.
 ## AI Sidecar 표시 정책
 
 Dashboard는 `/api/ai-sidecar/status` 성격의 상태와 `ai_insights` 저장 row를 보여준다.
-PR AI-1부터 Dashboard snapshot은 AI Context Builder status도 표시할 수 있다.
+PR AI-2부터 Dashboard snapshot은 AI Context Builder status, OpenAI client availability,
+recent request counts, recent request rows, recent insight rows, and last error metadata를 표시할 수 있다.
 표시 가능한 값은 `context_builder_available=true`, `openai_client_available=false`,
-`execution_api_available=false`, `order_context_allowed=false` 같은 상태 신호다.
-AI 실행 버튼, OpenAI client 호출, 자동 판단 연결은 여전히 없다.
+`execution_api_available=true`, `tools_enabled=false`, `order_tools_enabled=false`,
+`order_context_allowed=false` 같은 상태 신호다.
+AI 실행 버튼, OpenAI client 직접 호출, 자동 판단 연결은 여전히 없다.
 AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/OMS 자동 input으로 쓰지 않는다.
 
 ## 금지 범위
@@ -113,8 +115,10 @@ AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/O
 - `POST /api/orders/enqueue` 없음
 - Dashboard에서 Gateway command 생성/전송 없음
 - Dashboard에서 rebuild/evaluate/import 실행 버튼 없음
-- OpenAI API 호출 없음
-- AI Sidecar Context Builder status 표시만 가능
+- OpenAI API 직접 호출 없음
+- AI Sidecar request/insight status 표시만 가능
+- Dashboard AI 실행 버튼 없음
+- Dashboard JavaScript의 AI 실행 POST 없음
 - Dashboard 근거 자동 주문/자동 매수 판단 없음
 
 ## Local Runbook
@@ -151,4 +155,4 @@ Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/snapshot
 - Candidate가 `DATA_WAIT`이면 latest tick, 1m bar, VWAP readiness를 확인한다.
 - Strategy가 `DATA_WAIT`이면 Candidate context와 Market Data stale 설정을 확인한다.
 - Risk가 비어 있으면 Strategy latest observation이 존재하는지 확인한다.
-- AI insight가 비어 있어도 정상이다. 이번 PR은 AI 실행을 만들지 않는다.
+- AI insight가 비어 있어도 정상이다. AI 실행은 별도 local-token 보호 API에서 수동으로만 수행한다.

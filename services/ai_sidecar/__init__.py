@@ -1,1 +1,1 @@
-"""AI Sidecar read-only context builder services."""
+"""AI Sidecar read-only context, prompt, execution, and insight services."""

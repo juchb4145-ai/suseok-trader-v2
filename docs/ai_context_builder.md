@@ -4,21 +4,24 @@
 
 PR AI-1 adds a read-only LLM Context Builder for the AI Sidecar. It builds bounded,
 redacted, schema-versioned context packets from Event Store and projection state so an operator
-can preview what a future Sidecar model call would receive.
+can preview or persist the exact packet used by later Sidecar execution.
 
-This PR does not call OpenAI, create prompts, create AI insights, enqueue work, create
+The Context Builder itself does not call OpenAI, create AI insights, enqueue work, create
 `GatewayCommand`, create `OrderIntent`, implement OMS, or feed AI context into Strategy/Risk/OMS
-automatic decisions.
+automatic decisions. PR AI-2's runner may consume a context packet as model input, but the packet
+and validated insight remain read-only operator-review artifacts.
 
 ## Read-only Principles
 
 - Context Builder only reads SQLite projection tables and existing read-only service queries.
 - `GET /api/ai-sidecar/context/preview` builds a packet but does not call a model.
 - `persist=true` stores the final context packet for audit only.
-- No row is written to `ai_requests` or `ai_insights`.
+- Context preview writes no row to `ai_requests` or `ai_insights`.
+- PR AI-2 manual execution may write `ai_requests`, and writes `ai_insights` only after valid
+  structured output.
 - `AI_SIDECAR_ENABLED=false` does not disable preview, because preview has no model call.
-- `openai_client_available=false` and `execution_api_available=false` remain true statements for
-  this PR.
+- `execution_api_available=true` can be reported by AI-2, but Dashboard still has no execution
+  control and preview remains GET/read-only.
 
 ## Task Sections
 
@@ -111,7 +114,8 @@ the same hash.
 - `GET /api/ai-sidecar/context/theme/{theme_id}`
 - `GET /api/ai-sidecar/context/no-trade/{trade_date}`
 
-All endpoints are GET. There is no `POST /api/ai-sidecar/run`.
+All context endpoints are GET. PR AI-2 adds manual execution endpoints separately under
+`/api/ai-sidecar/run*`; those endpoints call the runner, not the context preview API.
 
 ## Storage
 
@@ -135,7 +139,8 @@ All endpoints are GET. There is no `POST /api/ai-sidecar/run`.
 - `payload_json`
 - `created_at`
 
-`ai_context_build_errors` stores preview/build failures without creating AI requests or insights.
+`ai_context_build_errors` stores preview/build failures. Runner context failures are also recorded
+in `ai_requests` with `CONTEXT_ERROR`.
 
 ## Dashboard Integration
 
@@ -143,19 +148,16 @@ Dashboard snapshot now includes context builder status in the AI Sidecar status 
 
 - `context_builder_available=true`
 - `openai_client_available=false`
-- `execution_api_available=false`
+- `execution_api_available=true`
 - `order_context_allowed=false`
+- `tools_enabled=false`
+- `order_tools_enabled=false`
 
-Dashboard UI remains display/status only. There is still no AI execution control.
+Dashboard UI remains display/status only. There is still no AI execution control or POST call from
+dashboard JavaScript.
 
 ## Explicitly Out Of Scope
 
-- OpenAI SDK/API calls
-- model client
-- prompt runner
-- structured output parser
-- AI insight generation
-- `POST /api/ai-sidecar/run`
 - intraday AI worker
 - OMS
 - `OrderIntent`, `EntryPlan`, `PositionSizing`
