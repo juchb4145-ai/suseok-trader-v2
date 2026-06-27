@@ -87,6 +87,24 @@ class Settings:
     strategy_breakout_retest_near_high_pct: float = 2.0
     strategy_follower_expansion_min_theme_rising_ratio: float = 0.35
     strategy_config_version: str = "observe_v1"
+    risk_gate_enabled: bool = True
+    risk_gate_observe_only: bool = True
+    risk_gate_max_strategy_observations: int = 500
+    risk_gate_require_strategy_matched: bool = True
+    risk_gate_stale_tick_sec: int = 30
+    risk_gate_strategy_stale_sec: int = 300
+    risk_gate_max_spread_ticks: int = 5
+    risk_gate_min_trade_value_delta_1m: float = 0.0
+    risk_gate_min_cumulative_trade_value: float = 0.0
+    risk_gate_min_execution_strength: float = 0.0
+    risk_gate_max_change_rate: float = 25.0
+    risk_gate_max_vwap_extension_pct: float = 8.0
+    risk_gate_near_day_high_pct: float = 1.0
+    risk_gate_min_theme_fresh_coverage_ratio: float = 0.3
+    risk_gate_min_theme_rising_ratio: float = 0.35
+    risk_gate_duplicate_active_candidate_limit: int = 1
+    risk_gate_observation_cooldown_sec: int = 60
+    risk_gate_config_version: str = "observe_v1"
 
     def __post_init__(self) -> None:
         if self.market_data_degraded_tick_stale_sec < self.market_data_tick_stale_sec:
@@ -185,6 +203,40 @@ class Settings:
             self,
             "strategy_config_version",
             _require_non_empty_config(self.strategy_config_version),
+        )
+        for field_name in (
+            "risk_gate_max_strategy_observations",
+            "risk_gate_stale_tick_sec",
+            "risk_gate_strategy_stale_sec",
+            "risk_gate_max_spread_ticks",
+            "risk_gate_duplicate_active_candidate_limit",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.risk_gate_observation_cooldown_sec < 0:
+            raise ValueError("RISK_GATE_OBSERVATION_COOLDOWN_SEC must be >= 0")
+        for field_name in (
+            "risk_gate_min_trade_value_delta_1m",
+            "risk_gate_min_cumulative_trade_value",
+            "risk_gate_min_execution_strength",
+            "risk_gate_max_change_rate",
+            "risk_gate_max_vwap_extension_pct",
+            "risk_gate_near_day_high_pct",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        _validate_ratio(
+            self.risk_gate_min_theme_fresh_coverage_ratio,
+            "RISK_GATE_MIN_THEME_FRESH_COVERAGE_RATIO",
+        )
+        _validate_ratio(
+            self.risk_gate_min_theme_rising_ratio,
+            "RISK_GATE_MIN_THEME_RISING_RATIO",
+        )
+        object.__setattr__(
+            self,
+            "risk_gate_config_version",
+            _require_non_empty_config(self.risk_gate_config_version),
         )
 
     @property
@@ -417,6 +469,80 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "STRATEGY_FOLLOWER_EXPANSION_MIN_THEME_RISING_RATIO",
         ),
         strategy_config_version=env.get("STRATEGY_CONFIG_VERSION", "observe_v1"),
+        risk_gate_enabled=_parse_bool(env.get("RISK_GATE_ENABLED", "true")),
+        risk_gate_observe_only=_parse_bool(env.get("RISK_GATE_OBSERVE_ONLY", "true")),
+        risk_gate_max_strategy_observations=_parse_int(
+            env.get("RISK_GATE_MAX_STRATEGY_OBSERVATIONS", "500"),
+            "RISK_GATE_MAX_STRATEGY_OBSERVATIONS",
+            min_value=1,
+        ),
+        risk_gate_require_strategy_matched=_parse_bool(
+            env.get("RISK_GATE_REQUIRE_STRATEGY_MATCHED", "true")
+        ),
+        risk_gate_stale_tick_sec=_parse_int(
+            env.get("RISK_GATE_STALE_TICK_SEC", "30"),
+            "RISK_GATE_STALE_TICK_SEC",
+            min_value=1,
+        ),
+        risk_gate_strategy_stale_sec=_parse_int(
+            env.get("RISK_GATE_STRATEGY_STALE_SEC", "300"),
+            "RISK_GATE_STRATEGY_STALE_SEC",
+            min_value=1,
+        ),
+        risk_gate_max_spread_ticks=_parse_int(
+            env.get("RISK_GATE_MAX_SPREAD_TICKS", "5"),
+            "RISK_GATE_MAX_SPREAD_TICKS",
+            min_value=1,
+        ),
+        risk_gate_min_trade_value_delta_1m=_parse_float(
+            env.get("RISK_GATE_MIN_TRADE_VALUE_DELTA_1M", "0"),
+            "RISK_GATE_MIN_TRADE_VALUE_DELTA_1M",
+            min_value=0.0,
+        ),
+        risk_gate_min_cumulative_trade_value=_parse_float(
+            env.get("RISK_GATE_MIN_CUMULATIVE_TRADE_VALUE", "0"),
+            "RISK_GATE_MIN_CUMULATIVE_TRADE_VALUE",
+            min_value=0.0,
+        ),
+        risk_gate_min_execution_strength=_parse_float(
+            env.get("RISK_GATE_MIN_EXECUTION_STRENGTH", "0"),
+            "RISK_GATE_MIN_EXECUTION_STRENGTH",
+            min_value=0.0,
+        ),
+        risk_gate_max_change_rate=_parse_float(
+            env.get("RISK_GATE_MAX_CHANGE_RATE", "25.0"),
+            "RISK_GATE_MAX_CHANGE_RATE",
+            min_value=0.0,
+        ),
+        risk_gate_max_vwap_extension_pct=_parse_float(
+            env.get("RISK_GATE_MAX_VWAP_EXTENSION_PCT", "8.0"),
+            "RISK_GATE_MAX_VWAP_EXTENSION_PCT",
+            min_value=0.0,
+        ),
+        risk_gate_near_day_high_pct=_parse_float(
+            env.get("RISK_GATE_NEAR_DAY_HIGH_PCT", "1.0"),
+            "RISK_GATE_NEAR_DAY_HIGH_PCT",
+            min_value=0.0,
+        ),
+        risk_gate_min_theme_fresh_coverage_ratio=_parse_float(
+            env.get("RISK_GATE_MIN_THEME_FRESH_COVERAGE_RATIO", "0.3"),
+            "RISK_GATE_MIN_THEME_FRESH_COVERAGE_RATIO",
+        ),
+        risk_gate_min_theme_rising_ratio=_parse_float(
+            env.get("RISK_GATE_MIN_THEME_RISING_RATIO", "0.35"),
+            "RISK_GATE_MIN_THEME_RISING_RATIO",
+        ),
+        risk_gate_duplicate_active_candidate_limit=_parse_int(
+            env.get("RISK_GATE_DUPLICATE_ACTIVE_CANDIDATE_LIMIT", "1"),
+            "RISK_GATE_DUPLICATE_ACTIVE_CANDIDATE_LIMIT",
+            min_value=1,
+        ),
+        risk_gate_observation_cooldown_sec=_parse_int(
+            env.get("RISK_GATE_OBSERVATION_COOLDOWN_SEC", "60"),
+            "RISK_GATE_OBSERVATION_COOLDOWN_SEC",
+            min_value=0,
+        ),
+        risk_gate_config_version=env.get("RISK_GATE_CONFIG_VERSION", "observe_v1"),
     )
 
 

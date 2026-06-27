@@ -8,6 +8,7 @@ from api.routes.candidates import router as candidates_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.market_data import router as market_data_router
+from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
 from api.routes.themes import router as themes_router
 from fastapi import FastAPI
@@ -36,6 +37,7 @@ def create_app() -> FastAPI:
     application.include_router(themes_router)
     application.include_router(candidates_router)
     application.include_router(strategy_router)
+    application.include_router(risk_router)
     return application
 
 

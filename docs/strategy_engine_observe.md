@@ -17,6 +17,7 @@ risk approval, Gateway command, or public order request.
 - `observe_only` is always true in strategy observations.
 - `MATCHED_OBSERVATION` is not buy readiness.
 - `FORMING` and `MATCHED_OBSERVATION` do not trigger execution.
+- PR 8 Risk Gate reads strategy observations as read-only input for risk classification only.
 - Strategy thresholds are configuration/code-review inputs, not intraday self-modifying values.
 - AI Sidecar output is not an input to Strategy evaluation.
 
@@ -33,6 +34,20 @@ Strategy evaluation reads:
 
 Candidate state is not changed by Strategy evaluation. `CONTEXT_READY` only means the context is
 ready for setup observation; it is not a buy, entry, or order-ready state.
+
+## PR 8 Risk Gate Connection
+
+Risk Gate observe-only reads:
+
+- `strategy_observations_latest`
+- `strategy_observations`
+- `strategy_setup_observations`
+- Candidate, Market Data, and Theme Snapshot rows referenced by the strategy observation
+
+Risk evaluation does not mutate Strategy rows. A `MATCHED_OBSERVATION` strategy status can produce
+a `PASS_OBSERVED` strategy-context risk check, but that still means only that the setup classifier
+matched and the risk observation was recorded. It is not buy readiness, order approval, position
+sizing input, or an OMS instruction.
 
 ## Setup Types
 
@@ -149,18 +164,17 @@ python -m tools.inspect_strategy_observation `
 
 ## Forbidden Scope
 
-PR 7 does not implement:
+PR 7 and PR 8 do not implement:
 
 - Kiwoom OpenAPI+ runtime code;
 - PyQt5 or QAxWidget imports;
-- Risk Gate;
 - OMS;
 - OrderIntent;
 - EntryPlan;
 - Position or position sizing;
 - send, cancel, or modify order paths;
 - public order enqueue endpoint;
-- GatewayCommand creation from Strategy;
+- GatewayCommand creation from Strategy or Risk;
 - OpenAI API calls;
 - AI Sidecar context builder;
 - automatic buy or sell decisions from strategy observations.

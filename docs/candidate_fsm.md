@@ -2,7 +2,8 @@
 
 PR 6 adds an observe-only Candidate FSM. A Candidate is an observation episode, not a buy
 candidate. PR 7 Strategy Engine reads `CONTEXT_READY` candidate context as a read-only input and
-stores strategy observations without touching Gateway commands, OMS, Risk, or order APIs.
+stores strategy observations. PR 8 Risk Gate reads candidate context as read-only input for risk
+classification only. Candidate state still does not touch Gateway commands, OMS, or order APIs.
 
 ## Purpose
 
@@ -42,8 +43,8 @@ Condition sources are read from `market_condition_signals`. Theme sources are re
 - `CLOSED`: source exit, no active source, TTL expiry, or theme rotation ended the episode.
 
 `CONTEXT_READY` is not buy readiness. It only means the observation context can be read by PR 7
-Strategy Engine. PR 6 has no setup validation, entry readiness, score, risk pass/fail, order
-intent, or order command.
+Strategy Engine and PR 8 Risk Gate. PR 6 has no setup validation, entry readiness, score, order
+approval, order intent, or order command.
 
 ## Identity And Generation
 
@@ -110,7 +111,14 @@ read-only evidence. Strategy evaluation does not mutate Candidate state, does no
 `CONTEXT_READY` into buy readiness, and does not create Gateway commands or order API calls.
 
 When a Strategy setup reaches `MATCHED_OBSERVATION`, the Candidate remains an observation episode.
-Risk Gate and OMS behavior are intentionally absent before later PRs.
+It is not converted to buy readiness.
+
+## PR 8 Risk Gate Connection
+
+Risk Gate observe-only reads candidate rows and `candidate_context_latest` when evaluating risk
+observations. It also reads Market Data projection rows, Theme Snapshot rows, and Strategy
+observations. Risk evaluation does not mutate Candidate state, does not create Candidate
+transitions, and does not convert `CONTEXT_READY` into buy readiness.
 
 ## API
 
@@ -168,5 +176,5 @@ PR 6 does not implement:
 - AI Sidecar context builder;
 - automatic buy/sell decisions from candidates.
 
-PR 7 keeps this boundary: Strategy observations are stored separately in strategy projection
+PR 7 and PR 8 keep this boundary: Strategy and Risk observations are stored in separate projection
 tables and never write Candidate states such as buy-ready or order-ready.

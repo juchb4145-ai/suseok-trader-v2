@@ -67,13 +67,15 @@
 - Keep `MATCHED_OBSERVATION` as a classifier result, not buy readiness.
 - Keep Risk, OMS, GatewayCommand creation, and order APIs out of scope.
 
-## Next: PR 8. Risk Gate observe-only
+## Done: PR 8. Risk Gate observe-only
 
 - Add deterministic risk evaluation in observe-only mode.
-- Record blocked reasons and risk observations.
+- Read StrategyObservation, Candidate context, Market Data, and Theme Snapshot rows.
+- Record risk check observations, latest risk observations, runs, and errors.
+- Expose read-only Risk APIs and CLI tools for operator review.
 - Do not enable order routing.
 
-## PR 9. Dashboard V1
+## Next: PR 9. Dashboard V1
 
 - Add read-only operator dashboard views for status, events, candidates, themes, and risk notes.
 - Include AI Sidecar insight display areas without triggering AI execution.

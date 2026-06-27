@@ -1,0 +1,29 @@
+from __future__ import annotations
+
+from enum import StrEnum
+
+
+class RiskObservationStatus(StrEnum):
+    NOT_EVALUATED = "NOT_EVALUATED"
+    DATA_WAIT = "DATA_WAIT"
+    OBSERVE_PASS = "OBSERVE_PASS"
+    OBSERVE_CAUTION = "OBSERVE_CAUTION"
+    OBSERVE_BLOCK = "OBSERVE_BLOCK"
+    INVALID_CONTEXT = "INVALID_CONTEXT"
+    STALE_CONTEXT = "STALE_CONTEXT"
+
+
+class RiskCheckStatus(StrEnum):
+    PASS_OBSERVED = "PASS_OBSERVED"
+    CAUTION_OBSERVED = "CAUTION_OBSERVED"
+    BLOCK_OBSERVED = "BLOCK_OBSERVED"
+    NOT_EVALUATED = "NOT_EVALUATED"
+    DATA_WAIT = "DATA_WAIT"
+
+
+class RiskSeverity(StrEnum):
+    INFO = "INFO"
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+    CRITICAL = "CRITICAL"

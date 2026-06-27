@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+import json
+
+from domain.broker.utils import datetime_to_wire, utc_now
+from domain.candidate.state import CandidateState
+from domain.risk.category import RiskCategory
+from domain.risk.models import RiskInputContext
+from domain.risk.reasons import RiskReasonCode
+from domain.risk.status import RiskCheckStatus, RiskObservationStatus
+from services.config import Settings
+from services.risk_gate import (
+    check_chase_overheat,
+    check_duplicate_cooldown,
+    check_liquidity_spread,
+    check_strategy_context,
+    check_theme_context,
+    evaluate_risk_for_candidate,
+    evaluate_risk_observations,
+    get_latest_risk_observation,
+    list_risk_observations_for_candidate,
+    load_risk_input_context,
+    save_risk_observation,
+)
+from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
+from storage.sqlite import initialize_database
+from tests.test_strategy_service import _insert_strategy_fixture
+
+
+def test_load_risk_input_context_reads_strategy_candidate_market_and_theme(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_context.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+
+    context = load_risk_input_context(connection, candidate_id, settings=settings)
+    connection.close()
+
+    assert context.candidate_instance_id == candidate_id
+    assert context.strategy_observation_id == strategy.strategy_observation_id
+    assert context.candidate_state == CandidateState.CONTEXT_READY.value
+    assert context.strategy_status == "MATCHED_OBSERVATION"
+    assert context.theme_state == "LEADING"
+    assert context.theme_fresh_coverage_ratio == 1.0
+    assert context.price == 97_000
+    assert context.vwap == 96_500
+    assert context.raw_context["context_hash"]
+
+
+def test_risk_observation_persistence_latest_and_checks_stays_observe_only(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_persistence.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    save_risk_observation(connection, observation)
+    latest = get_latest_risk_observation(connection, candidate_id, include_checks=True)
+    history = list_risk_observations_for_candidate(connection, candidate_id)
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert observation.overall_status is RiskObservationStatus.OBSERVE_PASS
+    assert observation.observe_only is True
+    assert latest is not None
+    assert latest["risk_observation_id"] == observation.risk_observation_id
+    assert latest["observe_only"] is True
+    assert latest["check_observations"]
+    assert history[0]["risk_observation_id"] == observation.risk_observation_id
+    assert command_count == 0
+
+
+def test_data_quality_missing_tick_is_data_wait_with_block_check(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_missing_tick.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    connection.execute("DELETE FROM market_ticks_latest WHERE code = '005930'")
+    connection.execute(
+        """
+        UPDATE candidate_context_latest
+        SET market_context_json = ?
+        WHERE candidate_instance_id = ?
+        """,
+        (json.dumps({}), candidate_id),
+    )
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    data_check = _check_by_category(observation, RiskCategory.DATA_QUALITY.value)
+    connection.close()
+
+    assert data_check.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert RiskReasonCode.LATEST_TICK_MISSING.value in data_check.reason_codes
+    assert observation.overall_status is RiskObservationStatus.DATA_WAIT
+
+
+def test_strategy_context_statuses_are_observation_only() -> None:
+    matched = check_strategy_context(
+        _context(strategy_status="MATCHED_OBSERVATION"),
+        _settings(),
+    )
+    forming = check_strategy_context(_context(strategy_status="FORMING"), _settings())
+    no_setup = check_strategy_context(_context(strategy_status="NO_SETUP"), _settings())
+    missing = check_strategy_context(
+        _context(strategy_observation_id=None, strategy_status=None),
+        _settings(),
+    )
+
+    assert matched.status is RiskCheckStatus.PASS_OBSERVED
+    assert RiskReasonCode.OBSERVE_PASS_NOT_ORDER_APPROVAL.value in matched.reason_codes
+    assert forming.status is RiskCheckStatus.CAUTION_OBSERVED
+    assert no_setup.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert missing.status is RiskCheckStatus.DATA_WAIT
+
+
+def test_theme_candidate_chase_and_liquidity_checks() -> None:
+    settings = _settings(
+        risk_gate_max_change_rate=10.0,
+        risk_gate_max_spread_ticks=2,
+        risk_gate_min_trade_value_delta_1m=100.0,
+        risk_gate_min_cumulative_trade_value=1_000.0,
+        risk_gate_min_execution_strength=100.0,
+    )
+    weak_theme = check_theme_context(
+        _context(theme_state="WATCH", theme_fresh_coverage_ratio=0.1, theme_rising_ratio=0.1),
+        settings,
+    )
+    chase = check_chase_overheat(
+        _context(change_rate=20.0, price=100.0, day_high=100.0, vwap=80.0),
+        settings,
+    )
+    liquidity = check_liquidity_spread(
+        _context(
+            spread_ticks=3,
+            trade_value_delta_1m=0.0,
+            cumulative_trade_value=0.0,
+            execution_strength=50.0,
+        ),
+        settings,
+    )
+
+    assert weak_theme.status is RiskCheckStatus.CAUTION_OBSERVED
+    assert RiskReasonCode.THEME_FRESH_COVERAGE_LOW.value in weak_theme.reason_codes
+    assert chase.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert RiskReasonCode.CHANGE_RATE_OVERHEAT.value in chase.reason_codes
+    assert RiskReasonCode.VI_DATA_UNAVAILABLE.value in chase.reason_codes
+    assert liquidity.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert RiskReasonCode.SPREAD_TOO_WIDE.value in liquidity.reason_codes
+
+
+def test_duplicate_cooldown_observes_without_mutating_candidate_or_strategy(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_duplicate.sqlite3")
+    settings = _settings(risk_gate_duplicate_active_candidate_limit=1)
+    first_id = _insert_strategy_fixture(connection, candidate_id="CAND-2026-06-27-005930-1")
+    second_id = "CAND-2026-06-27-005930-2"
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO candidates (
+            candidate_instance_id,
+            trade_date,
+            code,
+            name,
+            generation,
+            state,
+            previous_state,
+            detected_at,
+            last_seen_at,
+            state_updated_at,
+            closed_at,
+            primary_source_type,
+            primary_source_id,
+            source_count,
+            active_source_count,
+            theme_id,
+            theme_name,
+            theme_state,
+            theme_role,
+            market_readiness_status,
+            tick_age_sec,
+            vwap_ready,
+            bar_1m_ready,
+            bar_3m_ready,
+            bar_5m_ready,
+            reason_codes_json,
+            metadata_json
+        )
+        VALUES (?, '2026-06-27', '005930', '삼성전자', 2, 'CONTEXT_READY',
+            NULL, ?, ?, ?, NULL, 'THEME_LEADER', 'theme-005930', 1, 1,
+            'theme-005930', '반도체', 'LEADING', 'LEADER_CANDIDATE', 'FRESH',
+            1.0, 1, 1, 1, 1, '[]', '{}')
+        """,
+        (second_id, now, now, now),
+    )
+    strategy = evaluate_candidate_strategy(connection, first_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    before_state = connection.execute(
+        "SELECT state FROM candidates WHERE candidate_instance_id = ?",
+        (first_id,),
+    ).fetchone()["state"]
+
+    check = check_duplicate_cooldown(
+        connection,
+        load_risk_input_context(connection, first_id, settings=settings),
+        settings,
+    )
+    after_state = connection.execute(
+        "SELECT state FROM candidates WHERE candidate_instance_id = ?",
+        (first_id,),
+    ).fetchone()["state"]
+    second_state = connection.execute(
+        "SELECT state FROM candidates WHERE candidate_instance_id = ?",
+        (second_id,),
+    ).fetchone()["state"]
+    connection.close()
+
+    assert check.status is RiskCheckStatus.CAUTION_OBSERVED
+    assert RiskReasonCode.DUPLICATE_ACTIVE_CANDIDATE.value in check.reason_codes
+    assert after_state == before_state
+    assert second_state == CandidateState.CONTEXT_READY.value
+
+
+def test_batch_evaluation_records_counts_and_errors(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_batch.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection, candidate_id="CAND-2026-06-27-005930-1")
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    connection.execute(
+        """
+        INSERT INTO strategy_observations_latest (
+            candidate_instance_id,
+            strategy_observation_id,
+            trade_date,
+            code,
+            name,
+            evaluated_at,
+            overall_status,
+            primary_setup_type,
+            primary_setup_status,
+            score,
+            confidence,
+            reason_codes_json,
+            config_version,
+            observe_only
+        )
+        VALUES ('missing-candidate', 'missing-strategy', '2026-06-27', '000660',
+            'SK hynix', ?, 'MATCHED_OBSERVATION', NULL, NULL, 0, 0, '[]',
+            'observe_v1', 1)
+        """,
+        (datetime_to_wire(utc_now()),),
+    )
+
+    result = evaluate_risk_observations(
+        connection,
+        trade_date="2026-06-27",
+        strategy_status="MATCHED_OBSERVATION",
+        settings=settings,
+    )
+    latest_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM risk_observations_latest"
+    ).fetchone()["count"]
+    error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM risk_evaluation_errors"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result.strategy_observation_count == 2
+    assert result.evaluated_count == 1
+    assert result.observe_pass_count == 1
+    assert result.error_count == 1
+    assert result.status == "COMPLETED_WITH_ERRORS"
+    assert latest_count == 1
+    assert error_count == 1
+
+
+def test_overall_block_for_overheat_and_stale_for_candidate_state(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_overall.sqlite3")
+    overheat_settings = _settings(risk_gate_max_change_rate=1.0)
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=overheat_settings)
+    save_strategy_observation(connection, strategy)
+    overheat = evaluate_risk_for_candidate(connection, candidate_id, settings=overheat_settings)
+
+    stale_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-000660-1",
+        code="000660",
+        name="SK하이닉스",
+        state=CandidateState.STALE.value,
+    )
+    stale_strategy = evaluate_candidate_strategy(connection, stale_id, settings=_settings())
+    save_strategy_observation(connection, stale_strategy)
+    stale = evaluate_risk_for_candidate(connection, stale_id, settings=_settings())
+    connection.close()
+
+    assert overheat.overall_status is RiskObservationStatus.OBSERVE_BLOCK
+    assert stale.overall_status is RiskObservationStatus.STALE_CONTEXT
+
+
+def _settings(**overrides) -> Settings:
+    values = {
+        "market_data_tick_stale_sec": 999_999_999,
+        "market_data_degraded_tick_stale_sec": 999_999_999,
+        "candidate_source_stale_sec": 999_999_999,
+        "candidate_tick_stale_sec": 999_999_999,
+        "candidate_episode_ttl_sec": 999_999_999,
+        "strategy_engine_stale_tick_sec": 999_999_999,
+        "risk_gate_stale_tick_sec": 999_999_999,
+        "risk_gate_strategy_stale_sec": 999_999_999,
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def _context(**overrides) -> RiskInputContext:
+    values = {
+        "candidate_instance_id": "CAND-2026-06-27-005930-1",
+        "strategy_observation_id": "strategy-observation-1",
+        "trade_date": "2026-06-27",
+        "code": "005930",
+        "name": "Samsung",
+        "candidate_state": CandidateState.CONTEXT_READY.value,
+        "strategy_status": "MATCHED_OBSERVATION",
+        "strategy_evaluated_at": datetime_to_wire(utc_now()),
+        "theme_id": "theme-005930",
+        "theme_name": "semiconductor",
+        "theme_state": "LEADING",
+        "theme_role": "LEADER_CANDIDATE",
+        "theme_fresh_coverage_ratio": 1.0,
+        "theme_rising_ratio": 0.6,
+        "market_readiness_status": "FRESH",
+        "tick_age_sec": 1.0,
+        "price": 97_000,
+        "change_rate": 2.0,
+        "day_high": 100_000,
+        "spread_ticks": 1,
+        "cumulative_trade_value": 97_000_000,
+        "trade_value_delta_1m": 10_000_000,
+        "trade_value_delta_3m": 20_000_000,
+        "execution_strength": 120.0,
+        "vwap": 96_500,
+        "above_vwap": True,
+        "source_count": 1,
+        "active_source_count": 1,
+        "bar_1m_ready": True,
+        "raw_context": {
+            "candidate_missing": False,
+            "theme_latest_snapshot": {"leading_code": "005930"},
+        },
+    }
+    values.update(overrides)
+    return RiskInputContext(**values)
+
+
+def _check_by_category(observation, category: str):
+    for check in observation.check_observations:
+        if check.category.value == category:
+            return check
+    raise AssertionError(f"check category not found: {category}")

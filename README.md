@@ -6,9 +6,9 @@ The project currently contains the Core API bootstrap, settings loading, SQLite 
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
 plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4 read-only
 Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
-the PR 6 observe-only Candidate FSM, and the PR 7 observe-only Strategy Observation layer. It
-intentionally does not contain Kiwoom or PyQt imports, risk policy execution, OMS behavior,
-OpenAI API calls, or live order APIs.
+the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, and the
+PR 8 observe-only Risk Gate layer. It intentionally does not contain Kiwoom or PyQt imports,
+risk-driven order approval, OMS behavior, OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -227,9 +227,83 @@ Invoke-RestMethod http://127.0.0.1:8000/api/strategy/status
 Invoke-RestMethod http://127.0.0.1:8000/api/strategy/observations/latest
 ```
 
-PR 7 still has no Risk Gate, OMS, public order API, GatewayCommand creation from strategy,
-OpenAI API call, or AI Sidecar execution path. See `docs/strategy_engine_observe.md` for the
-status definitions, setup rules, storage schema, and API details.
+PR 7 strategy observations are read by PR 8 Risk Gate as observation input only. See
+`docs/strategy_engine_observe.md` for the status definitions, setup rules, storage schema, and
+API details.
+
+## Risk Gate Observe-Only
+
+PR 8 adds deterministic risk observation over PR 7 strategy observations. It reads Candidate
+context, Strategy observations, Market Data projection rows, and Theme Snapshot rows. It stores
+`RiskObservation` and `RiskCheckObservation` records for dashboards and operator review.
+
+`OBSERVE_PASS` is not order approval. `OBSERVE_BLOCK` is not an order cancellation or execution
+command. The Risk Gate does not create OrderIntent, EntryPlan, PositionSizing, GatewayCommand
+rows, OMS state, send/cancel/modify order calls, or live flag changes.
+
+Risk statuses:
+
+- `NOT_EVALUATED`
+- `DATA_WAIT`
+- `OBSERVE_PASS`
+- `OBSERVE_CAUTION`
+- `OBSERVE_BLOCK`
+- `INVALID_CONTEXT`
+- `STALE_CONTEXT`
+
+Risk categories:
+
+- `DATA_QUALITY`
+- `MARKET_CONTEXT`
+- `THEME_CONTEXT`
+- `CANDIDATE_CONTEXT`
+- `STRATEGY_CONTEXT`
+- `CHASE_OVERHEAT`
+- `LIQUIDITY_SPREAD`
+- `DUPLICATE_COOLDOWN`
+- `PORTFOLIO_PLACEHOLDER`
+
+Risk endpoints:
+
+- `GET /api/risk/status`
+- `GET /api/risk/observations/latest`
+- `GET /api/risk/candidates/{candidate_instance_id}`
+- `GET /api/risk/candidates/{candidate_instance_id}/history`
+- `GET /api/risk/observations/{risk_observation_id}`
+- `GET /api/risk/observations/{risk_observation_id}/checks`
+- `GET /api/risk/runs`
+- `GET /api/risk/errors`
+- `POST /api/risk/evaluate`
+
+Evaluate risk observations from current strategy observations:
+
+```powershell
+python -m tools.evaluate_risk --trade-date 2026-06-27
+```
+
+Inspect the latest risk observation for one candidate:
+
+```powershell
+python -m tools.inspect_risk_observation `
+  --candidate-instance-id CAND-2026-06-27-005930-1
+```
+
+Check the full observe-only flow through Risk:
+
+```powershell
+python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+python -m tools.rebuild_theme_snapshots
+python -m tools.rebuild_candidates
+python -m tools.rebuild_candidates
+python -m tools.evaluate_strategy
+python -m tools.evaluate_risk
+Invoke-RestMethod http://127.0.0.1:8000/api/risk/status
+Invoke-RestMethod http://127.0.0.1:8000/api/risk/observations/latest
+```
+
+See `docs/risk_gate_observe.md` for the check rules, storage tables, API details, CLI usage,
+and safety scope.
 
 ## Mock Gateway
 
@@ -277,8 +351,10 @@ python -m tools.rebuild_theme_snapshots
 python -m tools.rebuild_candidates
 python -m tools.rebuild_candidates
 python -m tools.evaluate_strategy
+python -m tools.evaluate_risk
 Invoke-RestMethod http://127.0.0.1:8000/api/candidates/status
 Invoke-RestMethod http://127.0.0.1:8000/api/strategy/status
+Invoke-RestMethod http://127.0.0.1:8000/api/risk/status
 ```
 
 `apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX

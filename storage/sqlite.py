@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 APP_NAME = "suseok-trader-v2"
 
 
@@ -35,6 +35,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_theme_projection_tables(connection)
     _create_candidate_projection_tables(connection)
     _create_strategy_projection_tables(connection)
+    _create_risk_projection_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -852,5 +853,143 @@ def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_strategy_errors_created_at
         ON strategy_evaluation_errors (created_at)
+        """
+    )
+
+
+def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_observations (
+            risk_observation_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            strategy_observation_id TEXT,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            overall_status TEXT NOT NULL,
+            max_severity TEXT NOT NULL,
+            blocked_count INTEGER NOT NULL DEFAULT 0,
+            caution_count INTEGER NOT NULL DEFAULT 0,
+            pass_count INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            config_version TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_observations_latest (
+            candidate_instance_id TEXT PRIMARY KEY,
+            risk_observation_id TEXT NOT NULL,
+            strategy_observation_id TEXT,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            overall_status TEXT NOT NULL,
+            max_severity TEXT NOT NULL,
+            blocked_count INTEGER NOT NULL DEFAULT 0,
+            caution_count INTEGER NOT NULL DEFAULT 0,
+            pass_count INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            config_version TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_check_observations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            risk_observation_id TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            evaluated_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_evaluation_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            strategy_observation_count INTEGER NOT NULL DEFAULT 0,
+            evaluated_count INTEGER NOT NULL DEFAULT 0,
+            observe_pass_count INTEGER NOT NULL DEFAULT 0,
+            caution_count INTEGER NOT NULL DEFAULT 0,
+            block_count INTEGER NOT NULL DEFAULT 0,
+            data_wait_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            config_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS risk_evaluation_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            candidate_instance_id TEXT,
+            strategy_observation_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_observations_trade_evaluated
+        ON risk_observations (trade_date, evaluated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_observations_code_trade
+        ON risk_observations (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_observations_status_trade
+        ON risk_observations (overall_status, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_checks_candidate_category
+        ON risk_check_observations (candidate_instance_id, category)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_checks_category_status
+        ON risk_check_observations (category, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_runs_started_at
+        ON risk_evaluation_runs (started_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_errors_created_at
+        ON risk_evaluation_errors (created_at)
         """
     )

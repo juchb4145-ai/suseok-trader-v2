@@ -57,6 +57,24 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.strategy_breakout_retest_near_high_pct == 2.0
     assert settings.strategy_follower_expansion_min_theme_rising_ratio == 0.35
     assert settings.strategy_config_version == "observe_v1"
+    assert settings.risk_gate_enabled is True
+    assert settings.risk_gate_observe_only is True
+    assert settings.risk_gate_max_strategy_observations == 500
+    assert settings.risk_gate_require_strategy_matched is True
+    assert settings.risk_gate_stale_tick_sec == 30
+    assert settings.risk_gate_strategy_stale_sec == 300
+    assert settings.risk_gate_max_spread_ticks == 5
+    assert settings.risk_gate_min_trade_value_delta_1m == 0
+    assert settings.risk_gate_min_cumulative_trade_value == 0
+    assert settings.risk_gate_min_execution_strength == 0
+    assert settings.risk_gate_max_change_rate == 25.0
+    assert settings.risk_gate_max_vwap_extension_pct == 8.0
+    assert settings.risk_gate_near_day_high_pct == 1.0
+    assert settings.risk_gate_min_theme_fresh_coverage_ratio == 0.3
+    assert settings.risk_gate_min_theme_rising_ratio == 0.35
+    assert settings.risk_gate_duplicate_active_candidate_limit == 1
+    assert settings.risk_gate_observation_cooldown_sec == 60
+    assert settings.risk_gate_config_version == "observe_v1"
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -136,3 +154,26 @@ def test_strategy_settings_are_validated() -> None:
         assert "ratio between 0 and 1" in str(exc)
     else:
         raise AssertionError("expected invalid strategy follower ratio")
+
+
+def test_risk_gate_settings_are_validated() -> None:
+    try:
+        load_settings({"RISK_GATE_MAX_STRATEGY_OBSERVATIONS": "0"})
+    except ValueError as exc:
+        assert "RISK_GATE_MAX_STRATEGY_OBSERVATIONS" in str(exc)
+    else:
+        raise AssertionError("expected invalid risk strategy observation limit")
+
+    try:
+        load_settings({"RISK_GATE_MIN_THEME_RISING_RATIO": "1.2"})
+    except ValueError as exc:
+        assert "ratio between 0 and 1" in str(exc)
+    else:
+        raise AssertionError("expected invalid risk theme ratio")
+
+    try:
+        load_settings({"RISK_GATE_MAX_CHANGE_RATE": "-1"})
+    except ValueError as exc:
+        assert "RISK_GATE_MAX_CHANGE_RATE" in str(exc)
+    else:
+        raise AssertionError("expected invalid risk negative setting")
