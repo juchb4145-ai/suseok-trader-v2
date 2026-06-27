@@ -1,16 +1,27 @@
 # suseok-trader-v2 LIVE_SIM Pilot Roadmap
 
-> 목적: `suseok_ai`의 장점인 실시간 시장/테마 판단력과 실전형 후보 생성 흐름은 살리고, 과도한 legacy/hybrid/A-B/shadow/review-only 복잡도는 제외하여 `suseok-trader-v2`를 키움 모의투자 전용 실전 자동매매 v2로 단계적으로 전환한다.
+> 목적: `suseok_ai`의 실전 자동매매 아이디어 중 **시장/테마 판단력, 후보 생성, 진입 타이밍, 주문 lifecycle**은 살리고, 무매수와 복잡도를 키운 **legacy/hybrid/A-B/shadow/review-only 과다 구조**는 제외하여 `suseok-trader-v2`를 키움 모의투자 전용 실전 자동매매 v2로 단계 전환한다.
 
-이 문서는 한 번에 대규모 PR을 만들지 않기 위한 기준 문서다. Codex 작업은 반드시 아래 PR 단위로 나누어 진행한다.
+이 문서는 Codex 작업을 한 번에 크게 던지지 않기 위한 기준 문서다. 각 PR은 아래 순서와 범위를 지킨다.
 
 ---
 
-## 0. 현재 판단
+## 0. 이번 로드맵의 전제
 
-현재 `suseok-trader-v2`는 Core/Gateway 분리, MarketData, Theme, Candidate, Strategy, Risk, Dashboard, DRY_RUN, LIVE_SIM 구조를 갖고 있지만 기본 목적이 OBSERVE/read-only/manual 중심이다.
+이번 로드맵의 출발점은 `suseok-trader-v2` 장중 실행 결과 분석이 아니다. 아직 v2로 장을 충분히 돌린 상태가 아니기 때문이다.
 
-따라서 다음 장에서 실전형 자동매매 프로그램처럼 동작하려면 다음 연결이 필요하다.
+따라서 PR-1의 목적은 v2 런타임 RCA가 아니라, **`suseok_ai`에서 무엇을 가져오고 무엇을 버릴지 코드/문서 기준으로 선별하는 것**이다.
+
+핵심 질문은 다음이다.
+
+```text
+suseok_ai에서 실제 장중 자동매매 흐름을 만들던 구성 요소는 무엇인가?
+그중 v2에 가져와야 할 실전 기능은 무엇인가?
+무매수와 복잡도를 만든 기능은 무엇이라 제외해야 하는가?
+v2의 안전한 Core/Gateway 경계 안에서 어떻게 재구성할 것인가?
+```
+
+v2의 최종 목표 흐름은 다음이다.
 
 ```text
 Kiwoom Gateway event
@@ -24,8 +35,6 @@ Kiwoom Gateway event
   -> Gateway send_order command
   -> Fill/position/exit/reconcile
 ```
-
-핵심 방향은 `suseok_ai`를 그대로 복사하는 것이 아니다. v2의 안전한 경계를 유지하면서, 실제 자동매매에 필요한 최소 실행 루프를 만든다.
 
 ---
 
@@ -53,6 +62,7 @@ Kiwoom Gateway event
 
 - 무매수를 막기 위해 모든 데이터 부족을 hard block으로 처리하지 않는다.
 - 단, 계좌/주문 안전성과 관련된 조건은 반드시 hard block한다.
+- `DATA_WAIT`, `WARMUP`, `VWAP 부족`, `theme coverage 부족`은 기본적으로 `WAIT_RETRY` 또는 `DATA_WAIT`로 남긴다.
 
 ---
 
@@ -179,69 +189,9 @@ side
 
 ---
 
-## 3. v2 목표 파이프라인
+## 3. Hard Block / Soft Wait 기준
 
-```text
-[장전]
-  Theme membership 갱신
-  전일/최근 theme persistence 계산
-  universe 압축
-  realtime subscription 후보 준비
-
-[장중]
-  Kiwoom tick/TR/condition event 수신
-    -> RealtimeSnapshotBuilder
-    -> ThemeLeadershipRanker
-    -> ThemeStateClassifier
-    -> StockRoleClassifier
-    -> WatchsetSelector
-    -> EntryTimingEngine
-    -> Strategy/Risk Gate
-    -> OrderPlanBuilder
-    -> LIVE_SIM intent
-    -> Gateway send_order command
-    -> Execution/Position/Exit/Reconcile
-```
-
----
-
-## 4. 주문 관련 상태 모델
-
-기존 observation 상태와 실제 주문 가능 상태를 분리한다.
-
-```text
-OBSERVED
-THEME_READY
-WATCH_READY
-ENTRY_READY
-RISK_PASS
-TRADE_READY
-ORDER_PLAN_READY
-LIVE_SIM_INTENT_CREATED
-LIVE_SIM_COMMAND_QUEUED
-BROKER_ACKED
-PARTIALLY_FILLED
-FILLED
-EXIT_MONITORING
-EXIT_SENT
-CLOSED
-BLOCKED
-WAIT_RETRY
-DATA_WAIT
-```
-
-중요:
-
-- `MATCHED_OBSERVATION`은 바로 주문 신호가 아니다.
-- `OBSERVE_PASS`는 바로 주문 승인도 아니다.
-- `TRADE_READY`부터 주문 후보로 본다.
-- `ORDER_PLAN_READY` 이후에만 LIVE_SIM intent를 만들 수 있다.
-
----
-
-## 5. Hard Block / Soft Wait 기준
-
-### 5.1 Hard Block
+### 3.1 Hard Block
 
 아래는 반드시 주문 차단한다.
 
@@ -265,7 +215,7 @@ max order notional exceeded
 extreme systemic risk off
 ```
 
-### 5.2 Soft Wait / Retry
+### 3.2 Soft Wait / Retry
 
 아래는 초기부터 hard block으로 보지 않는다.
 
@@ -290,64 +240,90 @@ market split state not confirmed
 
 ---
 
-## 6. 단계별 PR 계획
+## 4. 단계별 PR 계획
 
-## PR-0. Roadmap 문서 추가
+## PR-0. Roadmap 문서 추가/정정
 
 목표:
 
-- 이 문서를 추가한다.
-- 향후 PR이 이 문서를 기준으로 범위를 지키게 한다.
+- 이 문서를 기준 문서로 추가한다.
+- PR-1의 목적을 v2 runtime gap report가 아니라 `suseok_ai` 기능 선별/이식 기준 수립으로 명확히 한다.
 
 산출물:
 
-- `docs/live_sim_pilot_roadmap_ko.md`
+```text
+docs/live_sim_pilot_roadmap_ko.md
+```
 
 Definition of Done:
 
 - 문서가 repo에 추가되어 있다.
 - 다음 PR부터 이 문서의 PR 번호를 참조한다.
+- PR-1이 `suseok_ai` 분석 중심으로 정의되어 있다.
 
 ---
 
-## PR-1. Current State Inventory & Gap Report
+## PR-1. suseok_ai Functional Inventory & Migration Map
 
 목표:
 
-현재 v2가 왜 OBSERVE/manual 중심인지 코드 기준으로 정리하고, 자동 LIVE_SIM pipeline이 끊긴 지점을 명확히 한다.
+`v2`를 장에서 돌려본 결과를 분석하는 PR이 아니다. 이번 PR은 `suseok_ai`에서 실전 자동매매에 필요했던 기능을 코드/문서 기준으로 inventory화하고, v2로 가져올 것/버릴 것/재설계할 것을 분리하는 PR이다.
 
 작업:
 
-- README, docs, settings/config, Strategy, Risk, DRY_RUN, LIVE_SIM, Gateway command queue 점검
-- `candidate -> strategy -> risk -> order plan -> live_sim intent -> gateway command` 연결 상태 확인
-- 자동 실행 루프가 없는 지점 또는 flag로 막힌 지점 식별
-- hard block과 observe-only block을 분리
+- `suseok_ai`의 시장/테마 엔진, 후보 생성, watchset, entry timing, risk/order/exit 흐름을 파일/함수/데이터 모델 단위로 조사한다.
+- `suseok_ai`에서 무매수를 유발했거나 복잡도를 키운 구조를 분리한다.
+- `suseok_ai` 기능을 v2에 그대로 복사하지 않고, v2의 Core/Gateway/Service 경계에 맞춰 어떤 신규 service/interface로 재구성할지 mapping한다.
+- 조건검색, 네이버 테마, Kiwoom 실시간 tick/TR, theme membership, candidate lifecycle의 역할을 구분한다.
+- 다음 PR에서 바로 구현 가능한 최소 이식 단위를 정의한다.
 
 권장 산출물:
 
 ```text
-docs/live_sim_pilot_gap_report_ko.md
+docs/suseok_ai_v2_migration_map_ko.md
+```
+
+문서 구조:
+
+```text
+1. 요약
+2. suseok_ai 실전 흐름 개요
+3. 시장/테마 엔진 구성 요소
+4. 후보 생성/watchset 구성 요소
+5. 진입 타이밍 구성 요소
+6. risk/order/exit 구성 요소
+7. 가져올 기능 목록
+8. 버릴 기능 목록
+9. v2 신규 service/interface mapping
+10. PR-2 구현 범위 제안
 ```
 
 반드시 확인할 것:
 
-- Strategy/Risk가 observation에 머무는 이유
-- LIVE_SIM intent가 자동 생성되지 않는 이유
-- send_order command가 어떤 조건에서 queue되는지
-- Gateway가 command를 polling해서 Kiwoom으로 넘기는 흐름
-- 현재 테스트로 보장되는 safety 범위
+- suseok_ai에서 주도 테마를 어떻게 만들었는가
+- theme membership을 어떻게 구성했는가
+- 조건검색은 핵심 판단인지 discovery/boost인지
+- 후보 종목은 어떤 상태로 lifecycle을 탔는가
+- 매수 가능 상태와 관찰 상태가 어디서 갈렸는가
+- 어떤 risk/data gate가 과도하게 무매수를 만들었는가
+- v2에는 어떤 최소 모델이 필요한가
 
 Definition of Done:
 
-- 자동매매 pipeline의 missing link가 파일/함수 단위로 정리되어 있다.
-- 다음 PR에서 수정할 최소 지점이 명확하다.
-- 코드는 최소 수정한다. 이 PR은 분석/문서화 중심이다.
+- `docs/suseok_ai_v2_migration_map_ko.md`가 생성되어 있다.
+- suseok_ai에서 가져올 것/버릴 것이 명확히 분리되어 있다.
+- PR-2에서 구현할 최소 RT-TLS port 범위가 정리되어 있다.
+- v2를 장에서 돌린 결과처럼 단정하지 않는다.
+- 코드는 수정하지 않거나, 문서/테스트 보조 수준으로만 수정한다.
 
 금지:
 
-- 대규모 구조 변경
+- v2 장중 실행 결과가 있는 것처럼 RCA 작성
+- 자동 주문 활성화
+- LIVE_SIM_AUTO_PIPELINE 구현
 - AI 기능 추가
-- 주문 자동화 활성화
+- suseok_ai legacy code 단순 복사
+- LIVE_REAL 관련 구현
 
 ---
 
@@ -355,7 +331,7 @@ Definition of Done:
 
 목표:
 
-`suseok_ai`의 시장/테마 엔진 장점만 v2 구조에 맞게 최소 이식한다.
+PR-1에서 정리한 내용을 기준으로 `suseok_ai`의 시장/테마 엔진 장점만 v2 구조에 맞게 최소 이식한다.
 
 추가/수정 후보:
 
@@ -607,24 +583,7 @@ AI 금지:
 - kill switch 변경
 - 수량/계좌 한도 직접 변경
 
-입력 예시:
-
-```text
-theme_state
-stock_role
-current_price
-change_rate
-turnover_krw
-execution_strength
-momentum_1m/3m/5m
-vwap_deviation
-pullback_from_high_pct
-entry_timing_state
-risk_reasons
-recent_trade_stats
-```
-
-출력 JSON schema:
+출력 JSON schema 예시:
 
 ```json
 {
@@ -700,16 +659,6 @@ Dashboard 메인 패널:
 6. 왜 안 샀나
 ```
 
-개발자/검증 탭으로 이동:
-
-```text
-raw events
-debug tables
-A/B style reports
-review-only panels
-long audit logs
-```
-
 Definition of Done:
 
 - 운영자 메인 화면에서 지금 살 수 있는 후보와 못 산 이유가 보인다.
@@ -724,13 +673,13 @@ Definition of Done:
 
 ---
 
-## 7. PR 진행 순서
+## 5. PR 진행 순서
 
 권장 순서:
 
 ```text
-PR-0 Roadmap 문서 추가
-PR-1 Current State Inventory & Gap Report
+PR-0 Roadmap 문서 추가/정정
+PR-1 suseok_ai Functional Inventory & Migration Map
 PR-2 RT-TLS Minimal Core Port
 PR-3 EntryTimingEngine & OrderPlanBuilder
 PR-4 LIVE_SIM Auto Pipeline Pilot
@@ -741,7 +690,8 @@ PR-7 No-Buy Sentinel & Dashboard Simplification
 
 중요:
 
-- PR-1 없이 PR-4로 가지 않는다.
+- PR-1은 v2 장중 gap report가 아니라 `suseok_ai` 분석/이식 기준 수립이다.
+- PR-1 없이 PR-2로 가지 않는다.
 - PR-2 없이 PR-3로 가지 않는다.
 - PR-3 없이 PR-4로 가지 않는다.
 - PR-4 전까지는 자동 주문 command queue를 만들지 않는다.
@@ -750,7 +700,7 @@ PR-7 No-Buy Sentinel & Dashboard Simplification
 
 ---
 
-## 8. 다음 장 전 최소 목표
+## 6. 다음 장 전 최소 목표
 
 다음 장에서 “suseok_ai 이전에 돌아가던 만큼”에 가까워지려면 최소한 아래까지 필요하다.
 
@@ -760,115 +710,4 @@ PR-7 No-Buy Sentinel & Dashboard Simplification
 후순위: PR-6
 ```
 
-최소 파일럿 조건:
-
-```text
-LIVE_SIM only
-max order notional <= 100,000 KRW
-max daily order count <= 3
-max active positions <= 1
-market buy disabled
-kill switch respected
-duplicate order blocked
-unfilled order cancel available or explicitly blocked after TTL
-```
-
-PR-5가 완료되지 않았으면 장중 자동매수는 매우 제한적으로만 허용한다.
-
----
-
-## 9. Codex 작업 공통 프롬프트 헤더
-
-각 PR을 Codex에 던질 때 아래 헤더를 붙인다.
-
-```text
-너는 Kiwoom OpenAPI+ 기반 KOSPI/KOSDAQ 자동매매 시스템을 운영하는 시니어 퀀트 전략 개발자, 리스크 엔지니어, Python 백엔드 개발자다.
-
-대상 repo: suseok-trader-v2
-기준 문서: docs/live_sim_pilot_roadmap_ko.md
-
-이번 작업은 기준 문서의 해당 PR 범위만 수행한다.
-절대 다른 PR 범위까지 한 번에 구현하지 마라.
-LIVE_REAL은 절대 구현하거나 활성화하지 마라.
-AI/GPT는 advisory-only이며 주문 command/order intent를 직접 만들 수 없다.
-Core 내부에 PyQt5/QAxWidget/Kiwoom concrete client import를 추가하지 마라.
-DATA_WAIT/WARMUP/VWAP_MISSING을 일괄 hard block으로 처리하지 마라.
-계좌/주문 안전 관련 hard block은 반드시 유지하라.
-
-작업 후 반드시 아래를 보고하라.
-1. 변경 파일 목록
-2. 기준 문서의 어떤 항목을 구현했는지
-3. 구현하지 않은 항목과 이유
-4. 자동매매 pipeline에 미치는 영향
-5. safety 영향
-6. 테스트 결과
-7. 다음 PR로 넘길 항목
-```
-
----
-
-## 10. PR-1 Codex 프롬프트
-
-```text
-너는 Kiwoom OpenAPI+ 기반 KOSPI/KOSDAQ 자동매매 시스템을 운영하는 시니어 퀀트 전략 개발자, 리스크 엔지니어, Python 백엔드 개발자다.
-
-대상 repo: suseok-trader-v2
-기준 문서: docs/live_sim_pilot_roadmap_ko.md
-이번 작업 범위: PR-1 Current State Inventory & Gap Report
-
-목표:
-현재 v2가 왜 OBSERVE/manual 중심인지 코드 기준으로 정리하고, 자동 LIVE_SIM pipeline이 끊긴 지점을 명확히 해라.
-이번 PR은 분석/문서화 중심이며, 대규모 구현을 하지 않는다.
-
-점검 대상:
-- README.md
-- docs/architecture.md
-- settings/config 관련 파일
-- Strategy/Risk evaluator
-- Candidate FSM
-- DRY_RUN OMS
-- LIVE_SIM route/service
-- Gateway command queue
-- Dashboard status/snapshot API
-- tests
-
-확인할 흐름:
-candidate -> strategy -> risk -> order plan -> live_sim intent -> gateway send_order command
-
-구체적으로 확인할 것:
-1. Strategy/Risk가 observation에 머무는 이유
-2. LIVE_SIM intent가 자동 생성되지 않는 이유
-3. send_order GatewayCommand가 어떤 조건에서 queue되는지
-4. Gateway가 command를 polling해서 Kiwoom으로 넘기는 흐름
-5. 현재 hard block, observe-only block, config-disabled block 구분
-6. 자동매매 pipeline에서 missing link인 파일/함수/설정
-7. PR-2/PR-3/PR-4에서 수정해야 할 최소 지점
-
-산출물:
-- docs/live_sim_pilot_gap_report_ko.md 신규 작성
-
-문서 구조:
-1. 요약
-2. 현재 pipeline 구조
-3. 현재 끊긴 지점
-4. config/flag 현황
-5. Strategy/Risk/LIVE_SIM 상태
-6. Gateway command queue 상태
-7. hard block vs observe-only vs disabled 구분
-8. 다음 PR별 수정 포인트
-9. 테스트/검증 방법
-10. 남은 리스크
-
-금지:
-- 자동 주문 활성화
-- LIVE_SIM_AUTO_PIPELINE 구현
-- AI 기능 추가
-- legacy suseok_ai 코드 복사
-- LIVE_REAL 관련 구현
-
-완료 조건:
-- docs/live_sim_pilot_gap_report_ko.md가 생성되어 있다.
-- 자동매매 pipeline의 missing link가 파일/함수/설정 단위로 정리되어 있다.
-- 다음 PR에서 어디를 수정해야 하는지 명확하다.
-- 기존 테스트가 깨지지 않는다.
-```
+단, 다음 장 전 시간이 부족하면 PR-1 결과를 바탕으로 PR-2/PR-3/PR-4를 더 작게 쪼갠다.
