@@ -32,6 +32,14 @@ class Settings:
     ai_sidecar_model: str = ""
     ai_sidecar_max_context_chars: int = 12000
     ai_sidecar_request_timeout_sec: int = 30
+    ai_sidecar_context_builder_enabled: bool = True
+    ai_sidecar_context_default_limit: int = 50
+    ai_sidecar_context_max_limit: int = 200
+    ai_sidecar_context_persist_preview: bool = False
+    ai_sidecar_context_schema_version: str = "ai-sidecar-context.v1"
+    ai_sidecar_context_redact_paths: bool = True
+    ai_sidecar_context_redact_secrets: bool = True
+    ai_sidecar_context_include_raw_payload: bool = False
     market_data_enabled: bool = True
     market_data_tick_stale_sec: int = 10
     market_data_degraded_tick_stale_sec: int = 30
@@ -253,6 +261,18 @@ class Settings:
             raise ValueError(
                 "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT must be <= DASHBOARD_MAX_LIMIT"
             )
+        for field_name in ("ai_sidecar_context_default_limit", "ai_sidecar_context_max_limit"):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.ai_sidecar_context_default_limit > self.ai_sidecar_context_max_limit:
+            raise ValueError(
+                "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT must be <= AI_SIDECAR_CONTEXT_MAX_LIMIT"
+            )
+        object.__setattr__(
+            self,
+            "ai_sidecar_context_schema_version",
+            _require_non_empty_config(self.ai_sidecar_context_schema_version),
+        )
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -303,6 +323,35 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("AI_SIDECAR_REQUEST_TIMEOUT_SEC", "30"),
             "AI_SIDECAR_REQUEST_TIMEOUT_SEC",
             min_value=1,
+        ),
+        ai_sidecar_context_builder_enabled=_parse_bool(
+            env.get("AI_SIDECAR_CONTEXT_BUILDER_ENABLED", "true")
+        ),
+        ai_sidecar_context_default_limit=_parse_int(
+            env.get("AI_SIDECAR_CONTEXT_DEFAULT_LIMIT", "50"),
+            "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT",
+            min_value=1,
+        ),
+        ai_sidecar_context_max_limit=_parse_int(
+            env.get("AI_SIDECAR_CONTEXT_MAX_LIMIT", "200"),
+            "AI_SIDECAR_CONTEXT_MAX_LIMIT",
+            min_value=1,
+        ),
+        ai_sidecar_context_persist_preview=_parse_bool(
+            env.get("AI_SIDECAR_CONTEXT_PERSIST_PREVIEW", "false")
+        ),
+        ai_sidecar_context_schema_version=env.get(
+            "AI_SIDECAR_CONTEXT_SCHEMA_VERSION",
+            "ai-sidecar-context.v1",
+        ),
+        ai_sidecar_context_redact_paths=_parse_bool(
+            env.get("AI_SIDECAR_CONTEXT_REDACT_PATHS", "true")
+        ),
+        ai_sidecar_context_redact_secrets=_parse_bool(
+            env.get("AI_SIDECAR_CONTEXT_REDACT_SECRETS", "true")
+        ),
+        ai_sidecar_context_include_raw_payload=_parse_bool(
+            env.get("AI_SIDECAR_CONTEXT_INCLUDE_RAW_PAYLOAD", "false")
         ),
         market_data_enabled=_parse_bool(env.get("MARKET_DATA_ENABLED", "true")),
         market_data_tick_stale_sec=_parse_int(

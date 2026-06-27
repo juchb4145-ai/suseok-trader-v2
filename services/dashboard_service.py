@@ -243,8 +243,11 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "order_controls_available": False,
         "gateway_order_commands_allowed": False,
         "ai_sidecar_enabled": settings.ai_sidecar_enabled,
+        "ai_context_builder_available": True,
+        "ai_context_preview_available": settings.ai_sidecar_context_builder_enabled,
         "ai_execution_available": False,
         "openai_client_available": False,
+        "order_context_allowed": settings.ai_sidecar_order_context_allowed,
         "observe_only_pipeline": True,
         "warnings": warnings,
     }
@@ -260,6 +263,12 @@ def build_ai_sidecar_status(settings: Settings) -> dict[str, Any]:
         "forbidden_actions": get_forbidden_actions(),
         "openai_client_available": False,
         "execution_api_available": False,
+        "context_builder_available": True,
+        "context_builder_enabled": settings.ai_sidecar_context_builder_enabled,
+        "ai_execution_available": False,
+        "order_context_allowed": settings.ai_sidecar_order_context_allowed,
+        "max_context_chars": settings.ai_sidecar_max_context_chars,
+        "context_schema_version": settings.ai_sidecar_context_schema_version,
     }
 
 
@@ -410,6 +419,9 @@ def _pipeline_summary(
             "enabled": settings.ai_sidecar_enabled,
             "insight_count": len(ai_insights),
             "execution_api_available": False,
+            "context_builder_available": True,
+            "openai_client_available": False,
+            "order_context_allowed": settings.ai_sidecar_order_context_allowed,
         },
         "funnel": [
             {

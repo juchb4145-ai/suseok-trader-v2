@@ -81,19 +81,19 @@
 - Include AI Sidecar insight display areas without triggering AI execution.
 - Keep the default operating posture observable and non-trading.
 
-## Next: PR AI-1. LLM Context Builder
+## Done: PR AI-1. LLM Context Builder
 
 - Build bounded, redacted, read-only context packets from Event Store and domain state.
 - Enforce max context size and order-context restrictions.
 - Do not call OpenAI APIs.
-- Recommended next: do PR AI-1 before PR 10 so the dashboard can show safer explanatory
-  context before OMS + DRY_RUN introduces order-management state.
 
-## PR AI-2. OpenAI Client + Structured Outputs
+## Next: PR AI-2. OpenAI Client + Structured Outputs
 
 - Add the OpenAI client behind explicit AI Sidecar enablement.
 - Use structured outputs and schema validation.
 - Store invalid outputs as failures only; never feed outputs into trading automation.
+- Keep order tools and order context disabled unless a later safety review explicitly enables them.
+- Keep OMS + DRY_RUN for a later PR after separate safety review.
 
 ## PR AI-3. No-trade RCA / Candidate Block RCA
 

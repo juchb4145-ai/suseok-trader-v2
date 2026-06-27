@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 APP_NAME = "suseok-trader-v2"
 
 
@@ -123,6 +123,67 @@ def _create_ai_sidecar_tables(connection: sqlite3.Connection) -> None:
             grade_result_json TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_context_packets (
+            context_id TEXT PRIMARY KEY,
+            task_type TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            context_hash TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            size_chars INTEGER NOT NULL,
+            max_size_chars INTEGER NOT NULL,
+            truncated INTEGER NOT NULL DEFAULT 0,
+            redaction_applied INTEGER NOT NULL DEFAULT 0,
+            order_context_included INTEGER NOT NULL DEFAULT 0,
+            missing_sections_json TEXT NOT NULL DEFAULT '[]',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            source_sections_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_context_build_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_type TEXT,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_context_packets_task_created
+        ON ai_context_packets (task_type, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_context_packets_related_entity
+        ON ai_context_packets (related_entity_type, related_entity_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_context_packets_hash
+        ON ai_context_packets (context_hash)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_context_build_errors_created_at
+        ON ai_context_build_errors (created_at)
         """
     )
 

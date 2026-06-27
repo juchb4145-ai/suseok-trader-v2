@@ -3,8 +3,8 @@
 ## Default Posture
 
 The AI Sidecar is disabled by default. The Core API must operate normally without an
-OpenAI API key, SDK initialization, or model call. PR 2A exposes only read-only status,
-task, and insight list endpoints.
+OpenAI API key, SDK initialization, or model call. PR AI-1 adds read-only context preview
+endpoints, but still has no model execution path.
 
 ## Forbidden Actions
 
@@ -38,6 +38,10 @@ The Sidecar may produce validated read-only output for:
 
 Allowed output is limited to Dashboard, Report, Operator Review, and Codex Prompt Draft
 surfaces.
+
+PR AI-1 additionally allows bounded, redacted context packet previews for the same task list.
+Those packets are input material for future human-reviewed model execution, not trading signals
+and not strategy/risk/OMS automatic input.
 
 ## Schema Validation
 

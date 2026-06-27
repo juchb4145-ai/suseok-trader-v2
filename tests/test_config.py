@@ -11,6 +11,14 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.ai_sidecar_enabled is False
     assert settings.ai_sidecar_intraday_allowed is False
     assert settings.ai_sidecar_order_context_allowed is False
+    assert settings.ai_sidecar_context_builder_enabled is True
+    assert settings.ai_sidecar_context_default_limit == 50
+    assert settings.ai_sidecar_context_max_limit == 200
+    assert settings.ai_sidecar_context_persist_preview is False
+    assert settings.ai_sidecar_context_schema_version == "ai-sidecar-context.v1"
+    assert settings.ai_sidecar_context_redact_paths is True
+    assert settings.ai_sidecar_context_redact_secrets is True
+    assert settings.ai_sidecar_context_include_raw_payload is False
     assert settings.market_data_enabled is True
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
@@ -204,3 +212,17 @@ def test_dashboard_settings_are_validated() -> None:
         assert "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid dashboard limit setting")
+
+
+def test_ai_context_settings_are_validated() -> None:
+    try:
+        load_settings(
+            {
+                "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT": "201",
+                "AI_SIDECAR_CONTEXT_MAX_LIMIT": "200",
+            }
+        )
+    except ValueError as exc:
+        assert "AI_SIDECAR_CONTEXT_DEFAULT_LIMIT" in str(exc)
+    else:
+        raise AssertionError("expected invalid AI context limit setting")

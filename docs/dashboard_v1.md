@@ -96,7 +96,10 @@ entry plan, risk approval, position sizing이 아니다.
 ## AI Sidecar 표시 정책
 
 Dashboard는 `/api/ai-sidecar/status` 성격의 상태와 `ai_insights` 저장 row를 보여준다.
-AI 실행 버튼, OpenAI client 호출, context builder, 자동 판단 연결은 이번 PR 범위가 아니다.
+PR AI-1부터 Dashboard snapshot은 AI Context Builder status도 표시할 수 있다.
+표시 가능한 값은 `context_builder_available=true`, `openai_client_available=false`,
+`execution_api_available=false`, `order_context_allowed=false` 같은 상태 신호다.
+AI 실행 버튼, OpenAI client 호출, 자동 판단 연결은 여전히 없다.
 AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/OMS 자동 input으로 쓰지 않는다.
 
 ## 금지 범위
@@ -111,7 +114,7 @@ AI Sidecar insight는 운영자 참고용 표시 데이터이며 Strategy/Risk/O
 - Dashboard에서 Gateway command 생성/전송 없음
 - Dashboard에서 rebuild/evaluate/import 실행 버튼 없음
 - OpenAI API 호출 없음
-- AI Sidecar Context Builder 없음
+- AI Sidecar Context Builder status 표시만 가능
 - Dashboard 근거 자동 주문/자동 매수 판단 없음
 
 ## Local Runbook

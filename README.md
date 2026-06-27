@@ -7,7 +7,8 @@ PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B 
 plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4 read-only
 Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer,
 the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation layer, the
-PR 8 observe-only Risk Gate layer, and the PR 9 read-only Dashboard V1 operator surface.
+PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
+PR AI-1 read-only LLM Context Builder.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
 behavior, OpenAI API calls, or live order APIs.
 
@@ -349,6 +350,42 @@ Invoke-RestMethod http://127.0.0.1:8000/api/dashboard/snapshot
 ```
 
 See `docs/dashboard_v1.md` for the snapshot structure, UI sections, runbook, and safety policy.
+
+## AI Sidecar Context Builder
+
+PR AI-1 adds a bounded, redacted, deterministic context packet builder for the read-only AI
+Sidecar. It prepares operator-review context before any future model call, but it does not call
+OpenAI APIs, create AI insights, create prompts, enqueue work, or connect to Strategy/Risk/OMS
+automatic decisions.
+
+Context endpoints:
+
+- `GET /api/ai-sidecar/context/status`
+- `GET /api/ai-sidecar/context/preview?task_type=NO_TRADE_RCA`
+- `GET /api/ai-sidecar/context/packets`
+- `GET /api/ai-sidecar/context/packets/{context_id}`
+- `GET /api/ai-sidecar/context/errors`
+- `GET /api/ai-sidecar/context/candidate/{candidate_instance_id}`
+- `GET /api/ai-sidecar/context/theme/{theme_id}`
+- `GET /api/ai-sidecar/context/no-trade/{trade_date}`
+
+Preview example:
+
+```powershell
+Invoke-RestMethod "http://127.0.0.1:8000/api/ai-sidecar/context/preview?task_type=NO_TRADE_RCA&trade_date=2026-06-27"
+Invoke-RestMethod "http://127.0.0.1:8000/api/ai-sidecar/context/preview?task_type=CANDIDATE_BLOCK_RCA&related_entity_id=CAND-2026-06-27-005930-1"
+```
+
+`persist=true` stores the final context packet in `ai_context_packets` for audit/review. It is
+still not AI execution and does not write `ai_requests` or `ai_insights`. Context packets remove
+secrets, account-like values, local absolute paths, raw headers/env values, and order/action-like
+fields by default. `AI_SIDECAR_ALLOW_ORDER_CONTEXT=false` remains the default.
+
+The dashboard AI section now reports context builder status only. It still has no AI execution
+button and no OpenAI client.
+
+See `docs/ai_context_builder.md` for task sections, redaction, order-context restriction,
+truncation, hash, API, storage, and dashboard details.
 
 ## Mock Gateway
 

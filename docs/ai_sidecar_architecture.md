@@ -16,10 +16,10 @@ Core owns configuration, API routing, storage initialization, and system status.
 Strategy owns deterministic candidate evaluation. Risk owns deterministic risk checks.
 OMS owns order lifecycle behavior in later PRs. Gateway owns broker transport isolation.
 
-The Sidecar sits outside those decision paths. It may read bounded, sanitized context
-from the Event Store in later PRs, then produce validated explanatory output for human
-review surfaces. Strategy, Risk, and OMS must not use Sidecar output as automatic
-decision input.
+The Sidecar sits outside those decision paths. PR AI-1 adds a bounded, sanitized context
+builder that reads Event Store and projection state for operator preview. Later PRs may
+use those packets for model execution, but Strategy, Risk, and OMS must not use Sidecar
+output as automatic decision input.
 
 ## Read-only Principles
 
@@ -34,19 +34,36 @@ decision input.
   recorded only with an invalid-output status such as `AI_OUTPUT_INVALID`.
 - The default Sidecar posture is disabled.
 
+## Context Builder
+
+PR AI-1 adds `AISidecarContextPacket` and a read-only Context Builder. The builder is not
+an OpenAI client and does not create insights. It creates bounded, redacted, deterministic,
+schema-versioned packets for:
+
+- Daily market brief
+- Theme brief
+- Candidate block RCA
+- No-trade RCA
+- Trade review placeholder context
+- Operations incident summary
+- Codex prompt context
+
+Context packets enforce size limits, secret/path/account redaction, and order-context
+restriction. `persist=true` stores the final packet in `ai_context_packets` for audit only.
+
 ## Event Store Analysis Shape
 
-Future Sidecar PRs will build context from Event Store records instead of reaching into
-live execution components. The intended flow is:
+The intended Sidecar flow is:
 
 1. Deterministic services write market, candidate, risk, OMS, Gateway, and ops events.
-2. A context builder creates a bounded read-only packet for one allowed Sidecar task.
-3. The Sidecar validates the requested task and output schema.
-4. Valid insights are stored for read-only display.
-5. Invalid, timed out, or errored runs are recorded as failures without insight storage.
+2. The Context Builder creates a bounded read-only packet for one allowed Sidecar task.
+3. A later OpenAI client may consume that packet behind explicit enablement.
+4. The Sidecar validates the requested task and output schema.
+5. Valid insights are stored for read-only display.
+6. Invalid, timed out, or errored runs are recorded as failures without insight storage.
 
-This PR creates only the domain contracts, storage tables, docs, and read-only list/status
-API surface. It does not implement context building or OpenAI calls.
+PR AI-1 stops at step 2. It does not implement OpenAI calls, prompt runners, structured
+output parsing, or insight generation.
 
 ## Session Usage
 
@@ -65,6 +82,6 @@ creation.
 
 ## OpenAI Client Timing
 
-OpenAI API integration is intentionally out of scope for PR 2A. A later PR may add an
-OpenAI client with structured outputs, explicit enablement, timeout handling, and schema
-validation. The system must continue to boot, test, and serve status without an API key.
+OpenAI API integration is intentionally out of scope for PR AI-1. PR AI-2 may add an OpenAI
+client with structured outputs, explicit enablement, timeout handling, and schema validation.
+The system must continue to boot, test, and serve status without an API key.

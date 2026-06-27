@@ -24,6 +24,7 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["safety"]["order_routing_enabled"] is False
     assert snapshot["safety"]["order_controls_available"] is False
     assert snapshot["safety"]["ai_execution_available"] is False
+    assert snapshot["safety"]["ai_context_builder_available"] is True
     assert snapshot["safety"]["observe_only_pipeline"] is True
     assert "OBSERVE_PASS는 주문 승인이 아닙니다." in snapshot["safety"]["warnings"]
     assert "MATCHED_OBSERVATION은 매수 신호가 아닙니다." in snapshot["safety"]["warnings"]
@@ -67,6 +68,7 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert snapshot["errors"]["risk_errors"]
     assert snapshot["ai_sidecar"]["insight_count"] == 1
     assert snapshot["ai_sidecar"]["status"]["execution_api_available"] is False
+    assert snapshot["ai_sidecar"]["status"]["context_builder_available"] is True
 
 
 def _build_observe_pipeline_fixture(connection, settings: Settings) -> None:

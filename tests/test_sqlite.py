@@ -33,7 +33,9 @@ def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:
                 'ai_requests',
                 'ai_insights',
                 'ai_prompt_templates',
-                'ai_evaluation_cases'
+                'ai_evaluation_cases',
+                'ai_context_packets',
+                'ai_context_build_errors'
             )
         """
     ).fetchall()
@@ -44,6 +46,8 @@ def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:
         "ai_insights",
         "ai_prompt_templates",
         "ai_evaluation_cases",
+        "ai_context_packets",
+        "ai_context_build_errors",
     }
 
 
