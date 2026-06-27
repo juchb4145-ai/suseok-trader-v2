@@ -7,6 +7,7 @@ from apps.core_api import app
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_DIRS = ("api", "apps", "domain", "gateway", "infrastructure", "services", "storage", "tools")
+CORE_CODE_DIRS = ("api", "domain", "infrastructure", "services", "storage", "tools")
 
 
 def iter_project_python_files() -> list[Path]:
@@ -16,14 +17,22 @@ def iter_project_python_files() -> list[Path]:
     return paths
 
 
-def project_python_source() -> str:
+def iter_core_python_files() -> list[Path]:
+    paths: list[Path] = []
+    for directory in CORE_CODE_DIRS:
+        paths.extend((ROOT / directory).rglob("*.py"))
+    return paths
+
+
+def project_python_source(*, core_only: bool = False) -> str:
+    paths = iter_core_python_files() if core_only else iter_project_python_files()
     return "\n".join(
-        path.read_text(encoding="utf-8") for path in iter_project_python_files()
+        path.read_text(encoding="utf-8") for path in paths
     )
 
 
 def test_core_has_no_kiwoom_or_pyqt_imports() -> None:
-    combined_source = project_python_source()
+    combined_source = project_python_source(core_only=True)
 
     assert "PyQt5" not in combined_source
     assert "QAxWidget" not in combined_source
@@ -50,7 +59,7 @@ def test_order_execution_apis_and_order_intent_are_not_exposed() -> None:
 
 
 def test_order_execution_functions_strategy_risk_and_oms_are_not_implemented() -> None:
-    combined_source = project_python_source()
+    combined_source = project_python_source(core_only=True)
 
     order_function_pattern = r"def\s+(send_order|submit_order|cancel_order|modify_order)\b"
 

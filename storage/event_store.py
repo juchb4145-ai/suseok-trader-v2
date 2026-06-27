@@ -21,15 +21,24 @@ from storage.gateway_command_store import (
 SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "heartbeat",
+        "login_status",
+        "orderability",
         "price_tick",
         "condition_event",
         "condition_load_result",
+        "condition_loaded",
         "tr_response",
         "execution_event",
         "command_started",
         "command_ack",
         "command_failed",
+        "rate_limited",
         "gateway_error",
+        "gateway_log",
+        "market_symbols",
+        "kiwoom_order_chejan",
+        "kiwoom_balance_chejan",
+        "kiwoom_special_chejan",
     }
 )
 _PAYLOAD_VALIDATORS = {
@@ -165,6 +174,7 @@ def append_gateway_event(
         _upsert_gateway_status(connection, "last_event_received_at", received_at)
         if event_type == "heartbeat":
             _upsert_gateway_status(connection, "last_heartbeat_at", event_ts)
+            _upsert_heartbeat_status(connection, event.payload)
         if event_type in {"command_started", "command_ack", "command_failed"} and event.command_id:
             record_command_event(
                 connection,
@@ -256,6 +266,34 @@ def _upsert_gateway_status(
         """,
         (key, value, datetime_to_wire(utc_now())),
     )
+
+
+def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
+    status_keys = {
+        "kiwoom_logged_in": "kiwoom_logged_in",
+        "gateway_logged_in": "kiwoom_logged_in",
+        "gateway_orderable": "orderable",
+        "orderable": "orderable",
+        "broker_name": "broker_name",
+        "broker_env": "broker_env",
+        "server_mode": "server_mode",
+        "account_mode": "account_mode",
+        "server_gubun": "server_gubun",
+        "account": "account",
+        "condition_load_state": "condition_load_state",
+        "registered_realtime_code_count": "registered_realtime_code_count",
+        "command_queue_healthy": "command_queue_healthy",
+    }
+    for status_key, payload_key in status_keys.items():
+        if payload_key not in payload:
+            continue
+        _upsert_gateway_status(connection, status_key, _status_value(payload[payload_key]))
+
+
+def _status_value(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
 def _gateway_event_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

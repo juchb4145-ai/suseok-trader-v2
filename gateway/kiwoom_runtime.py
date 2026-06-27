@@ -1,0 +1,558 @@
+from __future__ import annotations
+
+import os
+from collections import deque
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any
+
+from domain.broker.commands import GatewayCommand
+from domain.broker.events import GatewayEvent
+from domain.broker.utils import datetime_to_wire, utc_now
+
+from gateway.core_client import CoreClient
+from gateway.kiwoom_client import (
+    ConditionInfo,
+    KiwoomChejanParseResult,
+    KiwoomOrderRequest,
+    KiwoomOrderResult,
+    broker_env_from_server_gubun,
+    condition_event_payload,
+    normalize_code,
+)
+from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
+from gateway.transport import GatewayTransportError
+
+
+@dataclass(frozen=True, kw_only=True)
+class KiwoomGatewayRuntimeConfig:
+    source: str = "kiwoom_gateway"
+    command_limit: int = 20
+    command_wait_sec: float = 1.0
+    condition_name: str | None = None
+    condition_index: int | None = None
+    condition_realtime: bool = True
+    realtime_codes: tuple[str, ...] = ()
+    observe_only: bool = True
+    account: str = ""
+
+
+@dataclass(frozen=True, kw_only=True)
+class PendingOrderRecord:
+    command_id: str
+    idempotency_key: str
+    account_id: str
+    code: str
+    side: str
+    live_sim_intent_id: str
+    account_mode: str
+    broker_env: str
+    server_mode: str
+
+
+class PendingOrderRegistry:
+    def __init__(self) -> None:
+        self._by_signature: dict[tuple[str, str, str], PendingOrderRecord] = {}
+        self._by_broker_order_no: dict[str, PendingOrderRecord] = {}
+
+    def record_ack(
+        self,
+        command: GatewayCommand,
+        request: KiwoomOrderRequest,
+        result: KiwoomOrderResult,
+    ) -> None:
+        metadata = dict(request.metadata)
+        record = PendingOrderRecord(
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key or request.idempotency_key,
+            account_id=request.account,
+            code=normalize_code(request.code),
+            side=request.side.upper(),
+            live_sim_intent_id=str(
+                metadata.get("live_sim_intent_id")
+                or command.payload.get("live_sim_intent_id")
+                or ""
+            ),
+            account_mode=str(command.payload.get("account_mode") or "SIMULATION").upper(),
+            broker_env=str(command.payload.get("broker_env") or "SIMULATION").upper(),
+            server_mode=str(command.payload.get("server_mode") or "SIMULATION").upper(),
+        )
+        self._by_signature[self._signature(record.account_id, record.code, record.side)] = record
+        if result.order_no:
+            self._by_broker_order_no[str(result.order_no)] = record
+
+    def enrich_chejan_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        enriched = dict(payload)
+        record = self._match(enriched)
+        if record is None:
+            return enriched
+        broker_order_no = str(
+            enriched.get("broker_order_no") or enriched.get("broker_order_id") or ""
+        )
+        if broker_order_no:
+            self._by_broker_order_no[broker_order_no] = record
+        enriched["command_id"] = record.command_id
+        enriched["idempotency_key"] = record.idempotency_key
+        enriched["live_sim_intent_id"] = record.live_sim_intent_id
+        return enriched
+
+    def enrich_execution_payload(
+        self,
+        payload: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], str, str]:
+        enriched = dict(payload)
+        record = self._match(enriched)
+        command_id = ""
+        idempotency_key = ""
+        if record is not None:
+            command_id = record.command_id
+            idempotency_key = record.idempotency_key
+            metadata = dict(enriched.get("metadata") or {})
+            metadata.update(
+                {
+                    "gateway_command_id": record.command_id,
+                    "live_sim_intent_id": record.live_sim_intent_id,
+                    "idempotency_key": record.idempotency_key,
+                    "account_mode": record.account_mode,
+                    "broker_env": record.broker_env,
+                    "server_mode": record.server_mode,
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                }
+            )
+            enriched["metadata"] = metadata
+        return enriched, command_id, idempotency_key
+
+    def _match(self, payload: Mapping[str, Any]) -> PendingOrderRecord | None:
+        broker_order_no = str(
+            payload.get("broker_order_no") or payload.get("broker_order_id") or ""
+        )
+        if broker_order_no and broker_order_no in self._by_broker_order_no:
+            return self._by_broker_order_no[broker_order_no]
+        account = str(payload.get("account_id") or payload.get("account") or "")
+        code = str(payload.get("code") or "")
+        side = str(payload.get("side") or "").upper()
+        if not account or not code or not side:
+            return None
+        return self._by_signature.get(self._signature(account, normalize_code(code), side))
+
+    @staticmethod
+    def _signature(account: str, code: str, side: str) -> tuple[str, str, str]:
+        return (str(account), normalize_code(code), str(side).upper())
+
+
+class KiwoomGatewayRuntime:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        core_client: CoreClient,
+        config: KiwoomGatewayRuntimeConfig | None = None,
+    ) -> None:
+        self.client = client
+        self.core_client = core_client
+        self.config = config or KiwoomGatewayRuntimeConfig()
+        self.pending_orders = PendingOrderRegistry()
+        self.command_handler = KiwoomGatewayCommandHandler(
+            client,
+            source=self.config.source,
+            on_order_ack=self.pending_orders.record_ack,
+        )
+        self._event_queue: deque[GatewayEvent] = deque()
+        self._heartbeat_sequence = 0
+        self._posted_count = 0
+        self._polled_count = 0
+        self._handled_command_count = 0
+        self._last_error = ""
+        self._login_in_progress = False
+        self._login_requested = False
+        self._login_result_code: int | None = None
+        self._login_error = ""
+        self._login_started_at = ""
+        self._login_finished_at = ""
+        self._login_threaded = False
+        self._condition_load_state = "IDLE"
+        self._registered_realtime_codes: set[str] = set()
+
+    def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
+        self.emit_event(
+            GatewayEvent(
+                event_type=event_type,
+                source=self.config.source,
+                payload=dict(payload),
+                **kwargs,
+            )
+        )
+
+    def emit_event(self, event: GatewayEvent) -> None:
+        self._event_queue.append(event)
+
+    def emit_heartbeat(self) -> None:
+        self._heartbeat_sequence += 1
+        payload = self.heartbeat_payload()
+        payload["sequence"] = self._heartbeat_sequence
+        self.emit("heartbeat", payload)
+
+    def flush_events(self, *, limit: int = 200) -> None:
+        drained = 0
+        while self._event_queue and drained < max(int(limit), 1):
+            event = self._event_queue[0]
+            try:
+                self.core_client.post_event(event)
+            except GatewayTransportError as exc:
+                self._last_error = str(exc)
+                break
+            except Exception as exc:
+                self._last_error = str(exc)
+                break
+            self._event_queue.popleft()
+            self._posted_count += 1
+            drained += 1
+
+    def poll_and_handle_commands(self) -> None:
+        try:
+            commands = self.core_client.poll_commands(
+                limit=self.config.command_limit,
+                wait_sec=self.config.command_wait_sec,
+            )
+        except GatewayTransportError as exc:
+            self._last_error = str(exc)
+            return
+        except Exception as exc:
+            self._last_error = str(exc)
+            return
+        self._polled_count += 1
+        for command in commands:
+            self._handled_command_count += 1
+            for event in self.command_handler.handle(command):
+                self.emit_event(event)
+        self.flush_events()
+
+    def heartbeat_payload(self) -> dict[str, Any]:
+        logged_in = self.kiwoom_logged_in()
+        accounts = self._accounts() if logged_in else []
+        account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
+        if not account and accounts:
+            account = accounts[0]
+        server_gubun = self._server_gubun() if logged_in else ""
+        broker_env = broker_env_from_server_gubun(server_gubun) if logged_in else "UNKNOWN"
+        orderable = bool(logged_in and account and broker_env == "SIMULATION")
+        return {
+            "status": "ok",
+            "kiwoom_logged_in": logged_in,
+            "orderable": orderable,
+            "mode": os.getenv("TRADING_MODE", "OBSERVE"),
+            "account": account,
+            "accounts": [_mask_account(item) for item in accounts],
+            "broker_name": "KIWOOM",
+            "broker_env": broker_env,
+            "server_mode": broker_env,
+            "account_mode": broker_env,
+            "server_gubun": server_gubun,
+            "last_error": self._last_error,
+            "reconnect_count": 0,
+            "rate_limit": {"adapter": "kiwoom", "local": True},
+            "command_queue_size": 0,
+            "event_queue_size": len(self._event_queue),
+            "login_in_progress": self._login_in_progress,
+            "login_requested": self._login_requested,
+            "login_result_code": self._login_result_code,
+            "login_error": self._login_error,
+            "login_started_at": self._login_started_at,
+            "login_finished_at": self._login_finished_at,
+            "login_threaded": self._login_threaded,
+            "condition_load_state": self._condition_load_state,
+            "registered_realtime_code_count": len(self._registered_realtime_codes),
+            "queued_event_count": len(self._event_queue),
+            "posted_event_count": self._posted_count,
+            "poll_count": self._polled_count,
+            "handled_command_count": self._handled_command_count,
+            "observe_only": self.config.observe_only,
+            "live_real_allowed": False,
+        }
+
+    def request_login_started(self, *, threaded: bool) -> None:
+        self._login_in_progress = True
+        self._login_requested = True
+        self._login_result_code = None
+        self._login_error = ""
+        self._login_started_at = datetime_to_wire(utc_now())
+        self._login_finished_at = ""
+        self._login_threaded = bool(threaded)
+
+    def request_login_failed(self, exc: Exception) -> None:
+        self._login_in_progress = False
+        self._login_error = str(exc)
+        self._login_finished_at = datetime_to_wire(utc_now())
+        self.emit("gateway_error", {"message": f"KIWOOM_LOGIN_REQUEST_FAILED:{exc}"})
+
+    def on_connected(self, ok: bool, code: int, message: str) -> None:
+        self._login_in_progress = False
+        self._login_finished_at = datetime_to_wire(utc_now())
+        self._login_result_code = int(code)
+        self._login_error = "" if ok else str(message or code)
+        self.emit(
+            "login_status",
+            {
+                "logged_in": bool(ok),
+                "code": int(code),
+                "message": str(message or ""),
+                **self._broker_mode_payload(logged_in=bool(ok)),
+            },
+        )
+        self.emit("orderability", self.heartbeat_payload())
+        if ok:
+            self._register_initial_realtime()
+            self._load_conditions()
+            self._emit_market_symbols()
+
+    def on_condition_load_result(self, success: bool, message: str = "") -> None:
+        self._condition_load_state = "LOADED" if success else "FAILED"
+        self.emit(
+            "condition_load_result",
+            {
+                "success": bool(success),
+                "message": str(message or ""),
+                "conditions": [condition.to_dict() for condition in self._conditions()],
+            },
+        )
+
+    def on_condition_loaded(self, conditions: Iterable[ConditionInfo]) -> None:
+        loaded = [condition.to_dict() for condition in list(conditions or [])]
+        self._condition_load_state = "LOADED"
+        self.emit("condition_loaded", {"conditions": loaded})
+        self._send_configured_condition(loaded)
+
+    def on_condition_event(
+        self,
+        *,
+        code: str,
+        event_type: str,
+        condition_name: str,
+        condition_index: int,
+        source: str,
+    ) -> None:
+        normalized_code = normalize_code(code)
+        payload = condition_event_payload(
+            code=normalized_code,
+            event_type=event_type,
+            condition_name=condition_name,
+            condition_index=condition_index,
+            name=self._code_name(normalized_code),
+            metadata={"source_event": source},
+        )
+        self.emit("condition_event", payload)
+        if payload["action"] == "ENTER" and self.config.condition_realtime:
+            self.register_realtime_codes([normalized_code])
+
+    def register_realtime_codes(self, codes: Iterable[str]) -> None:
+        normalized_codes = [normalize_code(code) for code in codes if str(code or "").strip()]
+        if not normalized_codes:
+            return
+        self.client.register_realtime(normalized_codes)
+        self._registered_realtime_codes.update(normalized_codes)
+
+    def on_chejan_result(self, result: KiwoomChejanParseResult) -> None:
+        chejan_payload = self.pending_orders.enrich_chejan_payload(result.to_event_payload())
+        command_id = str(chejan_payload.get("command_id") or "") or None
+        idempotency_key = str(chejan_payload.get("idempotency_key") or "") or None
+        self.emit(
+            result.gateway_event_type,
+            chejan_payload,
+            command_id=command_id,
+            idempotency_key=idempotency_key,
+        )
+        if result.execution_payload is not None:
+            payload, exec_command_id, exec_key = self.pending_orders.enrich_execution_payload(
+                result.execution_payload
+            )
+            self.emit(
+                "execution_event",
+                payload,
+                command_id=exec_command_id or command_id,
+                idempotency_key=exec_key or idempotency_key,
+            )
+
+    def kiwoom_logged_in(self) -> bool:
+        ocx = getattr(self.client, "ocx", None)
+        dynamic_call = getattr(ocx, "dynamicCall", None)
+        if callable(dynamic_call):
+            try:
+                return int(dynamic_call("GetConnectState()") or 0) == 1
+            except Exception:
+                return False
+        return bool(self._accounts())
+
+    def close(self) -> None:
+        close = getattr(self.core_client, "close", None)
+        if callable(close):
+            close()
+
+    def _load_conditions(self) -> None:
+        try:
+            result = int(self.client.load_conditions() or 0)
+        except Exception as exc:
+            self._condition_load_state = "FAILED"
+            self.emit("gateway_error", {"message": f"CONDITION_LOAD_FAILED:{exc}"})
+            return
+        self._condition_load_state = "LOADING" if result > 0 else "FAILED"
+        if result <= 0:
+            self.emit(
+                "condition_load_result",
+                {"success": False, "message": "GetConditionLoad failed"},
+            )
+
+    def _send_configured_condition(self, conditions: list[dict[str, Any]]) -> None:
+        condition_name = self.config.condition_name
+        condition_index = self.config.condition_index
+        if condition_index is None and condition_name:
+            for condition in conditions:
+                if str(condition.get("name") or "") == condition_name:
+                    condition_index = int(condition.get("index") or 0)
+                    break
+        if condition_name is None and condition_index is not None:
+            for condition in conditions:
+                if int(condition.get("index") or -1) == condition_index:
+                    condition_name = str(condition.get("name") or "")
+                    break
+        if condition_name is None or condition_index is None:
+            return
+        try:
+            result = int(
+                self.client.send_condition(
+                    "7600",
+                    condition_name,
+                    int(condition_index),
+                    realtime=self.config.condition_realtime,
+                )
+                or 0
+            )
+        except Exception as exc:
+            self.emit("gateway_error", {"message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}"})
+            return
+        self.emit(
+            "gateway_log",
+            {
+                "message": "configured condition send requested",
+                "condition_name": condition_name,
+                "condition_index": condition_index,
+                "result_code": result,
+            },
+        )
+
+    def _register_initial_realtime(self) -> None:
+        if self.config.realtime_codes:
+            self.register_realtime_codes(self.config.realtime_codes)
+
+    def _emit_market_symbols(self) -> None:
+        markets = []
+        for market_code, market_name in (("0", "KOSPI"), ("10", "KOSDAQ")):
+            try:
+                codes = [
+                    normalize_code(code)
+                    for code in self.client.get_code_list_by_market(market_code)
+                ]
+            except Exception as exc:
+                self.emit(
+                    "gateway_error",
+                    {"message": f"MARKET_SYMBOLS_LOAD_FAILED:{market_name}:{exc}"},
+                )
+                continue
+            if codes:
+                markets.append(
+                    {"market_code": market_code, "market": market_name, "symbols": codes}
+                )
+        if markets:
+            self.emit("market_symbols", {"source": "kiwoom_code_list", "markets": markets})
+
+    def _broker_mode_payload(self, *, logged_in: bool) -> dict[str, str]:
+        if not logged_in:
+            return {
+                "broker_name": "KIWOOM",
+                "broker_env": "UNKNOWN",
+                "server_mode": "UNKNOWN",
+                "account_mode": "UNKNOWN",
+                "server_gubun": "",
+            }
+        server_gubun = self._server_gubun()
+        broker_env = broker_env_from_server_gubun(server_gubun)
+        return {
+            "broker_name": "KIWOOM",
+            "broker_env": broker_env,
+            "server_mode": broker_env,
+            "account_mode": broker_env,
+            "server_gubun": server_gubun,
+        }
+
+    def _accounts(self) -> list[str]:
+        try:
+            return list(self.client.get_accounts() or [])
+        except Exception:
+            return []
+
+    def _conditions(self) -> list[ConditionInfo]:
+        try:
+            return list(self.client.condition_name_list() or [])
+        except Exception:
+            return []
+
+    def _server_gubun(self) -> str:
+        getter = getattr(self.client, "get_server_gubun", None)
+        if not callable(getter):
+            return ""
+        try:
+            return str(getter() or "").strip()
+        except Exception:
+            return ""
+
+    def _code_name(self, code: str) -> str:
+        try:
+            return str(self.client.get_code_name(normalize_code(code)) or "")
+        except Exception:
+            return normalize_code(code)
+
+
+def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
+    client.connected.connect(
+        lambda ok, code, message: runtime.on_connected(bool(ok), int(code), str(message or ""))
+    )
+    client.price_tick_received.connect(lambda payload: runtime.emit("price_tick", dict(payload)))
+    client.message_received.connect(
+        lambda message: runtime.emit("gateway_log", {"message": str(message or "")})
+    )
+    client.condition_load_result.connect(
+        lambda success, message="": runtime.on_condition_load_result(
+            bool(success), str(message or "")
+        )
+    )
+    client.condition_loaded.connect(lambda conditions: runtime.on_condition_loaded(conditions))
+    client.condition_real_received.connect(
+        lambda code, event_type, condition_name, condition_index: runtime.on_condition_event(
+            code=str(code or ""),
+            event_type=str(event_type or ""),
+            condition_name=str(condition_name or ""),
+            condition_index=int(condition_index or -1),
+            source="real_condition",
+        )
+    )
+    client.condition_tr_received.connect(
+        lambda screen_no, code_list, condition_name, condition_index, next_flag: [
+            runtime.on_condition_event(
+                code=code,
+                event_type="I",
+                condition_name=str(condition_name or ""),
+                condition_index=int(condition_index or -1),
+                source="tr_condition",
+            )
+            for code in str(code_list or "").split(";")
+            if code.strip()
+        ]
+    )
+    client.chejan_event_received.connect(lambda result: runtime.on_chejan_result(result))
+
+
+def _mask_account(value: str) -> str:
+    text = str(value or "")
+    if len(text) <= 4:
+        return "*" * len(text)
+    return f"{'*' * (len(text) - 4)}{text[-4:]}"

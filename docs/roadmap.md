@@ -2,7 +2,7 @@
 
 ## 요약
 
-이 로드맵은 `suseok-trader-v2`가 어떤 순서로 안전한 관찰 파이프라인을 쌓아 왔는지 보여준다. PR12까지 진행되었지만, 이것이 `LIVE_REAL` 준비 완료를 뜻하지 않는다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
+이 로드맵은 `suseok-trader-v2`가 어떤 순서로 안전한 관찰 파이프라인을 쌓아 왔는지 보여준다. PR13까지 진행되었지만, 이것이 `LIVE_REAL` 준비 완료를 뜻하지 않는다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
 
 ## 공통 안전 문구
 
@@ -38,12 +38,14 @@
 | PR 11 Exit Engine | Done | DRY_RUN position의 simulated close accounting 추가 | 실제 매도 주문 아님 |
 | PR 12 LIVE_SIM Enablement | Done | simulation-account-only LIVE_SIM path 추가 | safety-gated `send_order`만 허용, LIVE_REAL 아님 |
 | PR AI-6 LIVE_SIM Review Sidecar | Done | LIVE_SIM session/order/reconcile/incident review report 추가 | 장후 복기용 review-only artifact |
+| PR 13 Kiwoom Gateway Real Adapter | Done | suseok_ai의 Kiwoom OpenAPI+ client/gateway 자산을 v2 Gateway 계약으로 이식 | 32-bit Gateway에서 실제 조건검색/실시간/TR/LIVE_SIM command를 처리하되 LIVE_REAL 금지 |
 
 ## 현재 다음 후보
 
 | 후보 | 설명 | 주의 |
 | --- | --- | --- |
-| PR13 LIVE_SIM Hardening | LIVE_SIM safety gate와 acceptance runbook 강화 | 모의투자 전용 범위를 유지해야 함 |
+| PR14 Market Open OBSERVE Stabilization | 실제 장중 Kiwoom Gateway heartbeat, condition, tick, projection 안정화 | 주문 기능은 OFF 상태로 확인 |
+| PR15 LIVE_SIM Pilot Day Runbook | 모의투자 전용 하루 pilot 절차와 evidence/reconcile 강화 | simulation server 확인 없이는 주문 금지 |
 | Broker Reconcile Pilot | simulation-account snapshot 정합성 확인 | 실계좌 reconcile과 혼동 금지 |
 | Operator Kill Switch Drill | kill switch 절차와 운영 훈련 정리 | 버튼/자동 실행보다 확인 절차가 먼저 |
 
