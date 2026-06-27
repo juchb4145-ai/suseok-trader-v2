@@ -62,6 +62,12 @@ Prompt Generator path is deterministic. When `run_ai=true` is explicitly request
 produce a `prompt_draft`, but the PR AI-5 sanitizer rejects automatic Codex execution, GitHub
 branch/commit/push/PR creation, order execution, and live-flag changes before an insight is saved.
 
+PR AI-6 LIVE_SIM Review Sidecar reuses existing task types instead of adding a new model task.
+LIVE_SIM order reviews may call `TRADE_REVIEW`; session, reconcile, and incident reviews may call
+`OPS_INCIDENT_SUMMARY`. These calls happen only when `run_ai=true` is explicitly requested.
+The deterministic review report remains intact when AI is disabled, unavailable, invalid, or
+policy rejected.
+
 ## Prompt Registry
 
 `services/ai_sidecar/prompt_registry.py` owns task prompts. Prompts require read-only analysis,
@@ -164,6 +170,16 @@ leaves the deterministic draft intact and does not create a normal insight for r
 
 Tools/function calling, web search, code interpreter, MCP connections, and order tools remain
 disabled for this task.
+
+## LIVE_SIM Review Sidecar Linkage
+
+PR AI-6 may call `run_ai_sidecar_task` with `TRADE_REVIEW` or `OPS_INCIDENT_SUMMARY` only for
+manual review enrichment. Valid output can link `ai_request_id` and `ai_insight_id` to a
+`LiveSimReviewReport`. Failed, invalid, unavailable, or policy-rejected output records request
+status without creating a normal insight.
+
+The AI insight is never Strategy input, Risk input, OMS input, LIVE_SIM order input, retry input,
+cancel/modify input, reconcile command input, GatewayCommand input, or LIVE_REAL enablement.
 
 ## Dashboard Policy
 

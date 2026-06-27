@@ -9,6 +9,7 @@ manual only, and separated from DRY_RUN and LIVE_REAL.
 - LIVE_REAL remains disabled and out of scope.
 - DRY_RUN evidence can be a prerequisite, but DRY_RUN never auto-creates LIVE_SIM intents.
 - AI Sidecar, RCA reports, and Codex prompt drafts are review-only and never order inputs.
+- LIVE_SIM Review Sidecar reports are 장후 복기 artifacts and never order inputs.
 - Dashboard is read-only and has no buy, sell, cancel, modify, reconcile, or queue buttons.
 
 ## Safety Gate
@@ -122,6 +123,20 @@ CLI tools never bypass the safety gate and never create LIVE_REAL orders.
 Dashboard snapshot includes `live_sim` with status, safety gate, counts, recent intents, orders,
 executions, rejections, and reconcile snapshots. The browser UI renders these read-only and performs
 no LIVE_SIM POST calls.
+
+## LIVE_SIM Review Sidecar
+
+PR AI-6 adds deterministic session/order/reconcile/incident review reports under
+`/api/ai-sidecar/live-sim-review`. The review sidecar reads LIVE_SIM intents, orders, executions,
+rejections, gateway command status, command ack/failure events, reconcile snapshots, and errors.
+It stores operator review artifacts in `ai_live_sim_review_*` tables.
+
+The review sidecar does not create `LiveSimIntent`, does not enqueue `GatewayCommand`, does not
+call order send/cancel/modify paths, and does not mutate LIVE_SIM order state. `run_ai=false` is
+the default and works without OpenAI. `run_ai=true` can link an AI insight for review only.
+
+Dashboard displays latest LIVE_SIM review reports as read-only cards and still performs no POST
+calls to LIVE_SIM review endpoints.
 
 ## Mock Gateway Acceptance
 

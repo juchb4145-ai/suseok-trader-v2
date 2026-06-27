@@ -13,6 +13,12 @@ from services.ai_sidecar.codex_prompt_store import (
     list_codex_prompt_errors,
 )
 from services.ai_sidecar.context_store import list_context_build_errors
+from services.ai_sidecar.live_sim_review_store import (
+    count_live_sim_review_reports,
+    get_live_sim_review_report,
+    list_live_sim_review_errors,
+    list_live_sim_review_reports,
+)
 from services.ai_sidecar.rca_report_store import (
     count_rca_reports,
     get_rca_report,
@@ -164,6 +170,7 @@ def build_ai_explanation_status(
         "execution_controls_available": False,
         "run_buttons_available": False,
         "rca_report_count": count_rca_reports(connection),
+        "live_sim_review_report_count": count_live_sim_review_reports(connection),
         "codex_prompt_draft_count": count_codex_prompt_drafts(connection),
         "ai_insight_count": count_ai_insights(connection),
         "ai_request_failure_count": _count_ai_request_failures(connection),
@@ -214,6 +221,7 @@ def _build_all_cards(
     return [
         *build_no_trade_rca_cards(connection, settings, limit=min(5, bounded_limit)),
         *build_candidate_rca_cards(connection, settings, limit=candidate_limit),
+        *build_live_sim_review_cards(connection, settings, limit=bounded_limit),
         *build_codex_prompt_draft_cards(connection, settings, limit=bounded_limit),
         *build_ai_insight_cards(connection, settings, limit=bounded_limit),
         *build_ai_request_failure_cards(connection, settings, limit=bounded_limit),
@@ -229,6 +237,16 @@ def build_codex_prompt_draft_cards(
 ) -> list[dict[str, Any]]:
     rows = list_codex_prompt_drafts(connection, limit=_bounded_limit(limit, settings))
     return [_codex_prompt_draft_card(row) for row in rows]
+
+
+def build_live_sim_review_cards(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = list_live_sim_review_reports(connection, limit=_bounded_limit(limit, settings))
+    return [_live_sim_review_card(connection, row) for row in rows]
 
 
 def _rca_report_card(
@@ -269,6 +287,60 @@ def _rca_report_card(
             "report_sections": report.get("deterministic_sections", []),
             "links": report.get("links", []),
             "metadata": report.get("metadata", {}),
+        }
+    )
+
+
+def _live_sim_review_card(
+    connection: sqlite3.Connection,
+    row: Mapping[str, Any],
+) -> dict[str, Any]:
+    report = get_live_sim_review_report(
+        connection,
+        str(row["review_id"]),
+        include_sections=True,
+        include_links=True,
+    ) or dict(row)
+    card_type = str(report["report_type"])
+    warnings = _strings(report.get("warnings"))
+    warnings.extend(
+        [
+            "LIVE_SIM review card는 표시 전용입니다.",
+            "이 카드는 주문 재시도/취소/정정 입력이 아닙니다.",
+        ]
+    )
+    return _decorate_card(
+        {
+            "card_id": f"live-sim-review:{report['review_id']}",
+            "card_type": card_type,
+            "title": map_card_type_label(card_type),
+            "subtitle": report.get("title") or map_card_type_label(card_type),
+            "status": str(report["status"]),
+            "severity": str(report["severity"]),
+            "root_cause_category": report.get("root_cause_category"),
+            "root_cause": report.get("root_cause"),
+            "summary": report.get("summary"),
+            "suggested_checks": _strings(report.get("suggested_checks")),
+            "warnings": _unique(warnings),
+            "related_entity_type": report.get("related_entity_type"),
+            "related_entity_id": report.get("related_entity_id"),
+            "trade_date": report.get("trade_date"),
+            "generated_at": report.get("generated_at"),
+            "ai_request_id": report.get("ai_request_id"),
+            "ai_insight_id": report.get("ai_insight_id"),
+            "rca_report_id": None,
+            "live_sim_review_id": report.get("review_id"),
+            "live_sim_order_id": report.get("live_sim_order_id"),
+            "reconcile_id": report.get("reconcile_id"),
+            "context_id": report.get("context_id"),
+            "source": "ai_live_sim_review_reports",
+            "report_sections": report.get("deterministic_sections", []),
+            "links": report.get("links", []),
+            "metadata": report.get("metadata", {}),
+            "review_only": True,
+            "order_action_allowed": False,
+            "gateway_command_allowed": False,
+            "live_real_allowed": False,
         }
     )
 
@@ -401,9 +473,11 @@ def _build_ai_context_warning_cards(
     context_errors = list_context_build_errors(connection, limit=bounded_limit)
     rca_errors = list_rca_report_errors(connection, limit=bounded_limit)
     codex_prompt_errors = list_codex_prompt_errors(connection, limit=bounded_limit)
+    live_sim_review_errors = list_live_sim_review_errors(connection, limit=bounded_limit)
     cards = [_context_error_card(error) for error in context_errors]
     cards.extend(_rca_error_card(error) for error in rca_errors)
     cards.extend(_codex_prompt_error_card(error) for error in codex_prompt_errors)
+    cards.extend(_live_sim_review_error_card(error) for error in live_sim_review_errors)
     return cards
 
 
@@ -505,6 +579,40 @@ def _codex_prompt_error_card(error: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
+def _live_sim_review_error_card(error: Mapping[str, Any]) -> dict[str, Any]:
+    return _decorate_card(
+        {
+            "card_id": f"live-sim-review-error:{error['id']}",
+            "card_type": "AI_CONTEXT_WARNING",
+            "title": "LIVE_SIM review 오류",
+            "subtitle": str(error.get("report_type") or "live_sim_review"),
+            "status": "FAILED",
+            "severity": "HIGH",
+            "root_cause_category": "AI_EXECUTION",
+            "root_cause": error.get("error_message"),
+            "summary": (
+                "LIVE_SIM review report 생성 오류가 기록되었습니다: "
+                f"{error.get('error_message')}"
+            ),
+            "suggested_checks": [
+                "CLI/API 입력값과 관련 LIVE_SIM row 존재 여부를 확인하세요.",
+                "오류 카드는 표시 전용이며 Dashboard에서 재실행하지 않습니다.",
+            ],
+            "warnings": ["LIVE_SIM review error card는 주문 액션을 제공하지 않습니다."],
+            "related_entity_type": error.get("related_entity_type"),
+            "related_entity_id": error.get("related_entity_id"),
+            "trade_date": error.get("trade_date"),
+            "generated_at": error.get("created_at"),
+            "ai_request_id": None,
+            "ai_insight_id": None,
+            "rca_report_id": None,
+            "context_id": None,
+            "source": "ai_live_sim_review_errors",
+            "payload": error.get("payload", {}),
+        }
+    )
+
+
 def _decorate_card(card: dict[str, Any]) -> dict[str, Any]:
     status = str(card.get("status") or "UNKNOWN").upper()
     severity = str(card.get("severity") or "INFO").upper()
@@ -516,7 +624,11 @@ def _decorate_card(card: dict[str, Any]) -> dict[str, Any]:
     card["severity_label"] = map_ai_severity_label(severity)
     card["root_cause_category_label"] = map_rca_category_label(category)
     card["observe_only"] = True
+    card["review_only"] = True
     card["no_trading_side_effects"] = True
+    card["live_real_allowed"] = False
+    card["order_action_allowed"] = False
+    card["gateway_command_allowed"] = False
     card["actions_available"] = False
     card["execution_controls_available"] = False
     card["read_only_badge"] = "읽기 전용"
@@ -564,7 +676,15 @@ def _count_context_warnings(connection: sqlite3.Connection) -> int:
     codex_row = connection.execute(
         "SELECT COUNT(*) AS count FROM ai_codex_prompt_errors"
     ).fetchone()
-    return int(context_row["count"]) + int(rca_row["count"]) + int(codex_row["count"])
+    live_sim_review_row = connection.execute(
+        "SELECT COUNT(*) AS count FROM ai_live_sim_review_errors"
+    ).fetchone()
+    return (
+        int(context_row["count"])
+        + int(rca_row["count"])
+        + int(codex_row["count"])
+        + int(live_sim_review_row["count"])
+    )
 
 
 def _policy_warnings(

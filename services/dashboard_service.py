@@ -23,6 +23,11 @@ from services.ai_sidecar.codex_prompt_store import (
     list_codex_prompt_drafts,
     list_codex_prompt_errors,
 )
+from services.ai_sidecar.live_sim_review_store import (
+    count_live_sim_review_reports,
+    list_live_sim_review_errors,
+    list_live_sim_review_reports,
+)
 from services.ai_sidecar.openai_client import get_openai_client_status
 from services.ai_sidecar.rca_report_store import (
     count_rca_reports,
@@ -163,6 +168,15 @@ def build_dashboard_snapshot(
     latest_rca_reports = list_rca_reports(connection, limit=min(bounded_limit, 10))
     latest_rca_errors = list_rca_report_errors(connection, limit=min(bounded_limit, 10))
     rca_report_count = count_rca_reports(connection)
+    latest_live_sim_review_reports = list_live_sim_review_reports(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
+    latest_live_sim_review_errors = list_live_sim_review_errors(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
+    live_sim_review_report_count = count_live_sim_review_reports(connection)
     latest_codex_prompt_drafts = list_codex_prompt_drafts(
         connection,
         limit=min(bounded_limit, 10),
@@ -352,10 +366,15 @@ def build_dashboard_snapshot(
             "recent_rejections": live_sim_rejections,
             "reconcile_status": live_sim_reconcile[0] if live_sim_reconcile else None,
             "recent_reconcile_snapshots": live_sim_reconcile,
+            "live_sim_review_available": True,
+            "live_sim_review_report_count": live_sim_review_report_count,
+            "latest_live_sim_review_reports": latest_live_sim_review_reports,
+            "latest_live_sim_review_errors": latest_live_sim_review_errors,
             "warnings": [
                 "LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아닙니다.",
                 "LIVE_REAL은 비활성화되어 있습니다.",
                 "Dashboard는 PR12에서 LIVE_SIM 실행 버튼을 제공하지 않습니다.",
+                "LIVE_SIM Review Sidecar는 장후 복기 artifact이며 주문 입력이 아닙니다.",
             ],
             "order_controls_available": False,
             "execution_controls_available": False,
@@ -376,6 +395,12 @@ def build_dashboard_snapshot(
             "latest_rca_errors": latest_rca_errors,
             "latest_rca_report_count": len(latest_rca_reports),
             "latest_rca_error_count": len(latest_rca_errors),
+            "live_sim_review_available": True,
+            "live_sim_review_report_count": live_sim_review_report_count,
+            "latest_live_sim_review_reports": latest_live_sim_review_reports,
+            "latest_live_sim_review_errors": latest_live_sim_review_errors,
+            "latest_live_sim_review_report_count": len(latest_live_sim_review_reports),
+            "latest_live_sim_review_error_count": len(latest_live_sim_review_errors),
             "codex_prompt_generator_available": True,
             "codex_draft_count": codex_draft_count,
             "latest_codex_prompt_drafts": latest_codex_prompt_drafts,

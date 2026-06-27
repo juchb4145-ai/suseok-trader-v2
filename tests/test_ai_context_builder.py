@@ -253,6 +253,7 @@ def test_safety_regression_ai_execution_is_manual_run_only_and_no_order_routes()
         or path.startswith("/api/ai-sidecar/run")
         or path.startswith("/api/ai-sidecar/rca")
         or path.startswith("/api/ai-sidecar/codex-prompts")
+        or path.startswith("/api/ai-sidecar/live-sim-review")
         for path, methods in route_methods.items()
     )
     assert "/api/orders/enqueue" not in {route.path for route in app.routes}

@@ -490,6 +490,8 @@ const renderLiveSim = (snapshot) => {
   const executions = liveSim.recent_executions || [];
   const rejections = liveSim.recent_rejections || [];
   const reconcile = liveSim.recent_reconcile_snapshots || [];
+  const reviews = liveSim.latest_live_sim_review_reports || [];
+  const reviewErrors = liveSim.latest_live_sim_review_errors || [];
   document.getElementById("live-sim-badges").innerHTML = [
     badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
     badge(status.kill_switch ? "BLOCKED" : "OBSERVE", `kill ${status.kill_switch}`),
@@ -583,6 +585,10 @@ const renderLiveSim = (snapshot) => {
     logGroup("LIVE_SIM rejections", rejections),
     logGroup("LIVE_SIM reconcile", reconcile),
   ].join("");
+  document.getElementById("live-sim-reviews").innerHTML = [
+    logGroup("LIVE_SIM review reports", reviews),
+    logGroup("LIVE_SIM review errors", reviewErrors),
+  ].join("");
 };
 
 const renderErrors = (snapshot) => {
@@ -618,6 +624,7 @@ const renderAi = (snapshot) => {
     metric("recent_request_count", ai.recent_request_count || 0),
     metric("insight_count", ai.insight_count || 0),
     metric("rca_report_count", ai.rca_report_count || 0),
+    metric("live_sim_review_report_count", ai.live_sim_review_report_count || 0),
     metric("codex_draft_count", ai.codex_draft_count || 0),
   ].join("");
 
@@ -685,6 +692,7 @@ const renderAiExplanations = (snapshot) => {
   ].join("");
   document.getElementById("ai-explanation-status").innerHTML = [
     metric("rca_report_count", explanations.rca_report_count || 0),
+    metric("live_sim_review_report_count", explanations.live_sim_review_report_count || 0),
     metric("ai_insight_count", explanations.ai_insight_count || 0),
     metric("ai_request_failure_count", explanations.ai_request_failure_count || 0),
     metric("context_warning_count", explanations.context_warning_count || 0),
@@ -729,6 +737,9 @@ const aiExplanationCard = (card) => {
       <div class="ai-card-links">
         ${card.draft_id ? `<span>draft ${escapeHtml(card.draft_id)}</span>` : ""}
         ${card.rca_report_id ? `<span>report ${escapeHtml(card.rca_report_id)}</span>` : ""}
+        ${card.live_sim_review_id ? `<span>review ${escapeHtml(card.live_sim_review_id)}</span>` : ""}
+        ${card.live_sim_order_id ? `<span>live_sim_order ${escapeHtml(card.live_sim_order_id)}</span>` : ""}
+        ${card.reconcile_id ? `<span>reconcile ${escapeHtml(card.reconcile_id)}</span>` : ""}
         ${card.ai_insight_id ? `<span>insight ${escapeHtml(card.ai_insight_id)}</span>` : ""}
         ${card.ai_request_id ? `<span>request ${escapeHtml(card.ai_request_id)}</span>` : ""}
         ${card.context_id ? `<span>context ${escapeHtml(card.context_id)}</span>` : ""}

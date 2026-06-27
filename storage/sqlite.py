@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 APP_NAME = "suseok-trader-v2"
 
 
@@ -32,6 +32,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_sidecar_tables(connection)
     _create_ai_rca_tables(connection)
     _create_ai_codex_prompt_tables(connection)
+    _create_ai_live_sim_review_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
@@ -460,6 +461,130 @@ def _create_ai_codex_prompt_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ai_codex_prompt_errors_created_at
         ON ai_codex_prompt_errors (created_at)
+        """
+    )
+
+
+def _create_ai_live_sim_review_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_live_sim_review_reports (
+            review_id TEXT PRIMARY KEY,
+            report_type TEXT NOT NULL,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            live_sim_intent_id TEXT,
+            live_sim_order_id TEXT,
+            live_sim_execution_id TEXT,
+            reconcile_id TEXT,
+            title TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            root_cause_category TEXT NOT NULL,
+            root_cause TEXT NOT NULL,
+            ai_request_id TEXT,
+            ai_insight_id TEXT,
+            context_id TEXT,
+            suggested_checks_json TEXT NOT NULL DEFAULT '[]',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            review_only INTEGER NOT NULL DEFAULT 1,
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0,
+            order_action_allowed INTEGER NOT NULL DEFAULT 0,
+            gateway_command_allowed INTEGER NOT NULL DEFAULT 0,
+            generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_live_sim_review_sections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            section_name TEXT NOT NULL,
+            status TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            source_refs_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_live_sim_review_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id TEXT NOT NULL,
+            link_type TEXT NOT NULL,
+            related_entity_type TEXT NOT NULL,
+            related_entity_id TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_live_sim_review_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            report_type TEXT,
+            trade_date TEXT,
+            related_entity_type TEXT,
+            related_entity_id TEXT,
+            live_sim_intent_id TEXT,
+            live_sim_order_id TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_reports_type_generated
+        ON ai_live_sim_review_reports (report_type, generated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_reports_trade_date
+        ON ai_live_sim_review_reports (trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_reports_order
+        ON ai_live_sim_review_reports (live_sim_order_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_reports_related_entity
+        ON ai_live_sim_review_reports (related_entity_type, related_entity_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_sections_review
+        ON ai_live_sim_review_sections (review_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_links_review
+        ON ai_live_sim_review_links (review_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_errors_created
+        ON ai_live_sim_review_errors (created_at)
         """
     )
 

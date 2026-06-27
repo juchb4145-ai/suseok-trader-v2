@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections import Counter
 from collections.abc import Mapping, Sequence
@@ -192,6 +193,13 @@ def build_context_packet(
             bounded_limit,
         )
     if task is AISidecarTaskType.TRADE_REVIEW:
+        if _is_live_sim_order_context(related_entity_type, related_entity_id):
+            return build_live_sim_order_context(
+                connection,
+                related_entity_id or "",
+                settings=resolved_settings,
+                limit=bounded_limit,
+            )
         return build_trade_review_context(
             connection,
             related_entity_id,
@@ -199,6 +207,28 @@ def build_context_packet(
             bounded_limit,
         )
     if task is AISidecarTaskType.OPS_INCIDENT_SUMMARY:
+        if _is_live_sim_session_context(related_entity_type):
+            return build_live_sim_session_context(
+                connection,
+                target_trade_date,
+                settings=resolved_settings,
+                limit=bounded_limit,
+            )
+        if _is_live_sim_reconcile_context(related_entity_type, related_entity_id):
+            return build_live_sim_reconcile_context(
+                connection,
+                related_entity_id or "",
+                settings=resolved_settings,
+                limit=bounded_limit,
+            )
+        if _is_live_sim_incident_context(related_entity_type):
+            return build_live_sim_incident_context(
+                connection,
+                related_entity_id=related_entity_id,
+                trade_date=target_trade_date if trade_date else None,
+                settings=resolved_settings,
+                limit=bounded_limit,
+            )
         return build_ops_incident_context(
             connection,
             related_entity_id=related_entity_id,
@@ -747,6 +777,347 @@ def build_trade_review_context(
     )
 
 
+def build_live_sim_session_context(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    settings: Settings | None = None,
+    limit: int | None = None,
+) -> AISidecarContextPacket:
+    from services.live_sim.live_sim_service import (
+        get_live_sim_status,
+        list_live_sim_errors,
+        list_live_sim_executions,
+        list_live_sim_intents,
+        list_live_sim_orders,
+        list_live_sim_reconcile_snapshots,
+        list_live_sim_rejections,
+    )
+
+    resolved_settings = settings or load_settings()
+    bounded_limit = _bounded_limit(limit, resolved_settings)
+    intents = list_live_sim_intents(connection, trade_date=trade_date, limit=bounded_limit)
+    orders = list_live_sim_orders(connection, trade_date=trade_date, limit=bounded_limit)
+    command_ids = _live_sim_command_ids(intents, orders)
+    executions = _live_sim_related_executions(
+        list_live_sim_executions(connection, limit=bounded_limit),
+        intents=intents,
+        orders=orders,
+    )
+    rejections = [
+        row
+        for row in list_live_sim_rejections(connection, limit=bounded_limit)
+        if row.get("trade_date") == trade_date
+    ]
+    reconcile_rows = [
+        row
+        for row in list_live_sim_reconcile_snapshots(connection, limit=bounded_limit)
+        if row.get("trade_date") == trade_date
+    ]
+    errors = [
+        row
+        for row in list_live_sim_errors(connection, limit=bounded_limit)
+        if str(row.get("created_at") or "").startswith(trade_date)
+        or row.get("live_sim_intent_id") in {item.get("live_sim_intent_id") for item in intents}
+        or row.get("live_sim_order_id") in {item.get("live_sim_order_id") for item in orders}
+    ]
+    warnings = [
+        "LIVE_SIM review context is read-only and cannot create order actions.",
+        "AI insight is optional and is not Strategy/Risk/OMS input.",
+    ]
+    sections = [
+        _section(
+            "live_sim_review_policy",
+            "ai_sidecar_policy",
+            _live_sim_review_policy_payload(),
+            row_count=1,
+        ),
+        _section(
+            "live_sim_session_status",
+            "live_sim_status",
+            get_live_sim_status(connection, resolved_settings),
+            row_count=1,
+        ),
+        _section(
+            "live_sim_session_activity",
+            "live_sim_session_tables",
+            {
+                "trade_date": trade_date,
+                "intents": _compact_live_sim_rows(intents),
+                "orders": _compact_live_sim_rows(orders),
+                "executions": _compact_live_sim_rows(executions),
+                "rejections": _compact_live_sim_rows(rejections),
+                "reconcile_snapshots": _compact_live_sim_rows(reconcile_rows),
+                "errors": _compact_live_sim_rows(errors),
+            },
+            row_count=len(intents) + len(orders) + len(executions) + len(rejections),
+        ),
+        _section(
+            "live_sim_gateway_status",
+            "gateway_commands",
+            {
+                "commands": _context_gateway_commands(
+                    connection,
+                    command_ids=command_ids,
+                    include_live_sim=True,
+                    limit=bounded_limit,
+                ),
+                "command_events": _context_gateway_command_events(connection, command_ids),
+            },
+            row_count=len(command_ids),
+        ),
+    ]
+    return _finalize_packet(
+        AISidecarTaskType.OPS_INCIDENT_SUMMARY,
+        trade_date=trade_date,
+        related_entity_type="live_sim_session",
+        related_entity_id=trade_date,
+        sections=sections,
+        settings=resolved_settings,
+        warnings=warnings,
+    )
+
+
+def build_live_sim_order_context(
+    connection: sqlite3.Connection,
+    live_sim_order_id: str,
+    settings: Settings | None = None,
+    limit: int | None = None,
+) -> AISidecarContextPacket:
+    from services.live_sim.live_sim_service import get_live_sim_intent, get_live_sim_order
+
+    resolved_settings = settings or load_settings()
+    bounded_limit = _bounded_limit(limit, resolved_settings)
+    order = get_live_sim_order(connection, live_sim_order_id) if live_sim_order_id else None
+    intent = (
+        get_live_sim_intent(connection, str(order.get("live_sim_intent_id")))
+        if order and order.get("live_sim_intent_id")
+        else None
+    )
+    command_id = str(order.get("gateway_command_id") or "") if order else ""
+    executions = _context_live_sim_executions_for_order(connection, order or {})
+    reconcile_rows = _context_live_sim_reconcile_for_order(
+        connection,
+        order or {},
+        limit=bounded_limit,
+    )
+    missing = [] if order else ["LIVE_SIM_ORDER_NOT_FOUND"]
+    sections = [
+        _section(
+            "live_sim_review_policy",
+            "ai_sidecar_policy",
+            _live_sim_review_policy_payload(),
+            row_count=1,
+        ),
+        _section(
+            "live_sim_order_detail",
+            "live_sim_orders",
+            order or {},
+            row_count=1 if order else 0,
+            missing=order is None,
+        ),
+        _section(
+            "live_sim_intent_detail",
+            "live_sim_intents",
+            intent or {},
+            row_count=1 if intent else 0,
+            missing=order is not None and intent is None,
+        ),
+        _section(
+            "live_sim_order_gateway",
+            "gateway_commands",
+            {
+                "command": _context_gateway_command(connection, command_id) if command_id else {},
+                "command_events": (
+                    _context_gateway_command_events(connection, [command_id]) if command_id else []
+                ),
+            },
+            row_count=1 if command_id else 0,
+        ),
+        _section(
+            "live_sim_order_execution_reconcile",
+            "live_sim_execution_and_reconcile",
+            {"executions": executions, "reconcile_snapshots": reconcile_rows},
+            row_count=len(executions) + len(reconcile_rows),
+        ),
+        _section(
+            "live_sim_order_safety_reminders",
+            "dashboard",
+            {
+                "review_only": True,
+                "order_action_allowed": False,
+                "live_real_allowed": False,
+                "gateway_command_allowed": False,
+            },
+            row_count=1,
+        ),
+    ]
+    return _finalize_packet(
+        AISidecarTaskType.TRADE_REVIEW,
+        trade_date=order.get("trade_date") if order else None,
+        related_entity_type="live_sim_order",
+        related_entity_id=live_sim_order_id,
+        sections=sections,
+        settings=resolved_settings,
+        missing_sections=missing,
+        warnings=("LIVE_SIM_ORDER_REVIEW_CONTEXT_ONLY",),
+    )
+
+
+def build_live_sim_reconcile_context(
+    connection: sqlite3.Connection,
+    reconcile_id: str,
+    settings: Settings | None = None,
+    limit: int | None = None,
+) -> AISidecarContextPacket:
+    from services.live_sim.live_sim_service import list_live_sim_orders
+
+    resolved_settings = settings or load_settings()
+    bounded_limit = _bounded_limit(limit, resolved_settings)
+    snapshot = _context_live_sim_reconcile_snapshot(connection, reconcile_id)
+    trade_date = snapshot.get("trade_date") if snapshot else None
+    code = snapshot.get("code") if snapshot else None
+    open_orders = (
+        list_live_sim_orders(
+            connection,
+            trade_date=trade_date,
+            code=code,
+            limit=bounded_limit,
+            open_only=True,
+        )
+        if snapshot
+        else []
+    )
+    command_ids = _live_sim_command_ids([], open_orders)
+    missing = [] if snapshot else ["LIVE_SIM_RECONCILE_NOT_FOUND"]
+    sections = [
+        _section(
+            "live_sim_review_policy",
+            "ai_sidecar_policy",
+            _live_sim_review_policy_payload(),
+            row_count=1,
+        ),
+        _section(
+            "live_sim_reconcile_snapshot",
+            "live_sim_reconcile_snapshots",
+            snapshot or {},
+            row_count=1 if snapshot else 0,
+            missing=snapshot is None,
+        ),
+        _section(
+            "live_sim_reconcile_local_state",
+            "live_sim_orders_and_executions",
+            {
+                "local_open_orders": open_orders,
+                "local_executions": _context_live_sim_executions_for_orders(
+                    connection,
+                    open_orders,
+                    limit=bounded_limit,
+                ),
+            },
+            row_count=len(open_orders),
+        ),
+        _section(
+            "live_sim_reconcile_gateway_status",
+            "gateway_commands",
+            {
+                "commands": _context_gateway_commands(
+                    connection,
+                    command_ids=command_ids,
+                    limit=bounded_limit,
+                ),
+                "command_events": _context_gateway_command_events(connection, command_ids),
+            },
+            row_count=len(command_ids),
+        ),
+    ]
+    return _finalize_packet(
+        AISidecarTaskType.OPS_INCIDENT_SUMMARY,
+        trade_date=trade_date,
+        related_entity_type="live_sim_reconcile",
+        related_entity_id=reconcile_id,
+        sections=sections,
+        settings=resolved_settings,
+        missing_sections=missing,
+        warnings=("LIVE_SIM_RECONCILE_REVIEW_CONTEXT_ONLY",),
+    )
+
+
+def build_live_sim_incident_context(
+    connection: sqlite3.Connection,
+    related_entity_id: str | None = None,
+    trade_date: str | None = None,
+    settings: Settings | None = None,
+    limit: int | None = None,
+) -> AISidecarContextPacket:
+    from services.live_sim.live_sim_service import (
+        list_live_sim_errors,
+        list_live_sim_reconcile_snapshots,
+        list_live_sim_rejections,
+    )
+
+    resolved_settings = settings or load_settings()
+    bounded_limit = _bounded_limit(limit, resolved_settings)
+    rejections = list_live_sim_rejections(connection, limit=bounded_limit)
+    reconcile_rows = [
+        row
+        for row in list_live_sim_reconcile_snapshots(connection, limit=bounded_limit)
+        if int(row.get("mismatch_count") or 0) > 0
+    ]
+    if trade_date:
+        rejections = [row for row in rejections if row.get("trade_date") == trade_date]
+        reconcile_rows = [row for row in reconcile_rows if row.get("trade_date") == trade_date]
+    sections = [
+        _section(
+            "live_sim_review_policy",
+            "ai_sidecar_policy",
+            _live_sim_review_policy_payload(),
+            row_count=1,
+        ),
+        _section(
+            "live_sim_incident_errors",
+            "live_sim_errors",
+            {"items": list_live_sim_errors(connection, limit=bounded_limit)},
+            row_count=bounded_limit,
+        ),
+        _section(
+            "live_sim_incident_rejections",
+            "live_sim_rejections",
+            {"items": rejections},
+            row_count=len(rejections),
+        ),
+        _section(
+            "live_sim_incident_reconcile_mismatches",
+            "live_sim_reconcile_snapshots",
+            {"items": reconcile_rows},
+            row_count=len(reconcile_rows),
+        ),
+        _section(
+            "live_sim_incident_gateway_problems",
+            "gateway_events_and_commands",
+            {
+                "gateway_problem_events": _context_gateway_problem_events(
+                    connection,
+                    limit=bounded_limit,
+                ),
+                "failed_commands": _context_gateway_failed_commands(
+                    connection,
+                    limit=bounded_limit,
+                ),
+            },
+            row_count=bounded_limit,
+        ),
+    ]
+    return _finalize_packet(
+        AISidecarTaskType.OPS_INCIDENT_SUMMARY,
+        trade_date=trade_date,
+        related_entity_type="live_sim_incident" if related_entity_id else None,
+        related_entity_id=related_entity_id,
+        sections=sections,
+        settings=resolved_settings,
+        warnings=("LIVE_SIM_INCIDENT_REVIEW_CONTEXT_ONLY",),
+    )
+
+
 def build_ops_incident_context(
     connection: sqlite3.Connection,
     related_entity_id: str | None = None,
@@ -909,9 +1280,9 @@ def _finalize_packet(
     redacted_sections = [
         replace(section, payload=redact_context(section.payload)) for section in stripped_sections
     ]
-    redaction_applied = [
-        section.to_dict() for section in stripped_sections
-    ] != [section.to_dict() for section in redacted_sections]
+    redaction_applied = [section.to_dict() for section in stripped_sections] != [
+        section.to_dict() for section in redacted_sections
+    ]
     policy_sections, policy_warnings = sanitize_context_sections(
         redacted_sections,
         allow_order_context=settings.ai_sidecar_order_context_allowed,
@@ -1274,16 +1645,20 @@ def _selected_observation_summary(
         candidate = get_candidate(connection, related_entity_id, include_context=True)
         return {
             "candidate": candidate,
-            "strategy": get_latest_strategy_observation(
-                connection,
-                related_entity_id,
-                include_setups=True,
-            )
-            if candidate
-            else None,
-            "risk": get_latest_risk_observation(connection, related_entity_id, include_checks=True)
-            if candidate
-            else None,
+            "strategy": (
+                get_latest_strategy_observation(
+                    connection,
+                    related_entity_id,
+                    include_setups=True,
+                )
+                if candidate
+                else None
+            ),
+            "risk": (
+                get_latest_risk_observation(connection, related_entity_id, include_checks=True)
+                if candidate
+                else None
+            ),
         }
     if related_entity_id:
         candidate = get_candidate(connection, related_entity_id, include_context=True)
@@ -1384,9 +1759,7 @@ def _bounded_limit(limit: int | None, settings: Settings) -> int:
 
 def _default_trade_date(settings: Settings) -> str:
     return (
-        datetime.now(candidate_timezone(settings.candidate_trade_date_timezone))
-        .date()
-        .isoformat()
+        datetime.now(candidate_timezone(settings.candidate_trade_date_timezone)).date().isoformat()
     )
 
 
@@ -1397,6 +1770,332 @@ def _context_id(task_type: AISidecarTaskType, context_hash: str) -> str:
 
 def _unique(values: Sequence[str]) -> list[str]:
     return [*dict.fromkeys(str(value) for value in values if str(value).strip())]
+
+
+def _is_live_sim_order_context(
+    related_entity_type: str | None,
+    related_entity_id: str | None,
+) -> bool:
+    normalized = str(related_entity_type or "").strip().lower()
+    return normalized in {"live_sim_order", "live-sim-order"} or str(
+        related_entity_id or ""
+    ).startswith("live_sim_order")
+
+
+def _is_live_sim_session_context(related_entity_type: str | None) -> bool:
+    normalized = str(related_entity_type or "").strip().lower()
+    return normalized in {"live_sim_session", "live-sim-session"}
+
+
+def _is_live_sim_reconcile_context(
+    related_entity_type: str | None,
+    related_entity_id: str | None,
+) -> bool:
+    normalized = str(related_entity_type or "").strip().lower()
+    return normalized in {"live_sim_reconcile", "live-sim-reconcile"} or str(
+        related_entity_id or ""
+    ).startswith("live_sim_reconcile")
+
+
+def _is_live_sim_incident_context(related_entity_type: str | None) -> bool:
+    normalized = str(related_entity_type or "").strip().lower()
+    return normalized in {"live_sim_incident", "live-sim-incident"}
+
+
+def _live_sim_review_policy_payload() -> dict[str, Any]:
+    return {
+        "read_only": True,
+        "review_only": True,
+        "deterministic_report_available_without_openai": True,
+        "ai_run_default": False,
+        "ai_output_is_order_input": False,
+        "order_action_allowed": False,
+        "gateway_command_allowed": False,
+        "live_real_allowed": False,
+        "forbidden_actions": [
+            "send_order",
+            "cancel_order",
+            "modify_order",
+            "order_retry",
+            "live_real_enablement",
+            "background_review_worker",
+        ],
+    }
+
+
+def _live_sim_command_ids(
+    intents: Sequence[Mapping[str, Any]],
+    orders: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    values = [
+        *(row.get("gateway_command_id") for row in intents),
+        *(row.get("gateway_command_id") for row in orders),
+    ]
+    return _unique([str(value) for value in values if value])
+
+
+def _compact_live_sim_rows(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    omitted_keys = {"payload", "raw_payload", "raw_event_json", "snapshot_json"}
+    compacted = []
+    for row in rows[:limit]:
+        compacted.append({key: value for key, value in row.items() if key not in omitted_keys})
+    return compacted
+
+
+def _live_sim_related_executions(
+    executions: Sequence[Mapping[str, Any]],
+    *,
+    intents: Sequence[Mapping[str, Any]],
+    orders: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    order_ids = {str(row.get("live_sim_order_id")) for row in orders}
+    intent_ids = {str(row.get("live_sim_intent_id")) for row in intents}
+    if not order_ids and not intent_ids:
+        return _compact_live_sim_rows(executions)
+    return [
+        dict(row)
+        for row in executions
+        if str(row.get("live_sim_order_id")) in order_ids
+        or str(row.get("live_sim_intent_id")) in intent_ids
+    ]
+
+
+def _context_gateway_command(
+    connection: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, Any]:
+    if not command_id:
+        return {}
+    row = connection.execute(
+        """
+        SELECT *
+        FROM gateway_commands
+        WHERE command_id = ?
+        """,
+        (command_id,),
+    ).fetchone()
+    if row is None:
+        return {}
+    item = _context_row_to_dict(row)
+    item["payload"] = _context_json_object(item.pop("payload_json"))
+    return item
+
+
+def _context_gateway_commands(
+    connection: sqlite3.Connection,
+    *,
+    command_ids: Sequence[str],
+    include_live_sim: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if command_ids:
+        clauses.append(f"command_id IN ({', '.join('?' for _ in command_ids)})")
+        params.extend(command_ids)
+    if include_live_sim:
+        clauses.append("(LOWER(source) = 'live_sim' OR LOWER(command_type) = 'send_order')")
+    if not clauses:
+        return []
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM gateway_commands
+        WHERE {" OR ".join(clauses)}
+        ORDER BY created_at DESC, command_id DESC
+        LIMIT ?
+        """,
+        (*params, min(max(int(limit), 1), 200)),
+    ).fetchall()
+    commands = []
+    for row in rows:
+        item = _context_row_to_dict(row)
+        item["payload"] = _context_json_object(item.pop("payload_json"))
+        commands.append(item)
+    return commands
+
+
+def _context_gateway_command_events(
+    connection: sqlite3.Connection,
+    command_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    ids = [str(command_id) for command_id in command_ids if str(command_id).strip()]
+    if not ids:
+        return []
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM gateway_command_events
+        WHERE command_id IN ({', '.join('?' for _ in ids)})
+        ORDER BY id ASC
+        """,
+        tuple(ids),
+    ).fetchall()
+    events = []
+    for row in rows:
+        item = _context_row_to_dict(row)
+        item["payload"] = _context_json_object(item.pop("payload_json"))
+        events.append(item)
+    return events
+
+
+def _context_gateway_problem_events(
+    connection: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM gateway_events
+        WHERE status NOT IN ('ACCEPTED')
+            OR error_message IS NOT NULL
+        ORDER BY received_at DESC, event_id DESC
+        LIMIT ?
+        """,
+        (min(max(int(limit), 1), 200),),
+    ).fetchall()
+    events = []
+    for row in rows:
+        item = _context_row_to_dict(row)
+        item["payload"] = _context_json_object(item.pop("payload_json"))
+        events.append(item)
+    return events
+
+
+def _context_gateway_failed_commands(
+    connection: sqlite3.Connection,
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM gateway_commands
+        WHERE status IN ('FAILED', 'REJECTED', 'EXPIRED')
+        ORDER BY COALESCE(completed_at, created_at) DESC, command_id DESC
+        LIMIT ?
+        """,
+        (min(max(int(limit), 1), 200),),
+    ).fetchall()
+    commands = []
+    for row in rows:
+        item = _context_row_to_dict(row)
+        item["payload"] = _context_json_object(item.pop("payload_json"))
+        commands.append(item)
+    return commands
+
+
+def _context_live_sim_executions_for_order(
+    connection: sqlite3.Connection,
+    order: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    if not order:
+        return []
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_executions
+        WHERE live_sim_order_id = ?
+            OR broker_order_no = ?
+        ORDER BY executed_at ASC, live_sim_execution_id ASC
+        """,
+        (order.get("live_sim_order_id"), order.get("broker_order_no")),
+    ).fetchall()
+    return [_context_live_sim_execution_row(row) for row in rows]
+
+
+def _context_live_sim_executions_for_orders(
+    connection: sqlite3.Connection,
+    orders: Sequence[Mapping[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    order_ids = [
+        str(row.get("live_sim_order_id")) for row in orders if row.get("live_sim_order_id")
+    ]
+    if not order_ids:
+        return []
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM live_sim_executions
+        WHERE live_sim_order_id IN ({', '.join('?' for _ in order_ids)})
+        ORDER BY executed_at ASC, live_sim_execution_id ASC
+        LIMIT ?
+        """,
+        (*order_ids, min(max(int(limit), 1), 200)),
+    ).fetchall()
+    return [_context_live_sim_execution_row(row) for row in rows]
+
+
+def _context_live_sim_reconcile_for_order(
+    connection: sqlite3.Connection,
+    order: Mapping[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not order:
+        return []
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_reconcile_snapshots
+        WHERE trade_date = ?
+            AND (code = ? OR code IS NULL)
+        ORDER BY created_at DESC, reconcile_id DESC
+        LIMIT ?
+        """,
+        (order.get("trade_date"), order.get("code"), min(max(int(limit), 1), 200)),
+    ).fetchall()
+    snapshots = []
+    for row in rows:
+        item = _context_row_to_dict(row)
+        item["snapshot_json"] = _context_json_object(item.pop("snapshot_json"))
+        snapshots.append(item)
+    return snapshots
+
+
+def _context_live_sim_reconcile_snapshot(
+    connection: sqlite3.Connection,
+    reconcile_id: str,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_reconcile_snapshots
+        WHERE reconcile_id = ?
+        """,
+        (reconcile_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    item = _context_row_to_dict(row)
+    item["snapshot_json"] = _context_json_object(item.pop("snapshot_json"))
+    return item
+
+
+def _context_live_sim_execution_row(row: sqlite3.Row) -> dict[str, Any]:
+    item = _context_row_to_dict(row)
+    item["raw_event_json"] = _context_json_object(item.pop("raw_event_json"))
+    return item
+
+
+def _context_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
+
+
+def _context_json_object(value: object) -> dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, Mapping):
+        return dict(value)
+    loaded = json.loads(str(value))
+    return loaded if isinstance(loaded, dict) else {}
 
 
 _THEME_MEMBER_KEYS = (

@@ -164,11 +164,26 @@
 - Keep LIVE_REAL, generic order enqueue APIs, cancel/modify endpoints, Dashboard execution buttons,
   background workers, and AI/RCA/Codex-output-driven orders out of scope.
 
-## Next: PR AI-6. LIVE_SIM Review Sidecar
+## Done: PR AI-6. LIVE_SIM Review Sidecar
 
-- Add read-only Sidecar review reports for LIVE_SIM sessions.
-- Summarize behavior, incidents, no-trade causes, and trade reviews.
-- Preserve the rule that Sidecar output never drives automated trading decisions.
+- Add read-only deterministic review reports for LIVE_SIM sessions, orders, reconcile snapshots,
+  and incidents.
+- Persist `ai_live_sim_review_reports`, sections, links, and build errors.
+- Summarize safety gate posture, intents, orders, command ack/failure, execution events,
+  rejections, reconcile snapshots, errors, and dashboard safety reminders.
+- Optionally link PR AI-2 `TRADE_REVIEW` or `OPS_INCIDENT_SUMMARY` insights only when
+  `run_ai=true` is explicitly requested.
+- Preserve deterministic reports when AI is disabled, unavailable, invalid, or policy rejected.
+- Add local-token protected report creation API, CLI tools, Dashboard snapshot fields, and
+  read-only AI Explanation Cards.
+- Keep review output out of Strategy, Risk, OMS, Gateway command queues, LIVE_SIM order mutation,
+  and LIVE_REAL enablement.
+
+## Next Candidates
+
+- PR13 LIVE_SIM Hardening
+- Broker Reconcile Pilot for simulation-account snapshots
+- Operator Kill Switch Drill and runbook checks
 
 ## Future: LIVE_REAL Safety Project
 

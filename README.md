@@ -10,8 +10,9 @@ the PR 6 observe-only Candidate FSM, the PR 7 observe-only Strategy Observation 
 PR 8 observe-only Risk Gate layer, the PR 9 read-only Dashboard V1 operator surface, and the
 PR AI-1 read-only LLM Context Builder, PR AI-2 optional structured AI execution, PR AI-3
 No-trade RCA / Candidate Block RCA reports, PR AI-4 Dashboard AI Explanation Cards, and
-PR AI-5 human-copyable Codex Prompt Generator drafts, PR10 DRY_RUN-only OMS simulation, and
-PR11 DRY_RUN-only Exit Engine evaluation/simulated close accounting.
+PR AI-5 human-copyable Codex Prompt Generator drafts, PR10 DRY_RUN-only OMS simulation,
+PR11 DRY_RUN-only Exit Engine evaluation/simulated close accounting, PR12 simulation-account-only
+LIVE_SIM enablement, and PR AI-6 read-only LIVE_SIM Review Sidecar reports.
 It intentionally does not contain Kiwoom or PyQt imports, risk-driven order approval, OMS
 broker routing behavior, automatic OpenAI calls, or live order APIs.
 
@@ -738,6 +739,45 @@ Manual local-token protected API:
 
 See `docs/live_sim_enablement.md` for the full safety gate, eligibility, command, reconcile, and
 rollback policy.
+
+## PR AI-6 LIVE_SIM Review Sidecar
+
+PR AI-6 adds read-only review reports for LIVE_SIM sessions, orders, reconcile snapshots, and
+incidents. Deterministic reports work without an OpenAI API key. Passing `--run-ai` or
+`run_ai=true` explicitly can link a PR AI-2 `TRADE_REVIEW` or `OPS_INCIDENT_SUMMARY` insight, but
+AI disabled/unavailable/invalid/policy-rejected output leaves the deterministic report intact.
+
+LIVE_SIM review reports are operator review artifacts only. They do not create `LiveSimIntent`,
+do not create or enqueue `GatewayCommand`, do not call order send/cancel/modify paths, do not
+mutate Strategy/Risk/Candidate/OMS/LIVE_SIM state, and do not enable LIVE_REAL. Dashboard displays
+latest review cards read-only and never calls the POST review endpoints.
+
+Review API:
+
+- `GET /api/ai-sidecar/live-sim-review/status`
+- `POST /api/ai-sidecar/live-sim-review/session/{trade_date}?run_ai=false`
+- `POST /api/ai-sidecar/live-sim-review/order/{live_sim_order_id}?run_ai=false`
+- `POST /api/ai-sidecar/live-sim-review/reconcile/{reconcile_id}?run_ai=false`
+- `POST /api/ai-sidecar/live-sim-review/incident`
+- `POST /api/ai-sidecar/live-sim-review/orders/batch`
+- `GET /api/ai-sidecar/live-sim-review/reports`
+- `GET /api/ai-sidecar/live-sim-review/reports/{review_id}`
+- `GET /api/ai-sidecar/live-sim-review/errors`
+
+POST endpoints require the local token when configured and create reports only.
+
+CLI:
+
+```powershell
+python tools/build_live_sim_session_review.py --trade-date 2026-06-27
+python tools/build_live_sim_order_review.py --live-sim-order-id live_sim_order_x
+python tools/build_live_sim_reconcile_review.py --reconcile-id live_sim_reconcile_x
+python tools/build_live_sim_incident_review.py --trade-date 2026-06-27
+python tools/build_live_sim_order_review_batch.py --trade-date 2026-06-27 --limit 20
+```
+
+See `docs/live_sim_review_sidecar.md` for workflows, tables, root-cause categories, API, CLI,
+Dashboard display policy, AI linkage, and forbidden scope.
 
 ## Local Token
 
