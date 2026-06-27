@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 APP_NAME = "suseok-trader-v2"
 
 
@@ -33,6 +33,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
+    _create_candidate_projection_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -553,5 +554,169 @@ def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_theme_projection_errors_created_at
         ON theme_projection_errors (created_at)
+        """
+    )
+
+
+def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidates (
+            candidate_instance_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            state TEXT NOT NULL,
+            previous_state TEXT,
+            detected_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            state_updated_at TEXT NOT NULL,
+            closed_at TEXT,
+            primary_source_type TEXT NOT NULL,
+            primary_source_id TEXT NOT NULL,
+            source_count INTEGER NOT NULL DEFAULT 0,
+            active_source_count INTEGER NOT NULL DEFAULT 0,
+            theme_id TEXT,
+            theme_name TEXT,
+            theme_state TEXT,
+            theme_role TEXT,
+            market_readiness_status TEXT,
+            tick_age_sec REAL,
+            vwap_ready INTEGER NOT NULL DEFAULT 0,
+            bar_1m_ready INTEGER NOT NULL DEFAULT 0,
+            bar_3m_ready INTEGER NOT NULL DEFAULT 0,
+            bar_5m_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_source_events (
+            source_event_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            action TEXT NOT NULL,
+            theme_id TEXT,
+            theme_name TEXT,
+            condition_id TEXT,
+            condition_name TEXT,
+            event_ts TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            payload_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_sources_latest (
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            source_id TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active INTEGER NOT NULL DEFAULT 1,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            last_event_id TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            PRIMARY KEY (trade_date, code, source_type, source_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_state_transitions (
+            transition_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            from_state TEXT,
+            to_state TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            source_event_id TEXT,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            transitioned_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_context_latest (
+            candidate_instance_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            theme_context_json TEXT NOT NULL DEFAULT '{}',
+            market_context_json TEXT NOT NULL DEFAULT '{}',
+            source_context_json TEXT NOT NULL DEFAULT '{}',
+            readiness_json TEXT NOT NULL DEFAULT '{}',
+            refreshed_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_projection_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_instance_id TEXT,
+            source_event_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidates_trade_date_state
+        ON candidates (trade_date, state)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidates_code_trade_date
+        ON candidates (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidates_theme_trade_date
+        ON candidates (theme_id, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_source_events_code_trade_date_observed
+        ON candidate_source_events (code, trade_date, observed_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_sources_latest_trade_code_active
+        ON candidate_sources_latest (trade_date, code, active)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_transitions_candidate_time
+        ON candidate_state_transitions (candidate_instance_id, transitioned_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_projection_errors_created_at
+        ON candidate_projection_errors (created_at)
         """
     )

@@ -21,6 +21,20 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.theme_leading_rising_ratio == 0.5
     assert settings.theme_spreading_rising_ratio == 0.35
     assert settings.theme_import_allow_replace is False
+    assert settings.candidate_fsm_enabled is True
+    assert settings.candidate_trade_date_timezone == "Asia/Seoul"
+    assert settings.candidate_source_stale_sec == 300
+    assert settings.candidate_tick_stale_sec == 30
+    assert settings.candidate_episode_ttl_sec == 1800
+    assert settings.candidate_context_require_1m_bar is True
+    assert settings.candidate_context_require_vwap is False
+    assert settings.candidate_max_active_per_code == 1
+    assert settings.candidate_theme_source_states == ("LEADING", "SPREADING")
+    assert settings.candidate_theme_member_roles == (
+        "LEADER_CANDIDATE",
+        "CO_LEADER_CANDIDATE",
+        "FOLLOWER_CANDIDATE",
+    )
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -54,3 +68,19 @@ def test_theme_ratio_settings_are_validated() -> None:
         assert "ratio between 0 and 1" in str(exc)
     else:
         raise AssertionError("expected invalid theme ratio configuration")
+
+
+def test_candidate_settings_are_validated() -> None:
+    try:
+        load_settings({"CANDIDATE_SOURCE_STALE_SEC": "0"})
+    except ValueError as exc:
+        assert "CANDIDATE_SOURCE_STALE_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid candidate stale setting")
+
+    try:
+        load_settings({"CANDIDATE_THEME_SOURCE_STATES": "LEADING,"})
+    except ValueError as exc:
+        assert "CANDIDATE_THEME_SOURCE_STATES" in str(exc)
+    else:
+        raise AssertionError("expected invalid candidate list setting")

@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from api.routes.ai_sidecar import router as ai_sidecar_router
+from api.routes.candidates import router as candidates_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.market_data import router as market_data_router
@@ -32,6 +33,7 @@ def create_app() -> FastAPI:
     application.include_router(gateway_router)
     application.include_router(market_data_router)
     application.include_router(themes_router)
+    application.include_router(candidates_router)
     return application
 
 

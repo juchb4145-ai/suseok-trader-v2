@@ -1,15 +1,16 @@
 # Theme Service
 
 PR 5 adds a read-only theme observation layer. Theme membership and theme snapshots are derived
-context for later observation workflows. They do not produce candidates, strategy decisions, risk
-decisions, order intents, broker commands, or order API calls.
+context for later observation workflows. PR 6 Candidate FSM reads theme snapshots as observation
+source input, but Theme Service itself does not produce strategy decisions, risk decisions, order
+intents, broker commands, or order API calls.
 
 ## Purpose
 
 - Store and query source-typed theme membership.
 - Aggregate Market Data Service projections at theme level.
 - Summarize coverage, rising ratio, trade-value flow, VWAP position, and member roles.
-- Provide PR 6 Candidate FSM with observation context only.
+- Provide PR 6 Candidate FSM with read-only observation context only.
 
 Manual/file-based seed data is bootstrap/testing only. It exists to verify the membership import
 contract and snapshot rebuild path. Production membership is expected to come later from legacy
@@ -170,8 +171,9 @@ Initial deterministic rules:
 - `POST /api/themes/snapshots/rebuild?theme_id=semiconductor`
 
 POST endpoints are import/rebuild only and use the local token dependency when
-`TRADING_CORE_TOKEN` is set. There are no theme endpoints for buying, selling, candidate creation,
-strategy execution, risk execution, OMS behavior, or order enqueueing.
+`TRADING_CORE_TOKEN` is set. There are no theme endpoints for buying, selling, strategy execution,
+risk execution, OMS behavior, or order enqueueing. Candidate episodes are rebuilt through
+`/api/candidates/rebuild`, which reads theme snapshots without mutating Theme Service state.
 
 ## Rebuild Procedure
 
@@ -216,6 +218,15 @@ Invoke-RestMethod http://127.0.0.1:8000/api/themes/snapshots/latest
 If only one member has a fresh tick, snapshots still persist with partial coverage/state according
 to the deterministic rules.
 
+## Candidate FSM Connection
+
+PR 6 Candidate FSM reads `theme_latest_snapshots` and `theme_snapshot_members` as source context.
+Only configured theme states, default `LEADING` and `SPREADING`, and configured member roles,
+default `LEADER_CANDIDATE`, `CO_LEADER_CANDIDATE`, and `FOLLOWER_CANDIDATE`, become candidate
+source events. This is source attribution for an observation episode only. A leading theme member
+is not a buy signal, and a candidate in `CONTEXT_READY` only means PR 7 has enough read-only input
+to evaluate later.
+
 ## Forbidden Scope
 
 PR 5 does not implement:
@@ -223,7 +234,6 @@ PR 5 does not implement:
 - external web crawling or reference scraping;
 - broker runtime integration;
 - ActiveX or UI automation imports;
-- Candidate FSM;
 - strategy engine;
 - risk gate;
 - OMS;

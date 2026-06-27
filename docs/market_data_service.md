@@ -9,7 +9,7 @@ is the source of truth. Market data tables are derived state and can be rebuilt 
 - Normalize accepted `price_tick`, `condition_event`, and `tr_response` Gateway events.
 - Keep latest tick, tick samples, 1/3/5 minute bars, VWAP, condition signals, TR snapshots, and
   projection errors in SQLite.
-- Provide stable read APIs for Theme Snapshot, future Candidate, Strategy, and Dashboard work.
+- Provide stable read APIs for Theme Snapshot, Candidate FSM, future Strategy, and Dashboard work.
 - Avoid strategy, risk, OMS, order intent, and broker order side effects.
 
 ## Projection Tables
@@ -90,6 +90,16 @@ Theme snapshots are rebuilt separately through:
 ```powershell
 python -m tools.rebuild_theme_snapshots
 ```
+
+## Candidate FSM Connection
+
+PR 6 Candidate FSM reads Market Data Service projections as read-only context. It uses
+`market_condition_signals` for condition source events, `market_condition_latest` for condition
+attribution, `market_ticks_latest` for latest tick age, `market_minute_bars` for 1/3/5 minute bar
+and VWAP readiness, and `get_market_data_readiness()` for status and reason codes.
+
+Market Data Service still does not create candidate state itself, does not enqueue commands, and
+does not make strategy, risk, or order decisions.
 
 ## Rebuild
 

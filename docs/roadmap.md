@@ -50,16 +50,18 @@
 - Provide theme state, quality, leader/co-leader/follower observation context.
 - Keep theme data as observation input only with no Candidate, Strategy, Risk, OMS, or order path.
 
-## Next: PR 6. Candidate FSM
+## Done: PR 6. Candidate FSM
 
-- Add candidate lifecycle states and deterministic transitions.
-- Store candidate state changes through the event store.
-- Keep all candidate handling observe-only.
+- Add observe-only candidate lifecycle states and deterministic transitions.
+- Store candidate source events, source latest rows, state transitions, context latest rows, and
+  projection errors.
+- Connect condition observations, theme snapshots, and market readiness as candidate sources.
+- Keep Candidate FSM separate from Strategy, Risk, OMS, GatewayCommand, and order APIs.
 
-## PR 7. Strategy Engine observe-only
+## Next: PR 7. Strategy Engine observe-only
 
 - Add deterministic strategy evaluation in observe-only mode.
-- Emit explanations and candidate state updates without order intent creation.
+- Read PR 6 Candidate context and emit strategy observations without order intent creation.
 - Keep strategy thresholds controlled by configuration and code review only.
 
 ## PR 8. Risk Gate observe-only

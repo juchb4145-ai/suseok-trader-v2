@@ -182,3 +182,53 @@ def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None
         "gateway_events",
         "ai_requests",
     }
+
+
+def test_sqlite_initialization_creates_candidate_projection_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'candidates',
+                'candidate_source_events',
+                'candidate_sources_latest',
+                'candidate_state_transitions',
+                'candidate_context_latest',
+                'candidate_projection_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'theme_latest_snapshots',
+                'market_ticks_latest',
+                'gateway_events',
+                'ai_requests'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "candidates",
+        "candidate_source_events",
+        "candidate_sources_latest",
+        "candidate_state_transitions",
+        "candidate_context_latest",
+        "candidate_projection_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "theme_latest_snapshots",
+        "market_ticks_latest",
+        "gateway_events",
+        "ai_requests",
+    }

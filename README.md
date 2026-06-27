@@ -4,10 +4,10 @@ Broker-neutral foundation for a Kiwoom OpenAPI+ based domestic stock trading sys
 
 The project currently contains the Core API bootstrap, settings loading, SQLite initialization,
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
-plus Gateway transport surface, the PR 3 mock Gateway process skeleton, and the PR 4 read-only
-Market Data Service projection, and the PR 5 read-only Theme Membership + Theme Snapshot layer.
-It intentionally does not contain Kiwoom or PyQt imports, candidate FSM behavior, strategy
-decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
+plus Gateway transport surface, the PR 3 mock Gateway process skeleton, the PR 4 read-only
+Market Data Service projection, the PR 5 read-only Theme Membership + Theme Snapshot layer, and
+the PR 6 observe-only Candidate FSM. It intentionally does not contain Kiwoom or PyQt imports,
+strategy decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -120,10 +120,59 @@ Invoke-RestMethod http://127.0.0.1:8000/api/themes/snapshots/latest
 
 Theme snapshots aggregate latest ticks, readiness, 1/3/5 minute trade-value deltas, VWAP, and
 condition observations. They classify a theme as `DATA_WAIT`, `WATCH`, `SPREADING`, or `LEADING`
-with deterministic observation rules. They do not create candidates, strategy decisions, risk
-decisions, order intents, or broker commands.
+with deterministic observation rules. PR 6 Candidate FSM can read these snapshots as source
+context, but theme snapshots still do not create strategy decisions, risk decisions, order intents,
+or broker commands.
 
 See `docs/theme_service.md` for the schema, score formula, state rules, and API details.
+
+## Candidate FSM
+
+PR 6 adds an observe-only candidate lifecycle layer. A Candidate is an observation episode keyed
+by `candidate_instance_id`, not a buy candidate. It can merge condition, theme, market, manual,
+and mock sources into deterministic lifecycle states:
+
+- `DETECTED`
+- `HYDRATING`
+- `WATCHING`
+- `CONTEXT_READY`
+- `DATA_WAIT`
+- `BLOCKED_OBSERVATION`
+- `STALE`
+- `COOLDOWN`
+- `CLOSED`
+
+Candidate endpoints:
+
+- `GET /api/candidates/status`
+- `GET /api/candidates`
+- `GET /api/candidates/{candidate_instance_id}`
+- `GET /api/candidates/{candidate_instance_id}/sources`
+- `GET /api/candidates/{candidate_instance_id}/transitions`
+- `GET /api/candidates/by-code/{code}`
+- `GET /api/candidates/projection-errors`
+- `POST /api/candidates/rebuild`
+
+Rebuild candidates from current condition/theme observations:
+
+```powershell
+python -m tools.rebuild_candidates
+```
+
+Inspect one episode:
+
+```powershell
+python -m tools.inspect_candidate --candidate-instance-id CAND-2026-06-27-005930-1 `
+  --include-context --include-sources --include-transitions
+```
+
+Candidate FSM reads Market Data readiness, latest ticks, bars, VWAP, condition observations, and
+Theme Snapshot context. It records source events, source latest state, candidate snapshots,
+state transitions, context latest rows, and projection errors. It does not create Strategy scores,
+Risk pass/fail decisions, OrderIntent, EntryPlan, PositionSizing, GatewayCommand rows, or order
+API calls.
+
+See `docs/candidate_fsm.md` for source types, transition rules, schema, API, and safety scope.
 
 ## Mock Gateway
 
@@ -166,6 +215,10 @@ Invoke-RestMethod http://127.0.0.1:8000/api/market-data/status
 Invoke-RestMethod http://127.0.0.1:8000/api/market-data/ticks/005930
 Invoke-RestMethod "http://127.0.0.1:8000/api/market-data/bars/005930?interval_sec=60"
 Invoke-RestMethod http://127.0.0.1:8000/api/market-data/conditions/recent
+python -m tools.import_theme_memberships --file data/themes/sample_themes.json
+python -m tools.rebuild_theme_snapshots
+python -m tools.rebuild_candidates
+Invoke-RestMethod http://127.0.0.1:8000/api/candidates/status
 ```
 
 `apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX

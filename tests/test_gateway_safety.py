@@ -61,13 +61,18 @@ def test_order_execution_functions_strategy_risk_and_oms_are_not_implemented() -
     assert "class Oms" not in combined_source
 
 
-def test_pr5_does_not_add_candidate_or_ai_execution_surfaces() -> None:
+def test_pr6_candidate_surface_is_observe_only_and_no_ai_execution_surfaces() -> None:
     paths = {route.path for route in app.routes}
     combined_source = project_python_source()
 
-    assert "/api/candidates" not in paths
+    assert "/api/candidates" in paths
+    assert "/api/candidates/rebuild" in paths
     assert "class CandidateFSM" not in combined_source
     assert "class CandidateStateMachine" not in combined_source
     assert "class AISidecarContextBuilder" not in combined_source
     assert "def build_ai_sidecar_context" not in combined_source
     assert "def call_openai" not in combined_source
+    candidate_service_source = (ROOT / "services" / "candidate_service.py").read_text(
+        encoding="utf-8"
+    )
+    assert "GatewayCommand" not in candidate_service_source
