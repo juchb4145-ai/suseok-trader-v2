@@ -76,3 +76,57 @@ def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> Non
         "gateway_command_dedupe_keys",
         "gateway_status",
     }
+
+
+def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'market_ticks_latest',
+                'market_tick_samples',
+                'market_minute_bars',
+                'market_condition_signals',
+                'market_condition_latest',
+                'market_tr_snapshots',
+                'market_projection_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'raw_events',
+                'gateway_events',
+                'gateway_commands',
+                'ai_requests',
+                'ai_insights'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "market_ticks_latest",
+        "market_tick_samples",
+        "market_minute_bars",
+        "market_condition_signals",
+        "market_condition_latest",
+        "market_tr_snapshots",
+        "market_projection_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "raw_events",
+        "gateway_events",
+        "gateway_commands",
+        "ai_requests",
+        "ai_insights",
+    }

@@ -37,13 +37,13 @@
 - Keep Kiwoom OpenAPI+ and PyQt dependencies isolated from Core requirements.
 - Implement heartbeat and mock event posting before any broker action.
 
-## Next: PR 4. Market Data Service
+## Done: PR 4. Market Data Service
 
 - Normalize price ticks, condition events, and TR-derived market snapshots.
 - Provide read-only market data access to strategy and dashboard surfaces.
 - Preserve broker-neutral market contracts.
 
-## PR 5. Theme Membership + Theme Snapshot
+## Next: PR 5. Theme Membership + Theme Snapshot
 
 - Track theme membership and daily theme snapshots.
 - Connect condition and market data observations to theme-level context.

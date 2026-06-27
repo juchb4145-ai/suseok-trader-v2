@@ -11,6 +11,10 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.ai_sidecar_enabled is False
     assert settings.ai_sidecar_intraday_allowed is False
     assert settings.ai_sidecar_order_context_allowed is False
+    assert settings.market_data_enabled is True
+    assert settings.market_data_tick_stale_sec == 10
+    assert settings.market_data_degraded_tick_stale_sec == 30
+    assert settings.market_data_bar_intervals_sec == (60, 180, 300)
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:
@@ -26,3 +30,12 @@ def test_default_gateway_settings_are_mock_local_transport() -> None:
     assert settings.command_limit == 20
     assert settings.mock_once is False
     assert settings.mock_price_tick_interval_sec == 2.0
+
+
+def test_market_data_interval_settings_are_validated() -> None:
+    try:
+        load_settings({"MARKET_DATA_BAR_INTERVALS_SEC": "60,90"})
+    except ValueError as exc:
+        assert "minute-aligned" in str(exc)
+    else:
+        raise AssertionError("expected invalid market data interval configuration")

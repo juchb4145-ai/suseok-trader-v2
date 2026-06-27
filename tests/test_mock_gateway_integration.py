@@ -68,11 +68,17 @@ def test_mock_gateway_once_posts_events_to_core_api(tmp_path, monkeypatch) -> No
 
         recent = fastapi_client.get("/api/gateway/events/recent").json()["events"]
         status = fastapi_client.get("/api/gateway/status").json()
+        latest_tick = fastapi_client.get("/api/market-data/ticks/005930").json()["tick"]
+        bars = fastapi_client.get("/api/market-data/bars/005930?interval_sec=60").json()["bars"]
+        conditions = fastapi_client.get("/api/market-data/conditions/recent").json()["signals"]
 
     event_types = {event["event_type"] for event in recent}
     assert {"heartbeat", "price_tick", "condition_event"}.issubset(event_types)
     assert status["last_heartbeat_at"] is not None
     assert status["recent_event_count"] == 3
+    assert latest_tick["code"] == "005930"
+    assert bars[0]["code"] == "005930"
+    assert conditions[0]["code"] == "005930"
 
 
 def test_mock_gateway_request_tr_command_updates_core_command_status(tmp_path, monkeypatch) -> None:

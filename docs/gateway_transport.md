@@ -51,6 +51,39 @@ Duplicate policy:
 `heartbeat` updates `gateway_status.last_heartbeat_at`. Every stored event updates
 `gateway_status.last_event_received_at`.
 
+## Market Projection After Ingest
+
+PR 4 connects accepted Gateway observations to the read-only Market Data Service. After
+`append_gateway_event()` stores a non-duplicate event with `status='ACCEPTED'`, Core projects
+these event types:
+
+- `price_tick`: latest tick, tick sample, configured minute bars, VWAP, freshness inputs.
+- `condition_event`: append-only condition signal and latest condition state per condition/code.
+- `tr_response`: append-only TR row snapshots for market observation.
+
+Duplicate events are not projected again. Events stored as `REJECTED`, `CONFLICT`, or
+`UNKNOWN_EVENT_TYPE` are not projected. If projection fails after ingest, Core records the
+failure in `market_projection_errors` and leaves order, strategy, risk, and OMS behavior
+untouched.
+
+The Gateway event response may include `projection_status` for projected market events:
+
+```json
+{
+  "accepted": true,
+  "event_id": "evt_...",
+  "duplicate": false,
+  "status": "ACCEPTED",
+  "projection_status": "APPLIED"
+}
+```
+
+The Event Store remains the source of truth. Market projection tables are rebuildable with:
+
+```powershell
+python -m tools.rebuild_market_data_projection --clear-projection
+```
+
 ## Command Polling
 
 `GET /api/gateway/commands` is a long-poll endpoint with:

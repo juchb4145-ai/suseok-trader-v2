@@ -4,9 +4,9 @@ Broker-neutral foundation for a Kiwoom OpenAPI+ based domestic stock trading sys
 
 The project currently contains the Core API bootstrap, settings loading, SQLite initialization,
 PR 1 broker contract models, the PR 2A read-only AI Sidecar contract, the PR 2B Event Store
-plus Gateway transport surface, and the PR 3 mock Gateway process skeleton. It intentionally
-does not contain Kiwoom or PyQt imports, strategy decisions, risk policy execution, OMS behavior,
-OpenAI API calls, or live order APIs.
+plus Gateway transport surface, the PR 3 mock Gateway process skeleton, and the PR 4 read-only
+Market Data Service projection. It intentionally does not contain Kiwoom or PyQt imports,
+strategy decisions, risk policy execution, OMS behavior, OpenAI API calls, or live order APIs.
 
 ## Broker Contract
 
@@ -43,6 +43,35 @@ Gateway command enqueue is intentionally service-only for now. There is no publi
 enqueue endpoint and no order endpoint. Order-like command types such as `send_order`,
 `submit_order`, `cancel_order`, `modify_order`, and `order_intent` are rejected until a later
 OMS/Risk PR creates a reviewed order path.
+
+## Market Data Service
+
+PR 4 adds a read-only projection over accepted Gateway events. The Event Store remains the source
+of truth; market data tables can be rebuilt from accepted `price_tick`, `condition_event`, and
+`tr_response` rows.
+
+Market data endpoints:
+
+- `GET /api/market-data/status`
+- `GET /api/market-data/ticks/latest`
+- `GET /api/market-data/ticks/{code}`
+- `GET /api/market-data/bars/{code}?interval_sec=60`
+- `GET /api/market-data/readiness/{code}`
+- `GET /api/market-data/conditions/recent`
+- `GET /api/market-data/tr-snapshots/recent`
+- `GET /api/market-data/projection-errors`
+
+The projection normalizes latest ticks, tick samples, 1/3/5 minute bars, VWAP, condition signals,
+TR market snapshots, freshness/readiness, and projection errors. It is observation-only: it does
+not create strategy decisions, risk decisions, order intents, or broker commands.
+
+Rebuild the projection from accepted Event Store rows:
+
+```powershell
+python -m tools.rebuild_market_data_projection --clear-projection
+```
+
+Omit `--clear-projection` to run a non-destructive replay that skips already projected events.
 
 ## Mock Gateway
 
@@ -81,6 +110,10 @@ Confirm Core received the mock events:
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/api/gateway/status
 Invoke-RestMethod http://127.0.0.1:8000/api/gateway/events/recent
+Invoke-RestMethod http://127.0.0.1:8000/api/market-data/status
+Invoke-RestMethod http://127.0.0.1:8000/api/market-data/ticks/005930
+Invoke-RestMethod "http://127.0.0.1:8000/api/market-data/bars/005930?interval_sec=60"
+Invoke-RestMethod http://127.0.0.1:8000/api/market-data/conditions/recent
 ```
 
 `apps/kiwoom_gateway.py` is intentionally a skeleton in PR 3. It imports no broker UI/ActiveX

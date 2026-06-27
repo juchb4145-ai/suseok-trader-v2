@@ -6,6 +6,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
+from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
 from storage.event_store import (
     append_gateway_event,
     count_recent_gateway_events,
@@ -36,8 +37,16 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
 
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
+    projection_status: str | None = None
     try:
         result = append_gateway_event(connection, event)
+        if (
+            result.status == "ACCEPTED"
+            and not result.duplicate
+            and event.event_type.strip().lower() in MARKET_DATA_EVENT_TYPES
+        ):
+            projection_result = process_gateway_event(connection, event, settings=settings)
+            projection_status = projection_result.status
     finally:
         connection.close()
 
@@ -52,12 +61,15 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
             detail=result.error_message,
         )
 
-    return {
+    response = {
         "accepted": result.accepted,
         "event_id": result.event_id,
         "duplicate": result.duplicate,
         "status": result.status,
     }
+    if projection_status is not None:
+        response["projection_status"] = projection_status
+    return response
 
 
 @router.get("/commands", dependencies=[Depends(require_local_token)])
