@@ -334,6 +334,15 @@ class Settings:
     live_sim_reconcile_block_new_buy_on_mismatch: bool = True
     live_sim_reconcile_allow_exit_on_mismatch: bool = True
     live_sim_reconcile_stale_order_sec: int = 300
+    live_sim_operating_cycle_enabled: bool = True
+    live_sim_operating_default_mode: str = "OBSERVE_CYCLE"
+    live_sim_operating_max_buy_commands_per_cycle: int = 1
+    live_sim_operating_max_cancel_commands_per_cycle: int = 3
+    live_sim_operating_max_exit_commands_per_cycle: int = 3
+    live_sim_operating_require_preflight_pass_for_queue: bool = True
+    live_sim_operating_include_ai: bool = True
+    live_sim_operating_include_no_buy: bool = True
+    live_sim_operating_write_runs: bool = True
     no_buy_sentinel_enabled: bool = True
     no_buy_sentinel_market_open_time: str = "09:00:00"
     no_buy_sentinel_minutes_after_open: int = 20
@@ -756,6 +765,28 @@ class Settings:
                 "LIVE_SIM_CANCEL_ALLOW_WITHOUT_BROKER_ORDER_NO requires "
                 "LIVE_SIM_CANCEL_REQUIRE_BROKER_ORDER_NO=false"
             )
+        object.__setattr__(
+            self,
+            "live_sim_operating_default_mode",
+            _normalize_non_empty(self.live_sim_operating_default_mode),
+        )
+        if self.live_sim_operating_default_mode not in {
+            "OBSERVE_CYCLE",
+            "PILOT_BUY_ONLY",
+            "PILOT_FULL_LIFECYCLE",
+            "PROTECT_ONLY",
+        }:
+            raise ValueError(
+                "LIVE_SIM_OPERATING_DEFAULT_MODE must be one of "
+                "OBSERVE_CYCLE, PILOT_BUY_ONLY, PILOT_FULL_LIFECYCLE, PROTECT_ONLY"
+            )
+        for field_name in (
+            "live_sim_operating_max_buy_commands_per_cycle",
+            "live_sim_operating_max_cancel_commands_per_cycle",
+            "live_sim_operating_max_exit_commands_per_cycle",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -1990,6 +2021,40 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("LIVE_SIM_RECONCILE_STALE_ORDER_SEC", "300"),
             "LIVE_SIM_RECONCILE_STALE_ORDER_SEC",
             min_value=1,
+        ),
+        live_sim_operating_cycle_enabled=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_CYCLE_ENABLED", "true")
+        ),
+        live_sim_operating_default_mode=env.get(
+            "LIVE_SIM_OPERATING_DEFAULT_MODE",
+            "OBSERVE_CYCLE",
+        ),
+        live_sim_operating_max_buy_commands_per_cycle=_parse_int(
+            env.get("LIVE_SIM_OPERATING_MAX_BUY_COMMANDS_PER_CYCLE", "1"),
+            "LIVE_SIM_OPERATING_MAX_BUY_COMMANDS_PER_CYCLE",
+            min_value=0,
+        ),
+        live_sim_operating_max_cancel_commands_per_cycle=_parse_int(
+            env.get("LIVE_SIM_OPERATING_MAX_CANCEL_COMMANDS_PER_CYCLE", "3"),
+            "LIVE_SIM_OPERATING_MAX_CANCEL_COMMANDS_PER_CYCLE",
+            min_value=0,
+        ),
+        live_sim_operating_max_exit_commands_per_cycle=_parse_int(
+            env.get("LIVE_SIM_OPERATING_MAX_EXIT_COMMANDS_PER_CYCLE", "3"),
+            "LIVE_SIM_OPERATING_MAX_EXIT_COMMANDS_PER_CYCLE",
+            min_value=0,
+        ),
+        live_sim_operating_require_preflight_pass_for_queue=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_REQUIRE_PREFLIGHT_PASS_FOR_QUEUE", "true")
+        ),
+        live_sim_operating_include_ai=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_INCLUDE_AI", "true")
+        ),
+        live_sim_operating_include_no_buy=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_INCLUDE_NO_BUY", "true")
+        ),
+        live_sim_operating_write_runs=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_WRITE_RUNS", "true")
         ),
         no_buy_sentinel_enabled=_parse_bool(env.get("NO_BUY_SENTINEL_ENABLED", "true")),
         no_buy_sentinel_market_open_time=env.get(

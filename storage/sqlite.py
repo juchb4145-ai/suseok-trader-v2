@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 APP_NAME = "suseok-trader-v2"
 
 
@@ -738,6 +738,45 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
 
 
 def _create_operator_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_operating_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            mode TEXT NOT NULL,
+            queue_commands INTEGER NOT NULL DEFAULT 0,
+            preflight_status TEXT NOT NULL,
+            status TEXT NOT NULL,
+            buy_evaluated_count INTEGER NOT NULL DEFAULT 0,
+            buy_command_count INTEGER NOT NULL DEFAULT 0,
+            cancel_candidate_count INTEGER NOT NULL DEFAULT 0,
+            cancel_command_count INTEGER NOT NULL DEFAULT 0,
+            exit_signal_count INTEGER NOT NULL DEFAULT 0,
+            exit_command_count INTEGER NOT NULL DEFAULT 0,
+            reconcile_status TEXT,
+            no_buy_status TEXT,
+            ai_run_status TEXT,
+            reason_summary_json TEXT NOT NULL DEFAULT '{}',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            live_sim_only INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_operating_runs_created
+        ON live_sim_operating_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_operating_runs_trade_mode
+        ON live_sim_operating_runs (trade_date, mode, created_at)
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS no_buy_sentinel_snapshots (

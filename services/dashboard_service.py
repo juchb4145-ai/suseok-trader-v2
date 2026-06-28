@@ -97,6 +97,7 @@ from services.risk_gate import (
     list_risk_check_observations,
     list_risk_errors,
 )
+from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.strategy_engine import (
     get_strategy_status,
     list_latest_strategy_observations,
@@ -171,6 +172,7 @@ def build_dashboard_snapshot(
     dry_run_status = get_dry_run_status(connection, settings)
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
+    live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
     no_buy_sentinel = build_no_buy_sentinel_snapshot(
         connection,
         settings=settings,
@@ -416,6 +418,7 @@ def build_dashboard_snapshot(
             "recent_lifecycle_events": live_sim_lifecycle_events,
             "reconcile_status": live_sim_reconcile[0] if live_sim_reconcile else None,
             "recent_reconcile_snapshots": live_sim_reconcile,
+            "operating": live_sim_operator_status,
             "live_sim_review_available": True,
             "live_sim_review_report_count": live_sim_review_report_count,
             "latest_live_sim_review_reports": latest_live_sim_review_reports,
@@ -753,6 +756,11 @@ def _pipeline_summary(
             "safety_gate_status": live_sim_status["safety_gate"]["status"],
             "live_real_allowed": False,
             "order_controls_available": False,
+            "operating_mode": (
+                live_sim_status.get("operating", {}).get("current_operating_mode")
+                if "operating" in live_sim_status
+                else settings.live_sim_operating_default_mode
+            ),
         },
         "ai_sidecar": {
             "enabled": settings.ai_sidecar_enabled,

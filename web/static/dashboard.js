@@ -155,13 +155,20 @@ const renderLiveSimOps = (snapshot) => {
   const liveSim = snapshot.live_sim || {};
   const status = liveSim.status || {};
   const reconcile = liveSim.reconcile_status || {};
+  const operating = liveSim.operating || {};
+  const latestRun = operating.latest_run || {};
+  const commandCounts = operating.command_counts_last_run || {};
   document.getElementById("live-sim-badges").innerHTML = [
     badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${text(status.enabled)}`),
     badge(status.kill_switch ? "BLOCKED" : "OBSERVE", `kill ${text(status.kill_switch)}`),
     badge((status.safety_gate || {}).status || "UNKNOWN", `gate ${text((status.safety_gate || {}).status)}`),
+    badge(operating.preflight_status || "UNKNOWN", `preflight ${text(operating.preflight_status)}`),
     badge("OBSERVE", "LIVE_REAL false"),
   ].join("");
   document.getElementById("live-sim-status").innerHTML = [
+    metric("Operating mode", operating.current_operating_mode || "-"),
+    metric("Latest operating run", latestRun.status ? `${latestRun.status} / ${latestRun.mode}` : "-"),
+    metric("Last command counts", `${commandCounts.buy || 0} / ${commandCounts.cancel || 0} / ${commandCounts.exit || 0}`),
     metric("Today intents/orders", `${status.intent_count || 0} / ${status.order_count || 0}`),
     metric("Open orders", status.open_order_count || 0),
     metric("Open positions", status.open_position_count || 0),
@@ -170,6 +177,8 @@ const renderLiveSimOps = (snapshot) => {
     metric("Reconcile", reconcile.status || "-"),
   ].join("");
   document.getElementById("live-sim-tables").innerHTML = [
+    miniList("Operating warnings", operating.warnings || [], (row) => row),
+    miniList("Operating blocks", operating.blocking_reasons || [], (row) => row),
     miniList("Open positions", liveSim.open_positions || [], (row) => `${row.name} ${row.code} · ${row.status}`),
     miniList("Open orders", liveSim.recent_orders || [], (row) => `${row.name} ${row.code} · ${row.status}`),
     miniList("Reconcile", liveSim.recent_reconcile_snapshots || [], (row) => `${row.status} · mismatch ${row.mismatch_count || 0}`),

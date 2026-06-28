@@ -38,10 +38,18 @@ from services.live_sim.order_plan_intent import (
     create_live_sim_intent_from_order_plan,
     queue_live_sim_order_command_from_order_plan,
 )
+from services.runtime.live_sim_operating_orchestrator import (
+    OperatingMode,
+    build_live_sim_operator_status,
+    get_latest_live_sim_operating_run,
+    list_live_sim_operating_runs,
+    run_live_sim_operating_cycle_once,
+)
 from services.runtime.live_sim_pilot_pipeline import (
     list_live_sim_pilot_runs,
     run_live_sim_pilot_pipeline_once,
 )
+from services.runtime.preflight import run_live_sim_preflight
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -333,6 +341,90 @@ def live_sim_pilot_runs(
     return {"runs": runs, **_live_sim_response_flags()}
 
 
+@router.get("/operator/runs")
+def live_sim_operator_runs(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        runs = list_live_sim_operating_runs(connection, limit=limit)
+    finally:
+        connection.close()
+    return {
+        "runs": runs,
+        "read_only": True,
+        "no_order_side_effects": True,
+        **_live_sim_response_flags(),
+    }
+
+
+@router.get("/operator/runs/latest")
+def live_sim_operator_run_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        run = get_latest_live_sim_operating_run(connection)
+    finally:
+        connection.close()
+    return {
+        "run": run,
+        "read_only": True,
+        "no_order_side_effects": True,
+        **_live_sim_response_flags(),
+    }
+
+
+@router.get("/operator/preflight")
+def live_sim_operator_preflight(
+    mode: OperatingMode | None = None,
+    queue_commands: bool = Query(default=False),
+    trade_date: str | None = Query(default=None),
+    include_ai: bool | None = Query(default=None),
+    include_no_buy: bool | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        preflight = run_live_sim_preflight(
+            connection,
+            settings=settings,
+            mode=mode,
+            queue_commands=queue_commands,
+            trade_date=trade_date,
+            include_ai=settings.live_sim_operating_include_ai
+            if include_ai is None
+            else include_ai,
+            include_no_buy=settings.live_sim_operating_include_no_buy
+            if include_no_buy is None
+            else include_no_buy,
+        )
+    finally:
+        connection.close()
+    return preflight.to_dict() | {
+        "read_only": True,
+        "no_order_side_effects": True,
+        **_live_sim_response_flags(),
+    }
+
+
+@router.get("/operator/status")
+def live_sim_operator_status(
+    trade_date: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        status = build_live_sim_operator_status(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+        )
+    finally:
+        connection.close()
+    return status | _live_sim_response_flags()
+
+
 @router.post("/evaluate", dependencies=[Depends(require_local_token)])
 def live_sim_evaluate(
     trade_date: str | None = Query(default=None),
@@ -466,6 +558,33 @@ def live_sim_pilot_run_once(
             trade_date=trade_date,
             limit=limit,
             queue_commands=queue_commands,
+        )
+    finally:
+        connection.close()
+    return result.to_dict() | _live_sim_response_flags()
+
+
+@router.post("/operator/run-once", dependencies=[Depends(require_local_token)])
+def live_sim_operator_run_once(
+    mode: OperatingMode = OperatingMode.OBSERVE_CYCLE,
+    queue_commands: bool = Query(default=False),
+    trade_date: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+    include_ai: bool | None = Query(default=None),
+    include_no_buy: bool | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_live_sim_operating_cycle_once(
+            connection,
+            settings=settings,
+            mode=mode,
+            queue_commands=queue_commands,
+            trade_date=trade_date,
+            limit=limit,
+            include_ai=include_ai,
+            include_no_buy=include_no_buy,
         )
     finally:
         connection.close()
