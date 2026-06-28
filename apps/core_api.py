@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from api.routes.ai_advisory import router as ai_advisory_router
 from api.routes.ai_codex import router as ai_codex_router
 from api.routes.ai_live_sim_review import router as ai_live_sim_review_router
 from api.routes.ai_rca import router as ai_rca_router
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     application.include_router(health_router)
+    application.include_router(ai_advisory_router)
     application.include_router(ai_sidecar_router)
     application.include_router(ai_rca_router)
     application.include_router(ai_codex_router)

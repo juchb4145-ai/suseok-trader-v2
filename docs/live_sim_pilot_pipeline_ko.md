@@ -85,6 +85,14 @@ operator Naver import, 별도 실행
 
 `queue_commands=false`가 기본이다. `--queue-commands` 또는 API `queue_commands=true`를 줘도 `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`와 기존 safety gate가 모두 켜져야 command가 생성된다.
 
+## PR-6 AI Advisory 연결
+
+`run_live_sim_pilot_pipeline_once` 응답은 최신 AI Candidate Scorer run을 `ai_advisory_summary`로 포함할 수 있다. 이 값은 read-only summary이며 routing, eligibility, command queue 판단에 사용되지 않는다.
+
+AI advisory가 없거나 `DISABLED`, `FAILED`, `INVALID_SCHEMA`, `TIMEOUT`이어도 PR-4/PR-5 rule-based LIVE_SIM pipeline은 계속 독립적으로 동작한다. AI score가 낮아도 기존 `PLAN_READY`를 차단하지 않고, AI selected가 있어도 plan을 자동 승격하지 않는다.
+
+자세한 설정과 rollback은 [AI Candidate Scorer Advisory](ai_candidate_scorer_advisory_ko.md)를 따른다.
+
 ## API
 
 Read-only:

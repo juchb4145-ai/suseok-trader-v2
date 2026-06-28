@@ -85,3 +85,11 @@ PR-4는 `order_plan_drafts_latest`에서 `PLAN_READY`만 선택하되, 다음을
 `queue_commands=false`가 기본이며, `--queue-commands`와 `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`가 함께 있어야 `GatewayCommand(send_order)`가 생성된다. PR-4 pipeline은 run_once만 제공하고 scheduler는 후속 PR로 남긴다.
 
 자세한 운영 절차는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.
+
+## PR-6 AI Advisory 참고
+
+AI Candidate Scorer는 `order_plan_drafts_latest`의 `PLAN_READY`, `WAIT_RETRY`, `DATA_WAIT` 후보를 읽어 operator용 annotation을 만든다. 이 과정은 `OrderPlanDraft` status, quantity, notional, limit price를 변경하지 않는다.
+
+AI selected가 있어도 `PLAN_READY`로 승격하지 않고, AI selected가 아니어도 기존 rule-based `PLAN_READY`를 차단하지 않는다. AI risk/reward는 clamp된 제안으로만 저장되며 EntryTiming/Exit 설정에 자동 반영되지 않는다.
+
+자세한 내용은 [AI Candidate Scorer Advisory](ai_candidate_scorer_advisory_ko.md)를 따른다.

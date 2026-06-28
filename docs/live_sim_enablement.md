@@ -13,6 +13,7 @@
 - `modify_order`는 disabled다.
 - DRY_RUN evidence는 prerequisite이 될 수 있지만 DRY_RUN이 LIVE_SIM intent를 자동 생성하지 않는다.
 - AI Sidecar, RCA, Codex prompt draft, LIVE_SIM Review report는 review-only이며 order input이 아니다.
+- AI Candidate Scorer는 advisory-only이며 score/confidence/risk_reward가 LIVE_SIM routing input이 아니다.
 - Dashboard는 read-only이며 buy, sell, cancel, modify, reconcile, queue button이 없다.
 
 ## Safety Gate
@@ -67,6 +68,21 @@ PR-4는 `OrderPlanDraft(PLAN_READY)`를 기존 candidate 기반 manual LIVE_SIM 
 - `LIVE_SIM_ORDER_PLAN_REQUIRE_DRY_RUN_EVIDENCE=false`가 기본이며, 운영자가 true로 바꾸면 dry-run evidence를 요구한다.
 
 자세한 절차는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.
+
+## PR-6 AI Candidate Scorer Advisory
+
+AI Candidate Scorer는 LIVE_SIM safety gate 앞이나 뒤에서 주문 결정을 대체하지 않는다. 최신 advisory summary는 dashboard와 pilot run 결과에 표시될 수 있지만, `LiveSimIntent`, `LiveSimOrderRecord`, `GatewayCommand` 생성 조건에 포함되지 않는다.
+
+AI failure는 pipeline failure가 아니다. invalid schema, timeout, provider failure는 `ai_advisory_errors`와 scoring run status로 남기고 기존 LIVE_SIM path는 계속 fail-open으로 동작한다.
+
+Rollback:
+
+```powershell
+$env:AI_CANDIDATE_SCORER_ENABLED = "false"
+$env:AI_CANDIDATE_SCORER_PROVIDER = "mock"
+$env:AI_CANDIDATE_SCORER_ATTACH_TO_ORDER_PLAN = "false"
+$env:AI_CANDIDATE_SCORER_ATTACH_TO_LIVE_SIM_RUN = "false"
+```
 
 ## Required Environment for Local Acceptance
 

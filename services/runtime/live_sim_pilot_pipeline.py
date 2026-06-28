@@ -10,6 +10,7 @@ from domain.broker.utils import datetime_to_wire, new_message_id, normalize_valu
 from domain.live_sim.reasons import LiveSimReasonCode
 from domain.live_sim.status import LiveSimIntentStatus
 
+from services.ai_advisory.storage import get_latest_run as get_latest_ai_advisory_run
 from services.config import Settings, load_settings
 from services.entry_timing.service import evaluate_entry_timing
 from services.live_sim.live_sim_service import (
@@ -47,6 +48,7 @@ class LiveSimPilotPipelineRunResult:
     commands: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     preparation: Mapping[str, Any] = field(default_factory=dict)
     safety_gate: Mapping[str, Any] = field(default_factory=dict)
+    ai_advisory_summary: Mapping[str, Any] = field(default_factory=dict)
     live_sim_only: bool = True
     live_real_allowed: bool = False
 
@@ -68,6 +70,7 @@ class LiveSimPilotPipelineRunResult:
             "commands": normalize_value(list(self.commands)),
             "preparation": normalize_value(dict(self.preparation)),
             "safety_gate": normalize_value(dict(self.safety_gate)),
+            "ai_advisory_summary": normalize_value(dict(self.ai_advisory_summary)),
             "live_sim_only": True,
             "live_real_allowed": False,
             "broker_order_path": "LIVE_SIM_ONLY",
@@ -87,6 +90,7 @@ def run_live_sim_pilot_pipeline_once(
     started_at = datetime_to_wire(utc_now())
     _insert_pilot_run(connection, run_id=run_id, trade_date=trade_date, started_at=started_at)
     safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
+    ai_advisory_summary = _latest_ai_advisory_summary(connection)
     selected_order_plans: list[dict[str, Any]] = []
     eligibilities: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
@@ -105,6 +109,7 @@ def run_live_sim_pilot_pipeline_once(
                 reason_codes=reason_codes,
                 safety_gate=safety_gate.to_dict(),
             )
+            evidence["ai_advisory_summary"] = ai_advisory_summary
             _save_rejection(
                 connection,
                 candidate_instance_id=None,
@@ -139,6 +144,7 @@ def run_live_sim_pilot_pipeline_once(
                 status=status,
                 rejections=rejections,
                 safety_gate=safety_gate.to_dict(),
+                ai_advisory_summary=ai_advisory_summary,
             )
 
         if _has_candidate_targets(connection, trade_date=trade_date):
@@ -252,6 +258,7 @@ def run_live_sim_pilot_pipeline_once(
             "queue_commands_requested": should_queue,
             "selected_order_plans": selected_order_plans,
             "preparation": preparation,
+            "ai_advisory_summary": ai_advisory_summary,
             "live_sim_only": True,
             "live_real_allowed": False,
         }
@@ -285,6 +292,7 @@ def run_live_sim_pilot_pipeline_once(
             commands=commands,
             preparation=preparation,
             safety_gate=safety_gate.to_dict(),
+            ai_advisory_summary=ai_advisory_summary,
         )
     except Exception as exc:
         error_count += 1
@@ -395,6 +403,31 @@ def _has_candidate_targets(connection: sqlite3.Connection, *, trade_date: str | 
         tuple(params),
     ).fetchone()
     return int(row["count"]) > 0
+
+
+def _latest_ai_advisory_summary(connection: sqlite3.Connection) -> dict[str, Any]:
+    try:
+        latest = get_latest_ai_advisory_run(connection)
+    except sqlite3.Error:
+        latest = None
+    if latest is None:
+        return {
+            "available": False,
+            "advisory_only": True,
+            "no_order_side_effects": True,
+            "ai_advisory_used_for_routing": False,
+        }
+    return {
+        "available": True,
+        "run_id": latest.get("run_id"),
+        "status": latest.get("status"),
+        "selected_count": latest.get("selected_count"),
+        "summary": latest.get("summary"),
+        "no_trade_reason": latest.get("no_trade_reason"),
+        "advisory_only": True,
+        "no_order_side_effects": True,
+        "ai_advisory_used_for_routing": False,
+    }
 
 
 def _pipeline_evidence(

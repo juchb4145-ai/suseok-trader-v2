@@ -18,6 +18,15 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 
+from services.ai_advisory.storage import (
+    build_status as build_ai_advisory_status,
+)
+from services.ai_advisory.storage import (
+    list_errors as list_ai_advisory_errors,
+)
+from services.ai_advisory.storage import (
+    list_latest_scores as list_ai_advisory_latest_scores,
+)
 from services.ai_sidecar.codex_prompt_store import (
     count_codex_prompt_drafts,
     list_codex_prompt_drafts,
@@ -112,6 +121,7 @@ DASHBOARD_SECTIONS = [
     "risk",
     "dry_run",
     "live_sim",
+    "ai_advisory",
     "ai_sidecar",
     "ai_explanations",
     "recent_events",
@@ -169,6 +179,12 @@ def build_dashboard_snapshot(
     ai_requests = list_ai_requests(connection, limit=bounded_limit)
     ai_request_status_counts = get_ai_request_status_counts(connection)
     ai_last_error = get_last_ai_request_error(connection)
+    ai_advisory_status = build_ai_advisory_status(connection, settings=settings)
+    ai_advisory_latest = list_ai_advisory_latest_scores(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
+    ai_advisory_errors = list_ai_advisory_errors(connection, limit=min(bounded_limit, 10))
     latest_rca_reports = list_rca_reports(connection, limit=min(bounded_limit, 10))
     latest_rca_errors = list_rca_report_errors(connection, limit=min(bounded_limit, 10))
     rca_report_count = count_rca_reports(connection)
@@ -260,6 +276,7 @@ def build_dashboard_snapshot(
         dry_run_status=dry_run_status,
         exit_status=exit_status,
         live_sim_status=live_sim_status,
+        ai_advisory_status=ai_advisory_status,
         settings=settings,
     )
 
@@ -403,6 +420,23 @@ def build_dashboard_snapshot(
             "execution_controls_available": False,
             "read_only": True,
         },
+        "ai_advisory": {
+            "status": ai_advisory_status,
+            "latest": ai_advisory_latest,
+            "latest_run": ai_advisory_latest.get("run"),
+            "top_scores": ai_advisory_latest.get("scores", [])[:10],
+            "risk_reward_suggestions": ai_advisory_latest.get(
+                "risk_reward_suggestions",
+                [],
+            )[:10],
+            "latest_errors": ai_advisory_errors,
+            "latest_error_count": len(ai_advisory_errors),
+            "advisory_only": True,
+            "no_order_side_effects": True,
+            "execution_controls_available": False,
+            "order_controls_available": False,
+            "notice": "AI Candidate Scorer는 후보 평가 annotation이며 주문 입력이 아닙니다.",
+        },
         "ai_sidecar": {
             "status": build_ai_sidecar_status(settings),
             "insights": ai_insights,
@@ -468,6 +502,7 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "OBSERVE_PASS는 주문 승인이 아닙니다.",
         "MATCHED_OBSERVATION은 매수 신호가 아닙니다.",
         "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
+        "AI Candidate Scorer 결과는 advisory-only이며 주문 승인 근거가 아닙니다.",
         "AI Sidecar tools/function calling은 비활성화되어 있습니다.",
         "AI Sidecar에는 주문 tool이 없습니다.",
         "PR10 OMS는 DRY_RUN-only이며 broker 주문을 전송하지 않습니다.",
@@ -649,6 +684,7 @@ def _pipeline_summary(
     dry_run_status: dict[str, Any],
     exit_status: dict[str, Any],
     live_sim_status: dict[str, Any],
+    ai_advisory_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -719,6 +755,23 @@ def _pipeline_summary(
             "order_context_allowed": settings.ai_sidecar_order_context_allowed,
             "tools_enabled": False,
             "order_tools_enabled": False,
+        },
+        "ai_advisory": {
+            "enabled": ai_advisory_status["enabled"],
+            "provider": ai_advisory_status["provider"],
+            "latest_status": (
+                None
+                if ai_advisory_status.get("latest_run") is None
+                else ai_advisory_status["latest_run"].get("status")
+            ),
+            "latest_selected_count": (
+                0
+                if ai_advisory_status.get("latest_run") is None
+                else ai_advisory_status["latest_run"].get("selected_count", 0)
+            ),
+            "error_count": ai_advisory_status["error_count"],
+            "advisory_only": True,
+            "no_order_side_effects": True,
         },
         "funnel": [
             {

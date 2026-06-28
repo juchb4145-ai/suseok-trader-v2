@@ -28,15 +28,15 @@
       ↓
   RiskGate
       ↓
-  AI Candidate Scorer, 선택적
-      ↓
   OrderPlanBuilder
-      ↓
-  LIVE_SIM OrderIntent
-      ↓
-  Gateway send_order command
-      ↓
-  체결/미체결/취소/청산/리컨실
+      ├─ LIVE_SIM OrderIntent
+      │    ↓
+      │  Gateway send_order command
+      │    ↓
+      │  체결/미체결/취소/청산/리컨실
+      └─ AI Candidate Scorer, 선택적 advisory annotation
+           ↓
+         Operator/Dashboard summary, 주문 입력 아님
   
 ---
 
@@ -97,6 +97,23 @@ python -m tools.run_live_sim_pilot_once --queue-commands
 command queue는 `TRADING_PROFILE=LIVE_SIM_PILOT`, `LIVE_SIM_PILOT_PIPELINE_ENABLED=true`, `LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED=true`, `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`, 기존 LIVE_SIM safety gate가 모두 통과한 경우에만 가능하다.
 
 자세한 구현/운영 문서는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.
+
+---
+
+## PR-6 AI Candidate Scorer Advisory 업데이트
+
+PR-6은 `OrderPlanDraft`, ThemeLeadership, EntryTiming, Strategy, Risk, LIVE_SIM evidence를 읽어 상위 후보 5~10개를 advisory-only로 평가한다. AI 결과는 `ai_candidate_scoring_runs`, `ai_candidate_scores`, `ai_risk_reward_suggestions`, `ai_advisory_errors`에 저장되며, Dashboard/API/CLI에서 읽기 전용 annotation으로만 표시한다.
+
+핵심 원칙:
+
+- AI는 주문을 만들지 않는다.
+- AI는 `PLAN_READY` 승격, rejected plan 승격, safety gate 우회를 하지 않는다.
+- AI 실패, timeout, invalid schema는 trading pipeline 실패가 아니다.
+- AI score/confidence는 주문 승인, 리스크 승인, 수익 확률이 아니다.
+- AI risk_reward는 clamp된 제안이며 자동 Exit policy가 아니다.
+- 좋은 후보가 없으면 `selected=[]`가 정상이다.
+
+기본값은 `AI_CANDIDATE_SCORER_ENABLED=false`, `AI_CANDIDATE_SCORER_PROVIDER=mock`, raw response 저장 false다. 자세한 내용은 [AI Candidate Scorer Advisory](ai_candidate_scorer_advisory_ko.md)를 따른다.
 
 ---
 

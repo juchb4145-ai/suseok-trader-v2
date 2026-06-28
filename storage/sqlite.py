@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 APP_NAME = "suseok-trader-v2"
 
 
@@ -33,6 +33,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_rca_tables(connection)
     _create_ai_codex_prompt_tables(connection)
     _create_ai_live_sim_review_tables(connection)
+    _create_ai_advisory_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
     _create_theme_projection_tables(connection)
@@ -586,6 +587,131 @@ def _create_ai_live_sim_review_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ai_live_sim_review_errors_created
         ON ai_live_sim_review_errors (created_at)
+        """
+    )
+
+
+def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_candidate_scoring_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            provider TEXT NOT NULL,
+            model TEXT,
+            status TEXT NOT NULL,
+            candidate_count INTEGER NOT NULL DEFAULT 0,
+            selected_count INTEGER NOT NULL DEFAULT 0,
+            prompt_hash TEXT,
+            raw_response_hash TEXT,
+            raw_response_json TEXT,
+            summary TEXT,
+            no_trade_reason TEXT,
+            error_message TEXT,
+            validation_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at TEXT,
+            live_sim_only INTEGER NOT NULL DEFAULT 1,
+            advisory_only INTEGER NOT NULL DEFAULT 1,
+            no_order_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_candidate_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            candidate_instance_id TEXT,
+            order_plan_id TEXT,
+            score INTEGER,
+            confidence INTEGER,
+            selected INTEGER NOT NULL DEFAULT 0,
+            analysis TEXT,
+            avoid_reason TEXT,
+            flags_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_risk_reward_suggestions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            order_plan_id TEXT,
+            stop_loss_pct REAL,
+            take_profit_pct REAL,
+            trailing_stop_pct REAL,
+            max_hold_sec INTEGER,
+            clamped INTEGER NOT NULL DEFAULT 0,
+            clamp_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ai_advisory_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT,
+            trade_date TEXT,
+            error_type TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "ai_candidate_scoring_runs",
+        {
+            "raw_response_json": "TEXT",
+            "error_message": "TEXT",
+            "validation_error": "TEXT",
+            "completed_at": "TEXT",
+            "live_sim_only": "INTEGER NOT NULL DEFAULT 1",
+            "advisory_only": "INTEGER NOT NULL DEFAULT 1",
+            "no_order_side_effects": "INTEGER NOT NULL DEFAULT 1",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_candidate_scoring_runs_created
+        ON ai_candidate_scoring_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_candidate_scoring_runs_trade_status
+        ON ai_candidate_scoring_runs (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_candidate_scores_run_score
+        ON ai_candidate_scores (run_id, selected, score)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_candidate_scores_code_created
+        ON ai_candidate_scores (code, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_risk_reward_suggestions_run
+        ON ai_risk_reward_suggestions (run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_ai_advisory_errors_created
+        ON ai_advisory_errors (created_at)
         """
     )
 

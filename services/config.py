@@ -59,6 +59,29 @@ class Settings:
     ai_sidecar_context_redact_paths: bool = True
     ai_sidecar_context_redact_secrets: bool = True
     ai_sidecar_context_include_raw_payload: bool = False
+    ai_candidate_scorer_enabled: bool = False
+    ai_candidate_scorer_provider: str = "mock"
+    ai_candidate_scorer_model: str = ""
+    ai_candidate_scorer_timeout_seconds: int = 10
+    ai_candidate_scorer_max_candidates: int = 10
+    ai_candidate_scorer_min_score: int = 70
+    ai_candidate_scorer_min_confidence: int = 60
+    ai_candidate_scorer_store_raw_response: bool = False
+    ai_candidate_scorer_require_strict_json: bool = True
+    ai_candidate_scorer_allow_order_actions: bool = False
+    ai_candidate_scorer_fail_open: bool = True
+    ai_candidate_scorer_attach_to_order_plan: bool = False
+    ai_candidate_scorer_attach_to_live_sim_run: bool = False
+    ai_candidate_scorer_max_prompt_chars: int = 12000
+    ai_candidate_scorer_redact_account_id: bool = True
+    ai_candidate_risk_reward_stop_loss_min: float = 1.0
+    ai_candidate_risk_reward_stop_loss_max: float = 4.0
+    ai_candidate_risk_reward_take_profit_min: float = 2.0
+    ai_candidate_risk_reward_take_profit_max: float = 8.0
+    ai_candidate_risk_reward_trailing_min: float = 1.0
+    ai_candidate_risk_reward_trailing_max: float = 4.0
+    ai_candidate_risk_reward_max_hold_min_sec: int = 300
+    ai_candidate_risk_reward_max_hold_max_sec: int = 7200
     market_data_enabled: bool = True
     market_data_tick_stale_sec: int = 10
     market_data_degraded_tick_stale_sec: int = 30
@@ -746,6 +769,64 @@ class Settings:
             "ai_sidecar_context_schema_version",
             _require_non_empty_config(self.ai_sidecar_context_schema_version),
         )
+        object.__setattr__(
+            self,
+            "ai_candidate_scorer_provider",
+            _normalize_non_empty(self.ai_candidate_scorer_provider).lower(),
+        )
+        if self.ai_candidate_scorer_timeout_seconds < 1:
+            raise ValueError("AI_CANDIDATE_SCORER_TIMEOUT_SECONDS must be >= 1")
+        if self.ai_candidate_scorer_max_candidates < 1:
+            raise ValueError("AI_CANDIDATE_SCORER_MAX_CANDIDATES must be >= 1")
+        for field_name in (
+            "ai_candidate_scorer_min_score",
+            "ai_candidate_scorer_min_confidence",
+        ):
+            value = getattr(self, field_name)
+            if value < 0 or value > 100:
+                raise ValueError(f"{field_name.upper()} must be between 0 and 100")
+        if self.ai_candidate_scorer_allow_order_actions:
+            raise ValueError("AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS must remain false")
+        if not self.ai_candidate_scorer_fail_open:
+            raise ValueError("AI_CANDIDATE_SCORER_FAIL_OPEN must remain true")
+        if self.ai_candidate_scorer_max_prompt_chars < 1000:
+            raise ValueError("AI_CANDIDATE_SCORER_MAX_PROMPT_CHARS must be >= 1000")
+        if self.ai_candidate_risk_reward_stop_loss_min < 0:
+            raise ValueError("AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MIN must be >= 0")
+        if (
+            self.ai_candidate_risk_reward_stop_loss_max
+            < self.ai_candidate_risk_reward_stop_loss_min
+        ):
+            raise ValueError(
+                "AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MAX must be >= "
+                "AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MIN"
+            )
+        if (
+            self.ai_candidate_risk_reward_take_profit_max
+            < self.ai_candidate_risk_reward_take_profit_min
+        ):
+            raise ValueError(
+                "AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MAX must be >= "
+                "AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MIN"
+            )
+        if (
+            self.ai_candidate_risk_reward_trailing_max
+            < self.ai_candidate_risk_reward_trailing_min
+        ):
+            raise ValueError(
+                "AI_CANDIDATE_RISK_REWARD_TRAILING_MAX must be >= "
+                "AI_CANDIDATE_RISK_REWARD_TRAILING_MIN"
+            )
+        if self.ai_candidate_risk_reward_max_hold_min_sec < 1:
+            raise ValueError("AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC must be >= 1")
+        if (
+            self.ai_candidate_risk_reward_max_hold_max_sec
+            < self.ai_candidate_risk_reward_max_hold_min_sec
+        ):
+            raise ValueError(
+                "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC must be >= "
+                "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC"
+            )
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -865,6 +946,97 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ),
         ai_sidecar_context_include_raw_payload=_parse_bool(
             env.get("AI_SIDECAR_CONTEXT_INCLUDE_RAW_PAYLOAD", "false")
+        ),
+        ai_candidate_scorer_enabled=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_ENABLED", "false")
+        ),
+        ai_candidate_scorer_provider=env.get("AI_CANDIDATE_SCORER_PROVIDER", "mock"),
+        ai_candidate_scorer_model=env.get("AI_CANDIDATE_SCORER_MODEL", ""),
+        ai_candidate_scorer_timeout_seconds=_parse_int(
+            env.get("AI_CANDIDATE_SCORER_TIMEOUT_SECONDS", "10"),
+            "AI_CANDIDATE_SCORER_TIMEOUT_SECONDS",
+            min_value=1,
+        ),
+        ai_candidate_scorer_max_candidates=_parse_int(
+            env.get("AI_CANDIDATE_SCORER_MAX_CANDIDATES", "10"),
+            "AI_CANDIDATE_SCORER_MAX_CANDIDATES",
+            min_value=1,
+        ),
+        ai_candidate_scorer_min_score=_parse_int(
+            env.get("AI_CANDIDATE_SCORER_MIN_SCORE", "70"),
+            "AI_CANDIDATE_SCORER_MIN_SCORE",
+            min_value=0,
+        ),
+        ai_candidate_scorer_min_confidence=_parse_int(
+            env.get("AI_CANDIDATE_SCORER_MIN_CONFIDENCE", "60"),
+            "AI_CANDIDATE_SCORER_MIN_CONFIDENCE",
+            min_value=0,
+        ),
+        ai_candidate_scorer_store_raw_response=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_STORE_RAW_RESPONSE", "false")
+        ),
+        ai_candidate_scorer_require_strict_json=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_REQUIRE_STRICT_JSON", "true")
+        ),
+        ai_candidate_scorer_allow_order_actions=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS", "false")
+        ),
+        ai_candidate_scorer_fail_open=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_FAIL_OPEN", "true")
+        ),
+        ai_candidate_scorer_attach_to_order_plan=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_ATTACH_TO_ORDER_PLAN", "false")
+        ),
+        ai_candidate_scorer_attach_to_live_sim_run=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_ATTACH_TO_LIVE_SIM_RUN", "false")
+        ),
+        ai_candidate_scorer_max_prompt_chars=_parse_int(
+            env.get("AI_CANDIDATE_SCORER_MAX_PROMPT_CHARS", "12000"),
+            "AI_CANDIDATE_SCORER_MAX_PROMPT_CHARS",
+            min_value=1000,
+        ),
+        ai_candidate_scorer_redact_account_id=_parse_bool(
+            env.get("AI_CANDIDATE_SCORER_REDACT_ACCOUNT_ID", "true")
+        ),
+        ai_candidate_risk_reward_stop_loss_min=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MIN", "1.0"),
+            "AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MIN",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_stop_loss_max=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MAX", "4.0"),
+            "AI_CANDIDATE_RISK_REWARD_STOP_LOSS_MAX",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_take_profit_min=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MIN", "2.0"),
+            "AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MIN",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_take_profit_max=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MAX", "8.0"),
+            "AI_CANDIDATE_RISK_REWARD_TAKE_PROFIT_MAX",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_trailing_min=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_TRAILING_MIN", "1.0"),
+            "AI_CANDIDATE_RISK_REWARD_TRAILING_MIN",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_trailing_max=_parse_float(
+            env.get("AI_CANDIDATE_RISK_REWARD_TRAILING_MAX", "4.0"),
+            "AI_CANDIDATE_RISK_REWARD_TRAILING_MAX",
+            min_value=0.0,
+        ),
+        ai_candidate_risk_reward_max_hold_min_sec=_parse_int(
+            env.get("AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC", "300"),
+            "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC",
+            min_value=1,
+        ),
+        ai_candidate_risk_reward_max_hold_max_sec=_parse_int(
+            env.get("AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC", "7200"),
+            "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC",
+            min_value=1,
         ),
         market_data_enabled=_parse_bool(env.get("MARKET_DATA_ENABLED", "true")),
         market_data_tick_stale_sec=_parse_int(

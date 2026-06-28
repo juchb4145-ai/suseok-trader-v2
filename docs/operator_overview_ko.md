@@ -15,6 +15,7 @@ Gateway
   -> Strategy
   -> Risk
   -> Dashboard
+  -> AI Candidate Scorer Advisory
   -> AI Sidecar
   -> DRY_RUN OMS
   -> DRY_RUN Exit
@@ -33,6 +34,7 @@ Gateway
 | Strategy | setup observation 저장 | entry plan, position size | `MATCHED_OBSERVATION` 여부와 reason |
 | Risk | risk observation 저장 | 주문 승인하지 않음 | `OBSERVE_PASS`, caution/block reason |
 | Dashboard | pipeline read-only 표시 | 실행 버튼 제공 | safety banner, funnel, errors |
+| AI Candidate Scorer | 상위 후보 score/confidence/risk_reward suggestion 저장 | 주문 생성, plan 승격, risk block 생성 | `/api/ai-advisory/status`, latest scores |
 | AI Sidecar | context/insight/RCA/review 보조 | 자동 판단 입력 | failed request, validated insight |
 | DRY_RUN OMS | 내부 모의 회계 | broker 주문 | dry-run status, paper position |
 | DRY_RUN Exit | simulated close accounting | 실제 매도 주문 | exit signal/evaluation |
@@ -49,6 +51,7 @@ Gateway
 | `OBSERVE_CAUTION` | 주의할 risk note가 있다 |
 | `OBSERVE_BLOCK` | block reason이 관측되었다 |
 | `AI_OUTPUT_INVALID` | AI 출력이 schema를 통과하지 못했다 |
+| `INVALID_SCHEMA` | AI Candidate Scorer 출력이 strict schema를 통과하지 못했다 |
 | `POLICY_REJECTED` | AI output에서 금지된 action shape가 감지되었다 |
 
 `MATCHED_OBSERVATION`은 매수 신호가 아니다. `OBSERVE_PASS`는 주문 승인이 아니다.
@@ -66,6 +69,7 @@ Gateway
 | LIVE_SIM order가 안 생김 | kill switch -> account mode -> Gateway heartbeat -> rejections |
 | LIVE_SIM position/exit가 이상함 | `/api/live-sim/positions` -> lifecycle events -> reconcile latest |
 | 미체결이 남아 있음 | cancel flags -> broker order no -> `/api/live-sim/cancel-intents` |
+| AI Candidate Score가 없음 | `AI_CANDIDATE_SCORER_ENABLED` -> `/api/ai-advisory/status` -> latest errors |
 | AI card가 실패 | API key, model config, schema/policy rejection 확인 |
 
 ## 운영자가 절대 혼동하면 안 되는 것
@@ -79,6 +83,8 @@ Gateway
 - LIVE_SIM cancel은 미체결 BUY 취소 전용이다.
 - LIVE_SIM SELL은 open position close-only exit 전용이다.
 - LIVE_SIM scheduler는 아직 없고 run_once API/CLI만 있다.
+- AI Candidate Scorer score/confidence는 주문 승인, 리스크 승인, 수익 확률이 아니다.
+- AI Candidate Scorer risk_reward는 clamp된 제안이며 자동 적용값이 아니다.
 - AI/RCA/Codex output은 자동 주문 입력이 아니다.
 - Dashboard는 읽기 전용이며 실행 버튼이 없다.
 - LIVE_REAL은 현재 구현되어 있지 않다.

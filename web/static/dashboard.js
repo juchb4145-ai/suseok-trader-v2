@@ -602,6 +602,68 @@ const renderLiveSim = (snapshot) => {
   ].join("");
 };
 
+const renderAiAdvisory = (snapshot) => {
+  const advisory = snapshot.ai_advisory || {};
+  const status = advisory.status || {};
+  const latestRun = advisory.latest_run || {};
+  const scores = advisory.top_scores || [];
+  const errors = advisory.latest_errors || [];
+  document.getElementById("ai-advisory-badges").innerHTML = [
+    badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
+    badge("OBSERVE", "advisory-only"),
+    badge("OBSERVE", "no order side effects"),
+    badge(latestRun.status || "UNKNOWN", `latest ${latestRun.status || "none"}`),
+  ].join("");
+  document.getElementById("ai-advisory-status").innerHTML = [
+    metric("provider", status.provider || "mock"),
+    metric("model", status.model),
+    metric("strict_json", status.strict_json),
+    metric("store_raw_response", status.store_raw_response),
+    metric("candidate_count", latestRun.candidate_count || 0),
+    metric("selected_count", latestRun.selected_count || 0),
+    metric("error_count", status.error_count || 0),
+    metric("order side effects", advisory.no_order_side_effects),
+  ].join("");
+  document.getElementById("ai-advisory-scores").innerHTML = scores.length
+    ? `
+      <table>
+        <thead>
+          <tr>
+            <th>종목</th>
+            <th>selected</th>
+            <th>score</th>
+            <th>confidence</th>
+            <th>analysis</th>
+            <th>flags</th>
+            <th>상세</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${scores
+            .map(
+              (row) => `
+                <tr>
+                  <td>${escapeHtml(row.code)}<br /><span class="muted">${escapeHtml(row.candidate_instance_id)}</span></td>
+                  <td>${badge(row.selected ? "SELECTED" : "OBSERVE", row.selected)}</td>
+                  <td>${number(row.score)}</td>
+                  <td>${number(row.confidence)}</td>
+                  <td>${escapeHtml(row.analysis)}</td>
+                  <td>${reasonList(row.flags)}</td>
+                  <td>${rawJson(row)}</td>
+                </tr>
+              `,
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `
+    : emptyState("아직 AI Candidate Scorer 결과가 없습니다.");
+  document.getElementById("ai-advisory-errors").innerHTML = logGroup(
+    "AI advisory errors",
+    errors,
+  );
+};
+
 const renderErrors = (snapshot) => {
   const recent = ((snapshot.recent_events || {}).gateway_events || []).slice(0, 8);
   const errors = snapshot.errors || {};
@@ -873,6 +935,7 @@ const renderSnapshot = (snapshot) => {
   renderRisk(snapshot);
   renderDryRun(snapshot);
   renderLiveSim(snapshot);
+  renderAiAdvisory(snapshot);
   renderErrors(snapshot);
   renderAi(snapshot);
   renderAiExplanations(snapshot);
