@@ -285,3 +285,9 @@ Rollback은 AI advisory 생성을 멈추는 것이며 기존 rule-based OrderPla
 - 운영 대시보드에서 AI advisory drill-down 강화
 - AI risk_reward를 Exit policy에 선택 적용할지 별도 safety review
 - 외부 LLM adapter를 붙일 경우 민감 정보 redact와 timeout/error fail-open 재검증
+# No-Buy Sentinel 연동
+
+No-Buy Sentinel은 AI Candidate Scorer 결과를 advisory-only 입력으로만 읽는다. AI score는
+주문 승인, 리스크 승인, 수익 확률이 아니며 상태 승격에 사용하지 않는다. AI selected가 비어
+있고 `no_trade_reason`이 있으면 `AI_NO_TRADE`로 표시하지만, safety gate/reconcile/config
+block이 있으면 시스템 block이 우선이다.

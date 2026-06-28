@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 APP_NAME = "suseok-trader-v2"
 
 
@@ -44,6 +44,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_dry_run_oms_tables(connection)
     _create_dry_run_exit_tables(connection)
     _create_live_sim_tables(connection)
+    _create_operator_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
@@ -732,6 +733,53 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_ai_advisory_errors_created
         ON ai_advisory_errors (created_at)
+        """
+    )
+
+
+def _create_operator_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS no_buy_sentinel_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            no_buy_detected INTEGER NOT NULL DEFAULT 0,
+            intent_count INTEGER NOT NULL DEFAULT 0,
+            order_count INTEGER NOT NULL DEFAULT 0,
+            command_count INTEGER NOT NULL DEFAULT 0,
+            plan_ready_count INTEGER NOT NULL DEFAULT 0,
+            ai_selected_count INTEGER NOT NULL DEFAULT 0,
+            primary_reason TEXT,
+            stage_summary_json TEXT NOT NULL DEFAULT '{}',
+            reason_summary_json TEXT NOT NULL DEFAULT '{}',
+            top_near_miss_json TEXT NOT NULL DEFAULT '[]',
+            operator_checklist_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            read_only INTEGER NOT NULL DEFAULT 1,
+            no_order_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "no_buy_sentinel_snapshots",
+        {
+            "command_count": "INTEGER NOT NULL DEFAULT 0",
+            "read_only": "INTEGER NOT NULL DEFAULT 1",
+            "no_order_side_effects": "INTEGER NOT NULL DEFAULT 1",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_no_buy_sentinel_snapshots_trade_created
+        ON no_buy_sentinel_snapshots (trade_date, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_no_buy_sentinel_snapshots_status_created
+        ON no_buy_sentinel_snapshots (status, created_at)
         """
     )
 

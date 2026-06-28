@@ -855,3 +855,9 @@ PR-7 No-Buy Sentinel & Dashboard Simplification
 ```
 
 단, 다음 장 전 시간이 부족하면 PR-1 결과를 바탕으로 PR-2/PR-3/PR-4를 더 작게 쪼갠다.
+# PR-7 No-Buy Sentinel
+
+PR-7은 LIVE_SIM Pilot의 주문 조건을 완화하지 않고 read-only 진단을 추가한다. Operator
+Dashboard는 시스템/테마/후보/주문/AI/왜 안 샀나 6개 패널로 정리되며 실행 버튼을 두지
+않는다. No-Buy Sentinel은 OrderIntent, LiveSimIntent, GatewayCommand를 만들지 않고
+LIVE_REAL도 구현하지 않는다.

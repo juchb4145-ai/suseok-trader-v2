@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Suseok Trader Dashboard V1</title>
+    <title>Suseok Trader Operator Dashboard</title>
     <link rel="stylesheet" href="/static/dashboard.css" />
   </head>
   <body>
@@ -30,169 +30,107 @@
         <ul id="safety-warnings" class="warning-list">
           <li>OBSERVE_PASS는 주문 승인이 아닙니다.</li>
           <li>MATCHED_OBSERVATION은 매수 신호가 아닙니다.</li>
-          <li>AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.</li>
+          <li>AI score는 주문 승인이나 리스크 승인 근거가 아닙니다.</li>
         </ul>
       </section>
 
-      <main class="dashboard-grid">
+      <main class="dashboard-grid operator-grid">
         <section class="panel panel-wide" id="system-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">System</p>
+              <p class="eyebrow">1. System</p>
               <h2>시스템 상태</h2>
             </div>
+            <div id="system-badges" class="badge-row"></div>
           </div>
           <div id="system-cards" class="metric-grid"></div>
         </section>
 
-        <section class="panel panel-wide" id="pipeline-section">
+        <section class="panel" id="market-theme-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">Pipeline</p>
-              <h2>관찰 파이프라인</h2>
+              <p class="eyebrow">2. Market / Theme</p>
+              <h2>오늘 시장/테마</h2>
             </div>
+            <div id="market-theme-badges" class="badge-row"></div>
           </div>
-          <div id="pipeline-funnel" class="funnel"></div>
+          <div id="market-theme-status" class="metric-grid compact-metrics"></div>
+          <div id="market-theme-table" class="table-wrap"></div>
         </section>
 
-        <section class="panel" id="themes-section">
+        <section class="panel" id="candidate-orderplan-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">Themes</p>
-              <h2>테마 보드</h2>
+              <p class="eyebrow">3. Candidate / Plan</p>
+              <h2>매수 후보/OrderPlan</h2>
             </div>
-            <div id="theme-state-counts" class="badge-row"></div>
+            <div id="candidate-plan-badges" class="badge-row"></div>
           </div>
-          <div id="themes-table" class="table-wrap"></div>
-        </section>
-
-        <section class="panel" id="candidates-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Candidates</p>
-              <h2>후보 Funnel</h2>
-            </div>
-            <div id="candidate-state-counts" class="badge-row"></div>
-          </div>
-          <div id="candidates-table" class="table-wrap"></div>
-        </section>
-
-        <section class="panel" id="strategy-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Strategy</p>
-              <h2>전략 관찰</h2>
-            </div>
-            <div id="strategy-status-counts" class="badge-row"></div>
-          </div>
-          <p class="notice">MATCHED_OBSERVATION은 매수 신호가 아닙니다.</p>
-          <div id="strategy-table" class="table-wrap"></div>
-        </section>
-
-        <section class="panel" id="risk-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">Risk</p>
-              <h2>리스크 노트</h2>
-            </div>
-            <div id="risk-status-counts" class="badge-row"></div>
-          </div>
-          <p class="notice">OBSERVE_PASS는 주문 승인이 아닙니다.</p>
-          <div id="risk-table" class="table-wrap"></div>
-        </section>
-
-        <section class="panel panel-wide" id="dry-run-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">DRY_RUN OMS</p>
-              <h2>내부 시뮬레이션</h2>
-            </div>
-            <div id="dry-run-badges" class="badge-row"></div>
-          </div>
-          <p class="notice">DRY_RUN OMS는 내부 시뮬레이션 기록만 표시하며 broker 주문을 전송하지 않습니다.</p>
-          <div id="dry-run-status" class="metric-grid"></div>
-          <div id="dry-run-intents" class="table-wrap"></div>
-          <div id="dry-run-positions" class="table-wrap"></div>
-          <div class="subpanel">
-            <div class="panel-heading compact-heading">
-              <div>
-                <p class="eyebrow">DRY_RUN Exit</p>
-                <h3>Exit 관찰</h3>
-              </div>
-              <div id="dry-run-exit-badges" class="badge-row"></div>
-            </div>
-            <p class="notice">Exit Engine은 DRY_RUN simulated close 판단만 표시하며 실행 버튼을 제공하지 않습니다.</p>
-            <div id="dry-run-exit-status" class="metric-grid"></div>
-            <div id="dry-run-exit-evaluations" class="table-wrap"></div>
-            <div id="dry-run-exit-signals" class="table-wrap"></div>
-          </div>
+          <div id="candidate-plan-status" class="metric-grid compact-metrics"></div>
+          <div id="candidate-plan-table" class="table-wrap"></div>
         </section>
 
         <section class="panel panel-wide" id="live-sim-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">LIVE_SIM</p>
-              <h2>모의투자 주문 경로 관찰</h2>
+              <p class="eyebrow">4. LIVE_SIM</p>
+              <h2>LIVE_SIM 주문/포지션</h2>
             </div>
             <div id="live-sim-badges" class="badge-row"></div>
           </div>
-          <p class="notice">LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아닙니다. LIVE_REAL은 비활성화되어 있습니다.</p>
+          <p class="notice">LIVE_SIM은 모의투자 전용이며 LIVE_REAL은 구현되어 있지 않습니다.</p>
           <div id="live-sim-status" class="metric-grid"></div>
-          <div id="live-sim-intents" class="table-wrap"></div>
-          <div id="live-sim-orders" class="table-wrap"></div>
-          <div id="live-sim-events" class="stack"></div>
-          <div id="live-sim-reviews" class="stack"></div>
+          <div id="live-sim-tables" class="operator-columns"></div>
         </section>
 
-        <section class="panel panel-wide" id="ai-advisory-section">
+        <section class="panel" id="ai-advisory-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">AI Advisory</p>
-              <h2>Candidate Scorer 요약</h2>
+              <p class="eyebrow">5. AI Advisory</p>
+              <h2>AI Advisory</h2>
             </div>
             <div id="ai-advisory-badges" class="badge-row"></div>
           </div>
-          <p class="notice">AI Candidate Scorer는 advisory-only annotation이며 주문 승인이나 리스크 승인 근거가 아닙니다.</p>
-          <div id="ai-advisory-status" class="metric-grid"></div>
+          <p class="notice">AI Candidate Scorer는 advisory-only annotation이며 주문 승인 근거가 아닙니다.</p>
+          <div id="ai-advisory-status" class="metric-grid compact-metrics"></div>
           <div id="ai-advisory-scores" class="table-wrap"></div>
-          <div id="ai-advisory-errors" class="stack"></div>
         </section>
 
-        <section class="panel" id="events-section">
+        <section class="panel" id="no-buy-section">
           <div class="panel-heading">
             <div>
-              <p class="eyebrow">Events</p>
-              <h2>최근 이벤트와 오류</h2>
+              <p class="eyebrow">6. No-Buy Sentinel</p>
+              <h2>왜 안 샀나</h2>
             </div>
+            <div id="no-buy-badges" class="badge-row"></div>
           </div>
+          <div id="no-buy-status" class="metric-grid compact-metrics"></div>
+          <div id="no-buy-stage-summary" class="reason-grid"></div>
+          <div id="no-buy-near-miss" class="table-wrap"></div>
+          <ul id="no-buy-checklist" class="operator-checklist"></ul>
+        </section>
+
+        <details class="panel panel-wide developer-panel" id="pipeline-section">
+          <summary>개발자 진단</summary>
+          <p class="notice">Raw/debug 데이터는 접기 영역에만 표시합니다.</p>
+          <div id="pipeline-funnel" class="funnel"></div>
           <div id="events-errors" class="stack"></div>
-        </section>
-
-        <section class="panel" id="ai-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">AI Sidecar</p>
-              <h2>Insight 표시 영역</h2>
+          <section id="ai-explanations-section" class="subpanel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">AI Review</p>
+                <h2>AI 설명 카드 / RCA 리포트 / Codex 프롬프트 초안</h2>
+              </div>
+              <div id="ai-explanation-counts" class="badge-row"></div>
             </div>
-          </div>
-          <p class="notice">AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.</p>
-          <div id="ai-status" class="metric-grid"></div>
-          <div id="ai-requests" class="stack"></div>
-          <div id="ai-insights" class="stack"></div>
-        </section>
-
-        <section class="panel panel-wide" id="ai-explanations-section">
-          <div class="panel-heading">
-            <div>
-              <p class="eyebrow">AI Review</p>
-              <h2>AI 설명 카드 / RCA 리포트 / Codex 프롬프트 초안</h2>
-            </div>
-            <div id="ai-explanation-counts" class="badge-row"></div>
-          </div>
-          <p class="notice">AI/RCA 결과는 운영자 검토용 표시 데이터이며 자동 판단 입력이 아닙니다.</p>
-          <div id="ai-explanation-status" class="metric-grid"></div>
-          <div id="ai-explanation-cards" class="ai-card-grid"></div>
-        </section>
+            <div id="ai-explanation-status" class="metric-grid compact-metrics"></div>
+            <div id="ai-explanation-cards" class="ai-card-grid"></div>
+          </section>
+          <section id="dry-run-section" class="subpanel">
+            <p class="eyebrow">DRY_RUN</p>
+            <h2>DRY_RUN Exit</h2>
+          </section>
+        </details>
       </main>
     </div>
     <script src="/static/dashboard.js" defer></script>

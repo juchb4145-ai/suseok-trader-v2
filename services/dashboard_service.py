@@ -90,6 +90,7 @@ from services.oms.dry_run_service import (
     list_dry_run_orders,
     list_dry_run_positions,
 )
+from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
 from services.risk_gate import (
     get_risk_status,
     list_latest_risk_observations,
@@ -124,6 +125,7 @@ DASHBOARD_SECTIONS = [
     "ai_advisory",
     "ai_sidecar",
     "ai_explanations",
+    "no_buy_sentinel",
     "recent_events",
     "errors",
     "pipeline_summary",
@@ -169,6 +171,13 @@ def build_dashboard_snapshot(
     dry_run_status = get_dry_run_status(connection, settings)
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
+    no_buy_sentinel = build_no_buy_sentinel_snapshot(
+        connection,
+        settings=settings,
+        manual=True,
+        limit=min(bounded_limit, settings.no_buy_sentinel_top_near_miss_limit),
+        write_snapshot=False,
+    ).to_dict()
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
@@ -277,6 +286,7 @@ def build_dashboard_snapshot(
         exit_status=exit_status,
         live_sim_status=live_sim_status,
         ai_advisory_status=ai_advisory_status,
+        no_buy_sentinel=no_buy_sentinel,
         settings=settings,
     )
 
@@ -472,6 +482,7 @@ def build_dashboard_snapshot(
             "notice": "AI Sidecar 결과는 Strategy/Risk/OMS 자동 입력이 아닙니다.",
         },
         "ai_explanations": ai_explanations,
+        "no_buy_sentinel": no_buy_sentinel,
         "recent_events": {
             "gateway_events": gateway_recent_events,
         },
@@ -685,6 +696,7 @@ def _pipeline_summary(
     exit_status: dict[str, Any],
     live_sim_status: dict[str, Any],
     ai_advisory_status: dict[str, Any],
+    no_buy_sentinel: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -778,6 +790,18 @@ def _pipeline_summary(
             "advisory_only": True,
             "no_order_side_effects": True,
         },
+        "no_buy_sentinel": {
+            "status": no_buy_sentinel.get("status"),
+            "no_buy_detected": no_buy_sentinel.get("no_buy_detected"),
+            "intent_count": no_buy_sentinel.get("intent_count", 0),
+            "order_count": no_buy_sentinel.get("order_count", 0),
+            "command_count": no_buy_sentinel.get("command_count", 0),
+            "plan_ready_count": no_buy_sentinel.get("plan_ready_count", 0),
+            "buy_eligible_count": no_buy_sentinel.get("buy_eligible_count", 0),
+            "ai_selected_count": no_buy_sentinel.get("ai_selected_count", 0),
+            "read_only": True,
+            "no_order_side_effects": True,
+        },
         "funnel": [
             {
                 "key": "gateway_events",
@@ -818,6 +842,11 @@ def _pipeline_summary(
                 "key": "live_sim_orders",
                 "label": "LIVE_SIM Orders",
                 "count": live_sim_status["order_count"],
+            },
+            {
+                "key": "no_buy",
+                "label": "No-Buy Sentinel",
+                "count": 1 if no_buy_sentinel.get("no_buy_detected") else 0,
             },
         ],
     }

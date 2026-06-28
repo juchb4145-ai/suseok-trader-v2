@@ -122,6 +122,10 @@ h2 {
   gap: 16px;
 }
 
+.operator-grid {
+  align-items: start;
+}
+
 .panel {
   min-width: 0;
   padding: 16px;
@@ -156,6 +160,11 @@ h2 {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 10px;
+}
+
+.compact-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  margin-bottom: 12px;
 }
 
 .metric {
@@ -335,6 +344,57 @@ td {
   background: rgba(245, 185, 66, 0.1);
   color: #ffe0a3;
   font-size: 13px;
+}
+
+.operator-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.reason-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.reason-card {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #283a44;
+  border-radius: 8px;
+  background: #101922;
+}
+
+.reason-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+
+.reason-card p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.operator-checklist,
+.mini-list {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--soft);
+  font-size: 13px;
+}
+
+.developer-panel {
+  background: rgba(14, 20, 26, 0.9);
+}
+
+.developer-panel > summary {
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 800;
 }
 
 .stack {

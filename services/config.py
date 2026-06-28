@@ -334,6 +334,15 @@ class Settings:
     live_sim_reconcile_block_new_buy_on_mismatch: bool = True
     live_sim_reconcile_allow_exit_on_mismatch: bool = True
     live_sim_reconcile_stale_order_sec: int = 300
+    no_buy_sentinel_enabled: bool = True
+    no_buy_sentinel_market_open_time: str = "09:00:00"
+    no_buy_sentinel_minutes_after_open: int = 20
+    no_buy_sentinel_top_near_miss_limit: int = 10
+    no_buy_sentinel_lookback_minutes: int = 60
+    no_buy_sentinel_include_ai: bool = True
+    no_buy_sentinel_include_config: bool = True
+    no_buy_sentinel_include_reconcile: bool = True
+    no_buy_sentinel_write_snapshots: bool = True
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -874,6 +883,21 @@ class Settings:
             raise ValueError("AI_EXTERNAL_LLM_DAILY_CALL_LIMIT must be >= 0")
         if self.ai_external_llm_per_run_call_limit < 0:
             raise ValueError("AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT must be >= 0")
+        object.__setattr__(
+            self,
+            "no_buy_sentinel_market_open_time",
+            _validate_time_string(
+                self.no_buy_sentinel_market_open_time,
+                "NO_BUY_SENTINEL_MARKET_OPEN_TIME",
+            ),
+        )
+        for field_name in (
+            "no_buy_sentinel_minutes_after_open",
+            "no_buy_sentinel_top_near_miss_limit",
+            "no_buy_sentinel_lookback_minutes",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -1967,6 +1991,38 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "LIVE_SIM_RECONCILE_STALE_ORDER_SEC",
             min_value=1,
         ),
+        no_buy_sentinel_enabled=_parse_bool(env.get("NO_BUY_SENTINEL_ENABLED", "true")),
+        no_buy_sentinel_market_open_time=env.get(
+            "NO_BUY_SENTINEL_MARKET_OPEN_TIME",
+            "09:00:00",
+        ),
+        no_buy_sentinel_minutes_after_open=_parse_int(
+            env.get("NO_BUY_SENTINEL_MINUTES_AFTER_OPEN", "20"),
+            "NO_BUY_SENTINEL_MINUTES_AFTER_OPEN",
+            min_value=1,
+        ),
+        no_buy_sentinel_top_near_miss_limit=_parse_int(
+            env.get("NO_BUY_SENTINEL_TOP_NEAR_MISS_LIMIT", "10"),
+            "NO_BUY_SENTINEL_TOP_NEAR_MISS_LIMIT",
+            min_value=1,
+        ),
+        no_buy_sentinel_lookback_minutes=_parse_int(
+            env.get("NO_BUY_SENTINEL_LOOKBACK_MINUTES", "60"),
+            "NO_BUY_SENTINEL_LOOKBACK_MINUTES",
+            min_value=1,
+        ),
+        no_buy_sentinel_include_ai=_parse_bool(
+            env.get("NO_BUY_SENTINEL_INCLUDE_AI", "true")
+        ),
+        no_buy_sentinel_include_config=_parse_bool(
+            env.get("NO_BUY_SENTINEL_INCLUDE_CONFIG", "true")
+        ),
+        no_buy_sentinel_include_reconcile=_parse_bool(
+            env.get("NO_BUY_SENTINEL_INCLUDE_RECONCILE", "true")
+        ),
+        no_buy_sentinel_write_snapshots=_parse_bool(
+            env.get("NO_BUY_SENTINEL_WRITE_SNAPSHOTS", "true")
+        ),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(
             env.get("DASHBOARD_REFRESH_SEC", "5"),
@@ -2048,6 +2104,20 @@ def _validate_ratio(value: float, field_name: str) -> None:
 
 def _validate_timezone(value: str) -> None:
     candidate_timezone(value)
+
+
+def _validate_time_string(value: str, field_name: str) -> str:
+    normalized = _require_non_empty_config(value)
+    parts = normalized.split(":")
+    if len(parts) != 3:
+        raise ValueError(f"{field_name} must be HH:MM:SS")
+    try:
+        hour, minute, second = (int(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be HH:MM:SS") from exc
+    if hour < 0 or hour > 23 or minute < 0 or minute > 59 or second < 0 or second > 59:
+        raise ValueError(f"{field_name} must be HH:MM:SS")
+    return f"{hour:02d}:{minute:02d}:{second:02d}"
 
 
 def candidate_timezone(value: str) -> tzinfo:
