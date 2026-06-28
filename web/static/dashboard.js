@@ -612,16 +612,23 @@ const renderAiAdvisory = (snapshot) => {
     badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${status.enabled}`),
     badge("OBSERVE", "advisory-only"),
     badge("OBSERVE", "no order side effects"),
+    badge(status.external_enabled ? "ENABLED" : "OBSERVE", `external ${status.external_enabled}`),
+    badge(status.fallback_used ? "CAUTION" : "OBSERVE", `fallback ${status.fallback_used}`),
     badge(latestRun.status || "UNKNOWN", `latest ${latestRun.status || "none"}`),
   ].join("");
   document.getElementById("ai-advisory-status").innerHTML = [
     metric("provider", status.provider || "mock"),
     metric("model", status.model),
+    metric("external provider", status.external_provider || "none"),
+    metric("external model", status.external_model),
+    metric("external call attempted", status.external_call_attempted),
+    metric("latency_ms", status.latest_latency_ms),
     metric("strict_json", status.strict_json),
     metric("store_raw_response", status.store_raw_response),
     metric("candidate_count", latestRun.candidate_count || 0),
     metric("selected_count", latestRun.selected_count || 0),
     metric("error_count", status.error_count || 0),
+    metric("invalid_schema_count", status.invalid_schema_error_count || 0),
     metric("order side effects", advisory.no_order_side_effects),
   ].join("");
   document.getElementById("ai-advisory-scores").innerHTML = scores.length

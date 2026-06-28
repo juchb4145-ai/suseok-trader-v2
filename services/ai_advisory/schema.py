@@ -26,9 +26,13 @@ FORBIDDEN_OUTPUT_TOKENS = (
     "GATEWAYCOMMAND",
     "LIVE_SIM_INTENT",
     "LIVESIMINTENT",
+    "LIVESIMORDERRECORD",
     "KILL_SWITCH",
     "ACCOUNT_ID",
+    "ACCOUNTID",
     "POSITION_SIZING",
+    "QUANTITYOVERRIDE",
+    "QUANTITY_OVERRIDE",
 )
 
 MAX_SUMMARY_CHARS = 1000
@@ -79,4 +83,3 @@ def get_candidate_scorer_output_schema() -> dict[str, Any]:
             "no_trade_reason": {"type": ["string", "null"]},
         },
     }
-

@@ -89,6 +89,10 @@ def errors(limit: int = Query(default=100, ge=1, le=500)) -> dict[str, Any]:
 def score_candidates(
     trade_date: str | None = None,
     limit: int | None = Query(default=None, ge=1, le=100),
+    provider: str | None = Query(default=None, pattern="^(mock|external|external_http|openai)$"),
+    dry_run: bool = Query(default=False),
+    store_raw_response: bool = Query(default=False),
+    allow_external: bool = Query(default=False),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -97,9 +101,12 @@ def score_candidates(
             connection,
             trade_date=trade_date,
             limit=limit,
+            dry_run=dry_run,
+            provider_name=provider,
+            store_raw_response=store_raw_response,
+            allow_external=allow_external,
             settings=settings,
         )
     finally:
         connection.close()
     return result.to_dict()
-

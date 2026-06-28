@@ -69,6 +69,49 @@ class CandidatePrompt:
 
 
 @dataclass(frozen=True, kw_only=True)
+class AiProviderRawResult:
+    provider: str
+    model: str
+    status: str
+    raw_text: str | None = None
+    parsed_json: Mapping[str, Any] | None = None
+    latency_ms: float | None = None
+    token_usage: Mapping[str, Any] | None = None
+    error_message: str | None = None
+    finish_reason: str | None = None
+    request_id: str | None = None
+    external_call_enabled: bool = False
+    external_call_attempted: bool = False
+    attempts: int = 0
+    response_truncated: bool = False
+
+    def raw_payload(self) -> object:
+        if self.parsed_json is not None:
+            return self.parsed_json
+        return self.raw_text or ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return normalize_value(
+            {
+                "provider": self.provider,
+                "model": self.model,
+                "status": self.status,
+                "raw_text": self.raw_text,
+                "parsed_json": dict(self.parsed_json or {}),
+                "latency_ms": self.latency_ms,
+                "token_usage": dict(self.token_usage or {}),
+                "error_message": self.error_message,
+                "finish_reason": self.finish_reason,
+                "request_id": self.request_id,
+                "external_call_enabled": self.external_call_enabled,
+                "external_call_attempted": self.external_call_attempted,
+                "attempts": self.attempts,
+                "response_truncated": self.response_truncated,
+            }
+        )
+
+
+@dataclass(frozen=True, kw_only=True)
 class ValidatedRiskReward:
     stop_loss_pct: float
     take_profit_pct: float
@@ -142,6 +185,16 @@ class AiCandidateScoringResult:
     prompt: Mapping[str, Any] = field(default_factory=dict)
     advisory: Mapping[str, Any] = field(default_factory=dict)
     dry_run: bool = False
+    latency_ms: float | None = None
+    request_id: str | None = None
+    token_usage: Mapping[str, Any] = field(default_factory=dict)
+    external_call_enabled: bool = False
+    external_call_attempted: bool = False
+    fallback_provider: str | None = None
+    error_category: str | None = None
+    raw_response_stored: bool = False
+    prompt_redacted: bool = True
+    prompt_truncated: bool = False
     advisory_only: bool = True
     no_order_side_effects: bool = True
     live_sim_only: bool = True
@@ -167,9 +220,18 @@ class AiCandidateScoringResult:
                 "prompt": dict(self.prompt),
                 "advisory": dict(self.advisory),
                 "dry_run": self.dry_run,
+                "latency_ms": self.latency_ms,
+                "request_id": self.request_id,
+                "token_usage": dict(self.token_usage),
+                "external_call_enabled": self.external_call_enabled,
+                "external_call_attempted": self.external_call_attempted,
+                "fallback_provider": self.fallback_provider,
+                "error_category": self.error_category,
+                "raw_response_stored": self.raw_response_stored,
+                "prompt_redacted": self.prompt_redacted,
+                "prompt_truncated": self.prompt_truncated,
                 "advisory_only": True,
                 "no_order_side_effects": True,
                 "live_sim_only": True,
             }
         )
-

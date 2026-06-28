@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from collections.abc import Mapping
 
@@ -9,6 +10,7 @@ from services.ai_advisory.context_builder import (
     build_candidate_scoring_context,
     build_candidate_scoring_prompt,
 )
+from services.ai_advisory.providers import ExternalHttpTransportResponse
 from services.ai_advisory.scorer import MockCandidateScorerProvider
 from services.ai_advisory.service import score_ai_candidates
 from services.ai_advisory.storage import list_latest_scores
@@ -28,6 +30,11 @@ def test_ai_candidate_settings_default_safe_off() -> None:
     assert settings.ai_candidate_scorer_fail_open is True
     assert settings.ai_candidate_scorer_attach_to_order_plan is False
     assert settings.ai_candidate_scorer_attach_to_live_sim_run is False
+    assert settings.ai_external_llm_enabled is False
+    assert settings.ai_external_llm_provider == "none"
+    assert settings.ai_external_llm_allow_network is False
+    assert settings.ai_external_llm_fail_open is True
+    assert settings.ai_external_llm_redact_prompt is True
 
 
 def test_sqlite_initialization_creates_ai_advisory_tables(tmp_path) -> None:
@@ -134,7 +141,7 @@ def test_validator_accepts_selected_empty_and_clamps_risk_reward() -> None:
     settings = Settings(ai_candidate_scorer_enabled=True)
     advisory = validate_advisory_output(
         {
-            "selected": [],
+            "selected": ["999999"],
             "analysis": {"005930": "관망"},
             "score": {"005930": 64},
             "confidence": {"005930": 55},
@@ -163,6 +170,7 @@ def test_validator_accepts_selected_empty_and_clamps_risk_reward() -> None:
     payload = advisory.to_dict()
 
     assert payload["selected"] == []
+    assert "UNKNOWN_SELECTED_CODE:999999" in payload["warnings"]
     assert payload["risk_reward"]["005930"]["stop_loss_pct"] == 1.0
     assert payload["risk_reward"]["005930"]["take_profit_pct"] == 8.0
     assert payload["risk_reward"]["005930"]["max_hold_sec"] == 300
@@ -294,6 +302,319 @@ def test_provider_timeout_is_fail_open(tmp_path) -> None:
     assert run["status"] == "TIMEOUT"
 
 
+def test_external_provider_network_disabled_falls_back_to_mock(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "network-disabled.sqlite3")
+    transport = _FakeExternalTransport([_valid_external_response(_valid_external_advisory())])
+
+    result = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=transport,
+        settings=_external_settings(ai_external_llm_allow_network=False),
+    )
+    run = connection.execute(
+        """
+        SELECT status, fallback_provider, error_category, external_call_attempted
+        FROM ai_candidate_scoring_runs
+        WHERE run_id = ?
+        """,
+        (result.run_id,),
+    ).fetchone()
+    error = connection.execute(
+        "SELECT error_type FROM ai_advisory_errors WHERE run_id = ?",
+        (result.run_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.fallback_provider == "mock"
+    assert result.error_category == "DISABLED_NETWORK"
+    assert run["status"] == "COMPLETED"
+    assert run["fallback_provider"] == "mock"
+    assert int(run["external_call_attempted"]) == 0
+    assert error["error_type"] == "DISABLED_NETWORK"
+    assert transport.calls == []
+
+
+def test_external_provider_missing_api_key_falls_back_to_mock(tmp_path, monkeypatch) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "missing-key.sqlite3")
+    monkeypatch.delenv("AI_TEST_KEY", raising=False)
+    transport = _FakeExternalTransport([_valid_external_response(_valid_external_advisory())])
+
+    result = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=transport,
+        settings=_external_settings(),
+    )
+    error = connection.execute(
+        "SELECT error_type FROM ai_advisory_errors WHERE run_id = ?",
+        (result.run_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.fallback_provider == "mock"
+    assert result.error_category == "CONFIG_ERROR"
+    assert error["error_type"] == "CONFIG_ERROR"
+    assert transport.calls == []
+
+
+def test_external_provider_skips_call_when_no_candidates(tmp_path, monkeypatch) -> None:
+    connection = initialize_database(tmp_path / "external-empty.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+    transport = _FakeExternalTransport([_valid_external_response(_valid_external_advisory())])
+
+    result = score_ai_candidates(
+        connection,
+        provider_name="external_http",
+        allow_external=True,
+        transport=transport,
+        settings=_external_settings(),
+    )
+    row = connection.execute(
+        """
+        SELECT external_call_enabled, external_call_attempted, error_category, fallback_provider
+        FROM ai_candidate_scoring_runs
+        WHERE run_id = ?
+        """,
+        (result.run_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.candidate_count == 0
+    assert result.external_call_enabled is True
+    assert result.external_call_attempted is False
+    assert result.error_category is None
+    assert result.fallback_provider is None
+    assert transport.calls == []
+    assert int(row["external_call_enabled"]) == 1
+    assert int(row["external_call_attempted"]) == 0
+    assert row["error_category"] is None
+    assert row["fallback_provider"] is None
+
+
+def test_external_provider_valid_json_is_saved_without_raw_response(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "external-valid.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+    transport = _FakeExternalTransport([_valid_external_response(_valid_external_advisory())])
+
+    result = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=transport,
+        settings=_external_settings(),
+    )
+    row = connection.execute(
+        """
+        SELECT
+            status,
+            provider,
+            model,
+            external_call_enabled,
+            external_call_attempted,
+            request_id,
+            token_usage_json,
+            raw_response_json,
+            raw_response_stored,
+            fallback_provider
+        FROM ai_candidate_scoring_runs
+        WHERE run_id = ?
+        """,
+        (result.run_id,),
+    ).fetchone()
+    latest = list_latest_scores(connection)
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.provider == "external_http"
+    assert result.external_call_attempted is True
+    assert result.fallback_provider is None
+    assert row["status"] == "COMPLETED"
+    assert row["provider"] == "external_http"
+    assert row["model"] == "test-model"
+    assert int(row["external_call_enabled"]) == 1
+    assert int(row["external_call_attempted"]) == 1
+    assert row["request_id"] == "req-test-1"
+    assert json.loads(row["token_usage_json"])["total_tokens"] == 17
+    assert row["raw_response_json"] is None
+    assert int(row["raw_response_stored"]) == 0
+    assert row["fallback_provider"] is None
+    assert latest["scores"][0]["score"] == 88
+    request_payload = transport.calls[0]["payload"]
+    prompt_text = json.dumps(request_payload, ensure_ascii=False)
+    assert "account_id" not in prompt_text
+    assert "SIM-12345678" not in prompt_text
+    assert request_payload["response_format"]["type"] == "json_schema"
+
+
+def test_external_provider_invalid_schema_and_forbidden_token_use_mock_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "external-invalid.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+    invalid = _valid_external_advisory() | {"extra": "not allowed"}
+    forbidden = _valid_external_advisory()
+    forbidden["analysis"] = {"005930": "BUY_NOW"}
+
+    for advisory, expected_error in (
+        (invalid, "INVALID_SCHEMA"),
+        (forbidden, "INVALID_SCHEMA"),
+    ):
+        result = score_ai_candidates(
+            connection,
+            trade_date="2026-06-27",
+            provider_name="external_http",
+            allow_external=True,
+            transport=_FakeExternalTransport([_valid_external_response(advisory)]),
+            settings=_external_settings(),
+        )
+        assert result.status == "COMPLETED"
+        assert result.fallback_provider == "mock"
+        assert result.error_category == expected_error
+
+    rows = connection.execute(
+        "SELECT error_type FROM ai_advisory_errors ORDER BY id"
+    ).fetchall()
+    connection.close()
+
+    assert [row["error_type"] for row in rows] == ["INVALID_SCHEMA", "INVALID_SCHEMA"]
+
+
+def test_external_provider_http_errors_timeout_and_retry_fail_open(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "external-errors.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+
+    server_error = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=_FakeExternalTransport(
+            [ExternalHttpTransportResponse(status_code=500, text="server error")]
+        ),
+        settings=_external_settings(ai_external_llm_max_retries=0),
+    )
+    client_error = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=_FakeExternalTransport(
+            [ExternalHttpTransportResponse(status_code=400, text="bad request")]
+        ),
+        settings=_external_settings(ai_external_llm_max_retries=0),
+    )
+    timeout = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=_FakeExternalTransport([TimeoutError("timeout")]),
+        settings=_external_settings(ai_external_llm_max_retries=0),
+    )
+    retry_transport = _FakeExternalTransport(
+        [
+            ExternalHttpTransportResponse(status_code=500, text="temporary"),
+            _valid_external_response(_valid_external_advisory(score=91)),
+        ]
+    )
+    retried = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=retry_transport,
+        settings=_external_settings(ai_external_llm_retry_backoff_seconds=0),
+    )
+    connection.close()
+
+    assert server_error.status == "COMPLETED"
+    assert server_error.error_category == "PROVIDER_ERROR"
+    assert server_error.fallback_provider == "mock"
+    assert client_error.error_category == "CONFIG_OR_REQUEST_ERROR"
+    assert client_error.error_message is not None
+    assert "HTTP 400" in client_error.error_message
+    assert timeout.error_category == "TIMEOUT"
+    assert retried.status == "COMPLETED"
+    assert retried.fallback_provider is None
+    assert retried.external_call_attempted is True
+    assert len(retry_transport.calls) == 2
+
+
+def test_external_provider_response_too_long_is_invalid_schema_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "external-long.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+    advisory = _valid_external_advisory()
+
+    result = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=_FakeExternalTransport([_valid_external_response(advisory)]),
+        settings=_external_settings(ai_external_llm_max_response_chars=10),
+    )
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.fallback_provider == "mock"
+    assert result.error_category == "INVALID_SCHEMA"
+
+
+def test_external_provider_retries_without_temperature_and_json_schema_when_rejected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "external-temperature.sqlite3")
+    monkeypatch.setenv("AI_TEST_KEY", "secret-test-key")
+    transport = _FakeExternalTransport(
+        [
+            _temperature_unsupported_response(),
+            _invalid_response_format_schema_response(),
+            _valid_external_response(_valid_external_advisory(score=93)),
+        ]
+    )
+
+    result = score_ai_candidates(
+        connection,
+        trade_date="2026-06-27",
+        provider_name="external_http",
+        allow_external=True,
+        transport=transport,
+        settings=_external_settings(ai_external_llm_retry_backoff_seconds=0),
+    )
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.fallback_provider is None
+    assert result.error_category is None
+    assert result.advisory["score"]["005930"] == 93
+    assert len(transport.calls) == 3
+    assert "temperature" in transport.calls[0]["payload"]
+    assert "temperature" not in transport.calls[1]["payload"]
+    assert transport.calls[1]["payload"]["response_format"]["type"] == "json_schema"
+    assert "temperature" not in transport.calls[2]["payload"]
+    assert transport.calls[2]["payload"]["response_format"] == {"type": "json_object"}
+
+
 def test_disabled_scoring_records_disabled_without_context(tmp_path) -> None:
     connection = initialize_database(tmp_path / "disabled.sqlite3")
 
@@ -362,6 +683,127 @@ class _TimeoutProvider:
 
     def score(self, context: Mapping[str, object], *, settings: Settings) -> object:
         raise TimeoutError("provider timeout")
+
+
+class _FakeExternalTransport:
+    def __init__(self, responses) -> None:
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def post_json(self, url, *, headers, payload, timeout_seconds):
+        self.calls.append(
+            {
+                "url": url,
+                "headers": dict(headers),
+                "payload": copy.deepcopy(payload),
+                "timeout_seconds": timeout_seconds,
+            }
+        )
+        if not self.responses:
+            raise AssertionError("fake external transport received unexpected call")
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+def _external_settings(**overrides) -> Settings:
+    values = {
+        "ai_candidate_scorer_enabled": True,
+        "ai_candidate_scorer_provider": "external_http",
+        "ai_candidate_scorer_min_score": 0,
+        "ai_candidate_scorer_min_confidence": 0,
+        "ai_external_llm_enabled": True,
+        "ai_external_llm_provider": "external_http",
+        "ai_external_llm_model": "test-model",
+        "ai_external_llm_api_key_env": "AI_TEST_KEY",
+        "ai_external_llm_base_url": "https://example.invalid/v1/chat/completions",
+        "ai_external_llm_allow_network": True,
+        "ai_external_llm_retry_backoff_seconds": 0,
+    }
+    values.update(overrides)
+    return _pilot_settings(**values)
+
+
+def _valid_external_response(advisory: Mapping[str, object]) -> ExternalHttpTransportResponse:
+    body = {
+        "id": "chatcmpl-test",
+        "choices": [
+            {
+                "message": {"content": json.dumps(advisory, ensure_ascii=False)},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 11, "completion_tokens": 6, "total_tokens": 17},
+    }
+    return ExternalHttpTransportResponse(
+        status_code=200,
+        text=json.dumps(body, ensure_ascii=False),
+        headers={"x-request-id": "req-test-1"},
+        json_body=body,
+    )
+
+
+def _temperature_unsupported_response() -> ExternalHttpTransportResponse:
+    body = {
+        "error": {
+            "message": (
+                "Unsupported value: 'temperature' does not support 0 with this model. "
+                "Only the default (1) value is supported."
+            ),
+            "type": "invalid_request_error",
+            "param": "temperature",
+            "code": "unsupported_value",
+        }
+    }
+    return ExternalHttpTransportResponse(
+        status_code=400,
+        text=json.dumps(body, ensure_ascii=False),
+        headers={"x-request-id": "req-temperature"},
+        json_body=body,
+    )
+
+
+def _invalid_response_format_schema_response() -> ExternalHttpTransportResponse:
+    body = {
+        "error": {
+            "message": (
+                "Invalid schema for response_format 'ai_candidate_scorer_advisory': "
+                "In context=(), 'required' is required to be supplied and to be an array "
+                "including every key in properties."
+            ),
+            "type": "invalid_request_error",
+            "param": "response_format",
+            "code": None,
+        }
+    }
+    return ExternalHttpTransportResponse(
+        status_code=400,
+        text=json.dumps(body, ensure_ascii=False),
+        headers={"x-request-id": "req-schema"},
+        json_body=body,
+    )
+
+
+def _valid_external_advisory(*, score: int = 88) -> dict[str, object]:
+    return {
+        "selected": ["005930"],
+        "analysis": {"005930": "외부 LLM advisory only 평가입니다."},
+        "score": {"005930": score},
+        "confidence": {"005930": 82},
+        "risk_reward": {
+            "005930": {
+                "stop_loss_pct": 2,
+                "take_profit_pct": 4,
+                "trailing_stop_pct": 2,
+                "max_hold_sec": 1000,
+            }
+        },
+        "candidate_flags": {"005930": ["LEADER"]},
+        "avoid": {},
+        "summary": "외부 LLM JSON schema 응답입니다.",
+        "no_trade_reason": None,
+    }
 
 
 def _enabled_pilot_settings(**overrides) -> Settings:

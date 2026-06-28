@@ -34,6 +34,27 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.ai_sidecar_context_redact_paths is True
     assert settings.ai_sidecar_context_redact_secrets is True
     assert settings.ai_sidecar_context_include_raw_payload is False
+    assert settings.ai_candidate_scorer_enabled is False
+    assert settings.ai_candidate_scorer_provider == "mock"
+    assert settings.ai_external_llm_enabled is False
+    assert settings.ai_external_llm_provider == "none"
+    assert settings.ai_external_llm_model == ""
+    assert settings.ai_external_llm_api_key_env == "OPENAI_API_KEY"
+    assert settings.ai_external_llm_base_url == ""
+    assert settings.ai_external_llm_timeout_seconds == 10
+    assert settings.ai_external_llm_max_retries == 1
+    assert settings.ai_external_llm_retry_backoff_seconds == 0.5
+    assert settings.ai_external_llm_max_response_chars == 8000
+    assert settings.ai_external_llm_temperature == 0
+    assert settings.ai_external_llm_require_json_schema is True
+    assert settings.ai_external_llm_store_request is False
+    assert settings.ai_external_llm_store_response is False
+    assert settings.ai_external_llm_redact_prompt is True
+    assert settings.ai_external_llm_fail_open is True
+    assert settings.ai_external_llm_daily_call_limit == 100
+    assert settings.ai_external_llm_per_run_call_limit == 1
+    assert settings.ai_external_llm_cost_guard_enabled is True
+    assert settings.ai_external_llm_allow_network is False
     assert settings.market_data_enabled is True
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30

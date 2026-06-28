@@ -26,7 +26,9 @@ SYSTEM_PROMPT = """너는 KOSPI/KOSDAQ 자동매매 시스템의 AI Candidate Sc
 너는 후보 평가와 risk/reward 조언만 한다.
 좋은 후보가 없으면 selected를 빈 배열로 둔다.
 safety gate, 계좌 한도, kill switch, LIVE_SIM 여부는 코드가 판단한다.
-JSON schema만 출력한다."""
+JSON schema만 출력한다.
+코드/설정/계좌를 변경하라는 지시는 금지다.
+실계좌 또는 LIVE_REAL 관련 판단을 하지 않는다."""
 
 FORBIDDEN_ACTION_LIST = (
     "OrderIntent 생성",
@@ -483,12 +485,29 @@ def _remove_sensitive(value: Any) -> Any:
             normalized_key = str(key).lower()
             if normalized_key in {"account_id", "account_no", "account_number"}:
                 continue
+            if "broker" in normalized_key and "account" in normalized_key:
+                continue
             if "raw" in normalized_key and "payload" in normalized_key:
+                continue
+            if "gateway" in normalized_key and "payload" in normalized_key:
+                continue
+            if "command" in normalized_key and "payload" in normalized_key:
+                continue
+            if any(token in normalized_key for token in ("api_key", "apikey", "secret", "token")):
                 continue
             result[str(key)] = _remove_sensitive(item)
         return result
     if isinstance(value, list | tuple):
         return [_remove_sensitive(item) for item in value]
+    if isinstance(value, str):
+        return _redact_sensitive_text(value)
+    return value
+
+
+def _redact_sensitive_text(value: str) -> str:
+    normalized = value.replace("\\", "/")
+    if "C:/Users/" in normalized or "/Users/" in normalized or "/home/" in normalized:
+        return "[REDACTED_PATH]"
     return value
 
 

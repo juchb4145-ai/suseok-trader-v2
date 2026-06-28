@@ -759,6 +759,9 @@ def _pipeline_summary(
         "ai_advisory": {
             "enabled": ai_advisory_status["enabled"],
             "provider": ai_advisory_status["provider"],
+            "model": ai_advisory_status["model"],
+            "external_enabled": ai_advisory_status["external_enabled"],
+            "external_call_attempted": ai_advisory_status["external_call_attempted"],
             "latest_status": (
                 None
                 if ai_advisory_status.get("latest_run") is None
@@ -770,6 +773,8 @@ def _pipeline_summary(
                 else ai_advisory_status["latest_run"].get("selected_count", 0)
             ),
             "error_count": ai_advisory_status["error_count"],
+            "invalid_schema_error_count": ai_advisory_status["invalid_schema_error_count"],
+            "fallback_used": ai_advisory_status["fallback_used"],
             "advisory_only": True,
             "no_order_side_effects": True,
         },

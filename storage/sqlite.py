@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 APP_NAME = "suseok-trader-v2"
 
 
@@ -605,6 +605,16 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
             prompt_hash TEXT,
             raw_response_hash TEXT,
             raw_response_json TEXT,
+            external_call_enabled INTEGER NOT NULL DEFAULT 0,
+            external_call_attempted INTEGER NOT NULL DEFAULT 0,
+            latency_ms REAL,
+            request_id TEXT,
+            token_usage_json TEXT,
+            raw_response_stored INTEGER NOT NULL DEFAULT 0,
+            prompt_redacted INTEGER NOT NULL DEFAULT 1,
+            prompt_truncated INTEGER NOT NULL DEFAULT 0,
+            error_category TEXT,
+            fallback_provider TEXT,
             summary TEXT,
             no_trade_reason TEXT,
             error_message TEXT,
@@ -670,6 +680,16 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
         "ai_candidate_scoring_runs",
         {
             "raw_response_json": "TEXT",
+            "external_call_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "external_call_attempted": "INTEGER NOT NULL DEFAULT 0",
+            "latency_ms": "REAL",
+            "request_id": "TEXT",
+            "token_usage_json": "TEXT",
+            "raw_response_stored": "INTEGER NOT NULL DEFAULT 0",
+            "prompt_redacted": "INTEGER NOT NULL DEFAULT 1",
+            "prompt_truncated": "INTEGER NOT NULL DEFAULT 0",
+            "error_category": "TEXT",
+            "fallback_provider": "TEXT",
             "error_message": "TEXT",
             "validation_error": "TEXT",
             "completed_at": "TEXT",

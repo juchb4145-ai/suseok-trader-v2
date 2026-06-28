@@ -25,6 +25,16 @@ def save_scoring_run(
     error_message: str | None = None,
     validation_error: str | None = None,
     raw_response_json: Mapping[str, Any] | None = None,
+    external_call_enabled: bool = False,
+    external_call_attempted: bool = False,
+    latency_ms: float | None = None,
+    request_id: str | None = None,
+    token_usage_json: Mapping[str, Any] | None = None,
+    raw_response_stored: bool = False,
+    prompt_redacted: bool = True,
+    prompt_truncated: bool = False,
+    error_category: str | None = None,
+    fallback_provider: str | None = None,
 ) -> None:
     connection.execute(
         """
@@ -39,6 +49,16 @@ def save_scoring_run(
             prompt_hash,
             raw_response_hash,
             raw_response_json,
+            external_call_enabled,
+            external_call_attempted,
+            latency_ms,
+            request_id,
+            token_usage_json,
+            raw_response_stored,
+            prompt_redacted,
+            prompt_truncated,
+            error_category,
+            fallback_provider,
             summary,
             no_trade_reason,
             error_message,
@@ -48,7 +68,11 @@ def save_scoring_run(
             advisory_only,
             no_order_side_effects
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), 1, 1, 1)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, datetime('now'), 1, 1, 1
+        )
         ON CONFLICT(run_id) DO UPDATE SET
             status = excluded.status,
             candidate_count = excluded.candidate_count,
@@ -56,6 +80,16 @@ def save_scoring_run(
             prompt_hash = excluded.prompt_hash,
             raw_response_hash = excluded.raw_response_hash,
             raw_response_json = excluded.raw_response_json,
+            external_call_enabled = excluded.external_call_enabled,
+            external_call_attempted = excluded.external_call_attempted,
+            latency_ms = excluded.latency_ms,
+            request_id = excluded.request_id,
+            token_usage_json = excluded.token_usage_json,
+            raw_response_stored = excluded.raw_response_stored,
+            prompt_redacted = excluded.prompt_redacted,
+            prompt_truncated = excluded.prompt_truncated,
+            error_category = excluded.error_category,
+            fallback_provider = excluded.fallback_provider,
             summary = excluded.summary,
             no_trade_reason = excluded.no_trade_reason,
             error_message = excluded.error_message,
@@ -76,6 +110,16 @@ def save_scoring_run(
             prompt_hash,
             raw_response_hash,
             _json_dumps(raw_response_json) if raw_response_json is not None else None,
+            1 if external_call_enabled else 0,
+            1 if external_call_attempted else 0,
+            latency_ms,
+            request_id,
+            _json_dumps(token_usage_json) if token_usage_json is not None else None,
+            1 if raw_response_stored else 0,
+            1 if prompt_redacted else 0,
+            1 if prompt_truncated else 0,
+            error_category,
+            fallback_provider,
             summary,
             no_trade_reason,
             error_message,
@@ -322,18 +366,36 @@ def build_status(connection: sqlite3.Connection, *, settings: Any) -> dict[str, 
     error_count = connection.execute(
         "SELECT COUNT(*) AS count FROM ai_advisory_errors"
     ).fetchone()
+    invalid_schema_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM ai_advisory_errors WHERE error_type = 'INVALID_SCHEMA'"
+    ).fetchone()
     return {
         "enabled": settings.ai_candidate_scorer_enabled,
         "provider": settings.ai_candidate_scorer_provider,
         "model": settings.ai_candidate_scorer_model,
+        "external_enabled": settings.ai_external_llm_enabled,
+        "external_provider": settings.ai_external_llm_provider,
+        "external_model": settings.ai_external_llm_model,
+        "external_allow_network": settings.ai_external_llm_allow_network,
+        "external_fail_open": settings.ai_external_llm_fail_open,
+        "external_call_attempted": bool(
+            latest and latest.get("external_call_attempted")
+        ),
+        "latest_latency_ms": None if latest is None else latest.get("latency_ms"),
+        "latest_token_usage": {} if latest is None else latest.get("token_usage", {}),
+        "fallback_used": bool(latest and latest.get("fallback_provider")),
         "strict_json": settings.ai_candidate_scorer_require_strict_json,
         "store_raw_response": settings.ai_candidate_scorer_store_raw_response,
+        "external_store_response": settings.ai_external_llm_store_response,
         "fail_open": settings.ai_candidate_scorer_fail_open,
         "max_candidates": settings.ai_candidate_scorer_max_candidates,
         "min_score": settings.ai_candidate_scorer_min_score,
         "min_confidence": settings.ai_candidate_scorer_min_confidence,
         "latest_run": latest,
         "error_count": int(error_count["count"] if error_count else 0),
+        "invalid_schema_error_count": int(
+            invalid_schema_count["count"] if invalid_schema_count else 0
+        ),
         "advisory_only": True,
         "no_order_side_effects": True,
         "allow_order_actions": False,
@@ -345,7 +407,13 @@ def _run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item["live_sim_only"] = bool(item["live_sim_only"])
     item["advisory_only"] = bool(item["advisory_only"])
     item["no_order_side_effects"] = bool(item["no_order_side_effects"])
+    item["external_call_enabled"] = bool(item.get("external_call_enabled"))
+    item["external_call_attempted"] = bool(item.get("external_call_attempted"))
+    item["raw_response_stored"] = bool(item.get("raw_response_stored"))
+    item["prompt_redacted"] = bool(item.get("prompt_redacted"))
+    item["prompt_truncated"] = bool(item.get("prompt_truncated"))
     item["raw_response_json"] = _json_object(item.get("raw_response_json"))
+    item["token_usage"] = _json_object(item.pop("token_usage_json", None))
     return item
 
 
@@ -406,4 +474,3 @@ def _json_dumps(value: object) -> str:
 
 def _bounded_limit(limit: int) -> int:
     return min(max(int(limit), 1), 500)
-

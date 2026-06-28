@@ -117,6 +117,24 @@ PR-6은 `OrderPlanDraft`, ThemeLeadership, EntryTiming, Strategy, Risk, LIVE_SIM
 
 ---
 
+## PR-6.5 External LLM Adapter for AI Candidate Scorer
+
+PR-6.5는 PR-6의 advisory-only AI Candidate Scorer에 OpenAI-compatible `external_http` provider adapter를 붙이는 작업이다. 기본값은 계속 `mock` 또는 `disabled`이며, 외부 호출은 명시 설정과 API/CLI `allow_external` 옵션이 모두 켜진 경우에만 수행한다.
+
+핵심 원칙:
+
+- 외부 LLM은 후보 평가 JSON만 반환한다.
+- 외부 LLM은 `OrderIntent`, `LiveSimIntent`, `GatewayCommand`를 만들지 않는다.
+- 외부 LLM은 `send_order`, `cancel_order`, `modify_order`를 호출하지 않는다.
+- 외부 LLM 실패, timeout, invalid schema는 LIVE_SIM/DRY_RUN pipeline 장애가 아니다.
+- account_id, broker account, raw Gateway payload는 prompt에서 제거한다.
+- raw response 저장은 기본 false다.
+- AI risk_reward는 자동 적용하지 않는다.
+
+자세한 구현/운영 문서는 [External LLM Adapter](external_llm_adapter_ko.md)를 따른다.
+
+---
+
 ## 0. 이번 로드맵의 전제
 
 이번 로드맵의 출발점은 `suseok-trader-v2` 장중 실행 결과 분석이 아니다. 아직 v2로 장을 충분히 돌린 상태가 아니기 때문이다.
@@ -810,6 +828,7 @@ PR-3.5 Naver Theme Importer / Theme Membership Auto Refresh
 PR-4 LIVE_SIM Auto Pipeline Pilot
 PR-5 Execution/Cancel/Exit/Reconcile
 PR-6 AI Candidate Scorer Advisory
+PR-6.5 External LLM Adapter for AI Candidate Scorer
 PR-7 No-Buy Sentinel & Dashboard Simplification
 ```
 

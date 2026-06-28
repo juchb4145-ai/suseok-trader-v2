@@ -34,7 +34,7 @@ Gateway
 | Strategy | setup observation 저장 | entry plan, position size | `MATCHED_OBSERVATION` 여부와 reason |
 | Risk | risk observation 저장 | 주문 승인하지 않음 | `OBSERVE_PASS`, caution/block reason |
 | Dashboard | pipeline read-only 표시 | 실행 버튼 제공 | safety banner, funnel, errors |
-| AI Candidate Scorer | 상위 후보 score/confidence/risk_reward suggestion 저장 | 주문 생성, plan 승격, risk block 생성 | `/api/ai-advisory/status`, latest scores |
+| AI Candidate Scorer | 상위 후보 score/confidence/risk_reward suggestion 저장, 선택적 external LLM advisory | 주문 생성, plan 승격, risk block 생성 | `/api/ai-advisory/status`, latest scores/errors |
 | AI Sidecar | context/insight/RCA/review 보조 | 자동 판단 입력 | failed request, validated insight |
 | DRY_RUN OMS | 내부 모의 회계 | broker 주문 | dry-run status, paper position |
 | DRY_RUN Exit | simulated close accounting | 실제 매도 주문 | exit signal/evaluation |
@@ -70,7 +70,8 @@ Gateway
 | LIVE_SIM position/exit가 이상함 | `/api/live-sim/positions` -> lifecycle events -> reconcile latest |
 | 미체결이 남아 있음 | cancel flags -> broker order no -> `/api/live-sim/cancel-intents` |
 | AI Candidate Score가 없음 | `AI_CANDIDATE_SCORER_ENABLED` -> `/api/ai-advisory/status` -> latest errors |
-| AI card가 실패 | API key, model config, schema/policy rejection 확인 |
+| External LLM이 호출되지 않음 | `AI_CANDIDATE_SCORER_PROVIDER` -> `AI_EXTERNAL_LLM_ENABLED` -> `AI_EXTERNAL_LLM_ALLOW_NETWORK` -> API/CLI `allow_external` |
+| AI card가 실패 | API key, model config, timeout, schema/policy rejection 확인 |
 
 ## 운영자가 절대 혼동하면 안 되는 것
 
@@ -85,6 +86,8 @@ Gateway
 - LIVE_SIM scheduler는 아직 없고 run_once API/CLI만 있다.
 - AI Candidate Scorer score/confidence는 주문 승인, 리스크 승인, 수익 확률이 아니다.
 - AI Candidate Scorer risk_reward는 clamp된 제안이며 자동 적용값이 아니다.
+- External LLM adapter는 advisory-only이며 기본값에서는 호출되지 않는다.
+- External LLM timeout/schema/provider error는 trading pipeline 장애가 아니다.
 - AI/RCA/Codex output은 자동 주문 입력이 아니다.
 - Dashboard는 읽기 전용이며 실행 버튼이 없다.
 - LIVE_REAL은 현재 구현되어 있지 않다.

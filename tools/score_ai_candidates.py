@@ -19,6 +19,22 @@ def main() -> None:
     )
     parser.add_argument("--trade-date", help="Trade date filter, YYYY-MM-DD.")
     parser.add_argument("--limit", type=int, default=None, help="Candidate limit.")
+    parser.add_argument(
+        "--provider",
+        choices=("mock", "external", "external_http", "openai"),
+        default=None,
+        help="Provider override. External providers still require --allow-external and env flags.",
+    )
+    parser.add_argument(
+        "--allow-external",
+        action="store_true",
+        help="Allow an external provider call when all AI_EXTERNAL_LLM flags are enabled.",
+    )
+    parser.add_argument(
+        "--store-raw-response",
+        action="store_true",
+        help="Store redacted raw response only when explicit storage flags are also enabled.",
+    )
     args = parser.parse_args()
 
     settings = load_settings()
@@ -29,6 +45,9 @@ def main() -> None:
             trade_date=args.trade_date,
             limit=args.limit,
             dry_run=args.dry_run,
+            provider_name=args.provider,
+            allow_external=args.allow_external,
+            store_raw_response=args.store_raw_response,
             settings=settings,
         )
     finally:

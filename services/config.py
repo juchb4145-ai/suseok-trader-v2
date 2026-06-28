@@ -82,6 +82,25 @@ class Settings:
     ai_candidate_risk_reward_trailing_max: float = 4.0
     ai_candidate_risk_reward_max_hold_min_sec: int = 300
     ai_candidate_risk_reward_max_hold_max_sec: int = 7200
+    ai_external_llm_enabled: bool = False
+    ai_external_llm_provider: str = "none"
+    ai_external_llm_model: str = ""
+    ai_external_llm_api_key_env: str = "OPENAI_API_KEY"
+    ai_external_llm_base_url: str = ""
+    ai_external_llm_timeout_seconds: int = 10
+    ai_external_llm_max_retries: int = 1
+    ai_external_llm_retry_backoff_seconds: float = 0.5
+    ai_external_llm_max_response_chars: int = 8000
+    ai_external_llm_temperature: float = 0.0
+    ai_external_llm_require_json_schema: bool = True
+    ai_external_llm_store_request: bool = False
+    ai_external_llm_store_response: bool = False
+    ai_external_llm_redact_prompt: bool = True
+    ai_external_llm_fail_open: bool = True
+    ai_external_llm_daily_call_limit: int = 100
+    ai_external_llm_per_run_call_limit: int = 1
+    ai_external_llm_cost_guard_enabled: bool = True
+    ai_external_llm_allow_network: bool = False
     market_data_enabled: bool = True
     market_data_tick_stale_sec: int = 10
     market_data_degraded_tick_stale_sec: int = 30
@@ -827,6 +846,34 @@ class Settings:
                 "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC must be >= "
                 "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC"
             )
+        object.__setattr__(
+            self,
+            "ai_external_llm_provider",
+            _normalize_non_empty(self.ai_external_llm_provider).lower(),
+        )
+        object.__setattr__(
+            self,
+            "ai_external_llm_api_key_env",
+            _require_non_empty_config(self.ai_external_llm_api_key_env),
+        )
+        if self.ai_external_llm_timeout_seconds < 1:
+            raise ValueError("AI_EXTERNAL_LLM_TIMEOUT_SECONDS must be >= 1")
+        if self.ai_external_llm_max_retries < 0 or self.ai_external_llm_max_retries > 3:
+            raise ValueError("AI_EXTERNAL_LLM_MAX_RETRIES must be between 0 and 3")
+        if self.ai_external_llm_retry_backoff_seconds < 0:
+            raise ValueError("AI_EXTERNAL_LLM_RETRY_BACKOFF_SECONDS must be >= 0")
+        if self.ai_external_llm_max_response_chars < 1:
+            raise ValueError("AI_EXTERNAL_LLM_MAX_RESPONSE_CHARS must be >= 1")
+        if self.ai_external_llm_temperature < 0 or self.ai_external_llm_temperature > 2:
+            raise ValueError("AI_EXTERNAL_LLM_TEMPERATURE must be between 0 and 2")
+        if not self.ai_external_llm_fail_open:
+            raise ValueError("AI_EXTERNAL_LLM_FAIL_OPEN must remain true")
+        if not self.ai_external_llm_redact_prompt:
+            raise ValueError("AI_EXTERNAL_LLM_REDACT_PROMPT must remain true")
+        if self.ai_external_llm_daily_call_limit < 0:
+            raise ValueError("AI_EXTERNAL_LLM_DAILY_CALL_LIMIT must be >= 0")
+        if self.ai_external_llm_per_run_call_limit < 0:
+            raise ValueError("AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT must be >= 0")
 
     @property
     def live_sim_allowed(self) -> bool:
@@ -1037,6 +1084,68 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC", "7200"),
             "AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC",
             min_value=1,
+        ),
+        ai_external_llm_enabled=_parse_bool(env.get("AI_EXTERNAL_LLM_ENABLED", "false")),
+        ai_external_llm_provider=env.get("AI_EXTERNAL_LLM_PROVIDER", "none"),
+        ai_external_llm_model=env.get("AI_EXTERNAL_LLM_MODEL", ""),
+        ai_external_llm_api_key_env=env.get(
+            "AI_EXTERNAL_LLM_API_KEY_ENV",
+            "OPENAI_API_KEY",
+        ),
+        ai_external_llm_base_url=env.get("AI_EXTERNAL_LLM_BASE_URL", ""),
+        ai_external_llm_timeout_seconds=_parse_int(
+            env.get("AI_EXTERNAL_LLM_TIMEOUT_SECONDS", "10"),
+            "AI_EXTERNAL_LLM_TIMEOUT_SECONDS",
+            min_value=1,
+        ),
+        ai_external_llm_max_retries=_parse_int(
+            env.get("AI_EXTERNAL_LLM_MAX_RETRIES", "1"),
+            "AI_EXTERNAL_LLM_MAX_RETRIES",
+            min_value=0,
+        ),
+        ai_external_llm_retry_backoff_seconds=_parse_float(
+            env.get("AI_EXTERNAL_LLM_RETRY_BACKOFF_SECONDS", "0.5"),
+            "AI_EXTERNAL_LLM_RETRY_BACKOFF_SECONDS",
+            min_value=0.0,
+        ),
+        ai_external_llm_max_response_chars=_parse_int(
+            env.get("AI_EXTERNAL_LLM_MAX_RESPONSE_CHARS", "8000"),
+            "AI_EXTERNAL_LLM_MAX_RESPONSE_CHARS",
+            min_value=1,
+        ),
+        ai_external_llm_temperature=_parse_float(
+            env.get("AI_EXTERNAL_LLM_TEMPERATURE", "0"),
+            "AI_EXTERNAL_LLM_TEMPERATURE",
+            min_value=0.0,
+        ),
+        ai_external_llm_require_json_schema=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_REQUIRE_JSON_SCHEMA", "true")
+        ),
+        ai_external_llm_store_request=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_STORE_REQUEST", "false")
+        ),
+        ai_external_llm_store_response=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_STORE_RESPONSE", "false")
+        ),
+        ai_external_llm_redact_prompt=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_REDACT_PROMPT", "true")
+        ),
+        ai_external_llm_fail_open=_parse_bool(env.get("AI_EXTERNAL_LLM_FAIL_OPEN", "true")),
+        ai_external_llm_daily_call_limit=_parse_int(
+            env.get("AI_EXTERNAL_LLM_DAILY_CALL_LIMIT", "100"),
+            "AI_EXTERNAL_LLM_DAILY_CALL_LIMIT",
+            min_value=0,
+        ),
+        ai_external_llm_per_run_call_limit=_parse_int(
+            env.get("AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT", "1"),
+            "AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT",
+            min_value=0,
+        ),
+        ai_external_llm_cost_guard_enabled=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_COST_GUARD_ENABLED", "true")
+        ),
+        ai_external_llm_allow_network=_parse_bool(
+            env.get("AI_EXTERNAL_LLM_ALLOW_NETWORK", "false")
         ),
         market_data_enabled=_parse_bool(env.get("MARKET_DATA_ENABLED", "true")),
         market_data_tick_stale_sec=_parse_int(

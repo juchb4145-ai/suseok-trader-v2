@@ -49,9 +49,57 @@ AI_CANDIDATE_RISK_REWARD_TRAILING_MIN=1.0
 AI_CANDIDATE_RISK_REWARD_TRAILING_MAX=4.0
 AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MIN_SEC=300
 AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC=7200
+AI_EXTERNAL_LLM_ENABLED=false
+AI_EXTERNAL_LLM_PROVIDER=none
+AI_EXTERNAL_LLM_MODEL=
+AI_EXTERNAL_LLM_API_KEY_ENV=OPENAI_API_KEY
+AI_EXTERNAL_LLM_BASE_URL=
+AI_EXTERNAL_LLM_TIMEOUT_SECONDS=10
+AI_EXTERNAL_LLM_MAX_RETRIES=1
+AI_EXTERNAL_LLM_RETRY_BACKOFF_SECONDS=0.5
+AI_EXTERNAL_LLM_MAX_RESPONSE_CHARS=8000
+AI_EXTERNAL_LLM_TEMPERATURE=0
+AI_EXTERNAL_LLM_REQUIRE_JSON_SCHEMA=true
+AI_EXTERNAL_LLM_STORE_REQUEST=false
+AI_EXTERNAL_LLM_STORE_RESPONSE=false
+AI_EXTERNAL_LLM_REDACT_PROMPT=true
+AI_EXTERNAL_LLM_FAIL_OPEN=true
+AI_EXTERNAL_LLM_DAILY_CALL_LIMIT=100
+AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT=1
+AI_EXTERNAL_LLM_COST_GUARD_ENABLED=true
+AI_EXTERNAL_LLM_ALLOW_NETWORK=false
 ```
 
-`provider=mock`은 외부 네트워크를 쓰지 않는 deterministic local scorer다. 외부 LLM provider는 interface skeleton만 있으며 기본 테스트/운영에서는 호출되지 않는다.
+`provider=mock`은 외부 네트워크를 쓰지 않는 deterministic local scorer다. PR-6.5부터 `external_http` adapter가 추가되었지만 기본값은 `mock`/`disabled`이며 외부 호출은 발생하지 않는다.
+
+외부 호출 조건은 모두 충족되어야 한다.
+
+- `AI_CANDIDATE_SCORER_ENABLED=true`
+- `AI_CANDIDATE_SCORER_PROVIDER=external_http` 또는 `openai`
+- `AI_EXTERNAL_LLM_ENABLED=true`
+- `AI_EXTERNAL_LLM_ALLOW_NETWORK=true`
+- `AI_EXTERNAL_LLM_PROVIDER=external_http` 또는 `openai`
+- `AI_EXTERNAL_LLM_MODEL` 설정
+- `AI_EXTERNAL_LLM_API_KEY_ENV`가 가리키는 API key 존재
+- API/CLI에서 `allow_external=true` 또는 `--allow-external` 명시
+
+하나라도 빠지면 외부 호출은 `DISABLED`, `DISABLED_NETWORK`, `CONFIG_ERROR`로 처리되고 fail-open/mock fallback이 가능하다.
+
+## Provider 구조
+
+```text
+services/ai_advisory/
+  providers/
+    base.py
+    mock.py
+    external_http.py
+  scorer.py
+  service.py
+  validator.py
+  schema.py
+```
+
+provider interface는 `score_candidates(context) -> AiProviderRawResult` 형태다. 결과에는 provider, model, status, raw_text 또는 parsed_json, latency_ms, token_usage, request_id, finish_reason, error_message가 포함된다. 기존 PR-6 호환을 위해 `score(context, settings=...)`도 mock provider에 남아 있다.
 
 ## Context Builder
 
@@ -72,6 +120,14 @@ AI_CANDIDATE_RISK_REWARD_MAX_HOLD_MAX_SEC=7200
 - recent_trade_performance, lifecycle_warnings
 
 계좌 식별자와 raw Gateway payload는 prompt/context에서 제거한다. prompt는 `AI_CANDIDATE_SCORER_MAX_PROMPT_CHARS`로 제한한다.
+
+추가 redaction:
+
+- account_id/account_no/broker account 제거
+- raw Gateway payload, command payload 제거
+- API key/token/secret 성격 key 제거
+- local user path 문자열 제거
+- prompt가 축약되면 scoring run에 `prompt_truncated=true` 저장
 
 ## Prompt Builder
 
@@ -132,6 +188,32 @@ AI risk/reward는 자동 적용값이 아니라 clamped suggestion이다.
 
 raw response 저장은 기본 false다. 저장하더라도 민감 정보를 제거한다. advisory 저장은 주문 관련 테이블을 변경하지 않는다.
 
+PR-6.5 추가 저장 항목:
+
+- `external_call_enabled`, `external_call_attempted`
+- `latency_ms`, `request_id`, `token_usage_json`
+- `prompt_hash`, `raw_response_hash`
+- `raw_response_stored`, `prompt_redacted`, `prompt_truncated`
+- `error_category`, `fallback_provider`
+
+`AI_CANDIDATE_SCORER_STORE_RAW_RESPONSE=false` 또는 `AI_EXTERNAL_LLM_STORE_RESPONSE=false`이면 raw response 본문은 저장하지 않고 hash만 남긴다.
+
+## External LLM Fail-Open
+
+외부 provider 실패는 trading pipeline 장애가 아니다.
+
+| 상황 | 저장/상태 | 동작 |
+| --- | --- | --- |
+| external disabled | `DISABLED` | mock fallback 가능 |
+| network disabled | `DISABLED_NETWORK` | 외부 호출 미시도, mock fallback 가능 |
+| API key missing | `CONFIG_ERROR` | mock fallback 가능 |
+| timeout | `TIMEOUT` | retry 후 mock fallback 가능 |
+| 5xx | `PROVIDER_ERROR` | retry 후 mock fallback 가능 |
+| 4xx | `CONFIG_OR_REQUEST_ERROR` | mock fallback 가능 |
+| invalid JSON/schema | `INVALID_SCHEMA` | mock fallback 가능 |
+
+fail-open은 “AI 없이 rule-based pipeline이 계속 돈다”는 뜻이다. fail-open은 `PLAN_READY` 승격, 주문 허용, risk 승인, sizing 변경을 뜻하지 않는다.
+
 ## API
 
 Read-only:
@@ -145,6 +227,8 @@ Read-only:
 Local-token protected:
 
 - `POST /api/ai-advisory/score-candidates?trade_date=YYYY-MM-DD&limit=10`
+- `POST /api/ai-advisory/score-candidates?provider=mock|external_http|openai&dry_run=true`
+- `POST /api/ai-advisory/score-candidates?provider=external_http&allow_external=true`
 
 POST는 scoring run만 생성한다. 모든 응답은 `advisory_only=true`, `no_order_side_effects=true`를 포함한다.
 
@@ -152,24 +236,32 @@ POST는 scoring run만 생성한다. 모든 응답은 `advisory_only=true`, `no_
 
 ```powershell
 python -m tools.score_ai_candidates --dry-run
+python -m tools.score_ai_candidates --provider mock
+python -m tools.score_ai_candidates --provider external --dry-run
+python -m tools.score_ai_candidates --provider external --allow-external
 python -m tools.score_ai_candidates --trade-date 2026-06-27 --limit 10
 python -m tools.inspect_ai_candidate_scores --latest
 python -m tools.inspect_ai_candidate_scores --run-id AI-RUN-...
+python -m tools.inspect_ai_advisory_errors --limit 50
 ```
 
-`--dry-run`은 DB 저장 없이 context/prompt/validation preview를 출력한다. scoring disabled면 `DISABLED`를 명확히 출력한다.
+`--dry-run`은 DB 저장 없이 context/prompt/validation preview를 출력한다. CLI 기본은 외부 호출 없음이며 `--allow-external`을 명시해야 외부 호출 가능성이 생긴다. 그래도 설정 flag와 API key가 모두 필요하다.
 
 ## Dashboard
 
 Dashboard에는 read-only 요약만 추가한다.
 
 - AI scoring enabled/disabled
+- provider/model
+- external_enabled/external_call_attempted
 - latest run status
+- latency_ms/token_usage
 - selected count
 - top AI scored candidates
 - score/confidence
 - AI summary
 - invalid schema/error count
+- fallback used
 - advisory-only/no-side-effect badge
 
 AI 추천 매수/매도/취소 버튼과 설정 변경 UI는 없다.
@@ -179,6 +271,8 @@ AI 추천 매수/매도/취소 버튼과 설정 변경 UI는 없다.
 ```powershell
 $env:AI_CANDIDATE_SCORER_ENABLED = "false"
 $env:AI_CANDIDATE_SCORER_PROVIDER = "mock"
+$env:AI_EXTERNAL_LLM_ENABLED = "false"
+$env:AI_EXTERNAL_LLM_ALLOW_NETWORK = "false"
 $env:AI_CANDIDATE_SCORER_ATTACH_TO_ORDER_PLAN = "false"
 $env:AI_CANDIDATE_SCORER_ATTACH_TO_LIVE_SIM_RUN = "false"
 ```
