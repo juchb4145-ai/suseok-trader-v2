@@ -70,6 +70,14 @@ class Settings:
     theme_co_leader_score_ratio: float = 0.8
     theme_snapshot_max_members: int = 200
     theme_import_allow_replace: bool = False
+    naver_theme_import_enabled: bool = False
+    naver_theme_import_base_url: str = "https://finance.naver.com/sise/theme.naver"
+    naver_theme_import_timeout_seconds: float = 10.0
+    naver_theme_import_max_themes: int = 50
+    naver_theme_import_request_sleep_seconds: float = 0.3
+    naver_theme_import_replace: bool = False
+    naver_theme_import_min_member_count: int = 2
+    naver_theme_import_abort_on_empty: bool = True
     theme_leadership_enabled: bool = True
     theme_leadership_top_theme_count: int = 5
     theme_leadership_max_stocks_per_theme: int = 3
@@ -253,6 +261,19 @@ class Settings:
             raise ValueError("THEME_MIN_TOTAL_TRADE_VALUE must be >= 0")
         if self.theme_leader_min_trade_value_delta_1m < 0:
             raise ValueError("THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M must be >= 0")
+        object.__setattr__(
+            self,
+            "naver_theme_import_base_url",
+            _require_non_empty_config(self.naver_theme_import_base_url),
+        )
+        if self.naver_theme_import_timeout_seconds <= 0:
+            raise ValueError("NAVER_THEME_IMPORT_TIMEOUT_SECONDS must be > 0")
+        if self.naver_theme_import_max_themes < 1:
+            raise ValueError("NAVER_THEME_IMPORT_MAX_THEMES must be >= 1")
+        if self.naver_theme_import_request_sleep_seconds < 0:
+            raise ValueError("NAVER_THEME_IMPORT_REQUEST_SLEEP_SECONDS must be >= 0")
+        if self.naver_theme_import_min_member_count < 1:
+            raise ValueError("NAVER_THEME_IMPORT_MIN_MEMBER_COUNT must be >= 1")
         for field_name in (
             "theme_leadership_top_theme_count",
             "theme_leadership_max_stocks_per_theme",
@@ -759,6 +780,39 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=1,
         ),
         theme_import_allow_replace=_parse_bool(env.get("THEME_IMPORT_ALLOW_REPLACE", "false")),
+        naver_theme_import_enabled=_parse_bool(
+            env.get("NAVER_THEME_IMPORT_ENABLED", "false")
+        ),
+        naver_theme_import_base_url=env.get(
+            "NAVER_THEME_IMPORT_BASE_URL",
+            "https://finance.naver.com/sise/theme.naver",
+        ),
+        naver_theme_import_timeout_seconds=_parse_float(
+            env.get("NAVER_THEME_IMPORT_TIMEOUT_SECONDS", "10"),
+            "NAVER_THEME_IMPORT_TIMEOUT_SECONDS",
+            min_value=0.0,
+        ),
+        naver_theme_import_max_themes=_parse_int(
+            env.get("NAVER_THEME_IMPORT_MAX_THEMES", "50"),
+            "NAVER_THEME_IMPORT_MAX_THEMES",
+            min_value=1,
+        ),
+        naver_theme_import_request_sleep_seconds=_parse_float(
+            env.get("NAVER_THEME_IMPORT_REQUEST_SLEEP_SECONDS", "0.3"),
+            "NAVER_THEME_IMPORT_REQUEST_SLEEP_SECONDS",
+            min_value=0.0,
+        ),
+        naver_theme_import_replace=_parse_bool(
+            env.get("NAVER_THEME_IMPORT_REPLACE", "false")
+        ),
+        naver_theme_import_min_member_count=_parse_int(
+            env.get("NAVER_THEME_IMPORT_MIN_MEMBER_COUNT", "2"),
+            "NAVER_THEME_IMPORT_MIN_MEMBER_COUNT",
+            min_value=1,
+        ),
+        naver_theme_import_abort_on_empty=_parse_bool(
+            env.get("NAVER_THEME_IMPORT_ABORT_ON_EMPTY", "true")
+        ),
         theme_leadership_enabled=_parse_bool(env.get("THEME_LEADERSHIP_ENABLED", "true")),
         theme_leadership_top_theme_count=_parse_int(
             env.get("THEME_LEADERSHIP_TOP_THEME_COUNT", "5"),

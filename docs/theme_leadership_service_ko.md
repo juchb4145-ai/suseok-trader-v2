@@ -41,6 +41,16 @@ Candidate source metadata에 저장된 `theme_state`, `stock_role`, `priority_sc
 - `DATA_WAIT`를 hard block이나 폐기 상태로 처리.
 - `LIVE_REAL` 관련 구현.
 
+## Naver Reference Membership
+
+PR-3.5의 Naver Theme Importer는 ThemeLeadershipService의 membership universe를 보강하는 reference source다.
+
+- importer가 저장한 `NAVER_REFERENCE/naver_theme` active member는 기존 `ThemeUniverseBuilder`가 읽을 수 있다.
+- 네이버 등락률, 순위, 화면상 주도주는 metadata/source attribution으로만 남는다.
+- 장중 `LEADING`, `SPREADING`, leader/co-leader/follower 판단은 Kiwoom realtime tick과 MarketData projection으로 계산한다.
+- 네이버 theme hit나 condition hit만으로 `READY`, `PLAN_READY`, 매수 가능 상태를 만들지 않는다.
+- importer 실패 시 기존 membership은 삭제되지 않으며, PR-4 LIVE_SIM 주문 파이프라인과 직접 연결하지 않는다.
+
 ## State와 Role
 
 RT-TLS 전용 `ThemeState`:

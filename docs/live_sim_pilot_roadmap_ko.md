@@ -5,6 +5,42 @@
 이 문서는 Codex 작업을 한 번에 크게 던지지 않기 위한 기준 문서다. 각 PR은 아래 순서와 범위를 지킨다.
 
 ---
+## v2의 목표 구조
+
+[08:00~08:50 / 장전 준비]
+  네이버 테마 membership 갱신
+  전일/최근 테마 지속성 계산
+  관심 universe 압축
+  Kiwoom 실시간 등록 후보 준비
+
+[09:00~장중 / 실시간 루프]
+  Kiwoom tick / 체결강도 / 거래대금 / 호가 / 1m·3m·5m / VWAP 수집
+      ↓
+  ThemeLeadershipRanker
+      ↓
+  StockRoleClassifier
+      ↓
+  WatchsetSelector
+      ↓
+  EntryTimingEngine
+      ↓
+  TradeSetupClassifier
+      ↓
+  RiskGate
+      ↓
+  AI Candidate Scorer, 선택적
+      ↓
+  OrderPlanBuilder
+      ↓
+  LIVE_SIM OrderIntent
+      ↓
+  Gateway send_order command
+      ↓
+  체결/미체결/취소/청산/리컨실
+  
+---
+
+---
 
 ## PR-3 EntryTiming / OrderPlanDraft 업데이트
 
@@ -13,6 +49,24 @@ PR-3는 주문 PR이 아니다. ThemeLeadership watchset과 candidate/strategy/r
 `OrderPlanDraft`는 OrderIntent가 아니며 `PLAN_READY`도 주문 승인이나 매수 신호가 아니다. `MATCHED_OBSERVATION`과 `OBSERVE_PASS`는 계속 observe-only 근거로만 사용한다. VWAP warmup, momentum warmup, observation 미생성은 `DATA_WAIT` 또는 `WAIT_RETRY` near-miss로 남긴다.
 
 운영 확인은 `GET /api/entry-timing/plans/latest` 또는 `python -m tools.evaluate_entry_timing`으로 수행한다. LIVE_SIM 자동 주문 연결과 safety gate 최종 판정은 PR-4 범위다.
+
+---
+
+## PR-3.5 Naver Theme Importer 업데이트
+
+PR-3.5는 네이버 테마를 theme membership reference source로 가져오는 작업이다. 네이버 theme universe와 구성 종목은 `NAVER_REFERENCE/naver_theme` membership으로 저장되지만, 네이버 등락률/순위는 metadata로만 남긴다.
+
+장중 주도 테마 판단, 대장주 판단, 매수 후보 판단은 계속 Kiwoom realtime tick, MarketData projection, ThemeLeadershipService가 담당한다. 네이버 theme hit만으로 `LEADING`, `READY`, `PLAN_READY`, OrderIntent, GatewayCommand를 만들지 않는다.
+
+운영 확인:
+
+```powershell
+python -m tools.import_naver_themes --dry-run --limit-themes 20
+python -m tools.import_naver_themes --limit-themes 20
+python -m tools.inspect_theme_leadership
+```
+
+네이버 importer 실패 또는 empty fetch는 기존 membership을 삭제하지 않는다. `--replace`는 명시 실행 시에만 사용하고, 같은 `NAVER_REFERENCE/naver_theme` scope에서만 inactive 처리한다. PR-4 LIVE_SIM 주문 파이프라인과 직접 연결하지 않는다.
 
 ---
 
@@ -694,6 +748,7 @@ PR-0 Roadmap 문서 추가/정정
 PR-1 suseok_ai Functional Inventory & Migration Map
 PR-2 RT-TLS Minimal Core Port
 PR-3 EntryTimingEngine & OrderPlanBuilder
+PR-3.5 Naver Theme Importer / Theme Membership Auto Refresh
 PR-4 LIVE_SIM Auto Pipeline Pilot
 PR-5 Execution/Cancel/Exit/Reconcile
 PR-6 AI Candidate Scorer Advisory
@@ -705,7 +760,7 @@ PR-7 No-Buy Sentinel & Dashboard Simplification
 - PR-1은 v2 장중 gap report가 아니라 `suseok_ai` 분석/이식 기준 수립이다.
 - PR-1 없이 PR-2로 가지 않는다.
 - PR-2 없이 PR-3로 가지 않는다.
-- PR-3 없이 PR-4로 가지 않는다.
+- PR-3와 PR-3.5 없이 PR-4로 가지 않는다.
 - PR-4 전까지는 자동 주문 command queue를 만들지 않는다.
 - PR-5 전에는 소액 파일럿만 허용한다.
 - PR-6 AI는 PR-4 이후 붙인다. AI를 먼저 붙이면 무매수/오매수 원인이 흐려진다.

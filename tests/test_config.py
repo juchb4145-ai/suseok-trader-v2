@@ -43,6 +43,14 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.theme_leading_rising_ratio == 0.5
     assert settings.theme_spreading_rising_ratio == 0.35
     assert settings.theme_import_allow_replace is False
+    assert settings.naver_theme_import_enabled is False
+    assert settings.naver_theme_import_base_url == "https://finance.naver.com/sise/theme.naver"
+    assert settings.naver_theme_import_timeout_seconds == 10
+    assert settings.naver_theme_import_max_themes == 50
+    assert settings.naver_theme_import_request_sleep_seconds == 0.3
+    assert settings.naver_theme_import_replace is False
+    assert settings.naver_theme_import_min_member_count == 2
+    assert settings.naver_theme_import_abort_on_empty is True
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -197,6 +205,22 @@ def test_theme_ratio_settings_are_validated() -> None:
         assert "ratio between 0 and 1" in str(exc)
     else:
         raise AssertionError("expected invalid theme ratio configuration")
+
+
+def test_naver_theme_import_settings_are_validated() -> None:
+    invalid_cases = {
+        "NAVER_THEME_IMPORT_TIMEOUT_SECONDS": "0",
+        "NAVER_THEME_IMPORT_MAX_THEMES": "0",
+        "NAVER_THEME_IMPORT_REQUEST_SLEEP_SECONDS": "-0.1",
+        "NAVER_THEME_IMPORT_MIN_MEMBER_COUNT": "0",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid naver theme import setting: {key}")
 
 
 def test_candidate_settings_are_validated() -> None:

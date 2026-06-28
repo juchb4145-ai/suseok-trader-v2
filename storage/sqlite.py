@@ -989,6 +989,24 @@ def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS theme_import_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT,
+            source_type TEXT NOT NULL,
+            source_name TEXT,
+            stage TEXT NOT NULL,
+            theme_id TEXT,
+            theme_name TEXT,
+            code TEXT,
+            source_url TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS theme_projection_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             theme_id TEXT,
@@ -1027,6 +1045,18 @@ def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_theme_latest_snapshots_state
         ON theme_latest_snapshots (state)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_import_errors_created_at
+        ON theme_import_errors (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_import_errors_batch
+        ON theme_import_errors (batch_id)
         """
     )
     connection.execute(

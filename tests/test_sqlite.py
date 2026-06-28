@@ -173,6 +173,7 @@ def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None
                 'theme_snapshot_members',
                 'theme_latest_snapshots',
                 'theme_import_batches',
+                'theme_import_errors',
                 'theme_projection_errors'
             )
         """
@@ -199,6 +200,7 @@ def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None
         "theme_snapshot_members",
         "theme_latest_snapshots",
         "theme_import_batches",
+        "theme_import_errors",
         "theme_projection_errors",
     }
     assert {row["name"] for row in existing_rows} == {

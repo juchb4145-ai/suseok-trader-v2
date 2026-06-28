@@ -77,6 +77,30 @@ PR-2부터 `services/theme_leadership`가 이 계층 위에 추가된다. Theme 
 - `replace=false`는 기존 member를 유지한다.
 - `replace=true`는 같은 theme/source scope의 member를 inactive 처리한 뒤 upsert한다.
 - import batch는 `theme_import_batches`에 기록된다.
+- importer/fetch/parser 오류는 `theme_import_errors`에 기록된다.
+
+## Naver Theme Importer
+
+네이버 importer는 theme membership reference source다.
+
+- `source_type=NAVER_REFERENCE`
+- `source_name=naver_theme`
+- 기본 `replace=false`
+- `replace=true`도 같은 `NAVER_REFERENCE/naver_theme` scope만 inactive 처리한다.
+- importer 실패나 empty fetch는 기존 membership을 삭제하지 않는다.
+
+네이버 theme list/detail parser는 `/sise/sise_group_detail.naver?type=theme&no=...`와 `/item/main.naver?code=...` 링크를 읽어 theme/member evidence를 만든다. 네이버 등락률/순위는 metadata로만 저장하며 장중 매수 판단, ThemeLeadership score, `LEADING`/`PLAN_READY` 생성에 사용하지 않는다.
+
+CLI:
+
+```powershell
+python -m tools.import_naver_themes --dry-run
+python -m tools.import_naver_themes --limit-themes 20
+python -m tools.import_naver_themes --replace
+python -m tools.import_naver_themes --output data/themes/naver_themes_latest.json
+```
+
+자세한 운영 정책은 [Naver Theme Importer](naver_theme_importer_ko.md)를 참고한다.
 
 ## Snapshot Table
 
@@ -85,6 +109,7 @@ PR-2부터 `services/theme_leadership`가 이 계층 위에 추가된다. Theme 
 | `theme_snapshots` | theme-level summary |
 | `theme_snapshot_members` | snapshot별 member observation |
 | `theme_latest_snapshots` | theme별 latest snapshot pointer |
+| `theme_import_errors` | importer/fetch/parser error audit |
 | `theme_projection_errors` | member/theme projection error |
 
 Snapshot은 파생 projection이다. Event Store와 Market Data Service가 source of truth다.

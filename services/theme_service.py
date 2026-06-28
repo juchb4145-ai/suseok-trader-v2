@@ -289,6 +289,93 @@ def import_theme_memberships(
     )
 
 
+def record_theme_import_batch(
+    connection: sqlite3.Connection,
+    *,
+    source_type: ThemeSourceType | str,
+    source_name: str | None,
+    theme_count: int,
+    member_count: int,
+    status: str,
+    error_message: str | None = None,
+    payload_hash: str | None = None,
+    batch_id: str | None = None,
+) -> ThemeImportResult:
+    resolved_source_type = _parse_source_type(source_type)
+    resolved_source_name = _optional_source_name(source_name)
+    resolved_batch_id = batch_id or new_message_id("theme_import")
+    resolved_status = require_non_empty_str(status, "status").upper()
+    normalized_theme_count = max(int(theme_count), 0)
+    normalized_member_count = max(int(member_count), 0)
+    _record_import_batch(
+        connection,
+        batch_id=resolved_batch_id,
+        source_type=resolved_source_type,
+        source_name=resolved_source_name,
+        theme_count=normalized_theme_count,
+        member_count=normalized_member_count,
+        status=resolved_status,
+        error_message=error_message,
+        payload_hash=payload_hash,
+    )
+    return ThemeImportResult(
+        batch_id=resolved_batch_id,
+        source_type=resolved_source_type,
+        source_name=resolved_source_name,
+        theme_count=normalized_theme_count,
+        member_count=normalized_member_count,
+        status=resolved_status,
+        error_message=error_message,
+        payload_hash=payload_hash,
+    )
+
+
+def record_theme_import_error(
+    connection: sqlite3.Connection,
+    *,
+    source_type: ThemeSourceType | str,
+    source_name: str | None,
+    stage: str,
+    error_message: str,
+    batch_id: str | None = None,
+    theme_id: str | None = None,
+    theme_name: str | None = None,
+    code: str | None = None,
+    source_url: str | None = None,
+    payload: Mapping[str, Any] | None = None,
+) -> None:
+    normalized_code = validate_stock_code(code) if code is not None else None
+    connection.execute(
+        """
+        INSERT INTO theme_import_errors (
+            batch_id,
+            source_type,
+            source_name,
+            stage,
+            theme_id,
+            theme_name,
+            code,
+            source_url,
+            error_message,
+            payload_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            _optional_non_empty(batch_id, "batch_id"),
+            _parse_source_type(source_type).value,
+            _optional_source_name(source_name),
+            require_non_empty_str(stage, "stage"),
+            _optional_non_empty(theme_id, "theme_id"),
+            _optional_non_empty(theme_name, "theme_name"),
+            normalized_code,
+            _optional_non_empty(source_url, "source_url"),
+            require_non_empty_str(error_message, "error_message"),
+            canonical_json(payload or {}),
+        ),
+    )
+
+
 def list_themes(
     connection: sqlite3.Connection,
     *,
@@ -554,6 +641,7 @@ def get_theme_status(
         "active_theme_count": _count_rows(connection, "themes", where="active = 1"),
         "member_count": _count_rows(connection, "theme_members"),
         "latest_snapshot_count": _count_rows(connection, "theme_latest_snapshots"),
+        "import_error_count": _count_rows(connection, "theme_import_errors"),
         "projection_error_count": _count_rows(connection, "theme_projection_errors"),
         "min_fresh_coverage_ratio": resolved_settings.theme_min_fresh_coverage_ratio,
         "leading_rising_ratio": resolved_settings.theme_leading_rising_ratio,
@@ -678,6 +766,23 @@ def list_theme_projection_errors(
         (_bounded_limit(limit),),
     ).fetchall()
     return [_projection_error_row_to_dict(row) for row in rows]
+
+
+def list_theme_import_errors(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM theme_import_errors
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        """,
+        (_bounded_limit(limit),),
+    ).fetchall()
+    return [_import_error_row_to_dict(row) for row in rows]
 
 
 def _calculate_member_snapshot(
@@ -1290,6 +1395,12 @@ def _optional_source_name(value: object) -> str | None:
     return require_non_empty_str(value, "source_name")
 
 
+def _optional_non_empty(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return require_non_empty_str(value, field_name)
+
+
 def _timestamp_wire(value: datetime | str | None) -> str:
     return datetime_to_wire(parse_timestamp(value or utc_now(), "calculated_at"))
 
@@ -1343,6 +1454,12 @@ def _snapshot_member_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _projection_error_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = row_to_dict(row)
+    data["payload"] = json.loads(data.pop("payload_json"))
+    return data
+
+
+def _import_error_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = row_to_dict(row)
     data["payload"] = json.loads(data.pop("payload_json"))
     return data
