@@ -58,8 +58,8 @@
 
 | 원문 | 한글 설명 | 주의사항 |
 | --- | --- | --- |
-| `send_order` | 주문 전송 command type | PR12 LIVE_SIM service safety-gated path 외 금지 |
-| `cancel_order` | 주문 취소 command type | 현재 disabled |
+| `send_order` | 주문 전송 command type | LIVE_SIM service safety-gated path 외 금지 |
+| `cancel_order` | 주문 취소 command type | LIVE_SIM 미체결 BUY TTL 취소 전용 외 금지 |
 | `modify_order` | 주문 정정 command type | 현재 disabled |
 | `POST /api/orders/enqueue` | generic order enqueue API | 존재하지 않음 |
 | `live_sim_only=true` | LIVE_SIM 전용 metadata | 실계좌 허용이 아님 |

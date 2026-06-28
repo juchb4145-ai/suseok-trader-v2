@@ -36,7 +36,7 @@ Gateway
 | AI Sidecar | context/insight/RCA/review 보조 | 자동 판단 입력 | failed request, validated insight |
 | DRY_RUN OMS | 내부 모의 회계 | broker 주문 | dry-run status, paper position |
 | DRY_RUN Exit | simulated close accounting | 실제 매도 주문 | exit signal/evaluation |
-| LIVE_SIM | 키움 모의투자 전용 safety-gated path | 실계좌 주문하지 않음, cancel/modify 없음 | `/api/live-sim/status`, rejections |
+| LIVE_SIM | 키움 모의투자 전용 safety-gated path, PR-5 execution/cancel/exit/reconcile | 실계좌 주문, modify, 신규 SELL/short, scheduler 반복 | `/api/live-sim/status`, positions, lifecycle, reconcile |
 
 ## 주요 상태값
 
@@ -64,6 +64,8 @@ Gateway
 | Risk가 없음 | latest Strategy observation 존재 여부 확인 |
 | DRY_RUN intent가 안 생김 | DRY_RUN flags -> safety gate -> eligibility checks |
 | LIVE_SIM order가 안 생김 | kill switch -> account mode -> Gateway heartbeat -> rejections |
+| LIVE_SIM position/exit가 이상함 | `/api/live-sim/positions` -> lifecycle events -> reconcile latest |
+| 미체결이 남아 있음 | cancel flags -> broker order no -> `/api/live-sim/cancel-intents` |
 | AI card가 실패 | API key, model config, schema/policy rejection 확인 |
 
 ## 운영자가 절대 혼동하면 안 되는 것
@@ -74,6 +76,9 @@ Gateway
 - `OBSERVE_PASS`는 주문 승인이 아니다.
 - DRY_RUN은 내부 모의 회계이며 브로커 주문이 아니다.
 - LIVE_SIM은 모의투자 전용이며 실계좌 주문이 아니다.
+- LIVE_SIM cancel은 미체결 BUY 취소 전용이다.
+- LIVE_SIM SELL은 open position close-only exit 전용이다.
+- LIVE_SIM scheduler는 아직 없고 run_once API/CLI만 있다.
 - AI/RCA/Codex output은 자동 주문 입력이 아니다.
 - Dashboard는 읽기 전용이며 실행 버튼이 없다.
 - LIVE_REAL은 현재 구현되어 있지 않다.

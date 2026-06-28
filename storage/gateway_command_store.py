@@ -285,8 +285,10 @@ def validate_command_type_allowed(
     normalized = _normalize_command_type(command_type)
     if normalized == "send_order":
         return _validate_live_sim_send_order_allowed(command)
-    if normalized in {"cancel_order", "modify_order"}:
-        return f"{command_type} is disabled for PR12 LIVE_SIM"
+    if normalized == "cancel_order":
+        return _validate_live_sim_cancel_order_allowed(command)
+    if normalized == "modify_order":
+        return "modify_order is disabled for LIVE_SIM"
     if normalized in FORBIDDEN_ORDER_COMMAND_TYPES or "order" in normalized:
         return f"Order command_type is disabled for PR 2B: {command_type}"
     if normalized not in ALLOWED_COMMAND_TYPES:
@@ -326,8 +328,71 @@ def _validate_live_sim_send_order_allowed(command: GatewayCommand | None) -> str
         return "send_order broker_env must be simulation-like"
     if not _is_simulation_like(payload.get("server_mode")):
         return "send_order server_mode must be simulation-like"
-    if str(payload.get("side", "")).upper() != "BUY":
-        return "send_order LIVE_SIM PR12 allows BUY only"
+    side = str(payload.get("side", "")).upper()
+    if side == "BUY":
+        return None
+    if side == "SELL":
+        close_only = payload.get("close_only") is True or metadata.get("close_only") is True
+        if not close_only:
+            return "send_order LIVE_SIM SELL requires close_only=true"
+        if payload.get("live_real_allowed") is not False:
+            return "send_order SELL requires live_real_allowed=false"
+        if payload.get("live_sim_only") is not True:
+            return "send_order SELL requires live_sim_only=true"
+        if str(payload.get("broker_order_path", "")).upper() != "LIVE_SIM_ONLY":
+            return "send_order SELL requires broker_order_path=LIVE_SIM_ONLY"
+        if not metadata.get("position_id"):
+            return "send_order SELL close-only requires metadata.position_id"
+        if not metadata.get("exit_intent_id") and not payload.get("exit_intent_id"):
+            return "send_order SELL close-only requires exit_intent_id"
+        if str(payload.get("order_type", "")).upper() == "MARKET":
+            return "send_order SELL market order disabled by default"
+        if str(payload.get("allow_short", "false")).lower() in {"1", "true", "yes", "y"}:
+            return "send_order SELL allow_short must be false"
+        return None
+    return "send_order LIVE_SIM allows BUY or close-only SELL only"
+
+
+def _validate_live_sim_cancel_order_allowed(command: GatewayCommand | None) -> str | None:
+    if command is None:
+        return "cancel_order requires LIVE_SIM command envelope validation"
+    if command.source.strip().lower() != "live_sim":
+        return "cancel_order disabled except live_sim source"
+    if not command.idempotency_key:
+        return "cancel_order LIVE_SIM requires idempotency_key"
+
+    payload = command.payload
+    metadata = _mapping_value(payload, "metadata")
+    if str(payload.get("mode", payload.get("live_mode", ""))).upper() != "LIVE_SIM":
+        return "cancel_order payload mode must be LIVE_SIM"
+    if str(payload.get("live_mode", payload.get("mode", ""))).upper() != "LIVE_SIM":
+        return "cancel_order payload live_mode must be LIVE_SIM"
+    if payload.get("idempotency_key") != command.idempotency_key:
+        return "cancel_order payload idempotency_key must match command idempotency_key"
+    if metadata.get("idempotency_key") != command.idempotency_key:
+        return "cancel_order metadata idempotency_key must match command idempotency_key"
+    if payload.get("live_sim_only") is not True or metadata.get("live_sim_only") is not True:
+        return "cancel_order requires live_sim_only=true"
+    if payload.get("live_real_allowed") is not False:
+        return "cancel_order requires live_real_allowed=false"
+    if metadata.get("live_real_allowed") is not False:
+        return "cancel_order metadata.live_real_allowed must be false"
+    if str(payload.get("broker_order_path", "")).upper() != "LIVE_SIM_ONLY":
+        return "cancel_order requires broker_order_path=LIVE_SIM_ONLY"
+    if not _is_simulation_like(payload.get("account_mode")):
+        return "cancel_order account_mode must be simulation-like"
+    if not _is_simulation_like(payload.get("broker_env")):
+        return "cancel_order broker_env must be simulation-like"
+    if not _is_simulation_like(payload.get("server_mode")):
+        return "cancel_order server_mode must be simulation-like"
+    if str(payload.get("side", "")).upper() not in {"BUY_CANCEL", "CANCEL_BUY"}:
+        return "cancel_order requires side=BUY_CANCEL"
+    if not payload.get("original_order_no"):
+        return "cancel_order requires original_order_no"
+    if not metadata.get("cancel_intent_id"):
+        return "cancel_order requires metadata.cancel_intent_id"
+    if not metadata.get("original_live_sim_order_id"):
+        return "cancel_order requires metadata.original_live_sim_order_id"
     return None
 
 

@@ -258,6 +258,40 @@ class Settings:
     live_sim_order_plan_max_notional: float = 100_000
     live_sim_order_plan_allow_market_order: bool = False
     live_sim_order_plan_allowed_side: str = "BUY"
+    live_sim_fee_rate: float = 0.0
+    live_sim_tax_rate: float = 0.0
+    live_sim_position_allow_scale_in: bool = False
+    live_sim_position_max_per_code: int = 1
+    live_sim_cancel_enabled: bool = False
+    live_sim_cancel_unfilled_enabled: bool = False
+    live_sim_cancel_order_ttl_sec: int = 60
+    live_sim_cancel_max_commands_per_run: int = 3
+    live_sim_cancel_require_broker_order_no: bool = True
+    live_sim_cancel_allow_without_broker_order_no: bool = False
+    live_sim_cancel_kill_switch: bool = False
+    live_sim_exit_engine_enabled: bool = False
+    live_sim_exit_order_creation_enabled: bool = False
+    live_sim_exit_gateway_command_enabled: bool = False
+    live_sim_exit_allow_sell_close_only: bool = True
+    live_sim_exit_allow_short: bool = False
+    live_sim_exit_default_order_type: str = "LIMIT"
+    live_sim_exit_allow_market_order: bool = False
+    live_sim_exit_use_market_for_stop: bool = False
+    live_sim_exit_stop_loss_pct: float = 3.0
+    live_sim_exit_take_profit_pct: float = 5.0
+    live_sim_exit_trailing_stop_pct: float = 2.5
+    live_sim_exit_trailing_activation_pct: float = 2.0
+    live_sim_exit_max_hold_sec: int = 1800
+    live_sim_exit_min_hold_sec: int = 30
+    live_sim_exit_eod_flatten_enabled: bool = False
+    live_sim_exit_eod_flatten_time: str = "15:15:00"
+    live_sim_exit_max_commands_per_run: int = 3
+    live_sim_exit_price_offset_ticks: int = 0
+    live_sim_reconcile_enabled: bool = True
+    live_sim_reconcile_request_broker_snapshot_enabled: bool = False
+    live_sim_reconcile_block_new_buy_on_mismatch: bool = True
+    live_sim_reconcile_allow_exit_on_mismatch: bool = True
+    live_sim_reconcile_stale_order_sec: int = 300
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -614,6 +648,63 @@ class Settings:
         )
         if self.live_sim_order_plan_allowed_side != "BUY":
             raise ValueError("LIVE_SIM_ORDER_PLAN_ALLOWED_SIDE must be BUY in PR-4")
+        for field_name in ("live_sim_fee_rate", "live_sim_tax_rate"):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.live_sim_position_max_per_code < 1:
+            raise ValueError("LIVE_SIM_POSITION_MAX_PER_CODE must be >= 1")
+        for field_name in (
+            "live_sim_cancel_order_ttl_sec",
+            "live_sim_cancel_max_commands_per_run",
+            "live_sim_exit_max_hold_sec",
+            "live_sim_exit_max_commands_per_run",
+            "live_sim_reconcile_stale_order_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.live_sim_exit_min_hold_sec < 0:
+            raise ValueError("LIVE_SIM_EXIT_MIN_HOLD_SEC must be >= 0")
+        for field_name in (
+            "live_sim_exit_stop_loss_pct",
+            "live_sim_exit_take_profit_pct",
+            "live_sim_exit_trailing_stop_pct",
+            "live_sim_exit_trailing_activation_pct",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if not self.live_sim_exit_allow_sell_close_only:
+            raise ValueError("LIVE_SIM_EXIT_ALLOW_SELL_CLOSE_ONLY must remain true")
+        if self.live_sim_exit_allow_short:
+            raise ValueError("LIVE_SIM_EXIT_ALLOW_SHORT must remain false")
+        object.__setattr__(
+            self,
+            "live_sim_exit_default_order_type",
+            _normalize_non_empty(self.live_sim_exit_default_order_type),
+        )
+        if self.live_sim_exit_default_order_type not in {"LIMIT", "MARKET"}:
+            raise ValueError("LIVE_SIM_EXIT_DEFAULT_ORDER_TYPE must be LIMIT or MARKET")
+        if (
+            self.live_sim_exit_default_order_type == "MARKET"
+            and not self.live_sim_exit_allow_market_order
+        ):
+            raise ValueError(
+                "LIVE_SIM_EXIT_DEFAULT_ORDER_TYPE cannot be MARKET when "
+                "LIVE_SIM_EXIT_ALLOW_MARKET_ORDER is false"
+            )
+        if self.live_sim_exit_allow_market_order and not self.live_sim_allow_market_order:
+            raise ValueError(
+                "LIVE_SIM_EXIT_ALLOW_MARKET_ORDER requires LIVE_SIM_ALLOW_MARKET_ORDER"
+            )
+        if self.live_sim_exit_price_offset_ticks < 0:
+            raise ValueError("LIVE_SIM_EXIT_PRICE_OFFSET_TICKS must be >= 0")
+        if (
+            self.live_sim_cancel_allow_without_broker_order_no
+            and self.live_sim_cancel_require_broker_order_no
+        ):
+            raise ValueError(
+                "LIVE_SIM_CANCEL_ALLOW_WITHOUT_BROKER_ORDER_NO requires "
+                "LIVE_SIM_CANCEL_REQUIRE_BROKER_ORDER_NO=false"
+            )
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -1469,6 +1560,131 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         live_sim_order_plan_allowed_side=env.get(
             "LIVE_SIM_ORDER_PLAN_ALLOWED_SIDE",
             "BUY",
+        ),
+        live_sim_fee_rate=_parse_float(
+            env.get("LIVE_SIM_FEE_RATE", "0.0"),
+            "LIVE_SIM_FEE_RATE",
+            min_value=0.0,
+        ),
+        live_sim_tax_rate=_parse_float(
+            env.get("LIVE_SIM_TAX_RATE", "0.0"),
+            "LIVE_SIM_TAX_RATE",
+            min_value=0.0,
+        ),
+        live_sim_position_allow_scale_in=_parse_bool(
+            env.get("LIVE_SIM_POSITION_ALLOW_SCALE_IN", "false")
+        ),
+        live_sim_position_max_per_code=_parse_int(
+            env.get("LIVE_SIM_POSITION_MAX_PER_CODE", "1"),
+            "LIVE_SIM_POSITION_MAX_PER_CODE",
+            min_value=1,
+        ),
+        live_sim_cancel_enabled=_parse_bool(env.get("LIVE_SIM_CANCEL_ENABLED", "false")),
+        live_sim_cancel_unfilled_enabled=_parse_bool(
+            env.get("LIVE_SIM_CANCEL_UNFILLED_ENABLED", "false")
+        ),
+        live_sim_cancel_order_ttl_sec=_parse_int(
+            env.get("LIVE_SIM_CANCEL_ORDER_TTL_SEC", "60"),
+            "LIVE_SIM_CANCEL_ORDER_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_cancel_max_commands_per_run=_parse_int(
+            env.get("LIVE_SIM_CANCEL_MAX_COMMANDS_PER_RUN", "3"),
+            "LIVE_SIM_CANCEL_MAX_COMMANDS_PER_RUN",
+            min_value=1,
+        ),
+        live_sim_cancel_require_broker_order_no=_parse_bool(
+            env.get("LIVE_SIM_CANCEL_REQUIRE_BROKER_ORDER_NO", "true")
+        ),
+        live_sim_cancel_allow_without_broker_order_no=_parse_bool(
+            env.get("LIVE_SIM_CANCEL_ALLOW_WITHOUT_BROKER_ORDER_NO", "false")
+        ),
+        live_sim_cancel_kill_switch=_parse_bool(
+            env.get("LIVE_SIM_CANCEL_KILL_SWITCH", "false")
+        ),
+        live_sim_exit_engine_enabled=_parse_bool(
+            env.get("LIVE_SIM_EXIT_ENGINE_ENABLED", "false")
+        ),
+        live_sim_exit_order_creation_enabled=_parse_bool(
+            env.get("LIVE_SIM_EXIT_ORDER_CREATION_ENABLED", "false")
+        ),
+        live_sim_exit_gateway_command_enabled=_parse_bool(
+            env.get("LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED", "false")
+        ),
+        live_sim_exit_allow_sell_close_only=_parse_bool(
+            env.get("LIVE_SIM_EXIT_ALLOW_SELL_CLOSE_ONLY", "true")
+        ),
+        live_sim_exit_allow_short=_parse_bool(env.get("LIVE_SIM_EXIT_ALLOW_SHORT", "false")),
+        live_sim_exit_default_order_type=env.get("LIVE_SIM_EXIT_DEFAULT_ORDER_TYPE", "LIMIT"),
+        live_sim_exit_allow_market_order=_parse_bool(
+            env.get("LIVE_SIM_EXIT_ALLOW_MARKET_ORDER", "false")
+        ),
+        live_sim_exit_use_market_for_stop=_parse_bool(
+            env.get("LIVE_SIM_EXIT_USE_MARKET_FOR_STOP", "false")
+        ),
+        live_sim_exit_stop_loss_pct=_parse_float(
+            env.get("LIVE_SIM_EXIT_STOP_LOSS_PCT", "3.0"),
+            "LIVE_SIM_EXIT_STOP_LOSS_PCT",
+            min_value=0.0,
+        ),
+        live_sim_exit_take_profit_pct=_parse_float(
+            env.get("LIVE_SIM_EXIT_TAKE_PROFIT_PCT", "5.0"),
+            "LIVE_SIM_EXIT_TAKE_PROFIT_PCT",
+            min_value=0.0,
+        ),
+        live_sim_exit_trailing_stop_pct=_parse_float(
+            env.get("LIVE_SIM_EXIT_TRAILING_STOP_PCT", "2.5"),
+            "LIVE_SIM_EXIT_TRAILING_STOP_PCT",
+            min_value=0.0,
+        ),
+        live_sim_exit_trailing_activation_pct=_parse_float(
+            env.get("LIVE_SIM_EXIT_TRAILING_ACTIVATION_PCT", "2.0"),
+            "LIVE_SIM_EXIT_TRAILING_ACTIVATION_PCT",
+            min_value=0.0,
+        ),
+        live_sim_exit_max_hold_sec=_parse_int(
+            env.get("LIVE_SIM_EXIT_MAX_HOLD_SEC", "1800"),
+            "LIVE_SIM_EXIT_MAX_HOLD_SEC",
+            min_value=1,
+        ),
+        live_sim_exit_min_hold_sec=_parse_int(
+            env.get("LIVE_SIM_EXIT_MIN_HOLD_SEC", "30"),
+            "LIVE_SIM_EXIT_MIN_HOLD_SEC",
+            min_value=0,
+        ),
+        live_sim_exit_eod_flatten_enabled=_parse_bool(
+            env.get("LIVE_SIM_EXIT_EOD_FLATTEN_ENABLED", "false")
+        ),
+        live_sim_exit_eod_flatten_time=env.get(
+            "LIVE_SIM_EXIT_EOD_FLATTEN_TIME",
+            "15:15:00",
+        ),
+        live_sim_exit_max_commands_per_run=_parse_int(
+            env.get("LIVE_SIM_EXIT_MAX_COMMANDS_PER_RUN", "3"),
+            "LIVE_SIM_EXIT_MAX_COMMANDS_PER_RUN",
+            min_value=1,
+        ),
+        live_sim_exit_price_offset_ticks=_parse_int(
+            env.get("LIVE_SIM_EXIT_PRICE_OFFSET_TICKS", "0"),
+            "LIVE_SIM_EXIT_PRICE_OFFSET_TICKS",
+            min_value=0,
+        ),
+        live_sim_reconcile_enabled=_parse_bool(
+            env.get("LIVE_SIM_RECONCILE_ENABLED", "true")
+        ),
+        live_sim_reconcile_request_broker_snapshot_enabled=_parse_bool(
+            env.get("LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED", "false")
+        ),
+        live_sim_reconcile_block_new_buy_on_mismatch=_parse_bool(
+            env.get("LIVE_SIM_RECONCILE_BLOCK_NEW_BUY_ON_MISMATCH", "true")
+        ),
+        live_sim_reconcile_allow_exit_on_mismatch=_parse_bool(
+            env.get("LIVE_SIM_RECONCILE_ALLOW_EXIT_ON_MISMATCH", "true")
+        ),
+        live_sim_reconcile_stale_order_sec=_parse_int(
+            env.get("LIVE_SIM_RECONCILE_STALE_ORDER_SEC", "300"),
+            "LIVE_SIM_RECONCILE_STALE_ORDER_SEC",
+            min_value=1,
         ),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(

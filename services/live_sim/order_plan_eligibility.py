@@ -22,13 +22,18 @@ from domain.strategy.status import StrategyObservationStatus
 from services.config import Settings, TradingProfile, load_settings
 from services.entry_timing.models import EntryTimingState, OrderPlanStatus, SetupType
 from services.live_sim.live_sim_service import (
+    _active_cancel_count_for_code,
+    _active_exit_count_for_code,
     _active_order_count,
     _active_position_count,
     _daily_order_count,
     _daily_order_notional,
     _latest_dry_run_evidence,
+    _latest_reconcile_blocks_new_buy,
+    _open_position_count_for_code,
     _recent_active_live_sim_count_for_code,
     _save_rejection,
+    _unresolved_lifecycle_error_count,
 )
 from services.live_sim.safety_gate import check_live_sim_safety_gate
 
@@ -265,6 +270,19 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_DUPLICATE_INTENT.value)
     if _recent_active_live_sim_count_for_code(connection, code, resolved_settings) > 0:
         reason_codes.append(LiveSimReasonCode.DUPLICATE_LIVE_SIM_ORDER.value)
+    if _latest_reconcile_blocks_new_buy(connection, resolved_settings):
+        reason_codes.append(LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value)
+    if (
+        not resolved_settings.live_sim_position_allow_scale_in
+        and _open_position_count_for_code(connection, code) > 0
+    ):
+        reason_codes.append(LiveSimReasonCode.LIVE_SIM_OPEN_POSITION_EXISTS.value)
+    if _active_exit_count_for_code(connection, code) > 0:
+        reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_EXIT_EXISTS.value)
+    if _active_cancel_count_for_code(connection, code) > 0:
+        reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_CANCEL_EXISTS.value)
+    if _unresolved_lifecycle_error_count(connection, code=code) > 0:
+        reason_codes.append(LiveSimReasonCode.LIVE_SIM_LIFECYCLE_ERROR_BLOCK.value)
     if _daily_order_count(connection, str(order_plan["trade_date"])) >= (
         resolved_settings.live_sim_max_daily_order_count
     ):

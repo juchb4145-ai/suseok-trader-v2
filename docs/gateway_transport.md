@@ -101,11 +101,11 @@ public enqueue endpoint는 없다. 내부 service와 tests만 `storage.gateway_c
 
 ## Order Command Policy
 
-Order command는 기본적으로 거부된다. PR12의 좁은 예외만 있다.
+Order command는 기본적으로 거부된다. LIVE_SIM safety gate의 좁은 예외만 있다.
 
 LIVE_SIM에서 허용되는 조건:
 
-- `command_type=send_order`
+- `command_type=send_order` 또는 PR-5 미체결 BUY TTL 전용 `cancel_order`
 - `source=live_sim`
 - command와 payload 모두 `idempotency_key` 보유
 - `mode=LIVE_SIM`
@@ -113,13 +113,13 @@ LIVE_SIM에서 허용되는 조건:
 - simulation-like `account_mode`, `broker_env`, `server_mode`
 - `metadata.live_sim_only=true`
 - `metadata.live_real_allowed=false`
-- `metadata.live_sim_intent_id`
-- PR12에서는 BUY side만
+- BUY `send_order`는 `metadata.live_sim_intent_id`와 `side=BUY`
+- SELL `send_order`는 open position close-only exit metadata(`position_id`, `exit_intent_id`, short 금지)
+- `cancel_order`는 미체결 BUY 원주문 metadata(`cancel_intent_id`, `original_live_sim_order_id`, `original_order_no`)
 
 계속 거부되는 command:
 
 - `submit_order`
-- `cancel_order`
 - `modify_order`
 - `enqueue_order`
 - `order_intent`
@@ -133,4 +133,4 @@ LIVE_SIM에서 허용되는 조건:
 - Gateway event가 들어오는지 먼저 `/api/gateway/status`에서 heartbeat를 본다.
 - command가 `DISPATCHED` 후 `ACKED`로 가는지 확인한다.
 - `REJECTED` command는 safety/policy 이유를 먼저 확인한다.
-- `send_order`는 LIVE_SIM service safety-gated path 외 생성되면 안 된다.
+- `send_order`와 `cancel_order`는 LIVE_SIM service safety-gated path 외 생성되면 안 된다.

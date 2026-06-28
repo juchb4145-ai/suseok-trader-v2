@@ -634,6 +634,14 @@ Definition of Done:
 - 장마감 전 정리 옵션
 - local/broker reconcile report
 
+이번 PR-5의 확정 범위:
+
+- scheduler는 구현하지 않고 `cancel_unfilled_once`, `evaluate_exit_once`, `reconcile_once`만 제공한다.
+- `cancel_order`는 미체결 BUY 취소 전용이다.
+- SELL은 open position close-only exit 전용이다.
+- `modify_order`는 구현하지 않는다.
+- Dashboard에는 buy/sell/cancel 버튼을 추가하지 않는다.
+
 기본 정책:
 
 ```text
@@ -650,12 +658,15 @@ Definition of Done:
 - 미체결 주문이 TTL 이후 cancel command로 이어진다.
 - stop/take/trailing/max_hold 조건에서 exit order가 생성된다.
 - 재시작 후 broker 상태와 local 상태 차이를 보고한다.
+- reconcile mismatch가 신규 BUY를 차단한다.
+- LIVE_REAL, real account/server, stale heartbeat, kill switch에서는 주문성 command가 reject된다.
 
 금지:
 
 - 실계좌 청산 지원
 - 손절 조건 무시
 - 미체결 방치
+- scheduler/daemon/while-loop 상시 반복
 
 ---
 

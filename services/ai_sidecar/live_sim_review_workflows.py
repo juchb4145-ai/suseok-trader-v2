@@ -513,7 +513,10 @@ def classify_live_sim_reconcile_root_cause(
             f"RECONCILE_MISMATCH: mismatch_count={mismatch_count}",
             LiveSimReviewSeverity.HIGH,
         )
-    if str(snapshot.get("status") or "").upper() == "LOCAL_ONLY":
+    if str(snapshot.get("status") or "").upper() in {
+        "LOCAL_ONLY",
+        "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT",
+    }:
         return (
             LiveSimReviewRootCauseCategory.LOCAL_ONLY_RECONCILE,
             "LOCAL_ONLY_RECONCILE: broker snapshot 없이 local snapshot만 기록되었습니다.",
@@ -1828,7 +1831,11 @@ def _mismatch_count(evidence: Mapping[str, Any]) -> int:
 
 def _has_local_only_reconcile(evidence: Mapping[str, Any]) -> bool:
     rows = _rows(evidence.get("reconcile_snapshots"))
-    return any(str(row.get("status") or "").upper() == "LOCAL_ONLY" for row in rows)
+    return any(
+        str(row.get("status") or "").upper()
+        in {"LOCAL_ONLY", "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT"}
+        for row in rows
+    )
 
 
 def _has_command_failed(evidence: Mapping[str, Any]) -> bool:

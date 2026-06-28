@@ -490,6 +490,10 @@ const renderLiveSim = (snapshot) => {
   const executions = liveSim.recent_executions || [];
   const rejections = liveSim.recent_rejections || [];
   const reconcile = liveSim.recent_reconcile_snapshots || [];
+  const positions = liveSim.open_positions || [];
+  const exitSignals = liveSim.active_exit_signals || [];
+  const cancelIntents = liveSim.recent_cancel_intents || [];
+  const lifecycleEvents = liveSim.recent_lifecycle_events || [];
   const reviews = liveSim.latest_live_sim_review_reports || [];
   const reviewErrors = liveSim.latest_live_sim_review_errors || [];
   document.getElementById("live-sim-badges").innerHTML = [
@@ -507,6 +511,9 @@ const renderLiveSim = (snapshot) => {
     metric("intents", status.intent_count || 0),
     metric("orders", status.order_count || 0),
     metric("executions", status.execution_count || 0),
+    metric("open positions", status.open_position_count || 0),
+    metric("cancel pending", status.cancel_pending_count || 0),
+    metric("exit signals", status.active_exit_signal_count || 0),
     metric("rejections", status.rejection_count || 0),
     metric("open orders", status.open_order_count || 0),
     metric("max order notional", number(status.max_order_notional)),
@@ -581,9 +588,13 @@ const renderLiveSim = (snapshot) => {
     `
     : emptyState("LIVE_SIM order가 없습니다.");
   document.getElementById("live-sim-events").innerHTML = [
+    logGroup("LIVE_SIM open positions", positions),
+    logGroup("LIVE_SIM active exit signals", exitSignals),
+    logGroup("LIVE_SIM cancel intents", cancelIntents),
     logGroup("LIVE_SIM executions", executions),
     logGroup("LIVE_SIM rejections", rejections),
     logGroup("LIVE_SIM reconcile", reconcile),
+    logGroup("LIVE_SIM lifecycle", lifecycleEvents),
   ].join("");
   document.getElementById("live-sim-reviews").innerHTML = [
     logGroup("LIVE_SIM review reports", reviews),

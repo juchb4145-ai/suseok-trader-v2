@@ -175,7 +175,7 @@ Invoke-RestMethod http://127.0.0.1:8000/api/gateway/commands/status
 - safety gate 실패
 - idempotency mismatch
 - `metadata.live_real_allowed=true`
-- `cancel_order` 또는 `modify_order` command 생성
+- PR-5 TTL 취소 외 `cancel_order` 또는 모든 `modify_order` command 생성
 - command가 DISPATCHED에서 오래 멈춤
 - Chejan parser가 계좌/종목/주문번호를 해석하지 못함
 
@@ -187,4 +187,3 @@ Invoke-RestMethod http://127.0.0.1:8000/api/gateway/commands/status
 - `command_ack`가 저장됨
 - Chejan 또는 execution evidence가 저장됨
 - pilot 후 kill switch와 routing disable 확인
-

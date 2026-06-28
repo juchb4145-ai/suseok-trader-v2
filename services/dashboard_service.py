@@ -58,10 +58,14 @@ from services.exit_engine import (
 )
 from services.live_sim.live_sim_service import (
     get_live_sim_status,
+    list_live_sim_cancel_intents,
     list_live_sim_errors,
     list_live_sim_executions,
+    list_live_sim_exit_signals,
     list_live_sim_intents,
+    list_live_sim_lifecycle_events,
     list_live_sim_orders,
+    list_live_sim_positions,
     list_live_sim_reconcile_snapshots,
     list_live_sim_rejections,
 )
@@ -193,6 +197,17 @@ def build_dashboard_snapshot(
     live_sim_orders = list_live_sim_orders(connection, limit=min(bounded_limit, 10))
     live_sim_executions = list_live_sim_executions(connection, limit=min(bounded_limit, 10))
     live_sim_rejections = list_live_sim_rejections(connection, limit=min(bounded_limit, 10))
+    live_sim_positions = list_live_sim_positions(
+        connection,
+        open_only=True,
+        limit=min(bounded_limit, 10),
+    )
+    live_sim_exit_signals = list_live_sim_exit_signals(connection, limit=min(bounded_limit, 10))
+    live_sim_cancel_intents = list_live_sim_cancel_intents(connection, limit=min(bounded_limit, 10))
+    live_sim_lifecycle_events = list_live_sim_lifecycle_events(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
     live_sim_reconcile = list_live_sim_reconcile_snapshots(
         connection,
         limit=min(bounded_limit, 10),
@@ -358,12 +373,20 @@ def build_dashboard_snapshot(
             "intent_count": live_sim_status["intent_count"],
             "order_count": live_sim_status["order_count"],
             "execution_count": live_sim_status["execution_count"],
+            "position_count": live_sim_status["position_count"],
+            "open_position_count": live_sim_status["open_position_count"],
+            "cancel_pending_count": live_sim_status["cancel_pending_count"],
+            "active_exit_signal_count": live_sim_status["active_exit_signal_count"],
             "rejection_count": live_sim_status["rejection_count"],
             "open_order_count": live_sim_status["open_order_count"],
             "recent_intents": live_sim_intents,
             "recent_orders": live_sim_orders,
             "recent_executions": live_sim_executions,
             "recent_rejections": live_sim_rejections,
+            "open_positions": live_sim_positions,
+            "active_exit_signals": live_sim_exit_signals,
+            "recent_cancel_intents": live_sim_cancel_intents,
+            "recent_lifecycle_events": live_sim_lifecycle_events,
             "reconcile_status": live_sim_reconcile[0] if live_sim_reconcile else None,
             "recent_reconcile_snapshots": live_sim_reconcile,
             "live_sim_review_available": True,

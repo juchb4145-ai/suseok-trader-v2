@@ -11,17 +11,25 @@ from services.live_sim.live_sim_service import (
     create_live_sim_intent,
     evaluate_live_sim_candidates,
     evaluate_live_sim_eligibility,
+    get_latest_live_sim_reconcile,
     get_live_sim_intent,
     get_live_sim_order,
+    get_live_sim_position,
     get_live_sim_status,
+    list_live_sim_cancel_intents,
     list_live_sim_errors,
     list_live_sim_executions,
+    list_live_sim_exit_signals,
     list_live_sim_intents,
+    list_live_sim_lifecycle_events,
     list_live_sim_orders,
+    list_live_sim_positions,
     list_live_sim_reconcile_snapshots,
     list_live_sim_rejections,
     queue_live_sim_order_command,
     reconcile_live_sim,
+    run_live_sim_cancel_unfilled_once,
+    run_live_sim_exit_once,
 )
 from services.live_sim.order_plan_eligibility import (
     evaluate_live_sim_order_plan_eligibility,
@@ -185,6 +193,116 @@ def live_sim_errors(
     finally:
         connection.close()
     return {"errors": errors}
+
+
+@router.get("/positions")
+def live_sim_positions(
+    trade_date: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    code: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code) if code is not None else None
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        positions = list_live_sim_positions(
+            connection,
+            trade_date=trade_date,
+            status=status,
+            code=normalized_code,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"positions": positions, **_live_sim_response_flags()}
+
+
+@router.get("/positions/{position_id}")
+def live_sim_position(position_id: str) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        position = get_live_sim_position(connection, position_id)
+    finally:
+        connection.close()
+    if position is None:
+        raise _not_found("LIVE_SIM position", position_id)
+    return {"position": position, **_live_sim_response_flags()}
+
+
+@router.get("/exit-signals")
+def live_sim_exit_signals(
+    code: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code) if code is not None else None
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        signals = list_live_sim_exit_signals(
+            connection,
+            code=normalized_code,
+            status=status,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"exit_signals": signals, **_live_sim_response_flags()}
+
+
+@router.get("/cancel-intents")
+def live_sim_cancel_intents(
+    code: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code) if code is not None else None
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        intents = list_live_sim_cancel_intents(
+            connection,
+            code=normalized_code,
+            status=status,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"cancel_intents": intents, **_live_sim_response_flags()}
+
+
+@router.get("/lifecycle-events")
+def live_sim_lifecycle_events(
+    code: str | None = Query(default=None),
+    position_id: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code) if code is not None else None
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        events = list_live_sim_lifecycle_events(
+            connection,
+            code=normalized_code,
+            position_id=position_id,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"lifecycle_events": events, **_live_sim_response_flags()}
+
+
+@router.get("/reconcile/latest")
+def live_sim_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        snapshot = get_latest_live_sim_reconcile(connection)
+    finally:
+        connection.close()
+    return {"reconcile": snapshot, **_live_sim_response_flags()}
 
 
 @router.get("/order-plan-eligibility")
@@ -363,6 +481,64 @@ def live_sim_reconcile() -> dict[str, Any]:
     finally:
         connection.close()
     return {"reconcile": snapshot.to_dict(), **_live_sim_response_flags()}
+
+
+@router.post("/cancel/run-once", dependencies=[Depends(require_local_token)])
+def live_sim_cancel_run_once(
+    dry_run: bool = Query(default=False),
+    queue_commands: bool = Query(default=False),
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_live_sim_cancel_unfilled_once(
+            connection,
+            settings=settings,
+            dry_run=dry_run,
+            queue_commands=queue_commands,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return result.to_dict() | _live_sim_response_flags()
+
+
+@router.post("/exit/run-once", dependencies=[Depends(require_local_token)])
+def live_sim_exit_run_once(
+    dry_run: bool = Query(default=False),
+    queue_commands: bool = Query(default=False),
+    position_id: str | None = Query(default=None),
+    code: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code) if code is not None else None
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_live_sim_exit_once(
+            connection,
+            settings=settings,
+            dry_run=dry_run,
+            queue_commands=queue_commands,
+            position_id=position_id,
+            code=normalized_code,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return result.to_dict() | _live_sim_response_flags()
+
+
+@router.post(
+    "/reconcile/request-broker-snapshot",
+    dependencies=[Depends(require_local_token)],
+)
+def live_sim_reconcile_request_broker_snapshot() -> dict[str, Any]:
+    settings = load_settings()
+    if not settings.live_sim_reconcile_request_broker_snapshot_enabled:
+        raise _bad_request("LIVE_SIM broker snapshot request is disabled")
+    raise _bad_request("LIVE_SIM broker snapshot request command is reserved for a later PR")
 
 
 def _live_sim_response_flags() -> dict[str, Any]:

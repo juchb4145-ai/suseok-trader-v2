@@ -34,9 +34,9 @@ ALLOWED_KIWOOM_COMMAND_TYPES = {
     "send_condition",
     "stop_condition",
     "send_order",
+    "cancel_order",
 }
 FORBIDDEN_KIWOOM_COMMAND_TYPES = {
-    "cancel_order",
     "modify_order",
     "submit_order",
     "enqueue_order",
@@ -68,12 +68,13 @@ class KiwoomGatewayCommandHandler:
             "load_conditions": 1.0,
             "send_condition": 0.2,
             "send_order": 0.2,
+            "cancel_order": 0.2,
         }
 
     def handle(self, command: GatewayCommand) -> list[GatewayEvent]:
         command_type = command.command_type.strip().lower()
         if command_type in FORBIDDEN_KIWOOM_COMMAND_TYPES or (
-            "order" in command_type and command_type != "send_order"
+            "order" in command_type and command_type not in {"send_order", "cancel_order"}
         ):
             return [
                 make_command_failed_event(
@@ -92,6 +93,8 @@ class KiwoomGatewayCommandHandler:
             ]
         if command_type == "send_order":
             return self._handle_send_order(command)
+        if command_type == "cancel_order":
+            return self._handle_cancel_order(command)
 
         events = [make_command_started_event(command, source=self.source)]
         wait_time = self._rate_limit_wait_time(command_type)
@@ -307,7 +310,7 @@ class KiwoomGatewayCommandHandler:
             code=normalize_code(payload.get("code")),
             quantity=int(payload.get("quantity") or 0),
             price=_order_price(payload),
-            side="BUY",
+            side=_string_value(payload, "side", "BUY").upper(),
             tag=_string_value(payload, "tag", command.command_id),
             order_type=_kiwoom_order_type(payload),
             hoga=_kiwoom_hoga(payload),
@@ -352,6 +355,84 @@ class KiwoomGatewayCommandHandler:
                 make_command_failed_event(
                     command,
                     f"Kiwoom SendOrder rejected: {result.message}",
+                    source=self.source,
+                )
+            )
+        return events
+
+    def _handle_cancel_order(self, command: GatewayCommand) -> list[GatewayEvent]:
+        safety_error = validate_command_type_allowed("cancel_order", command=command)
+        if safety_error is not None:
+            return [make_command_failed_event(command, safety_error, source=self.source)]
+        actual_broker_env = self._actual_broker_env()
+        if actual_broker_env != "SIMULATION":
+            return [
+                make_command_failed_event(
+                    command,
+                    f"Kiwoom cancel_order requires simulation server, got {actual_broker_env}",
+                    source=self.source,
+                )
+            ]
+        wait_time = self._rate_limit_wait_time("cancel_order")
+        if wait_time > 0:
+            return [
+                make_command_started_event(command, source=self.source),
+                self._rate_limited_event(command, wait_time),
+                make_command_failed_event(
+                    command,
+                    f"Kiwoom cancel_order rate limited: wait {wait_time:.3f}s",
+                    source=self.source,
+                ),
+            ]
+
+        payload = command.payload
+        request = KiwoomOrderRequest(
+            account=_string_value(payload, "account_id", _string_value(payload, "account", "")),
+            code=normalize_code(payload.get("code")),
+            quantity=int(payload.get("cancel_quantity") or payload.get("quantity") or 0),
+            price=0,
+            side="BUY_CANCEL",
+            tag=_string_value(payload, "tag", command.command_id),
+            order_type=_kiwoom_order_type(payload),
+            hoga=_kiwoom_hoga(payload),
+            original_order_no=_string_value(payload, "original_order_no", ""),
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key or "",
+            metadata=_mapping_value(payload, "metadata"),
+        )
+        events = [make_command_started_event(command, source=self.source)]
+        try:
+            result = self.client.send_order(request)
+            self._record_rate_limit("cancel_order")
+        except Exception as exc:
+            events.append(make_command_failed_event(command, str(exc), source=self.source))
+            return events
+
+        details = {
+            "accepted": bool(result.ok),
+            "broker_result_code": str(result.code),
+            "broker_message": result.message,
+            "original_order_no": request.original_order_no,
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_env": actual_broker_env,
+            "account_mode": actual_broker_env,
+            "server_mode": actual_broker_env,
+        }
+        if result.ok:
+            events.append(
+                make_command_ack_event(
+                    command,
+                    source=self.source,
+                    message="Kiwoom LIVE_SIM cancel accepted",
+                    details=details,
+                )
+            )
+        else:
+            events.append(
+                make_command_failed_event(
+                    command,
+                    f"Kiwoom cancel_order rejected: {result.message}",
                     source=self.source,
                 )
             )
@@ -458,6 +539,10 @@ def _kiwoom_hoga(payload: Mapping[str, Any]) -> str:
 
 def _kiwoom_order_type(payload: Mapping[str, Any]) -> int:
     side = str(payload.get("side") or "").strip().upper()
-    if side != "BUY":
-        raise ValueError("Kiwoom LIVE_SIM adapter allows BUY only")
-    return 1
+    if side == "BUY":
+        return 1
+    if side == "SELL":
+        return 2
+    if side in {"BUY_CANCEL", "CANCEL_BUY"}:
+        return 3
+    raise ValueError("Kiwoom LIVE_SIM adapter allows BUY, close-only SELL, or BUY_CANCEL")

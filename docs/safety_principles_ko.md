@@ -23,8 +23,8 @@
 - `GatewayCommand`는 safety gate 없이는 생성 금지다.
 - `send_order`, `cancel_order`, `modify_order`는 통제된 경로 외 금지다.
 - `POST /api/orders/enqueue` 같은 generic order endpoint는 존재하지 않는다.
-- `cancel_order`와 `modify_order`는 현재 disabled다.
-- LIVE_SIM `send_order`는 live_sim service safety-gated path에서만 가능하다.
+- LIVE_SIM `cancel_order`는 미체결 BUY TTL 취소 전용이며, `modify_order`는 disabled다.
+- LIVE_SIM `send_order`는 BUY entry 또는 open position close-only SELL exit 경로에서만 가능하다.
 - LIVE_SIM command는 `live_sim_only=true`, `live_real_allowed=false` metadata를 유지해야 한다.
 - DRY_RUN은 `GatewayCommand`를 만들지 않는다.
 

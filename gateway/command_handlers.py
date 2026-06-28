@@ -58,6 +58,8 @@ class GatewayCommandHandler:
         command_type = command.command_type.strip().lower()
         if command_type == "send_order":
             return self._handle_live_sim_send_order(command)
+        if command_type == "cancel_order":
+            return self._handle_live_sim_cancel_order(command)
         if _is_forbidden_order_command(command_type):
             return [
                 make_command_failed_event(
@@ -174,6 +176,28 @@ class GatewayCommandHandler:
             )
         return events
 
+    def _handle_live_sim_cancel_order(self, command: GatewayCommand) -> list[GatewayEvent]:
+        error_message = _validate_live_sim_cancel_payload(command)
+        if error_message is not None:
+            return [make_command_failed_event(command, error_message, source=self.source)]
+
+        events = [make_command_started_event(command, source=self.source)]
+        events.append(
+            make_command_ack_event(
+                command,
+                source=self.source,
+                message="mock LIVE_SIM cancel accepted",
+                details={
+                    "accepted": True,
+                    "broker_result_code": "0",
+                    "original_order_no": command.payload.get("original_order_no"),
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                },
+            )
+        )
+        return events
+
     def _handle_request_tr(self, command: GatewayCommand) -> list[GatewayEvent]:
         payload = command.payload
         request_id = _string_value(payload, "request_id", command.command_id)
@@ -275,11 +299,46 @@ def _validate_live_sim_order_payload(command: GatewayCommand) -> str | None:
         return "mock send_order requires metadata.live_real_allowed=false"
     if not metadata.get("live_sim_intent_id"):
         return "mock send_order requires live_sim_intent_id"
-    if str(payload.get("side", "")).upper() != "BUY":
-        return "mock PR12 send_order allows BUY only"
+    side = str(payload.get("side", "")).upper()
+    if side == "SELL":
+        if payload.get("close_only") is not True or metadata.get("close_only") is not True:
+            return "mock SELL requires close_only=true"
+        if not metadata.get("position_id") or not metadata.get("exit_intent_id"):
+            return "mock SELL requires position_id and exit_intent_id"
+        if str(payload.get("order_type", "")).upper() == "MARKET":
+            return "mock SELL market order disabled"
+    elif side != "BUY":
+        return "mock send_order allows BUY or close-only SELL only"
     for field_name in ("account_mode", "broker_env", "server_mode"):
         if not _is_simulation_like(payload.get(field_name)):
             return f"mock send_order requires simulation-like {field_name}"
+    return None
+
+
+def _validate_live_sim_cancel_payload(command: GatewayCommand) -> str | None:
+    payload = command.payload
+    metadata = _mapping_value(payload, "metadata")
+    if command.source.strip().lower() != "live_sim":
+        return "mock cancel_order requires live_sim source"
+    if not command.idempotency_key:
+        return "mock cancel_order requires idempotency_key"
+    if str(payload.get("mode", "")).upper() != "LIVE_SIM":
+        return "mock cancel_order requires mode=LIVE_SIM"
+    if payload.get("live_sim_only") is not True or metadata.get("live_sim_only") is not True:
+        return "mock cancel_order requires live_sim_only=true"
+    if payload.get("live_real_allowed") is not False:
+        return "mock cancel_order requires live_real_allowed=false"
+    if metadata.get("live_real_allowed") is not False:
+        return "mock cancel_order requires metadata.live_real_allowed=false"
+    if str(payload.get("side", "")).upper() not in {"BUY_CANCEL", "CANCEL_BUY"}:
+        return "mock cancel_order requires BUY cancel side"
+    if not payload.get("original_order_no"):
+        return "mock cancel_order requires original_order_no"
+    if not metadata.get("cancel_intent_id"):
+        return "mock cancel_order requires cancel_intent_id"
+    for field_name in ("account_mode", "broker_env", "server_mode"):
+        if not _is_simulation_like(payload.get(field_name)):
+            return f"mock cancel_order requires simulation-like {field_name}"
     return None
 
 

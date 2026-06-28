@@ -23,7 +23,7 @@ PR13은 `suseok_ai`의 실제 Kiwoom OpenAPI+ Gateway 자산을 `suseok-trader-v
 - broker reconcile 대형 TR runtime
 - background auto order worker
 - generic order enqueue API
-- `cancel_order` / `modify_order` 실행 경로
+- generic `cancel_order` / `modify_order` 실행 경로. `cancel_order`는 LIVE_SIM 미체결 BUY TTL 취소 전용으로만 처리한다.
 - LIVE_REAL 주문 경로
 
 ## Gateway/Core Event Mapping
@@ -105,11 +105,11 @@ Gateway 처리:
 
 초기 안정 범위는 `opt10001` 같은 기본 TR이다. 대형 multi-page TR은 후속 PR에서 별도 rate-limit와 parser spec을 붙인다.
 
-## LIVE_SIM Send Order Guard
+## LIVE_SIM Order Guard
 
-Real Kiwoom Gateway의 `send_order`는 다음 조건을 모두 만족해야 `SendOrder`를 호출한다.
+Real Kiwoom Gateway의 `send_order`와 `cancel_order`는 다음 조건을 모두 만족해야 `SendOrder`를 호출한다.
 
-- `command_type=send_order`
+- `command_type=send_order` 또는 PR-5 미체결 BUY TTL 전용 `cancel_order`
 - `source=live_sim`
 - command-level `idempotency_key`
 - payload `mode=LIVE_SIM`, `live_mode=LIVE_SIM`
@@ -120,9 +120,11 @@ Real Kiwoom Gateway의 `send_order`는 다음 조건을 모두 만족해야 `Sen
 - `metadata.live_sim_intent_id`
 - `account_mode`, `broker_env`, `server_mode`가 simulation-like
 - Kiwoom `GetServerGubun`이 simulation-like
-- side는 `BUY`
+- BUY entry `send_order`는 `side=BUY`
+- SELL exit `send_order`는 open position close-only metadata(`position_id`, `exit_intent_id`, short 금지)
+- `cancel_order`는 미체결 BUY 원주문 metadata(`cancel_intent_id`, `original_live_sim_order_id`, `original_order_no`)
 
-`LIVE_REAL`, 실서버, metadata 누락, idempotency 누락, sell/cancel/modify는 모두 reject된다.
+`LIVE_REAL`, 실서버, metadata 누락, idempotency 누락, 신규 SELL/short, generic cancel, modify는 모두 reject된다.
 
 ## 실행
 

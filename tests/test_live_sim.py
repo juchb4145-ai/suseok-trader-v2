@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -11,8 +13,13 @@ from services.live_sim.live_sim_service import (
     evaluate_live_sim_eligibility,
     get_live_sim_order,
     handle_live_sim_gateway_event,
+    list_live_sim_cancel_intents,
+    list_live_sim_exit_signals,
+    list_live_sim_positions,
     queue_live_sim_order_command,
     reconcile_live_sim,
+    run_live_sim_cancel_unfilled_once,
+    run_live_sim_exit_once,
 )
 from services.live_sim.safety_gate import check_live_sim_safety_gate
 from services.oms.dry_run_service import create_dry_run_intent
@@ -37,6 +44,12 @@ def test_live_sim_schema_and_config_defaults(tmp_path) -> None:
         "live_sim_intents",
         "live_sim_orders",
         "live_sim_executions",
+        "live_sim_positions",
+        "live_sim_position_events",
+        "live_sim_exit_signals",
+        "live_sim_exit_intents",
+        "live_sim_cancel_intents",
+        "live_sim_lifecycle_events",
         "live_sim_rejections",
         "live_sim_runs",
         "live_sim_reconcile_snapshots",
@@ -45,6 +58,8 @@ def test_live_sim_schema_and_config_defaults(tmp_path) -> None:
     assert settings.live_sim_enabled is False
     assert settings.live_sim_order_routing_enabled is False
     assert settings.live_sim_gateway_command_enabled is False
+    assert settings.live_sim_cancel_enabled is False
+    assert settings.live_sim_exit_engine_enabled is False
     assert settings.live_sim_kill_switch is True
     assert settings.live_real_allowed is False
 
@@ -109,7 +124,197 @@ def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     assert stored_order["broker_order_no"].startswith("MOCKSIM-")
     assert execution_result["handled"] is True
     assert filled_order["status"] == LiveSimOrderStatus.FILLED.value
-    assert snapshot.status == "LOCAL_ONLY"
+    assert snapshot.status == "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT"
+
+
+def test_live_sim_partial_fill_idempotent_and_position_accounting(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-position.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    command = poll_commands(connection)[0]
+    for event in GatewayCommandHandler().handle(command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    partial = _execution_event(
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        broker_order_no=stored_order["broker_order_no"],
+        live_sim_intent_id=intent.live_sim_intent_id,
+        account_id=settings.live_sim_account_id,
+        quantity=1,
+        price=97_000,
+        remaining_quantity=1,
+        execution_id="exec-partial-1",
+    )
+    first = handle_live_sim_gateway_event(connection, partial, settings=settings)
+    duplicate = handle_live_sim_gateway_event(connection, partial, settings=settings)
+    full = _execution_event(
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        broker_order_no=stored_order["broker_order_no"],
+        live_sim_intent_id=intent.live_sim_intent_id,
+        account_id=settings.live_sim_account_id,
+        quantity=1,
+        price=99_000,
+        remaining_quantity=0,
+        execution_id="exec-full-1",
+    )
+    handle_live_sim_gateway_event(connection, full, settings=settings)
+    final_order = get_live_sim_order(connection, order.live_sim_order_id)
+    positions = list_live_sim_positions(connection)
+    execution_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM live_sim_executions"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert first["handled"] is True
+    assert duplicate["duplicate"] is True
+    assert execution_count == 2
+    assert final_order["status"] == LiveSimOrderStatus.FILLED.value
+    assert final_order["filled_quantity"] == 2
+    assert final_order["avg_fill_price"] == 98_000
+    assert positions[0]["quantity"] == 2
+    assert positions[0]["available_quantity"] == 2
+    assert positions[0]["avg_entry_price"] == 98_000
+
+
+def test_live_sim_cancel_unfilled_ttl_queues_once_and_ack_cancels(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-cancel.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_cancel_enabled=True,
+        live_sim_cancel_unfilled_enabled=True,
+        live_sim_cancel_order_ttl_sec=1,
+    )
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    old = "2020-01-01T00:00:00Z"
+    connection.execute(
+        """
+        UPDATE live_sim_orders
+        SET status = 'BROKER_ACKED',
+            broker_order_no = 'MOCK-ORDER-1',
+            created_at = ?,
+            remaining_quantity = quantity
+        WHERE live_sim_order_id = ?
+        """,
+        (old, order.live_sim_order_id),
+    )
+    connection.commit()
+
+    first = run_live_sim_cancel_unfilled_once(
+        connection,
+        settings=settings,
+        queue_commands=True,
+    )
+    second = run_live_sim_cancel_unfilled_once(
+        connection,
+        settings=settings,
+        queue_commands=True,
+    )
+    cancel_command = connection.execute(
+        "SELECT * FROM gateway_commands WHERE command_type = 'cancel_order'"
+    ).fetchone()
+    cancel_gateway_command = next(
+        command
+        for command in poll_commands(connection, limit=10)
+        if command.command_type == "cancel_order"
+    )
+    events = GatewayCommandHandler().handle(cancel_gateway_command)
+    for event in events:
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    cancelled = get_live_sim_order(connection, order.live_sim_order_id)
+    cancel_intents = list_live_sim_cancel_intents(connection)
+    connection.close()
+
+    assert first.command_count == 1
+    assert second.command_count == 0
+    assert cancel_command["source"] == "live_sim"
+    assert len(cancel_intents) == 1
+    assert cancelled["status"] == LiveSimOrderStatus.CANCELLED.value
+
+
+def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-exit.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_exit_engine_enabled=True,
+        live_sim_exit_order_creation_enabled=True,
+        live_sim_exit_gateway_command_enabled=True,
+        live_sim_exit_stop_loss_pct=3.0,
+        live_sim_stale_tick_sec=999_999_999,
+    )
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    command = poll_commands(connection)[0]
+    for event in GatewayCommandHandler().handle(command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    buy_fill = _execution_event(
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        broker_order_no=stored_order["broker_order_no"],
+        live_sim_intent_id=intent.live_sim_intent_id,
+        account_id=settings.live_sim_account_id,
+        quantity=1,
+        price=100_000,
+        remaining_quantity=0,
+        execution_id="exec-buy-for-exit",
+    )
+    handle_live_sim_gateway_event(connection, buy_fill, settings=settings)
+    connection.execute("UPDATE market_ticks_latest SET price = 96_000 WHERE code = '005930'")
+    connection.commit()
+
+    result = run_live_sim_exit_once(connection, settings=settings, queue_commands=True)
+    exit_command = connection.execute(
+        "SELECT * FROM gateway_commands WHERE command_type = 'send_order' ORDER BY created_at DESC"
+    ).fetchone()
+    payload = json.loads(exit_command["payload_json"])
+    exit_gateway_command = next(
+        command
+        for command in poll_commands(connection, limit=10)
+        if command.command_type == "send_order" and command.payload.get("side") == "SELL"
+    )
+    for event in GatewayCommandHandler().handle(exit_gateway_command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    sell_order = connection.execute(
+        "SELECT * FROM live_sim_orders WHERE side = 'SELL'"
+    ).fetchone()
+    sell_fill = _execution_event(
+        command_id=exit_gateway_command.command_id,
+        idempotency_key=exit_gateway_command.idempotency_key,
+        broker_order_no=sell_order["broker_order_no"],
+        live_sim_intent_id=sell_order["live_sim_intent_id"],
+        account_id=settings.live_sim_account_id,
+        side="SELL",
+        quantity=1,
+        price=96_000,
+        remaining_quantity=0,
+        execution_id="exec-sell-close",
+        metadata_extra={
+            "position_id": payload["metadata"]["position_id"],
+            "exit_intent_id": payload["metadata"]["exit_intent_id"],
+        },
+    )
+    handle_live_sim_gateway_event(connection, sell_fill, settings=settings)
+    positions = list_live_sim_positions(connection)
+    signals = list_live_sim_exit_signals(connection)
+    connection.close()
+
+    assert result.command_count == 1
+    assert payload["side"] == "SELL"
+    assert payload["close_only"] is True
+    assert payload["live_real_allowed"] is False
+    assert signals[0]["reason"] == "STOP_LOSS"
+    assert positions[0]["status"] == "CLOSED"
+    assert positions[0]["quantity"] == 0
+    assert positions[0]["realized_pnl"] == -4_000
 
 
 def test_live_sim_default_disabled_creates_rejection_no_command(tmp_path) -> None:
@@ -177,31 +382,39 @@ def _execution_event(
     broker_order_no: str,
     live_sim_intent_id: str,
     account_id: str,
+    side: str = "BUY",
+    quantity: int = 1,
+    price: int = 97000,
+    remaining_quantity: int = 0,
+    execution_id: str = "exec-live-sim-1",
+    metadata_extra: dict[str, object] | None = None,
 ) -> GatewayEvent:
+    metadata = {
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "broker_env": "SIMULATION",
+        "account_mode": "SIMULATION",
+        "server_mode": "SIMULATION",
+        "live_sim_intent_id": live_sim_intent_id,
+        "gateway_command_id": command_id,
+    }
+    metadata.update(metadata_extra or {})
     return GatewayEvent(
         event_type="execution_event",
         source="mock_gateway",
         command_id=command_id,
         idempotency_key=idempotency_key,
         payload={
-            "execution_id": "exec-live-sim-1",
+            "execution_id": execution_id,
             "broker_order_id": broker_order_no,
             "broker_order_no": broker_order_no,
             "account_id": account_id,
             "code": "005930",
-            "side": "BUY",
-            "quantity": 1,
-            "price": 97000,
-            "remaining_quantity": 0,
+            "side": side,
+            "quantity": quantity,
+            "price": price,
+            "remaining_quantity": remaining_quantity,
             "executed_at": datetime_to_wire(utc_now()),
-            "metadata": {
-                "live_sim_only": True,
-                "live_real_allowed": False,
-                "broker_env": "SIMULATION",
-                "account_mode": "SIMULATION",
-                "server_mode": "SIMULATION",
-                "live_sim_intent_id": live_sim_intent_id,
-                "gateway_command_id": command_id,
-            },
+            "metadata": metadata,
         },
     )

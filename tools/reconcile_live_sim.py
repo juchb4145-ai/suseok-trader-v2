@@ -16,16 +16,19 @@ def main() -> int:
     from services.live_sim.safety_gate import check_live_sim_safety_gate
     from storage.sqlite import initialize_database
 
-    argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         description="Create a local-only LIVE_SIM reconcile snapshot."
-    ).parse_args()
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args()
 
     settings = load_settings()
     connection = initialize_database(settings.trading_db_path)
     try:
-        snapshot = reconcile_live_sim(connection, settings=settings)
+        snapshot = None if args.dry_run else reconcile_live_sim(connection, settings=settings)
         payload = {
-            "reconcile": snapshot.to_dict(),
+            "reconcile": None if snapshot is None else snapshot.to_dict(),
+            "dry_run": bool(args.dry_run),
             "safety_gate": check_live_sim_safety_gate(connection, settings).to_dict(),
             "live_sim_only": True,
             "live_real_allowed": False,
