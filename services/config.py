@@ -19,8 +19,14 @@ class TradingMode(StrEnum):
     LIVE_REAL = "LIVE_REAL"
 
 
+class TradingProfile(StrEnum):
+    OBSERVE = "OBSERVE"
+    LIVE_SIM_PILOT = "LIVE_SIM_PILOT"
+
+
 @dataclass(frozen=True)
 class Settings:
+    trading_profile: TradingProfile = TradingProfile.OBSERVE
     trading_mode: TradingMode = TradingMode.OBSERVE
     trading_core_token: str = ""
     trading_db_path: Path = Path("storage/suseok-trader-v2.sqlite3")
@@ -234,6 +240,24 @@ class Settings:
     live_sim_default_hoga: str = "00"
     live_sim_price_offset_ticks: int = 0
     live_sim_config_version: str = "live_sim_v1"
+    live_sim_pilot_pipeline_enabled: bool = False
+    live_sim_pilot_auto_queue_command: bool = False
+    live_sim_order_plan_routing_enabled: bool = False
+    live_sim_order_plan_require_plan_ready: bool = True
+    live_sim_order_plan_require_fresh_tick: bool = True
+    live_sim_order_plan_stale_sec: int = 30
+    live_sim_order_plan_max_price_drift_pct: float = 0.8
+    live_sim_order_plan_require_strategy_matched: bool = True
+    live_sim_order_plan_require_risk_observe_pass: bool = True
+    live_sim_order_plan_require_candidate_context_ready: bool = True
+    live_sim_order_plan_require_dry_run_evidence: bool = False
+    live_sim_order_plan_max_plans_per_run: int = 3
+    live_sim_order_plan_max_commands_per_run: int = 1
+    live_sim_order_plan_min_notional: float = 10_000
+    live_sim_order_plan_default_notional: float = 100_000
+    live_sim_order_plan_max_notional: float = 100_000
+    live_sim_order_plan_allow_market_order: bool = False
+    live_sim_order_plan_allowed_side: str = "BUY"
     dashboard_enabled: bool = True
     dashboard_refresh_sec: int = 5
     dashboard_snapshot_default_limit: int = 50
@@ -556,6 +580,40 @@ class Settings:
             "live_sim_config_version",
             _require_non_empty_config(self.live_sim_config_version),
         )
+        for field_name in (
+            "live_sim_order_plan_stale_sec",
+            "live_sim_order_plan_max_plans_per_run",
+            "live_sim_order_plan_max_commands_per_run",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        for field_name in (
+            "live_sim_order_plan_max_price_drift_pct",
+            "live_sim_order_plan_min_notional",
+            "live_sim_order_plan_default_notional",
+            "live_sim_order_plan_max_notional",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.live_sim_order_plan_min_notional > self.live_sim_order_plan_max_notional:
+            raise ValueError(
+                "LIVE_SIM_ORDER_PLAN_MIN_NOTIONAL must be <= "
+                "LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL"
+            )
+        if self.live_sim_order_plan_default_notional > self.live_sim_order_plan_max_notional:
+            raise ValueError(
+                "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL must be <= "
+                "LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL"
+            )
+        if self.live_sim_order_plan_allow_market_order:
+            raise ValueError("LIVE_SIM_ORDER_PLAN_ALLOW_MARKET_ORDER must remain false in PR-4")
+        object.__setattr__(
+            self,
+            "live_sim_order_plan_allowed_side",
+            _normalize_non_empty(self.live_sim_order_plan_allowed_side),
+        )
+        if self.live_sim_order_plan_allowed_side != "BUY":
+            raise ValueError("LIVE_SIM_ORDER_PLAN_ALLOWED_SIDE must be BUY in PR-4")
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -627,6 +685,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
     env = os.environ if environ is None else environ
 
     return Settings(
+        trading_profile=_parse_trading_profile(
+            env.get("TRADING_PROFILE", TradingProfile.OBSERVE.value)
+        ),
         trading_mode=_parse_trading_mode(env.get("TRADING_MODE", TradingMode.OBSERVE.value)),
         trading_core_token=env.get("TRADING_CORE_TOKEN", ""),
         trading_db_path=Path(env.get("TRADING_DB_PATH", DEFAULT_DB_PATH)).expanduser(),
@@ -1340,6 +1401,75 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=0,
         ),
         live_sim_config_version=env.get("LIVE_SIM_CONFIG_VERSION", "live_sim_v1"),
+        live_sim_pilot_pipeline_enabled=_parse_bool(
+            env.get("LIVE_SIM_PILOT_PIPELINE_ENABLED", "false")
+        ),
+        live_sim_pilot_auto_queue_command=_parse_bool(
+            env.get("LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND", "false")
+        ),
+        live_sim_order_plan_routing_enabled=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED", "false")
+        ),
+        live_sim_order_plan_require_plan_ready=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_PLAN_READY", "true")
+        ),
+        live_sim_order_plan_require_fresh_tick=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_FRESH_TICK", "true")
+        ),
+        live_sim_order_plan_stale_sec=_parse_int(
+            env.get("LIVE_SIM_ORDER_PLAN_STALE_SEC", "30"),
+            "LIVE_SIM_ORDER_PLAN_STALE_SEC",
+            min_value=1,
+        ),
+        live_sim_order_plan_max_price_drift_pct=_parse_float(
+            env.get("LIVE_SIM_ORDER_PLAN_MAX_PRICE_DRIFT_PCT", "0.8"),
+            "LIVE_SIM_ORDER_PLAN_MAX_PRICE_DRIFT_PCT",
+            min_value=0.0,
+        ),
+        live_sim_order_plan_require_strategy_matched=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_STRATEGY_MATCHED", "true")
+        ),
+        live_sim_order_plan_require_risk_observe_pass=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_RISK_OBSERVE_PASS", "true")
+        ),
+        live_sim_order_plan_require_candidate_context_ready=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_CANDIDATE_CONTEXT_READY", "true")
+        ),
+        live_sim_order_plan_require_dry_run_evidence=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_REQUIRE_DRY_RUN_EVIDENCE", "false")
+        ),
+        live_sim_order_plan_max_plans_per_run=_parse_int(
+            env.get("LIVE_SIM_ORDER_PLAN_MAX_PLANS_PER_RUN", "3"),
+            "LIVE_SIM_ORDER_PLAN_MAX_PLANS_PER_RUN",
+            min_value=1,
+        ),
+        live_sim_order_plan_max_commands_per_run=_parse_int(
+            env.get("LIVE_SIM_ORDER_PLAN_MAX_COMMANDS_PER_RUN", "1"),
+            "LIVE_SIM_ORDER_PLAN_MAX_COMMANDS_PER_RUN",
+            min_value=1,
+        ),
+        live_sim_order_plan_min_notional=_parse_float(
+            env.get("LIVE_SIM_ORDER_PLAN_MIN_NOTIONAL", "10000"),
+            "LIVE_SIM_ORDER_PLAN_MIN_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_order_plan_default_notional=_parse_float(
+            env.get("LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL", "100000"),
+            "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_order_plan_max_notional=_parse_float(
+            env.get("LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL", "100000"),
+            "LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_order_plan_allow_market_order=_parse_bool(
+            env.get("LIVE_SIM_ORDER_PLAN_ALLOW_MARKET_ORDER", "false")
+        ),
+        live_sim_order_plan_allowed_side=env.get(
+            "LIVE_SIM_ORDER_PLAN_ALLOWED_SIDE",
+            "BUY",
+        ),
         dashboard_enabled=_parse_bool(env.get("DASHBOARD_ENABLED", "true")),
         dashboard_refresh_sec=_parse_int(
             env.get("DASHBOARD_REFRESH_SEC", "5"),
@@ -1368,6 +1498,17 @@ def _parse_trading_mode(value: str) -> TradingMode:
     except ValueError as exc:
         allowed = ", ".join(mode.value for mode in TradingMode)
         raise ValueError(f"Unsupported TRADING_MODE={value!r}; expected one of: {allowed}") from exc
+
+
+def _parse_trading_profile(value: str) -> TradingProfile:
+    normalized = value.strip().upper()
+    try:
+        return TradingProfile(normalized)
+    except ValueError as exc:
+        allowed = ", ".join(profile.value for profile in TradingProfile)
+        raise ValueError(
+            f"Unsupported TRADING_PROFILE={value!r}; expected one of: {allowed}"
+        ) from exc
 
 
 def _parse_bool(value: str) -> bool:

@@ -1,10 +1,11 @@
 from gateway.settings import load_gateway_settings
-from services.config import TradingMode, load_settings
+from services.config import TradingMode, TradingProfile, load_settings
 
 
 def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     settings = load_settings({})
 
+    assert settings.trading_profile is TradingProfile.OBSERVE
     assert settings.trading_mode is TradingMode.OBSERVE
     assert settings.live_sim_allowed is False
     assert settings.live_real_allowed is False
@@ -166,6 +167,24 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dry_run_exit_order_routing_enabled is False
     assert settings.dry_run_exit_gateway_command_enabled is False
     assert settings.dry_run_exit_config_version == "exit_dry_run_v1"
+    assert settings.live_sim_pilot_pipeline_enabled is False
+    assert settings.live_sim_pilot_auto_queue_command is False
+    assert settings.live_sim_order_plan_routing_enabled is False
+    assert settings.live_sim_order_plan_require_plan_ready is True
+    assert settings.live_sim_order_plan_require_fresh_tick is True
+    assert settings.live_sim_order_plan_stale_sec == 30
+    assert settings.live_sim_order_plan_max_price_drift_pct == 0.8
+    assert settings.live_sim_order_plan_require_strategy_matched is True
+    assert settings.live_sim_order_plan_require_risk_observe_pass is True
+    assert settings.live_sim_order_plan_require_candidate_context_ready is True
+    assert settings.live_sim_order_plan_require_dry_run_evidence is False
+    assert settings.live_sim_order_plan_max_plans_per_run == 3
+    assert settings.live_sim_order_plan_max_commands_per_run == 1
+    assert settings.live_sim_order_plan_min_notional == 10_000
+    assert settings.live_sim_order_plan_default_notional == 100_000
+    assert settings.live_sim_order_plan_max_notional == 100_000
+    assert settings.live_sim_order_plan_allow_market_order is False
+    assert settings.live_sim_order_plan_allowed_side == "BUY"
     assert settings.dashboard_enabled is True
     assert settings.dashboard_refresh_sec == 5
     assert settings.dashboard_snapshot_default_limit == 50
@@ -332,6 +351,48 @@ def test_entry_timing_settings_are_validated() -> None:
         assert "ENTRY_TIMING_DEFAULT_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid entry timing notional range")
+
+
+def test_live_sim_order_plan_settings_are_validated() -> None:
+    invalid_cases = {
+        "LIVE_SIM_ORDER_PLAN_STALE_SEC": "0",
+        "LIVE_SIM_ORDER_PLAN_MAX_PLANS_PER_RUN": "0",
+        "LIVE_SIM_ORDER_PLAN_MAX_COMMANDS_PER_RUN": "0",
+        "LIVE_SIM_ORDER_PLAN_MAX_PRICE_DRIFT_PCT": "-0.1",
+        "LIVE_SIM_ORDER_PLAN_ALLOW_MARKET_ORDER": "true",
+        "LIVE_SIM_ORDER_PLAN_ALLOWED_SIDE": "SELL",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid LIVE_SIM order plan setting: {key}")
+
+    try:
+        load_settings(
+            {
+                "LIVE_SIM_ORDER_PLAN_MIN_NOTIONAL": "200000",
+                "LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL": "100000",
+            }
+        )
+    except ValueError as exc:
+        assert "LIVE_SIM_ORDER_PLAN_MIN_NOTIONAL" in str(exc)
+    else:
+        raise AssertionError("expected invalid LIVE_SIM order plan min/max notional")
+
+    try:
+        load_settings(
+            {
+                "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL": "200000",
+                "LIVE_SIM_ORDER_PLAN_MAX_NOTIONAL": "100000",
+            }
+        )
+    except ValueError as exc:
+        assert "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL" in str(exc)
+    else:
+        raise AssertionError("expected invalid LIVE_SIM order plan default/max notional")
 
 
 def test_dashboard_settings_are_validated() -> None:

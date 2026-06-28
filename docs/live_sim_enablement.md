@@ -52,9 +52,24 @@ PR12 `LIVE_SIM`은 Kiwoom mock-trading acceptance test를 위한 simulation-acco
 
 `MATCHED_OBSERVATION`은 매수 신호가 아니고 `OBSERVE_PASS`는 주문 승인이 아니다. LIVE_SIM eligibility는 모의투자 전용 gate다.
 
+## PR-4 OrderPlanDraft Pilot
+
+PR-4는 `OrderPlanDraft(PLAN_READY)`를 기존 candidate 기반 manual LIVE_SIM 경로와 별도로 평가한다. `OrderPlanDraft`는 여전히 주문 의도가 아니며, LIVE_SIM OrderPlan eligibility가 계좌/heartbeat/kill switch/중복/한도/fresh tick/price drift/strategy/risk를 다시 확인한 뒤에만 `LiveSimIntent`가 된다.
+
+추가 설정은 기본 disabled다.
+
+- `TRADING_PROFILE=LIVE_SIM_PILOT`
+- `LIVE_SIM_PILOT_PIPELINE_ENABLED=true`
+- `LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED=true`
+- `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`일 때만 run_once command queue 가능
+- `LIVE_SIM_ORDER_PLAN_REQUIRE_DRY_RUN_EVIDENCE=false`가 기본이며, 운영자가 true로 바꾸면 dry-run evidence를 요구한다.
+
+자세한 절차는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.
+
 ## Required Environment for Local Acceptance
 
 ```powershell
+$env:TRADING_PROFILE = "LIVE_SIM_PILOT"
 $env:TRADING_MODE = "LIVE_SIM"
 $env:TRADING_ALLOW_LIVE_SIM = "true"
 $env:TRADING_ALLOW_LIVE_REAL = "false"
@@ -82,6 +97,8 @@ Queued command 조건:
 - `mode=LIVE_SIM`
 - `live_mode=LIVE_SIM`
 - command-level and payload `idempotency_key`
+- payload `live_sim_only=true`
+- payload `live_real_allowed=false`
 - simulation-like `account_mode`, `broker_env`, `server_mode`
 - `metadata.live_sim_only=true`
 - `metadata.live_real_allowed=false`
@@ -117,6 +134,9 @@ Manual local-token protected:
 - `POST /api/live-sim/evaluate`
 - `POST /api/live-sim/intents/from-candidate/{candidate_instance_id}`
 - `POST /api/live-sim/orders/from-intent/{live_sim_intent_id}`
+- `POST /api/live-sim/intents/from-order-plan/{order_plan_id}`
+- `POST /api/live-sim/orders/from-order-plan/{order_plan_id}`
+- `POST /api/live-sim/pilot/run-once?queue_commands=false`
 - `POST /api/live-sim/reconcile`
 
 POST response는 `live_sim_only=true`, `live_real_allowed=false`, `broker_order_path=LIVE_SIM_ONLY`, `real_order_allowed=false`를 포함한다.
@@ -127,6 +147,10 @@ POST response는 `live_sim_only=true`, `live_real_allowed=false`, `broker_order_
 python tools/evaluate_live_sim_eligibility.py --candidate-instance-id CANDIDATE_ID
 python tools/create_live_sim_intent.py --candidate-instance-id CANDIDATE_ID
 python tools/queue_live_sim_order.py --live-sim-intent-id live_sim_intent_x
+python -m tools.evaluate_live_sim_order_plan --order-plan-id OPD-...
+python -m tools.create_live_sim_intent_from_order_plan --order-plan-id OPD-...
+python -m tools.run_live_sim_pilot_once
+python -m tools.run_live_sim_pilot_once --queue-commands
 python -m apps.mock_gateway --core-url http://127.0.0.1:8000 --once
 python tools/reconcile_live_sim.py
 ```
@@ -145,6 +169,9 @@ PR12 reconcile은 local-only다. local open LIVE_SIM order와 Gateway command st
 
 ```powershell
 $env:LIVE_SIM_KILL_SWITCH = "true"
+$env:LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND = "false"
+$env:LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED = "false"
+$env:LIVE_SIM_PILOT_PIPELINE_ENABLED = "false"
 $env:LIVE_SIM_ORDER_ROUTING_ENABLED = "false"
 $env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "false"
 $env:LIVE_SIM_ENABLED = "false"

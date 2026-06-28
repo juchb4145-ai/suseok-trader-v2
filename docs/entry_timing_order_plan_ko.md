@@ -72,4 +72,16 @@ Threshold는 초기 pilot 값이다. 실장 관측 데이터로 VWAP tolerance, 
 
 ## PR-4 연결
 
-PR-4는 `order_plan_drafts_latest`를 읽고 LIVE_SIM safety gate에서 계좌, 일일 한도, 중복, fresh tick, risk/strategy 최종 요구 조건을 다시 검증해야 한다. 그 전까지 PR-3 산출물은 주문, intent, gateway command를 생성하지 않는다.
+PR-4는 `order_plan_drafts_latest`에서 `PLAN_READY`만 선택하되, 다음을 다시 확인한 뒤에만 `LiveSimIntent`로 변환한다.
+
+- LIVE_SIM safety gate, kill switch, simulation account/server/broker
+- latest tick freshness와 draft price 대비 drift
+- candidate `CONTEXT_READY`
+- strategy `MATCHED_OBSERVATION`
+- risk `OBSERVE_PASS`
+- duplicate `order_plan_id`/code active intent/order
+- daily notional, daily order count, active order/position limit
+
+`queue_commands=false`가 기본이며, `--queue-commands`와 `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`가 함께 있어야 `GatewayCommand(send_order)`가 생성된다. PR-4 pipeline은 run_once만 제공하고 scheduler는 후속 PR로 남긴다.
+
+자세한 운영 절차는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.

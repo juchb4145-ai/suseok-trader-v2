@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2210,6 +2210,7 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS live_sim_runs (
             run_id TEXT PRIMARY KEY,
             trade_date TEXT,
+            pipeline_source TEXT NOT NULL DEFAULT 'candidate',
             started_at TEXT NOT NULL,
             completed_at TEXT,
             evaluated_count INTEGER NOT NULL DEFAULT 0,
@@ -2219,9 +2220,18 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
             rejection_count INTEGER NOT NULL DEFAULT 0,
             error_count INTEGER NOT NULL DEFAULT 0,
             status TEXT NOT NULL,
-            error_message TEXT
+            error_message TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "live_sim_runs",
+        {
+            "pipeline_source": "TEXT NOT NULL DEFAULT 'candidate'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
     )
     connection.execute(
         """

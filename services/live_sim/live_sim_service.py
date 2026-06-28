@@ -1027,6 +1027,10 @@ def _build_gateway_send_order_payload(
         "hoga": settings.live_sim_default_hoga,
         "mode": "LIVE_SIM",
         "live_mode": "LIVE_SIM",
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "broker_order_path": "LIVE_SIM_ONLY",
+        "real_order_allowed": False,
         "live_sim_intent_id": intent["live_sim_intent_id"],
         "idempotency_key": idempotency_key,
         "metadata": {

@@ -119,6 +119,9 @@ PR-4 전에 운영자가 확인할 최소 절차:
 python -m tools.import_naver_themes --dry-run --limit-themes 20
 python -m tools.import_naver_themes --limit-themes 20
 python -m tools.inspect_theme_leadership
+python -m tools.evaluate_entry_timing
+python -m tools.run_live_sim_pilot_once
+python -m tools.run_live_sim_pilot_once --queue-commands
 ```
 
 멤버십 교체가 의도된 날에만:
@@ -135,3 +138,9 @@ python -m tools.import_naver_themes --limit-themes 20 --replace
 - 전체 payload empty: 기본 safe abort.
 - parser failure: `theme_import_errors` 기록.
 - 주문 관련 테이블, `GatewayCommand`, `send_order` 경로는 변경하지 않는다.
+
+## PR-4 경계
+
+PR-4 LIVE_SIM run_once는 네이버 fetch를 자동 실행하지 않는다. Naver importer는 장전 또는 운영자 명시 CLI 작업이며, importer 결과는 theme membership reference일 뿐이다.
+
+`PLAN_READY`가 있더라도 LIVE_SIM OrderPlan safety gate를 통과하지 않으면 `LiveSimIntent`나 `GatewayCommand(send_order)`가 생성되지 않는다. 네이버 등락률/순위, theme hit, condition hit만으로 주문을 만들지 않는다.

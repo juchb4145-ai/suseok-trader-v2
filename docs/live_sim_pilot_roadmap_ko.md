@@ -70,6 +70,36 @@ python -m tools.inspect_theme_leadership
 
 ---
 
+## PR-4 LIVE_SIM Pilot Pipeline 업데이트
+
+PR-4는 `order_plan_drafts_latest`의 `PLAN_READY` 초안을 LIVE_SIM 모의투자 전용 safety gate로 다시 검증해 `LiveSimIntent`와 선택적 `GatewayCommand(send_order)`를 만드는 run_once 파일럿이다.
+
+핵심 원칙:
+
+- LIVE_REAL은 구현하지 않는다.
+- `PLAN_READY`는 주문 승인이나 매수 신호가 아니다.
+- OrderPlanDraft 없이 candidate만으로 자동 주문을 만들지 않는다.
+- `DATA_WAIT`, `WAIT_RETRY`를 강제로 `PLAN_READY`로 승격하지 않는다.
+- market order, SELL, cancel, modify는 PR-4 범위가 아니다.
+- scheduler는 PR-5 이후로 남긴다.
+
+운영 순서:
+
+```powershell
+python -m tools.import_naver_themes --dry-run --limit-themes 20
+python -m tools.import_naver_themes --limit-themes 20
+python -m tools.inspect_theme_leadership
+python -m tools.evaluate_entry_timing
+python -m tools.run_live_sim_pilot_once
+python -m tools.run_live_sim_pilot_once --queue-commands
+```
+
+command queue는 `TRADING_PROFILE=LIVE_SIM_PILOT`, `LIVE_SIM_PILOT_PIPELINE_ENABLED=true`, `LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED=true`, `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`, 기존 LIVE_SIM safety gate가 모두 통과한 경우에만 가능하다.
+
+자세한 구현/운영 문서는 [LIVE_SIM Pilot Pipeline from OrderPlanDraft](live_sim_pilot_pipeline_ko.md)를 따른다.
+
+---
+
 ## 0. 이번 로드맵의 전제
 
 이번 로드맵의 출발점은 `suseok-trader-v2` 장중 실행 결과 분석이 아니다. 아직 v2로 장을 충분히 돌린 상태가 아니기 때문이다.
