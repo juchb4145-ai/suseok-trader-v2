@@ -70,6 +70,14 @@ class Settings:
     theme_co_leader_score_ratio: float = 0.8
     theme_snapshot_max_members: int = 200
     theme_import_allow_replace: bool = False
+    theme_leadership_enabled: bool = True
+    theme_leadership_top_theme_count: int = 5
+    theme_leadership_max_stocks_per_theme: int = 3
+    theme_leadership_max_total_watchset: int = 20
+    theme_leadership_min_valid_members: int = 2
+    theme_leadership_min_fresh_coverage_ratio: float = 0.4
+    theme_leadership_condition_boost_enabled: bool = True
+    theme_leadership_write_candidate_sources: bool = False
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -223,6 +231,18 @@ class Settings:
             raise ValueError("THEME_MIN_TOTAL_TRADE_VALUE must be >= 0")
         if self.theme_leader_min_trade_value_delta_1m < 0:
             raise ValueError("THEME_LEADER_MIN_TRADE_VALUE_DELTA_1M must be >= 0")
+        for field_name in (
+            "theme_leadership_top_theme_count",
+            "theme_leadership_max_stocks_per_theme",
+            "theme_leadership_max_total_watchset",
+            "theme_leadership_min_valid_members",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        _validate_ratio(
+            self.theme_leadership_min_fresh_coverage_ratio,
+            "THEME_LEADERSHIP_MIN_FRESH_COVERAGE_RATIO",
+        )
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -353,8 +373,7 @@ class Settings:
                 raise ValueError(f"{field_name.upper()} must be > 0")
         if self.dry_run_default_position_notional > self.dry_run_max_position_notional:
             raise ValueError(
-                "DRY_RUN_DEFAULT_POSITION_NOTIONAL must be <= "
-                "DRY_RUN_MAX_POSITION_NOTIONAL"
+                "DRY_RUN_DEFAULT_POSITION_NOTIONAL must be <= " "DRY_RUN_MAX_POSITION_NOTIONAL"
             )
         for field_name in ("dry_run_commission_rate", "dry_run_tax_rate"):
             if getattr(self, field_name) < 0:
@@ -407,9 +426,7 @@ class Settings:
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
         if self.live_sim_max_daily_notional < self.live_sim_max_order_notional:
-            raise ValueError(
-                "LIVE_SIM_MAX_DAILY_NOTIONAL must be >= LIVE_SIM_MAX_ORDER_NOTIONAL"
-            )
+            raise ValueError("LIVE_SIM_MAX_DAILY_NOTIONAL must be >= LIVE_SIM_MAX_ORDER_NOTIONAL")
         if self.live_sim_price_offset_ticks < 0:
             raise ValueError("LIVE_SIM_PRICE_OFFSET_TICKS must be >= 0")
         object.__setattr__(
@@ -460,9 +477,7 @@ class Settings:
         if self.dashboard_max_limit < 1:
             raise ValueError("DASHBOARD_MAX_LIMIT must be >= 1")
         if self.dashboard_snapshot_default_limit > self.dashboard_max_limit:
-            raise ValueError(
-                "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT must be <= DASHBOARD_MAX_LIMIT"
-            )
+            raise ValueError("DASHBOARD_SNAPSHOT_DEFAULT_LIMIT must be <= DASHBOARD_MAX_LIMIT")
         for field_name in ("ai_sidecar_context_default_limit", "ai_sidecar_context_max_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -553,9 +568,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             "OPENAI_API_KEY",
         ),
         ai_sidecar_openai_base_url=env.get("AI_SIDECAR_OPENAI_BASE_URL", ""),
-        ai_sidecar_use_responses_api=_parse_bool(
-            env.get("AI_SIDECAR_USE_RESPONSES_API", "true")
-        ),
+        ai_sidecar_use_responses_api=_parse_bool(env.get("AI_SIDECAR_USE_RESPONSES_API", "true")),
         ai_sidecar_structured_outputs_enabled=_parse_bool(
             env.get("AI_SIDECAR_STRUCTURED_OUTPUTS_ENABLED", "true")
         ),
@@ -577,9 +590,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         ai_sidecar_store_raw_response=_parse_bool(
             env.get("AI_SIDECAR_STORE_RAW_RESPONSE", "false")
         ),
-        ai_sidecar_allow_manual_run=_parse_bool(
-            env.get("AI_SIDECAR_ALLOW_MANUAL_RUN", "true")
-        ),
+        ai_sidecar_allow_manual_run=_parse_bool(env.get("AI_SIDECAR_ALLOW_MANUAL_RUN", "true")),
         ai_sidecar_request_retention_days=_parse_int(
             env.get("AI_SIDECAR_REQUEST_RETENTION_DAYS", "30"),
             "AI_SIDECAR_REQUEST_RETENTION_DAYS",
@@ -684,6 +695,37 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=1,
         ),
         theme_import_allow_replace=_parse_bool(env.get("THEME_IMPORT_ALLOW_REPLACE", "false")),
+        theme_leadership_enabled=_parse_bool(env.get("THEME_LEADERSHIP_ENABLED", "true")),
+        theme_leadership_top_theme_count=_parse_int(
+            env.get("THEME_LEADERSHIP_TOP_THEME_COUNT", "5"),
+            "THEME_LEADERSHIP_TOP_THEME_COUNT",
+            min_value=1,
+        ),
+        theme_leadership_max_stocks_per_theme=_parse_int(
+            env.get("THEME_LEADERSHIP_MAX_STOCKS_PER_THEME", "3"),
+            "THEME_LEADERSHIP_MAX_STOCKS_PER_THEME",
+            min_value=1,
+        ),
+        theme_leadership_max_total_watchset=_parse_int(
+            env.get("THEME_LEADERSHIP_MAX_TOTAL_WATCHSET", "20"),
+            "THEME_LEADERSHIP_MAX_TOTAL_WATCHSET",
+            min_value=1,
+        ),
+        theme_leadership_min_valid_members=_parse_int(
+            env.get("THEME_LEADERSHIP_MIN_VALID_MEMBERS", "2"),
+            "THEME_LEADERSHIP_MIN_VALID_MEMBERS",
+            min_value=1,
+        ),
+        theme_leadership_min_fresh_coverage_ratio=_parse_float(
+            env.get("THEME_LEADERSHIP_MIN_FRESH_COVERAGE_RATIO", "0.4"),
+            "THEME_LEADERSHIP_MIN_FRESH_COVERAGE_RATIO",
+        ),
+        theme_leadership_condition_boost_enabled=_parse_bool(
+            env.get("THEME_LEADERSHIP_CONDITION_BOOST_ENABLED", "true")
+        ),
+        theme_leadership_write_candidate_sources=_parse_bool(
+            env.get("THEME_LEADERSHIP_WRITE_CANDIDATE_SOURCES", "false")
+        ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),
         candidate_source_stale_sec=_parse_int(
@@ -726,9 +768,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         candidate_condition_action_enter=env.get("CANDIDATE_CONDITION_ACTION_ENTER", "ENTER"),
         candidate_condition_action_exit=env.get("CANDIDATE_CONDITION_ACTION_EXIT", "EXIT"),
         strategy_engine_enabled=_parse_bool(env.get("STRATEGY_ENGINE_ENABLED", "true")),
-        strategy_engine_observe_only=_parse_bool(
-            env.get("STRATEGY_ENGINE_OBSERVE_ONLY", "true")
-        ),
+        strategy_engine_observe_only=_parse_bool(env.get("STRATEGY_ENGINE_OBSERVE_ONLY", "true")),
         strategy_engine_max_candidates=_parse_int(
             env.get("STRATEGY_ENGINE_MAX_CANDIDATES", "500"),
             "STRATEGY_ENGINE_MAX_CANDIDATES",
@@ -760,9 +800,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         strategy_engine_require_1m_bar=_parse_bool(
             env.get("STRATEGY_ENGINE_REQUIRE_1M_BAR", "true")
         ),
-        strategy_engine_require_vwap=_parse_bool(
-            env.get("STRATEGY_ENGINE_REQUIRE_VWAP", "false")
-        ),
+        strategy_engine_require_vwap=_parse_bool(env.get("STRATEGY_ENGINE_REQUIRE_VWAP", "false")),
         strategy_pullback_min_pct=_parse_float(
             env.get("STRATEGY_PULLBACK_MIN_PCT", "0.3"),
             "STRATEGY_PULLBACK_MIN_PCT",
@@ -879,9 +917,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         dry_run_simulated_fill_enabled=_parse_bool(
             env.get("DRY_RUN_SIMULATED_FILL_ENABLED", "false")
         ),
-        dry_run_require_safety_gate=_parse_bool(
-            env.get("DRY_RUN_REQUIRE_SAFETY_GATE", "true")
-        ),
+        dry_run_require_safety_gate=_parse_bool(env.get("DRY_RUN_REQUIRE_SAFETY_GATE", "true")),
         dry_run_require_strategy_matched=_parse_bool(
             env.get("DRY_RUN_REQUIRE_STRATEGY_MATCHED", "true")
         ),
@@ -953,9 +989,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         dry_run_allow_without_safety_draft_for_tests=_parse_bool(
             env.get("DRY_RUN_ALLOW_WITHOUT_SAFETY_DRAFT_FOR_TESTS", "false")
         ),
-        dry_run_exit_engine_enabled=_parse_bool(
-            env.get("DRY_RUN_EXIT_ENGINE_ENABLED", "false")
-        ),
+        dry_run_exit_engine_enabled=_parse_bool(env.get("DRY_RUN_EXIT_ENGINE_ENABLED", "false")),
         dry_run_exit_intent_creation_enabled=_parse_bool(
             env.get("DRY_RUN_EXIT_INTENT_CREATION_ENABLED", "false")
         ),
@@ -1076,9 +1110,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         live_sim_require_candidate_context_ready=_parse_bool(
             env.get("LIVE_SIM_REQUIRE_CANDIDATE_CONTEXT_READY", "true")
         ),
-        live_sim_require_fresh_tick=_parse_bool(
-            env.get("LIVE_SIM_REQUIRE_FRESH_TICK", "true")
-        ),
+        live_sim_require_fresh_tick=_parse_bool(env.get("LIVE_SIM_REQUIRE_FRESH_TICK", "true")),
         live_sim_stale_tick_sec=_parse_int(
             env.get("LIVE_SIM_STALE_TICK_SEC", "15"),
             "LIVE_SIM_STALE_TICK_SEC",
@@ -1087,9 +1119,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
         live_sim_allow_buy=_parse_bool(env.get("LIVE_SIM_ALLOW_BUY", "true")),
         live_sim_allow_sell=_parse_bool(env.get("LIVE_SIM_ALLOW_SELL", "false")),
         live_sim_allow_exit_sell=_parse_bool(env.get("LIVE_SIM_ALLOW_EXIT_SELL", "false")),
-        live_sim_allow_market_order=_parse_bool(
-            env.get("LIVE_SIM_ALLOW_MARKET_ORDER", "false")
-        ),
+        live_sim_allow_market_order=_parse_bool(env.get("LIVE_SIM_ALLOW_MARKET_ORDER", "false")),
         live_sim_allow_limit_order=_parse_bool(env.get("LIVE_SIM_ALLOW_LIMIT_ORDER", "true")),
         live_sim_default_order_type=env.get("LIVE_SIM_DEFAULT_ORDER_TYPE", "LIMIT"),
         live_sim_default_hoga=env.get("LIVE_SIM_DEFAULT_HOGA", "00"),

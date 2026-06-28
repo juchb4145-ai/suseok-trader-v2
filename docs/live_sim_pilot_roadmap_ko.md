@@ -79,6 +79,8 @@ Kiwoom Gateway event
 - Stock role classification
 - Watchset selection
 
+PR-2에서는 위 항목만 observe-only로 구현한다. `LEADING_THEME`/`SPREADING_THEME`은 매수 신호가 아니며, `LEADER`/`CO_LEADER` role도 매수 신호가 아니다. condition hit는 boost/discovery source로만 쓰고, `DATA_WAIT`는 hard block이 아니라 보류/재평가 상태로 남긴다. EntryTiming, OrderPlan, LIVE_SIM auto pipeline은 뒤 PR 범위다.
+
 필수 snapshot 필드:
 
 ```text

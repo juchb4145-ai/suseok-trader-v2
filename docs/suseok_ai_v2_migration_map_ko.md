@@ -21,6 +21,15 @@
 | 재설계할 것 | suseok_ai의 기능을 v2 `Core/Gateway/Service` 경계에 맞춰 deterministic service와 interface로 재구성한다. Gateway는 Kiwoom 통신과 command polling만 담당하고, Core는 판단/정책/상태 저장만 담당한다. |
 | PR-2 최소 범위 | `RT-TLS` port의 최소 단위는 `ThemeUniverse -> RealtimeSnapshot -> ThemeLeadershipRanking -> ThemeState -> StockRole -> Watchset`이다. 주문, LIVE_SIM 자동 생성, AI 기능은 제외한다. |
 
+PR-2 구현 메모:
+
+- v2에는 `services/theme_leadership`가 추가된다.
+- 기존 Theme Service를 대체하지 않고 `themes/theme_members`와 Market Data projection 위에서 계산한다.
+- condition include는 discovery/boost source일 뿐이며 단독으로 `LEADING`이나 매수 가능 상태를 만들지 않는다.
+- `DATA_WAIT`는 hard block이 아니라 보류/재평가 상태다.
+- CandidateSourceEvent 연결은 observe-only이며 `THEME_LEADERSHIP_WRITE_CANDIDATE_SOURCES=false`가 기본이다.
+- EntryTiming, OrderPlan, LIVE_SIM auto pipeline은 PR-3/PR-4 범위다.
+
 근거로 확인한 suseok_ai 주요 영역은 다음이다.
 
 - `trading/theme_engine/*`: Naver theme universe, evidence/membership, seed signal, cohort, state machine, stock role, leadership handover, focused expansion, candidate bridge.
