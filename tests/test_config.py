@@ -97,6 +97,28 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.risk_gate_duplicate_active_candidate_limit == 1
     assert settings.risk_gate_observation_cooldown_sec == 60
     assert settings.risk_gate_config_version == "observe_v1"
+    assert settings.entry_timing_enabled is True
+    assert settings.entry_timing_write_order_plan_drafts is True
+    assert settings.entry_timing_max_plans_per_run == 20
+    assert settings.entry_timing_plan_ttl_seconds == 90
+    assert settings.entry_timing_pullback_min_pct == 1.0
+    assert settings.entry_timing_pullback_max_pct == 4.5
+    assert settings.entry_timing_vwap_reclaim_tolerance_pct == 0.7
+    assert settings.entry_timing_vwap_overextended_pct == 3.0
+    assert settings.entry_timing_chase_near_high_pct == 0.7
+    assert settings.entry_timing_max_spread_ticks == 3
+    assert settings.entry_timing_min_turnover_krw == 500_000_000
+    assert settings.entry_timing_min_execution_strength == 100
+    assert settings.entry_timing_default_notional == 100_000
+    assert settings.entry_timing_max_notional == 100_000
+    assert settings.entry_timing_allow_market_order is False
+    assert settings.entry_timing_price_offset_ticks == 0
+    assert settings.entry_timing_allow_follower_in_spreading is True
+    assert settings.entry_timing_allow_follower_in_leader_only is False
+    assert settings.entry_timing_require_risk_observe_pass is False
+    assert settings.entry_timing_require_strategy_matched is False
+    assert settings.entry_timing_stale_max_seconds == 60
+    assert settings.entry_timing_config_version == "entry_timing_v1"
     assert settings.dry_run_oms_enabled is False
     assert settings.dry_run_intent_creation_enabled is False
     assert settings.dry_run_simulated_fill_enabled is False
@@ -244,6 +266,48 @@ def test_risk_gate_settings_are_validated() -> None:
         assert "RISK_GATE_MAX_CHANGE_RATE" in str(exc)
     else:
         raise AssertionError("expected invalid risk negative setting")
+
+
+def test_entry_timing_settings_are_validated() -> None:
+    invalid_cases = {
+        "ENTRY_TIMING_MAX_PLANS_PER_RUN": "0",
+        "ENTRY_TIMING_PLAN_TTL_SECONDS": "0",
+        "ENTRY_TIMING_MAX_SPREAD_TICKS": "0",
+        "ENTRY_TIMING_ALLOW_MARKET_ORDER": "true",
+        "ENTRY_TIMING_PRICE_OFFSET_TICKS": "-1",
+        "ENTRY_TIMING_STALE_MAX_SECONDS": "0",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid entry timing setting: {key}")
+
+    try:
+        load_settings(
+            {
+                "ENTRY_TIMING_PULLBACK_MIN_PCT": "5",
+                "ENTRY_TIMING_PULLBACK_MAX_PCT": "1",
+            }
+        )
+    except ValueError as exc:
+        assert "ENTRY_TIMING_PULLBACK_MAX_PCT" in str(exc)
+    else:
+        raise AssertionError("expected invalid entry timing pullback range")
+
+    try:
+        load_settings(
+            {
+                "ENTRY_TIMING_DEFAULT_NOTIONAL": "200000",
+                "ENTRY_TIMING_MAX_NOTIONAL": "100000",
+            }
+        )
+    except ValueError as exc:
+        assert "ENTRY_TIMING_DEFAULT_NOTIONAL" in str(exc)
+    else:
+        raise AssertionError("expected invalid entry timing notional range")
 
 
 def test_dashboard_settings_are_validated() -> None:

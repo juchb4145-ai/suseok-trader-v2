@@ -134,6 +134,28 @@ class Settings:
     risk_gate_duplicate_active_candidate_limit: int = 1
     risk_gate_observation_cooldown_sec: int = 60
     risk_gate_config_version: str = "observe_v1"
+    entry_timing_enabled: bool = True
+    entry_timing_write_order_plan_drafts: bool = True
+    entry_timing_max_plans_per_run: int = 20
+    entry_timing_plan_ttl_seconds: int = 90
+    entry_timing_pullback_min_pct: float = 1.0
+    entry_timing_pullback_max_pct: float = 4.5
+    entry_timing_vwap_reclaim_tolerance_pct: float = 0.7
+    entry_timing_vwap_overextended_pct: float = 3.0
+    entry_timing_chase_near_high_pct: float = 0.7
+    entry_timing_max_spread_ticks: int = 3
+    entry_timing_min_turnover_krw: float = 500_000_000
+    entry_timing_min_execution_strength: float = 100.0
+    entry_timing_default_notional: float = 100_000
+    entry_timing_max_notional: float = 100_000
+    entry_timing_allow_market_order: bool = False
+    entry_timing_price_offset_ticks: int = 0
+    entry_timing_allow_follower_in_spreading: bool = True
+    entry_timing_allow_follower_in_leader_only: bool = False
+    entry_timing_require_risk_observe_pass: bool = False
+    entry_timing_require_strategy_matched: bool = False
+    entry_timing_stale_max_seconds: int = 60
+    entry_timing_config_version: str = "entry_timing_v1"
     dry_run_oms_enabled: bool = False
     dry_run_intent_creation_enabled: bool = False
     dry_run_simulated_fill_enabled: bool = False
@@ -354,6 +376,48 @@ class Settings:
             self,
             "risk_gate_config_version",
             _require_non_empty_config(self.risk_gate_config_version),
+        )
+        for field_name in (
+            "entry_timing_max_plans_per_run",
+            "entry_timing_plan_ttl_seconds",
+            "entry_timing_max_spread_ticks",
+            "entry_timing_stale_max_seconds",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        for field_name in (
+            "entry_timing_pullback_min_pct",
+            "entry_timing_pullback_max_pct",
+            "entry_timing_vwap_reclaim_tolerance_pct",
+            "entry_timing_vwap_overextended_pct",
+            "entry_timing_chase_near_high_pct",
+            "entry_timing_min_turnover_krw",
+            "entry_timing_min_execution_strength",
+            "entry_timing_default_notional",
+            "entry_timing_max_notional",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.entry_timing_pullback_max_pct < self.entry_timing_pullback_min_pct:
+            raise ValueError(
+                "ENTRY_TIMING_PULLBACK_MAX_PCT must be >= ENTRY_TIMING_PULLBACK_MIN_PCT"
+            )
+        if self.entry_timing_default_notional <= 0:
+            raise ValueError("ENTRY_TIMING_DEFAULT_NOTIONAL must be > 0")
+        if self.entry_timing_max_notional <= 0:
+            raise ValueError("ENTRY_TIMING_MAX_NOTIONAL must be > 0")
+        if self.entry_timing_default_notional > self.entry_timing_max_notional:
+            raise ValueError(
+                "ENTRY_TIMING_DEFAULT_NOTIONAL must be <= ENTRY_TIMING_MAX_NOTIONAL"
+            )
+        if self.entry_timing_allow_market_order:
+            raise ValueError("ENTRY_TIMING_ALLOW_MARKET_ORDER must remain false in PR-3")
+        if self.entry_timing_price_offset_ticks < 0:
+            raise ValueError("ENTRY_TIMING_PRICE_OFFSET_TICKS must be >= 0")
+        object.__setattr__(
+            self,
+            "entry_timing_config_version",
+            _require_non_empty_config(self.entry_timing_config_version),
         )
         for field_name in (
             "dry_run_max_daily_intents",
@@ -910,6 +974,99 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=0,
         ),
         risk_gate_config_version=env.get("RISK_GATE_CONFIG_VERSION", "observe_v1"),
+        entry_timing_enabled=_parse_bool(env.get("ENTRY_TIMING_ENABLED", "true")),
+        entry_timing_write_order_plan_drafts=_parse_bool(
+            env.get("ENTRY_TIMING_WRITE_ORDER_PLAN_DRAFTS", "true")
+        ),
+        entry_timing_max_plans_per_run=_parse_int(
+            env.get("ENTRY_TIMING_MAX_PLANS_PER_RUN", "20"),
+            "ENTRY_TIMING_MAX_PLANS_PER_RUN",
+            min_value=1,
+        ),
+        entry_timing_plan_ttl_seconds=_parse_int(
+            env.get("ENTRY_TIMING_PLAN_TTL_SECONDS", "90"),
+            "ENTRY_TIMING_PLAN_TTL_SECONDS",
+            min_value=1,
+        ),
+        entry_timing_pullback_min_pct=_parse_float(
+            env.get("ENTRY_TIMING_PULLBACK_MIN_PCT", "1.0"),
+            "ENTRY_TIMING_PULLBACK_MIN_PCT",
+            min_value=0.0,
+        ),
+        entry_timing_pullback_max_pct=_parse_float(
+            env.get("ENTRY_TIMING_PULLBACK_MAX_PCT", "4.5"),
+            "ENTRY_TIMING_PULLBACK_MAX_PCT",
+            min_value=0.0,
+        ),
+        entry_timing_vwap_reclaim_tolerance_pct=_parse_float(
+            env.get("ENTRY_TIMING_VWAP_RECLAIM_TOLERANCE_PCT", "0.7"),
+            "ENTRY_TIMING_VWAP_RECLAIM_TOLERANCE_PCT",
+            min_value=0.0,
+        ),
+        entry_timing_vwap_overextended_pct=_parse_float(
+            env.get("ENTRY_TIMING_VWAP_OVEREXTENDED_PCT", "3.0"),
+            "ENTRY_TIMING_VWAP_OVEREXTENDED_PCT",
+            min_value=0.0,
+        ),
+        entry_timing_chase_near_high_pct=_parse_float(
+            env.get("ENTRY_TIMING_CHASE_NEAR_HIGH_PCT", "0.7"),
+            "ENTRY_TIMING_CHASE_NEAR_HIGH_PCT",
+            min_value=0.0,
+        ),
+        entry_timing_max_spread_ticks=_parse_int(
+            env.get("ENTRY_TIMING_MAX_SPREAD_TICKS", "3"),
+            "ENTRY_TIMING_MAX_SPREAD_TICKS",
+            min_value=1,
+        ),
+        entry_timing_min_turnover_krw=_parse_float(
+            env.get("ENTRY_TIMING_MIN_TURNOVER_KRW", "500000000"),
+            "ENTRY_TIMING_MIN_TURNOVER_KRW",
+            min_value=0.0,
+        ),
+        entry_timing_min_execution_strength=_parse_float(
+            env.get("ENTRY_TIMING_MIN_EXECUTION_STRENGTH", "100"),
+            "ENTRY_TIMING_MIN_EXECUTION_STRENGTH",
+            min_value=0.0,
+        ),
+        entry_timing_default_notional=_parse_float(
+            env.get("ENTRY_TIMING_DEFAULT_NOTIONAL", "100000"),
+            "ENTRY_TIMING_DEFAULT_NOTIONAL",
+            min_value=0.0,
+        ),
+        entry_timing_max_notional=_parse_float(
+            env.get("ENTRY_TIMING_MAX_NOTIONAL", "100000"),
+            "ENTRY_TIMING_MAX_NOTIONAL",
+            min_value=0.0,
+        ),
+        entry_timing_allow_market_order=_parse_bool(
+            env.get("ENTRY_TIMING_ALLOW_MARKET_ORDER", "false")
+        ),
+        entry_timing_price_offset_ticks=_parse_int(
+            env.get("ENTRY_TIMING_PRICE_OFFSET_TICKS", "0"),
+            "ENTRY_TIMING_PRICE_OFFSET_TICKS",
+            min_value=0,
+        ),
+        entry_timing_allow_follower_in_spreading=_parse_bool(
+            env.get("ENTRY_TIMING_ALLOW_FOLLOWER_IN_SPREADING", "true")
+        ),
+        entry_timing_allow_follower_in_leader_only=_parse_bool(
+            env.get("ENTRY_TIMING_ALLOW_FOLLOWER_IN_LEADER_ONLY", "false")
+        ),
+        entry_timing_require_risk_observe_pass=_parse_bool(
+            env.get("ENTRY_TIMING_REQUIRE_RISK_OBSERVE_PASS", "false")
+        ),
+        entry_timing_require_strategy_matched=_parse_bool(
+            env.get("ENTRY_TIMING_REQUIRE_STRATEGY_MATCHED", "false")
+        ),
+        entry_timing_stale_max_seconds=_parse_int(
+            env.get("ENTRY_TIMING_STALE_MAX_SECONDS", "60"),
+            "ENTRY_TIMING_STALE_MAX_SECONDS",
+            min_value=1,
+        ),
+        entry_timing_config_version=env.get(
+            "ENTRY_TIMING_CONFIG_VERSION",
+            "entry_timing_v1",
+        ),
         dry_run_oms_enabled=_parse_bool(env.get("DRY_RUN_OMS_ENABLED", "false")),
         dry_run_intent_creation_enabled=_parse_bool(
             env.get("DRY_RUN_INTENT_CREATION_ENABLED", "false")

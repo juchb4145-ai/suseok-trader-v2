@@ -6,6 +6,16 @@
 
 ---
 
+## PR-3 EntryTiming / OrderPlanDraft 업데이트
+
+PR-3는 주문 PR이 아니다. ThemeLeadership watchset과 candidate/strategy/risk 관측 결과를 `EntryTimingInput`으로 모아 가격 위치를 분류하고, PR-4 LIVE_SIM safety-gated path가 읽을 수 있는 `OrderPlanDraft` 초안만 만든다.
+
+`OrderPlanDraft`는 OrderIntent가 아니며 `PLAN_READY`도 주문 승인이나 매수 신호가 아니다. `MATCHED_OBSERVATION`과 `OBSERVE_PASS`는 계속 observe-only 근거로만 사용한다. VWAP warmup, momentum warmup, observation 미생성은 `DATA_WAIT` 또는 `WAIT_RETRY` near-miss로 남긴다.
+
+운영 확인은 `GET /api/entry-timing/plans/latest` 또는 `python -m tools.evaluate_entry_timing`으로 수행한다. LIVE_SIM 자동 주문 연결과 safety gate 최종 판정은 PR-4 범위다.
+
+---
+
 ## 0. 이번 로드맵의 전제
 
 이번 로드맵의 출발점은 `suseok-trader-v2` 장중 실행 결과 분석이 아니다. 아직 v2로 장을 충분히 돌린 상태가 아니기 때문이다.

@@ -361,6 +361,52 @@ def test_sqlite_initialization_creates_risk_projection_tables(tmp_path) -> None:
     }
 
 
+def test_sqlite_initialization_creates_entry_timing_tables(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'entry_timing_evaluations',
+                'order_plan_drafts',
+                'order_plan_drafts_latest',
+                'entry_timing_evaluation_errors'
+            )
+        """
+    ).fetchall()
+    existing_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'risk_observations_latest',
+                'strategy_observations_latest',
+                'candidates',
+                'market_ticks_latest'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "entry_timing_evaluations",
+        "order_plan_drafts",
+        "order_plan_drafts_latest",
+        "entry_timing_evaluation_errors",
+    }
+    assert {row["name"] for row in existing_rows} == {
+        "risk_observations_latest",
+        "strategy_observations_latest",
+        "candidates",
+        "market_ticks_latest",
+    }
+
+
 def test_sqlite_initialization_creates_dry_run_oms_tables(tmp_path) -> None:
     db_path = tmp_path / "app.sqlite3"
     connection = initialize_database(db_path)

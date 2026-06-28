@@ -13,6 +13,7 @@ from api.routes.dashboard import router as dashboard_router
 from api.routes.dashboard_page import router as dashboard_page_router
 from api.routes.dry_run_exit import router as dry_run_exit_router
 from api.routes.dry_run_oms import router as dry_run_oms_router
+from api.routes.entry_timing import router as entry_timing_router
 from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.live_sim import router as live_sim_router
@@ -56,6 +57,7 @@ def create_app() -> FastAPI:
     application.include_router(candidates_router)
     application.include_router(strategy_router)
     application.include_router(risk_router)
+    application.include_router(entry_timing_router)
     application.include_router(dry_run_oms_router)
     application.include_router(dry_run_exit_router)
     application.include_router(live_sim_router)

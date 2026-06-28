@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 APP_NAME = "suseok-trader-v2"
 
 
@@ -39,6 +39,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_candidate_projection_tables(connection)
     _create_strategy_projection_tables(connection)
     _create_risk_projection_tables(connection)
+    _create_entry_timing_tables(connection)
     _create_dry_run_oms_tables(connection)
     _create_dry_run_exit_tables(connection)
     _create_live_sim_tables(connection)
@@ -1467,6 +1468,152 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_risk_errors_created_at
         ON risk_evaluation_errors (created_at)
+        """
+    )
+
+
+def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_timing_evaluations (
+            entry_timing_evaluation_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            evaluated_at TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
+            entry_timing_state TEXT NOT NULL,
+            price_location_state TEXT NOT NULL,
+            status TEXT NOT NULL,
+            order_plan_id TEXT,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            not_order_intent INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_plan_drafts (
+            order_plan_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'BUY',
+            status TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
+            entry_timing_state TEXT NOT NULL,
+            price_location_state TEXT NOT NULL,
+            theme_id TEXT,
+            theme_name TEXT,
+            theme_state TEXT,
+            theme_rank INTEGER,
+            stock_role TEXT,
+            priority_score REAL,
+            current_price REAL NOT NULL,
+            limit_price REAL NOT NULL,
+            limit_price_source TEXT NOT NULL,
+            limit_price_offset_ticks INTEGER NOT NULL DEFAULT 0,
+            suggested_quantity INTEGER NOT NULL DEFAULT 0,
+            suggested_notional REAL NOT NULL DEFAULT 0,
+            max_notional REAL NOT NULL DEFAULT 0,
+            risk_budget_source TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            idempotency_key TEXT NOT NULL UNIQUE,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            not_order_intent INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS order_plan_drafts_latest (
+            idempotency_key TEXT PRIMARY KEY,
+            order_plan_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            candidate_instance_id TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'BUY',
+            status TEXT NOT NULL,
+            setup_type TEXT NOT NULL,
+            entry_timing_state TEXT NOT NULL,
+            price_location_state TEXT NOT NULL,
+            theme_id TEXT,
+            theme_name TEXT,
+            theme_state TEXT,
+            theme_rank INTEGER,
+            stock_role TEXT,
+            priority_score REAL,
+            current_price REAL NOT NULL,
+            limit_price REAL NOT NULL,
+            limit_price_source TEXT NOT NULL,
+            limit_price_offset_ticks INTEGER NOT NULL DEFAULT 0,
+            suggested_quantity INTEGER NOT NULL DEFAULT 0,
+            suggested_notional REAL NOT NULL DEFAULT 0,
+            max_notional REAL NOT NULL DEFAULT 0,
+            risk_budget_source TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            not_order_intent INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_timing_evaluation_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_instance_id TEXT,
+            code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_timing_evaluations_trade_status
+        ON entry_timing_evaluations (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_timing_evaluations_candidate_time
+        ON entry_timing_evaluations (candidate_instance_id, evaluated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_plan_drafts_trade_status
+        ON order_plan_drafts (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_plan_drafts_code_trade
+        ON order_plan_drafts (code, trade_date)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_plan_drafts_latest_trade_status
+        ON order_plan_drafts_latest (trade_date, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_timing_errors_created_at
+        ON entry_timing_evaluation_errors (created_at)
         """
     )
 

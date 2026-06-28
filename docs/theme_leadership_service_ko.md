@@ -18,6 +18,12 @@ ThemeUniverse
 
 이 서비스는 주문 PR이 아니다. `LEADING`/`SPREADING` theme은 매수 신호가 아니고, `LEADER`/`CO_LEADER` role도 매수 신호가 아니다. watchset은 장중 관찰 대상 목록이며, Strategy/EntryTiming/OrderPlan/LIVE_SIM auto pipeline 입력으로 직접 승격되지 않는다.
 
+## PR-3 EntryTiming 연결
+
+PR-3 EntryTiming 계층은 watchset 또는 observe-only candidate source metadata를 입력으로 가격 위치를 다시 평가하고 `OrderPlanDraft` 초안만 만든다. `PLAN_READY` draft도 주문 승인이나 매수 신호가 아니며 PR-4 LIVE_SIM safety gate 입력 후보로만 사용한다.
+
+Candidate source metadata에 저장된 `theme_state`, `stock_role`, `priority_score`를 우선 사용하며, 누락 시 theme latest 또는 on-demand watchset rebuild 결과로 보강한다.
+
 ## 범위
 
 하는 일:
