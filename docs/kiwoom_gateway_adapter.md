@@ -141,7 +141,7 @@ python -m apps.kiwoom_gateway `
   --core-url http://127.0.0.1:8000 `
   --token $env:TRADING_CORE_TOKEN `
   --auto-login `
-  --threaded-login `
+  --no-threaded-login `
   --poll-wait-sec 1 `
   --heartbeat-interval-sec 2 `
   --condition-name "YOUR_CONDITION_NAME" `
@@ -154,8 +154,21 @@ python -m apps.kiwoom_gateway `
 - Kiwoom OpenAPI+ 설치 및 로그인 가능 상태
 - 32-bit PyQt5
 - Core와 동일한 local token
+- `QAxWidget` 생성, `CommConnect`, `GetConditionLoad`, `SendCondition`, `SetRealReg` 호출은 기본적으로 Qt main thread에서 실행
 
 ## Troubleshooting
+
+`SetRealReg`의 `result_code=0`은 등록 요청 성공이다. 실제 실시간 수신 성공은 `OnReceiveRealData` callback 진입 여부로 별도 확인해야 한다. 조건식도 `GetConditionLoad()` 호출 성공 이후 `OnReceiveConditionVer` callback이 와야 loaded 상태로 본다. `OnReceiveConditionVer`와 `OnReceiveRealData`가 모두 오지 않으면 조건식/종목 문제가 아니라 ActiveX event sink, Qt event loop, thread 문제를 먼저 의심한다.
+
+먼저 확인할 Gateway status 값:
+
+- `login_threaded`
+- `condition_load_state`
+- `latest_condition_ver_callback_at`
+- `realtime_registration_success_count`
+- `realtime_callback_count`
+- `latest_realtime_callback_at`
+- `realtime_subscription_health`
 
 | 증상 | 확인 |
 | --- | --- |
@@ -165,5 +178,8 @@ python -m apps.kiwoom_gateway `
 | heartbeat 없음 | Core URL/token, 방화벽, `/api/gateway/events/recent` 확인 |
 | condition 없음 | 조건식 이름/index, Kiwoom 조건식 로드 성공 여부 확인 |
 | tick 없음 | condition hit 또는 `--realtime-codes` 등록 여부 확인 |
+| `condition_load_state=CALLBACK_TIMEOUT` | `GetConditionLoad` 이후 `OnReceiveConditionVer` 미수신. ActiveX callback/thread/event loop 확인 |
+| `realtime_subscription_health=CALLBACK_TIMEOUT` | `SetRealReg` 등록 성공 후 `OnReceiveRealData` 미수신. `active_x_thread_audit`, `login_threaded=false` 확인 |
+| `realtime_subscription_health=PARSE_ERROR` | raw callback은 왔으나 FID parsing 실패. `latest_realtime_parse_error` 확인 |
 | LIVE_SIM command rejected | `/api/gateway/events/recent`의 `command_failed.error_message` 확인 |
 | REAL server detected | 모의투자 로그인인지 확인. REAL이면 주문은 의도적으로 거부됨 |

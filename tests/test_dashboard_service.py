@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+from domain.broker.events import GatewayEvent
 from domain.broker.utils import utc_now
 from gateway.event_factory import make_condition_event, make_heartbeat_event, make_price_tick_event
 from services.candidate_service import rebuild_candidates_from_observations
@@ -32,6 +33,25 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["dry_run"]["exit_engine"]["gateway_command_allowed"] is False
     assert snapshot["dry_run"]["exit_engine"]["broker_order_sent"] is False
     assert snapshot["pipeline_summary"]["dry_run"]["exit_evaluation_count"] == 0
+    stage_statuses = {
+        row["stage"]: row for row in snapshot["pipeline_summary"]["stage_statuses"]
+    }
+    assert {
+        "Core",
+        "Gateway",
+        "MarketData",
+        "Theme",
+        "Candidate",
+        "Strategy",
+        "Risk",
+        "EntryTiming",
+        "LiveSim",
+        "OrderSafety",
+    }.issubset(stage_statuses)
+    assert stage_statuses["OrderSafety"]["status"] == "PASS"
+    assert stage_statuses["OrderSafety"]["count"] == 0
+    assert stage_statuses["OrderSafety"]["endpoint"] == "/api/gateway/commands/status"
+    assert all("last_updated_at" in row for row in stage_statuses.values())
     assert {
         "gateway",
         "market_data",
@@ -78,6 +98,78 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert snapshot["ai_sidecar"]["execution_controls_available"] is False
     assert snapshot["ai_sidecar"]["status"]["tools_enabled"] is False
     assert snapshot["ai_sidecar"]["status"]["order_tools_enabled"] is False
+
+
+def test_dashboard_pipeline_order_safety_blocks_on_order_command_row(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-order-safety.sqlite3")
+    now = utc_now().isoformat()
+    connection.execute(
+        """
+        INSERT INTO gateway_commands (
+            command_id,
+            command_type,
+            source,
+            status,
+            payload_json,
+            payload_hash,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "cmd_send_order",
+            "send_order",
+            "test",
+            "REJECTED",
+            "{}",
+            "hash",
+            now,
+        ),
+    )
+
+    snapshot = build_dashboard_snapshot(connection, Settings())
+    connection.close()
+    stage_statuses = {
+        row["stage"]: row for row in snapshot["pipeline_summary"]["stage_statuses"]
+    }
+
+    assert snapshot["pipeline_summary"]["order_safety"]["order_command_count"] == 1
+    assert snapshot["pipeline_summary"]["order_safety"]["command_type_counts"]["send_order"] == 1
+    assert stage_statuses["OrderSafety"]["status"] == "BLOCK"
+    assert stage_statuses["OrderSafety"]["count"] == 1
+    assert "ORDER_COMMAND_ZERO_EXPECTED" in stage_statuses["OrderSafety"]["reason_codes"]
+
+
+def test_dashboard_gateway_stage_blocks_when_realtime_callbacks_missing(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-gateway-callback.sqlite3")
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={
+                "status": "ok",
+                "kiwoom_logged_in": True,
+                "server_mode": "SIMULATION",
+                "condition_load_state": "LOADING",
+                "registered_realtime_code_count": 2,
+                "latest_realtime_registration_at": "2026-06-29T05:24:22Z",
+                "latest_realtime_callback_at": "",
+                "realtime_callback_count": 0,
+                "realtime_recover_count": 2,
+            },
+        ),
+    )
+
+    snapshot = build_dashboard_snapshot(connection, Settings())
+    connection.close()
+    stage_statuses = {
+        row["stage"]: row for row in snapshot["pipeline_summary"]["stage_statuses"]
+    }
+
+    assert snapshot["gateway"]["realtime_callback_count"] == 0
+    assert stage_statuses["Gateway"]["status"] == "BLOCK"
+    assert "REALTIME_CALLBACK_MISSING" in stage_statuses["Gateway"]["reason_codes"]
 
 
 def _build_observe_pipeline_fixture(connection, settings: Settings) -> None:

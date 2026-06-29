@@ -253,17 +253,15 @@ const renderPipeline = (snapshot) => {
   const pipeline = snapshot.pipeline_summary || {};
   const stages = pipeline.stage_statuses || [];
   const funnel = pipeline.funnel || [];
+  const stageRows = stages.map((stage) => [
+    stage.stage,
+    badge(stage.status || "UNKNOWN"),
+    number(stage.count),
+    text(stage.updated_at),
+    reasonList(stage.reason_codes),
+  ]);
   const stageHtml = stages.length
-    ? table(
-        ["Stage", "상태", "count", "updated", "reason"],
-        stages.map((stage) => [
-          stage.stage,
-          badge(stage.status || "UNKNOWN"),
-          number(stage.count),
-          text(stage.updated_at),
-          reasonList(stage.reason_codes),
-        ]),
-      )
+    ? `<div class="table-wrap pipeline-stage-table">${table(["Stage", "상태", "count", "updated", "reason"], stageRows)}</div>`
     : emptyState("운영 파이프라인 stage 요약이 없습니다.");
   const funnelHtml = funnel
     .map((step) => `

@@ -50,7 +50,7 @@ python -m apps.kiwoom_gateway `
   --core-url http://127.0.0.1:8000 `
   --token $env:TRADING_CORE_TOKEN `
   --auto-login `
-  --threaded-login `
+  --no-threaded-login `
   --condition-name "YOUR_CONDITION_NAME" `
   --condition-realtime
 ```

@@ -28,6 +28,7 @@ STAGES = (
     "Risk",
     "EntryTiming",
     "LiveSim",
+    "OrderSafety",
 )
 STATUS_RANK = {"UNKNOWN": 0, "PASS": 1, "WARN": 2, "BLOCK": 3}
 
@@ -150,7 +151,8 @@ def main() -> int:
     )
     parser.add_argument("--trade-date", default=date.today().isoformat())
     parser.add_argument("--timeout-sec", type=float, default=5.0)
-    parser.add_argument("--report-root", default=str(ROOT_DIR / "reports" / "market_open_rca"))
+    parser.add_argument("--out-dir", default=None)
+    parser.add_argument("--report-root", default=None)
     args = parser.parse_args()
 
     endpoint_results = collect_endpoints(
@@ -163,7 +165,8 @@ def main() -> int:
         core_url=args.core_url,
         trade_date=args.trade_date,
     )
-    paths = write_rca_report(summary, report_root=Path(args.report_root))
+    report_root = Path(args.out_dir or args.report_root or ROOT_DIR / "reports" / "market_open_rca")
+    paths = write_rca_report(summary, report_root=report_root)
     summary["report_paths"] = {key: str(value) for key, value in paths.items()}
     paths["summary_json"].write_text(
         json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True),
@@ -268,6 +271,7 @@ def classify_market_open_rca(
     _classify_risk(stages, endpoint_results)
     _classify_entry_timing(stages, endpoint_results)
     _classify_live_sim(stages, endpoint_results)
+    _classify_order_safety(stages, endpoint_results)
     stage_list = [_finalize_stage(stages[stage]) for stage in STAGES]
     return {
         "trade_date": trade_date,
@@ -354,6 +358,9 @@ def render_markdown_summary(summary: Mapping[str, Any]) -> str:
                 summary_text=str(stage.get("summary") or "").replace("|", "\\|"),
             )
         )
+    error_detail_lines = _render_error_detail_lines(summary)
+    if error_detail_lines:
+        lines.extend(["", "## Error Details", "", *error_detail_lines])
     lines.extend(
         [
             "",
@@ -368,6 +375,53 @@ def render_markdown_summary(summary: Mapping[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_error_detail_lines(summary: Mapping[str, Any]) -> list[str]:
+    rows: list[tuple[str, str, str, str, str]] = []
+    for stage in summary.get("stages", []):
+        if not isinstance(stage, Mapping):
+            continue
+        stage_name = str(stage.get("stage") or "")
+        checks = stage.get("checks") if isinstance(stage.get("checks"), list) else []
+        for check in checks:
+            if not isinstance(check, Mapping):
+                continue
+            details = check.get("details")
+            if not isinstance(details, Mapping):
+                continue
+            errors = details.get("errors")
+            if not isinstance(errors, list):
+                continue
+            for error in errors[:5]:
+                if not isinstance(error, Mapping):
+                    continue
+                rows.append(
+                    (
+                        stage_name,
+                        str(error.get("event_id") or "-"),
+                        str(error.get("code") or "-"),
+                        str(error.get("error_message") or error.get("error") or "-"),
+                        _json_excerpt(error.get("payload")),
+                    )
+                )
+    if not rows:
+        return []
+    lines = [
+        "| Stage | event_id | code | error | payload_excerpt |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for stage_name, event_id, code, error, payload in rows[:20]:
+        lines.append(
+            "| {stage} | {event_id} | {code} | {error} | {payload} |".format(
+                stage=_md_cell(stage_name),
+                event_id=_md_cell(event_id),
+                code=_md_cell(code),
+                error=_md_cell(error),
+                payload=_md_cell(payload),
+            )
+        )
+    return lines
 
 
 def _initial_stages() -> dict[str, dict[str, Any]]:
@@ -483,6 +537,7 @@ def _classify_gateway(
     status = _payload(endpoint_results, "gateway_status")
     if not status:
         return
+    events = _list_from_payload(_payload(endpoint_results, "gateway_events_recent"), "events")
     heartbeat_at = status.get("last_heartbeat_at")
     if not heartbeat_at:
         _mark(
@@ -506,7 +561,6 @@ def _classify_gateway(
             )
         else:
             _mark(stages, "Gateway", "PASS", None, "Gateway heartbeat exists.")
-    events = _list_from_payload(_payload(endpoint_results, "gateway_events_recent"), "events")
     if not events:
         _mark(
             stages,
@@ -515,6 +569,7 @@ def _classify_gateway(
             "GATEWAY_HEARTBEAT_MISSING",
             "No recent gateway events were returned.",
         )
+    _classify_gateway_recent_events(stages, events)
     command_counts = _dict_or_empty(
         _payload(endpoint_results, "gateway_commands_status").get("counts")
     )
@@ -530,28 +585,192 @@ def _classify_gateway(
         )
 
 
+def _classify_gateway_recent_events(
+    stages: dict[str, dict[str, Any]],
+    events: Sequence[Any],
+) -> None:
+    event_items = [_dict_or_empty(event) for event in events]
+    latest_heartbeat = _latest_event_payload(event_items, "heartbeat")
+    error_messages = [
+        str(_dict_or_empty(event.get("payload")).get("message") or "")
+        for event in event_items
+        if str(event.get("event_type") or "").lower() == "gateway_error"
+    ]
+    login_failed = any(
+        str(event.get("event_type") or "").lower() == "login_status"
+        and _dict_or_empty(event.get("payload")).get("logged_in") is False
+        for event in event_items
+    ) or any("KIWOOM_LOGIN" in message for message in error_messages)
+    if (
+        not login_failed
+        and latest_heartbeat.get("login_requested") is True
+        and latest_heartbeat.get("login_in_progress") is False
+        and latest_heartbeat.get("login_result_code") not in {None, "", 0}
+    ):
+        login_failed = True
+    if login_failed:
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK",
+            "KIWOOM_LOGIN_FAILED",
+            "Kiwoom login failure was reported by Gateway events.",
+            {"latest_heartbeat": latest_heartbeat, "gateway_errors": error_messages[:5]},
+        )
+
+    condition_load_failed = any(
+        str(event.get("event_type") or "").lower() == "condition_load_result"
+        and _dict_or_empty(event.get("payload")).get("success") is False
+        for event in event_items
+    ) or str(latest_heartbeat.get("condition_load_state") or "").upper() == "FAILED"
+    condition_load_failed = condition_load_failed or any(
+        "CONDITION_LOAD_FAILED" in message for message in error_messages
+    )
+    if condition_load_failed:
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK",
+            "CONDITION_LOAD_FAILED",
+            "Condition load failed in recent Gateway events.",
+            {"latest_heartbeat": latest_heartbeat, "gateway_errors": error_messages[:5]},
+        )
+    elif str(latest_heartbeat.get("condition_load_state") or "").upper() == "CALLBACK_TIMEOUT":
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK",
+            [
+                "CONDITION_VER_CALLBACK_TIMEOUT",
+                "CONDITION_LOAD_TIMEOUT",
+                "ACTIVE_X_CALLBACK_SUSPECTED",
+                "POSSIBLE_THREADING_ISSUE",
+            ],
+            (
+                "GetConditionLoad was requested, but OnReceiveConditionVer did not "
+                "arrive before timeout."
+            ),
+            {"latest_heartbeat": latest_heartbeat, "gateway_errors": error_messages[:5]},
+        )
+    else:
+        condition_load_success = any(
+            str(event.get("event_type") or "").lower()
+            in {"condition_loaded", "condition_load_result"}
+            and _dict_or_empty(event.get("payload")).get("success", True) is not False
+            for event in event_items
+        )
+        condition_sent = any(
+            str(event.get("event_type") or "").lower() == "condition_event"
+            for event in event_items
+        ) or any(
+            "configured condition send requested" in message.lower()
+            for message in [
+                str(_dict_or_empty(event.get("payload")).get("message") or "")
+                for event in event_items
+                if str(event.get("event_type") or "").lower() == "gateway_log"
+            ]
+        )
+        if condition_load_success and not condition_sent:
+            _mark(
+                stages,
+                "Gateway",
+                "WARN",
+                "CONDITION_NOT_SENT",
+                "Conditions loaded, but no configured condition send or hit is visible.",
+            )
+
+    has_enter_condition = any(
+        str(event.get("event_type") or "").lower() == "condition_event"
+        and str(_dict_or_empty(event.get("payload")).get("action") or "").upper() == "ENTER"
+        for event in event_items
+    )
+    has_price_tick = any(
+        str(event.get("event_type") or "").lower() == "price_tick" for event in event_items
+    )
+    registered_count = _optional_int(latest_heartbeat.get("registered_realtime_code_count"))
+    if has_enter_condition and not has_price_tick and registered_count == 0:
+        _mark(
+            stages,
+            "Gateway",
+            "WARN",
+            "REALTIME_NOT_REGISTERED",
+            "Condition ENTER exists, but no realtime registration/tick is visible.",
+            {"latest_heartbeat": latest_heartbeat},
+        )
+    callback_count = _optional_int(latest_heartbeat.get("realtime_callback_count"))
+    latest_callback_at = str(latest_heartbeat.get("latest_realtime_callback_at") or "").strip()
+    recover_count = _optional_int(latest_heartbeat.get("realtime_recover_count")) or 0
+    health = str(latest_heartbeat.get("realtime_subscription_health") or "").upper()
+    if health == "PARSE_ERROR":
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK",
+            "REALTIME_PARSE_ERROR",
+            "Realtime callbacks arrived, but price tick parsing failed.",
+            {"latest_heartbeat": latest_heartbeat},
+        )
+    if (
+        health == "CALLBACK_TIMEOUT"
+        or registered_count
+        and registered_count > 0
+        and not has_price_tick
+        and not callback_count
+    ):
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK" if health == "CALLBACK_TIMEOUT" or recover_count > 0 else "WARN",
+            ["REALTIME_CALLBACK_MISSING", "ACTIVE_X_CALLBACK_SUSPECTED"],
+            (
+                "Realtime registration exists, but Kiwoom OnReceiveRealData callbacks "
+                "are not visible."
+            ),
+            {
+                "latest_heartbeat": latest_heartbeat,
+                "latest_realtime_callback_at": latest_callback_at,
+                "realtime_recover_count": recover_count,
+            },
+        )
+
+
 def _classify_market_data(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "market_data_status") and _endpoint_unavailable(
+        endpoint_results, "market_data_ticks_latest"
+    ):
+        return
     status = _payload(endpoint_results, "market_data_status")
     ticks = _list_from_payload(_payload(endpoint_results, "market_data_ticks_latest"), "ticks")
     errors = _list_from_payload(
         _payload(endpoint_results, "market_data_projection_errors"),
         "errors",
     )
-    conditions = _list_from_payload(
-        _payload(endpoint_results, "market_data_conditions_recent"),
-        "conditions",
-    )
+    conditions_payload = _payload(endpoint_results, "market_data_conditions_recent")
+    conditions = _list_from_payload_any(conditions_payload, ("signals", "conditions"))
     projection_error_count = int(status.get("projection_error_count") or len(errors))
-    if projection_error_count or errors:
+    recent_projection_error_count = int(status.get("recent_projection_error_count") or 0)
+    if recent_projection_error_count:
         _mark(
             stages,
             "MarketData",
             "BLOCK",
             "MARKET_PROJECTION_ERROR",
-            f"Market projection errors exist: {projection_error_count or len(errors)}",
+            (
+                "Recent market projection errors exist: "
+                f"{recent_projection_error_count}"
+            ),
+            {"errors": errors[:5], "status": status},
+        )
+    elif projection_error_count or errors:
+        _mark(
+            stages,
+            "MarketData",
+            "WARN",
+            None,
+            f"Historical market projection errors exist: {projection_error_count or len(errors)}",
             {"errors": errors[:5], "status": status},
         )
     if not ticks:
@@ -567,7 +786,7 @@ def _classify_market_data(
             _mark(
                 stages,
                 "MarketData",
-                "WARN",
+                "BLOCK",
                 "TICK_STALE",
                 f"All latest ticks are stale by threshold {stale_sec}s.",
                 {"stale_count": len(stale_ticks), "tick_count": len(ticks)},
@@ -588,6 +807,8 @@ def _classify_theme(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "themes_status"):
+        return
     status = _payload(endpoint_results, "themes_status")
     themes = _list_from_payload(_payload(endpoint_results, "themes"), "themes")
     snapshots = _list_from_payload(
@@ -595,6 +816,7 @@ def _classify_theme(
         "snapshots",
     )
     errors = _list_from_payload(_payload(endpoint_results, "themes_projection_errors"), "errors")
+    state_counts = _counts_by_key(snapshots, "state")
     member_count = int(status.get("member_count") or 0)
     active_theme_count = int(status.get("active_theme_count") or len(themes))
     if member_count <= 0 or active_theme_count <= 0:
@@ -616,7 +838,18 @@ def _classify_theme(
             {"status": status},
         )
     else:
-        _mark(stages, "Theme", "PASS", None, f"theme_snapshots={len(snapshots)}")
+        _mark(
+            stages,
+            "Theme",
+            "PASS",
+            None,
+            (
+                f"theme_snapshots={len(snapshots)}, "
+                f"LEADING={state_counts.get('LEADING', 0)}, "
+                f"SPREADING={state_counts.get('SPREADING', 0)}"
+            ),
+            {"status": status, "state_counts": state_counts},
+        )
     if errors:
         _mark(
             stages,
@@ -632,6 +865,8 @@ def _classify_candidate(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "candidates_status"):
+        return
     status = _payload(endpoint_results, "candidates_status")
     candidates = _list_from_payload(_payload(endpoint_results, "candidates"), "candidates")
     errors = _list_from_payload(
@@ -639,6 +874,8 @@ def _classify_candidate(
         "errors",
     )
     active_count = int(status.get("active_candidate_count") or len(candidates))
+    state_counts = _dict_or_empty(status.get("state_counts"))
+    data_wait_count = int(state_counts.get("DATA_WAIT") or 0)
     if errors:
         _mark(
             stages,
@@ -648,14 +885,30 @@ def _classify_candidate(
             f"Candidate projection errors exist: {len(errors)}",
             {"errors": errors[:5]},
         )
-    elif active_count <= 0:
+    elif data_wait_count:
         _mark(
             stages,
             "Candidate",
             "WARN",
-            "CANDIDATE_EMPTY",
-            "No active candidates exist.",
+            "CANDIDATE_DATA_WAIT",
+            f"Candidates are waiting for data/context: {data_wait_count}",
             {"status": status},
+        )
+    elif active_count <= 0:
+        reasons = ["CANDIDATE_EMPTY"]
+        theme_status = _payload(endpoint_results, "themes_status")
+        market_ticks = _list_from_payload(_payload(endpoint_results, "market_data_ticks_latest"), "ticks")
+        if int(theme_status.get("member_count") or 0) <= 0:
+            reasons.append("THEME_MEMBERSHIP_EMPTY")
+        if not market_ticks:
+            reasons.append("TICK_MISSING")
+        _mark(
+            stages,
+            "Candidate",
+            "WARN",
+            reasons,
+            "No active candidates exist.",
+            {"status": status, "upstream_theme_status": theme_status},
         )
     else:
         _mark(stages, "Candidate", "PASS", None, f"active_candidate_count={active_count}")
@@ -665,6 +918,10 @@ def _classify_strategy(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "strategy_status") and _endpoint_unavailable(
+        endpoint_results, "strategy_runs"
+    ):
+        return
     status = _payload(endpoint_results, "strategy_status")
     runs = _list_from_payload(_payload(endpoint_results, "strategy_runs"), "runs")
     errors = _list_from_payload(_payload(endpoint_results, "strategy_errors"), "errors")
@@ -701,6 +958,10 @@ def _classify_risk(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "risk_status") and _endpoint_unavailable(
+        endpoint_results, "risk_runs"
+    ):
+        return
     status = _payload(endpoint_results, "risk_status")
     runs = _list_from_payload(_payload(endpoint_results, "risk_runs"), "runs")
     errors = _list_from_payload(_payload(endpoint_results, "risk_errors"), "errors")
@@ -731,20 +992,24 @@ def _classify_entry_timing(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "entry_timing_status"):
+        return
     status = _payload(endpoint_results, "entry_timing_status")
     plans = _list_from_payload(
         _payload(endpoint_results, "entry_timing_plans_latest"),
         "order_plan_drafts",
     )
     errors = _list_from_payload(_payload(endpoint_results, "entry_timing_errors"), "errors")
+    plan_counts = _entry_timing_plan_counts(status, plans)
+    count_summary = _entry_timing_count_summary(plan_counts)
     if errors:
         _mark(
             stages,
             "EntryTiming",
             "BLOCK",
             "ENTRY_TIMING_NO_INPUT",
-            f"EntryTiming errors exist: {len(errors)}",
-            {"errors": errors[:5]},
+            f"EntryTiming errors exist: {len(errors)}; {count_summary}",
+            {"status": status, "plan_status_counts": plan_counts, "errors": errors[:5]},
         )
     elif int(status.get("evaluation_count") or 0) <= 0:
         _mark(
@@ -752,31 +1017,54 @@ def _classify_entry_timing(
             "EntryTiming",
             "WARN",
             "ENTRY_TIMING_NO_INPUT",
-            "EntryTiming has not evaluated inputs.",
-            {"status": status},
+            f"EntryTiming has not evaluated inputs; {count_summary}",
+            {"status": status, "plan_status_counts": plan_counts},
         )
     elif not plans or int(status.get("latest_plan_count") or 0) <= 0:
+        reason = "ENTRY_TIMING_NO_INPUT" if plan_counts["DATA_WAIT"] > 0 else "ORDER_PLAN_EMPTY"
         _mark(
             stages,
             "EntryTiming",
             "WARN",
-            "ORDER_PLAN_EMPTY",
-            "EntryTiming evaluated but no order plan draft exists.",
-            {"status": status},
+            reason,
+            f"EntryTiming evaluated but no order plan draft exists; {count_summary}",
+            {"status": status, "plan_status_counts": plan_counts},
+        )
+    elif plan_counts["PLAN_READY"] <= 0:
+        reason = "ENTRY_TIMING_NO_INPUT" if plan_counts["DATA_WAIT"] > 0 else "ORDER_PLAN_EMPTY"
+        _mark(
+            stages,
+            "EntryTiming",
+            "WARN",
+            reason,
+            f"Order plan drafts exist, but none are PLAN_READY; {count_summary}",
+            {"status": status, "plan_status_counts": plan_counts, "order_plan_drafts": plans[:5]},
         )
     else:
-        _mark(stages, "EntryTiming", "PASS", None, f"order_plan_drafts={len(plans)}")
+        _mark(
+            stages,
+            "EntryTiming",
+            "PASS",
+            None,
+            (
+                f"order_plan_drafts={len(plans)}; {count_summary}; "
+                "observe_only=true; not_order_intent=true"
+            ),
+            {"status": status, "plan_status_counts": plan_counts},
+        )
 
 
 def _classify_live_sim(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
+    if _endpoint_unavailable(endpoint_results, "live_sim_status"):
+        return
     status = _payload(endpoint_results, "live_sim_status")
     operator_status = _payload(endpoint_results, "live_sim_operator_status")
     rejections = _list_from_payload(_payload(endpoint_results, "live_sim_rejections"), "rejections")
     errors = _list_from_payload(_payload(endpoint_results, "live_sim_errors"), "errors")
-    reasons = ["ORDER_COMMAND_ZERO_EXPECTED"]
+    reasons: list[str] = []
     if status.get("enabled") is False:
         reasons.append("LIVE_SIM_DISABLED_EXPECTED")
     if status.get("kill_switch") is True:
@@ -820,6 +1108,57 @@ def _classify_live_sim(
         )
 
 
+def _classify_order_safety(
+    stages: dict[str, dict[str, Any]],
+    endpoint_results: Mapping[str, Mapping[str, Any]],
+) -> None:
+    payload = _payload(endpoint_results, "gateway_commands_status")
+    if not payload:
+        _mark(
+            stages,
+            "OrderSafety",
+            "UNKNOWN",
+            None,
+            "Gateway command status was not available.",
+        )
+        return
+    command_type_counts = _dict_or_empty(payload.get("command_type_counts"))
+    order_command_count = payload.get("order_command_count")
+    if order_command_count is None:
+        order_command_count = sum(
+            int(command_type_counts.get(command_type) or 0)
+            for command_type in (
+                "send_order",
+                "submit_order",
+                "cancel_order",
+                "modify_order",
+                "enqueue_order",
+                "order_intent",
+                "gateway_order",
+                "live_order",
+            )
+        )
+    order_command_count = int(order_command_count or 0)
+    if order_command_count:
+        _mark(
+            stages,
+            "OrderSafety",
+            "BLOCK",
+            "ORDER_COMMAND_ZERO_EXPECTED",
+            f"Order-like GatewayCommand count is {order_command_count}; expected zero in OBSERVE.",
+            {"command_type_counts": command_type_counts},
+        )
+        return
+    _mark(
+        stages,
+        "OrderSafety",
+        "PASS",
+        "ORDER_COMMAND_ZERO_EXPECTED",
+        "No order-like GatewayCommand exists in command status.",
+        {"command_type_counts": command_type_counts, "order_command_count": order_command_count},
+    )
+
+
 def _finalize_stage(stage: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "stage": stage["stage"],
@@ -850,13 +1189,85 @@ def _payload(
     return dict(data) if isinstance(data, Mapping) else {}
 
 
+def _endpoint_unavailable(
+    endpoint_results: Mapping[str, Mapping[str, Any]],
+    key: str,
+) -> bool:
+    result = endpoint_results.get(key)
+    if not result:
+        return True
+    return not bool(result.get("ok")) and not bool(result.get("data"))
+
+
 def _list_from_payload(payload: Mapping[str, Any], key: str) -> list[Any]:
     value = payload.get(key)
     return list(value) if isinstance(value, list) else []
 
 
+def _list_from_payload_any(payload: Mapping[str, Any], keys: Sequence[str]) -> list[Any]:
+    for key in keys:
+        values = _list_from_payload(payload, key)
+        if values:
+            return values
+    return []
+
+
 def _dict_or_empty(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _latest_event_payload(events: Sequence[Mapping[str, Any]], event_type: str) -> dict[str, Any]:
+    normalized_type = event_type.strip().lower()
+    for event in events:
+        if str(event.get("event_type") or "").lower() == normalized_type:
+            return _dict_or_empty(event.get("payload"))
+    return {}
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _counts_by_key(items: Sequence[Any], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, Mapping):
+            continue
+        value = str(item.get(key) or "UNKNOWN").upper()
+        counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _entry_timing_plan_counts(
+    status: Mapping[str, Any],
+    plans: Sequence[Any],
+) -> dict[str, int]:
+    plan_status_counts = _counts_by_key(plans, "status")
+    status_keys = {
+        "PLAN_READY": "plan_ready_count",
+        "WAIT_RETRY": "wait_retry_count",
+        "DATA_WAIT": "data_wait_count",
+        "NO_PLAN": "no_plan_count",
+    }
+    counts: dict[str, int] = {}
+    for plan_status, status_key in status_keys.items():
+        status_count = _optional_int(status.get(status_key))
+        counts[plan_status] = (
+            status_count if status_count is not None else plan_status_counts.get(plan_status, 0)
+        )
+    return counts
+
+
+def _entry_timing_count_summary(counts: Mapping[str, int]) -> str:
+    return ", ".join(
+        f"{status}={int(counts.get(status, 0))}"
+        for status in ("PLAN_READY", "WAIT_RETRY", "DATA_WAIT", "NO_PLAN")
+    )
 
 
 def _json_or_empty(value: str) -> dict[str, Any]:
@@ -865,6 +1276,22 @@ def _json_or_empty(value: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _json_excerpt(value: object, *, max_chars: int = 180) -> str:
+    if value in (None, ""):
+        return "-"
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
+def _md_cell(value: object) -> str:
+    return str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def _join_url(base_url: str, path: str) -> str:

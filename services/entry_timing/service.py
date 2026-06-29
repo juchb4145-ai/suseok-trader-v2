@@ -507,6 +507,19 @@ def get_entry_timing_status(
             "order_plan_drafts_latest",
             where="status = 'DATA_WAIT'",
         ),
+        "no_plan_count": _count_rows(
+            connection,
+            "entry_timing_evaluations",
+            where=(
+                "status IN ("
+                "'NO_PLAN',"
+                "'BLOCKED_CHASE',"
+                "'BLOCKED_OVERHEAT',"
+                "'BLOCKED_STALE',"
+                "'BLOCKED_RISK'"
+                ")"
+            ),
+        ),
         "evaluation_count": _count_rows(connection, "entry_timing_evaluations"),
         "error_count": _count_rows(connection, "entry_timing_evaluation_errors"),
         "max_plans_per_run": resolved_settings.entry_timing_max_plans_per_run,

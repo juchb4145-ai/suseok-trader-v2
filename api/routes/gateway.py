@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from domain.broker.events import GatewayEvent
@@ -15,7 +16,9 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 from storage.gateway_command_store import (
+    FORBIDDEN_ORDER_COMMAND_TYPES,
     GatewayCommandStatus,
+    get_command_type_counts,
     get_command_status_counts,
     poll_commands,
 )
@@ -104,6 +107,65 @@ def get_gateway_status() -> dict[str, Any]:
     return {
         "last_event_received_at": status_values.get("last_event_received_at"),
         "last_heartbeat_at": status_values.get("last_heartbeat_at"),
+        "kiwoom_logged_in": _json_value(status_values.get("kiwoom_logged_in")),
+        "login_threaded": _json_value(status_values.get("login_threaded")),
+        "condition_load_state": status_values.get("condition_load_state"),
+        "condition_load_requested_at": status_values.get("condition_load_requested_at"),
+        "condition_load_retry_count": _json_value(
+            status_values.get("condition_load_retry_count")
+        ),
+        "condition_load_timeout_count": _json_value(
+            status_values.get("condition_load_timeout_count")
+        ),
+        "latest_condition_ver_callback_at": status_values.get(
+            "latest_condition_ver_callback_at"
+        ),
+        "latest_condition_ver_result": _json_value(
+            status_values.get("latest_condition_ver_result")
+        ),
+        "server_mode": status_values.get("server_mode"),
+        "registered_realtime_code_count": _json_value(
+            status_values.get("registered_realtime_code_count")
+        ),
+        "realtime_registered_codes": _json_value(
+            status_values.get("realtime_registered_codes")
+        ),
+        "realtime_exchange": status_values.get("realtime_exchange"),
+        "realtime_registered_kiwoom_codes": _json_value(
+            status_values.get("realtime_registered_kiwoom_codes")
+        ),
+        "realtime_registration_requested_count": _json_value(
+            status_values.get("realtime_registration_requested_count")
+        ),
+        "realtime_registration_success_count": _json_value(
+            status_values.get("realtime_registration_success_count")
+        ),
+        "latest_realtime_registration_at": status_values.get(
+            "latest_realtime_registration_at"
+        ),
+        "latest_realtime_registration_result": _json_value(
+            status_values.get("latest_realtime_registration_result")
+        ),
+        "realtime_callback_count": _json_value(status_values.get("realtime_callback_count")),
+        "raw_realtime_callback_count": _json_value(
+            status_values.get("raw_realtime_callback_count")
+        ),
+        "latest_realtime_callback_at": status_values.get("latest_realtime_callback_at"),
+        "parsed_price_tick_count": _json_value(status_values.get("parsed_price_tick_count")),
+        "realtime_parse_error_count": _json_value(
+            status_values.get("realtime_parse_error_count")
+        ),
+        "latest_realtime_parse_error": _json_value(
+            status_values.get("latest_realtime_parse_error")
+        ),
+        "realtime_subscription_health": status_values.get("realtime_subscription_health"),
+        "raw_callback_counts": _json_value(status_values.get("raw_callback_counts")),
+        "latest_callback_at_by_method": _json_value(
+            status_values.get("latest_callback_at_by_method")
+        ),
+        "latest_active_x_thread_audit": _json_value(
+            status_values.get("latest_active_x_thread_audit")
+        ),
         "queued_command_count": command_counts[GatewayCommandStatus.QUEUED.value],
         "dispatched_command_count": command_counts[GatewayCommandStatus.DISPATCHED.value],
         "acked_command_count": command_counts[GatewayCommandStatus.ACKED.value],
@@ -112,6 +174,15 @@ def get_gateway_status() -> dict[str, Any]:
         "token_required": bool(settings.trading_core_token),
         "order_commands_allowed": False,
     }
+
+
+def _json_value(value: str | None) -> Any:
+    if value is None or value == "":
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
 
 
 @router.get("/events/recent")
@@ -129,15 +200,27 @@ def get_recent_gateway_events(
 
 
 @router.get("/commands/status")
-def get_gateway_command_status() -> dict[str, dict[str, int]]:
+def get_gateway_command_status() -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
         counts = get_command_status_counts(connection)
+        command_type_counts = get_command_type_counts(connection)
     finally:
         connection.close()
 
-    return {"counts": counts}
+    order_command_count = sum(
+        count
+        for command_type, count in command_type_counts.items()
+        if command_type in FORBIDDEN_ORDER_COMMAND_TYPES
+    )
+    return {
+        "counts": counts,
+        "command_type_counts": command_type_counts,
+        "order_command_count": order_command_count,
+        "read_only": True,
+        "order_commands_allowed": False,
+    }
 
 
 @router.get("/auth/probe", dependencies=[Depends(require_local_token)])

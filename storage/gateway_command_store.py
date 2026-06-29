@@ -261,6 +261,17 @@ def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def get_command_type_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT LOWER(command_type) AS command_type, COUNT(*) AS count
+        FROM gateway_commands
+        GROUP BY LOWER(command_type)
+        """
+    ).fetchall()
+    return {str(row["command_type"]): int(row["count"]) for row in rows}
+
+
 def expire_queued_commands(connection: sqlite3.Connection) -> None:
     now = datetime_to_wire(utc_now())
     connection.execute(

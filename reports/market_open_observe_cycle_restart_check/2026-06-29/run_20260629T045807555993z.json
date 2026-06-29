@@ -1,0 +1,767 @@
+{
+  "command_counts_after": {
+    "ACKED": 3,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 2,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "command_counts_before": {
+    "ACKED": 3,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 2,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "created_at": "2026-06-29T04:58:07.555993Z",
+  "errors": [],
+  "gateway_command_delta": {
+    "ACKED": 0,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 0,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "live_real_allowed": false,
+  "no_order_side_effects": true,
+  "not_order_intent": true,
+  "observe_only": true,
+  "order_controls_available": false,
+  "queue_commands": false,
+  "real_order_allowed": false,
+  "run_id": "market_open_observe_cycle_run_1a8d2cbf600947209c1ea33815f4a533",
+  "send_order_count_after": 0,
+  "send_order_count_before": 0,
+  "send_order_delta": 0,
+  "stage_summary": {
+    "Candidate": {
+      "counts": {
+        "active_candidate_count": 0,
+        "candidate_count": 0,
+        "context_refreshed_count": 0,
+        "error_count": 0,
+        "source_event_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_created_count": 0,
+          "candidate_updated_count": 0,
+          "closed_count": 0,
+          "context_refreshed_count": 0,
+          "error_count": 0,
+          "source_event_count": 0,
+          "stale_count": 0,
+          "transition_count": 0
+        },
+        "status": {
+          "active_candidate_count": 0,
+          "candidate_count": 0,
+          "context_require_1m_bar": true,
+          "context_require_vwap": false,
+          "enabled": true,
+          "episode_ttl_sec": 1800,
+          "projection_error_count": 0,
+          "source_stale_sec": 300,
+          "state_counts": {
+            "BLOCKED_OBSERVATION": 0,
+            "CLOSED": 0,
+            "CONTEXT_READY": 0,
+            "COOLDOWN": 0,
+            "DATA_WAIT": 0,
+            "DETECTED": 0,
+            "HYDRATING": 0,
+            "STALE": 0,
+            "WATCHING": 0
+          },
+          "tick_stale_sec": 30,
+          "trade_date": "2026-06-29"
+        }
+      },
+      "reason_codes": [
+        "CANDIDATE_DATA_WAIT"
+      ],
+      "stage": "Candidate",
+      "status": "WARN",
+      "summary": "active=0, source_events=0"
+    },
+    "CommandSafety": {
+      "counts": {
+        "send_order_delta": 0
+      },
+      "details": {},
+      "reason_codes": [
+        "ORDER_COMMAND_ZERO_EXPECTED"
+      ],
+      "stage": "CommandSafety",
+      "status": "PASS",
+      "summary": "No send_order GatewayCommand was created."
+    },
+    "EntryTiming": {
+      "counts": {
+        "candidate_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_plan_count": 0,
+        "order_plan_draft_count": 0,
+        "plan_ready_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_count": 0,
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "evaluations": [],
+          "no_plan_count": 0,
+          "not_order_intent": true,
+          "observe_only": true,
+          "order_plan_drafts": [],
+          "plan_ready_count": 0,
+          "status": "COMPLETED",
+          "trade_date": "2026-06-29",
+          "wait_retry_count": 0
+        },
+        "status": {
+          "allow_market_order": false,
+          "config_version": "entry_timing_v1",
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "evaluation_count": 0,
+          "latest_plan_count": 0,
+          "max_plans_per_run": 20,
+          "no_plan_count": 0,
+          "not_order_intent": true,
+          "observe_only": true,
+          "plan_ready_count": 0,
+          "wait_retry_count": 0,
+          "write_order_plan_drafts": true
+        }
+      },
+      "reason_codes": [
+        "ENTRY_TIMING_NO_INPUT"
+      ],
+      "stage": "EntryTiming",
+      "status": "WARN",
+      "summary": "evaluated=0, drafts=0, ready=0"
+    },
+    "LiveSim": {
+      "counts": {
+        "intent_count": 0,
+        "open_order_count": 0,
+        "open_position_count": 0,
+        "order_count": 0,
+        "preflight_status": "WARN"
+      },
+      "details": {
+        "preflight": {
+          "ai_summary": {
+            "advisory_only": true,
+            "included": false,
+            "no_order_side_effects": true
+          },
+          "blocking_reasons": [],
+          "broker_order_path": "LIVE_SIM_ONLY",
+          "checks": [
+            {
+              "details": {},
+              "message": "Core DB is accessible.",
+              "name": "core_db",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "heartbeat_age_sec": 0.380194,
+                "last_heartbeat_at": "2026-06-29T04:58:09.737860Z"
+              },
+              "message": "Gateway heartbeat is fresh.",
+              "name": "gateway_heartbeat",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "gateway_orderable": false
+              },
+              "message": "Gateway is not orderable; command queueing is blocked when requested.",
+              "name": "gateway_orderable",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "trading_allow_live_real": false,
+                "trading_mode": "OBSERVE"
+              },
+              "message": "LIVE_REAL is disabled.",
+              "name": "live_real_disabled",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "account_configured": false
+              },
+              "message": "LIVE_SIM account is not configured.",
+              "name": "live_sim_account_configured",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_mode": "SIMULATION",
+                "broker_env": "SIMULATION",
+                "configured_account_mode": "SIMULATION",
+                "configured_broker_env": "SIMULATION",
+                "configured_server_mode": "SIMULATION",
+                "server_mode": "SIMULATION"
+              },
+              "message": "Account/server/broker modes are simulation-like.",
+              "name": "simulation_like_modes",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "live_sim_kill_switch": true,
+                "queue_commands": false
+              },
+              "message": "LIVE_SIM kill switch is on; command queueing is blocked.",
+              "name": "live_sim_kill_switch",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "live_sim_enabled": false,
+                "live_sim_gateway_command_enabled": false,
+                "live_sim_order_routing_enabled": false,
+                "operating_cycle_enabled": true,
+                "order_plan_routing_enabled": false,
+                "pilot_pipeline_enabled": false,
+                "trading_allow_live_sim": false
+              },
+              "message": "One or more LIVE_SIM operating flags are disabled.",
+              "name": "live_sim_enabled_flags",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "active_member_count": 6441
+              },
+              "message": "Theme membership exists.",
+              "name": "theme_membership",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "data_wait_count": 5,
+                "snapshot_count": 5,
+                "status": "OK",
+                "watchset_count": 0
+              },
+              "message": "ThemeLeadership has DATA_WAIT themes.",
+              "name": "theme_leadership",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "allow_market_order": false,
+                "config_version": "entry_timing_v1",
+                "data_wait_count": 0,
+                "enabled": true,
+                "error_count": 0,
+                "evaluation_count": 0,
+                "latest_plan_count": 0,
+                "max_plans_per_run": 20,
+                "no_plan_count": 0,
+                "not_order_intent": true,
+                "observe_only": true,
+                "plan_ready_count": 0,
+                "wait_retry_count": 0,
+                "write_order_plan_drafts": true
+              },
+              "message": "EntryTiming has zero PLAN_READY order plans.",
+              "name": "entry_timing",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_mode": "SIMULATION",
+                "broker_env": "SIMULATION",
+                "daily_limit_remaining": 3,
+                "dashboard_order_controls_unavailable": true,
+                "dry_run_prerequisite_confirmed": true,
+                "gateway_command_queue_healthy": true,
+                "gateway_heartbeat_ok": true,
+                "gateway_orderable": false,
+                "kill_switch_active": true,
+                "live_real_allowed": false,
+                "live_real_disabled": true,
+                "live_sim_enabled": false,
+                "max_notional": 100000.0,
+                "no_trading_side_effects": false,
+                "openai_tools_disabled": true,
+                "order_tools_disabled": true,
+                "passed": false,
+                "reason_codes": [
+                  "LIVE_SIM_DISABLED",
+                  "ORDER_ROUTING_DISABLED",
+                  "GATEWAY_COMMAND_DISABLED",
+                  "LIVE_SIM_KILL_SWITCH_ACTIVE",
+                  "GATEWAY_NOT_ORDERABLE",
+                  "ACCOUNT_NOT_SIMULATION"
+                ],
+                "risk_prerequisite_confirmed": true,
+                "server_mode": "SIMULATION",
+                "simulation_account_confirmed": false,
+                "simulation_server_confirmed": true,
+                "status": "BLOCKED",
+                "trading_mode": "OBSERVE",
+                "warnings": [
+                  "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+                ]
+              },
+              "message": "LIVE_SIM safety gate preview did not pass.",
+              "name": "live_sim_safety_gate_preview",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_id": "SIMULATION_ACCOUNT_REQUIRED",
+                "allow_exit": true,
+                "blocking_new_buy": false,
+                "broker_open_order_count": 0,
+                "broker_position_count": 0,
+                "code": null,
+                "created_at": "2026-06-29T00:57:48.007098Z",
+                "live_real_allowed": false,
+                "live_sim_only": true,
+                "local_open_order_count": 0,
+                "local_position_count": 0,
+                "mismatch_count": 0,
+                "reconcile_id": "live_sim_reconcile_c129d170036e489e938c987591fd6dee",
+                "snapshot_json": {
+                  "allow_exit": true,
+                  "blocking_new_buy": false,
+                  "broker_order_path": "LIVE_SIM_ONLY",
+                  "broker_snapshot_available": false,
+                  "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+                  "live_real_allowed": false,
+                  "live_sim_only": true,
+                  "mismatches": [],
+                  "open_orders": [],
+                  "positions": []
+                },
+                "status": "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT",
+                "trade_date": "2026-06-29"
+              },
+              "message": "Broker snapshot is unavailable; latest reconcile is local-only.",
+              "name": "reconcile_latest_status",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "limit": 1,
+                "open_order_count": 0
+              },
+              "message": "Open order count is within limit.",
+              "name": "open_order_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "limit": 1,
+                "open_position_count": 0
+              },
+              "message": "Open position count is within limit.",
+              "name": "open_position_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "active_cancel_count": 0
+              },
+              "message": "Active cancel count inspected.",
+              "name": "active_cancel_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "active_exit_count": 0
+              },
+              "message": "Active exit count inspected.",
+              "name": "active_exit_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "lifecycle_error_count": 0
+              },
+              "message": "No unresolved lifecycle errors were found.",
+              "name": "lifecycle_error_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "age_sec": 18355.407959,
+                "imported_at": "2026-06-28 23:52:15",
+                "member_count": 6441,
+                "status": "SUCCESS",
+                "theme_count": 265
+              },
+              "message": "Naver theme importer ran recently.",
+              "name": "naver_import_recent",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "fee_rate": 0.0,
+                "tax_rate": 0.0
+              },
+              "message": "LIVE_SIM fee/tax uses a zero default.",
+              "name": "fee_tax_config",
+              "status": "WARN"
+            },
+            {
+              "details": {},
+              "message": "AI advisory preflight is skipped.",
+              "name": "ai_advisory",
+              "status": "PASS"
+            },
+            {
+              "details": {},
+              "message": "No-Buy Sentinel preflight is skipped.",
+              "name": "no_buy_sentinel",
+              "status": "PASS"
+            }
+          ],
+          "counts": {
+            "active_cancel_count": 0,
+            "active_exit_count": 0,
+            "lifecycle_error_count": 0,
+            "open_order_count": 0,
+            "open_position_count": 0
+          },
+          "gateway": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "command_queue_healthy": true,
+            "gateway_orderable": false,
+            "heartbeat_age_sec": 0.380194,
+            "last_heartbeat_at": "2026-06-29T04:58:09.737860Z",
+            "server_mode": "SIMULATION"
+          },
+          "latest_reconcile": {
+            "account_id": "SIMULATION_ACCOUNT_REQUIRED",
+            "allow_exit": true,
+            "blocking_new_buy": false,
+            "broker_open_order_count": 0,
+            "broker_position_count": 0,
+            "code": null,
+            "created_at": "2026-06-29T00:57:48.007098Z",
+            "live_real_allowed": false,
+            "live_sim_only": true,
+            "local_open_order_count": 0,
+            "local_position_count": 0,
+            "mismatch_count": 0,
+            "reconcile_id": "live_sim_reconcile_c129d170036e489e938c987591fd6dee",
+            "snapshot_json": {
+              "allow_exit": true,
+              "blocking_new_buy": false,
+              "broker_order_path": "LIVE_SIM_ONLY",
+              "broker_snapshot_available": false,
+              "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+              "live_real_allowed": false,
+              "live_sim_only": true,
+              "mismatches": [],
+              "open_orders": [],
+              "positions": []
+            },
+            "status": "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT",
+            "trade_date": "2026-06-29"
+          },
+          "live_real_allowed": false,
+          "live_sim_only": true,
+          "mode": "OBSERVE_CYCLE",
+          "no_buy_summary": {
+            "included": false,
+            "no_order_side_effects": true,
+            "read_only": true
+          },
+          "no_order_side_effects": true,
+          "queue_commands": false,
+          "real_order_allowed": false,
+          "safety_gate": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "daily_limit_remaining": 3,
+            "dashboard_order_controls_unavailable": true,
+            "dry_run_prerequisite_confirmed": true,
+            "gateway_command_queue_healthy": true,
+            "gateway_heartbeat_ok": true,
+            "gateway_orderable": false,
+            "kill_switch_active": true,
+            "live_real_allowed": false,
+            "live_real_disabled": true,
+            "live_sim_enabled": false,
+            "max_notional": 100000.0,
+            "no_trading_side_effects": false,
+            "openai_tools_disabled": true,
+            "order_tools_disabled": true,
+            "passed": false,
+            "reason_codes": [
+              "LIVE_SIM_DISABLED",
+              "ORDER_ROUTING_DISABLED",
+              "GATEWAY_COMMAND_DISABLED",
+              "LIVE_SIM_KILL_SWITCH_ACTIVE",
+              "GATEWAY_NOT_ORDERABLE",
+              "ACCOUNT_NOT_SIMULATION"
+            ],
+            "risk_prerequisite_confirmed": true,
+            "server_mode": "SIMULATION",
+            "simulation_account_confirmed": false,
+            "simulation_server_confirmed": true,
+            "status": "BLOCKED",
+            "trading_mode": "OBSERVE",
+            "warnings": [
+              "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+            ]
+          },
+          "status": "WARN",
+          "warnings": [
+            "Gateway is not orderable; command queueing is blocked when requested.",
+            "LIVE_SIM account is not configured.",
+            "LIVE_SIM kill switch is on; command queueing is blocked.",
+            "One or more LIVE_SIM operating flags are disabled.",
+            "ThemeLeadership has DATA_WAIT themes.",
+            "EntryTiming has zero PLAN_READY order plans.",
+            "LIVE_SIM safety gate preview did not pass.",
+            "Broker snapshot is unavailable; latest reconcile is local-only.",
+            "LIVE_SIM fee/tax uses a zero default."
+          ]
+        },
+        "queue_commands": false,
+        "read_only": true,
+        "status": {
+          "account_id_configured": false,
+          "account_mode": "SIMULATION",
+          "active_exit_signal_count": 0,
+          "allow_buy": true,
+          "allow_exit_sell_close_only": true,
+          "allow_limit_order": true,
+          "allow_market_order": false,
+          "allow_sell": false,
+          "broker_env": "SIMULATION",
+          "broker_order_path": "LIVE_SIM_ONLY",
+          "cancel_enabled": false,
+          "cancel_pending_count": 0,
+          "enabled": false,
+          "execution_count": 0,
+          "exit_engine_enabled": false,
+          "gateway_command_enabled": false,
+          "intent_count": 0,
+          "kill_switch": true,
+          "live_real_allowed": false,
+          "max_daily_notional": 300000.0,
+          "max_daily_order_count": 3,
+          "max_order_notional": 100000.0,
+          "open_order_count": 0,
+          "open_position_count": 0,
+          "order_count": 0,
+          "order_routing_enabled": false,
+          "position_count": 0,
+          "real_order_allowed": false,
+          "reconcile_enabled": true,
+          "rejection_count": 0,
+          "safety_gate": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "daily_limit_remaining": 3,
+            "dashboard_order_controls_unavailable": true,
+            "dry_run_prerequisite_confirmed": true,
+            "gateway_command_queue_healthy": true,
+            "gateway_heartbeat_ok": true,
+            "gateway_orderable": false,
+            "kill_switch_active": true,
+            "live_real_allowed": false,
+            "live_real_disabled": true,
+            "live_sim_enabled": false,
+            "max_notional": 100000.0,
+            "no_trading_side_effects": false,
+            "openai_tools_disabled": true,
+            "order_tools_disabled": true,
+            "passed": false,
+            "reason_codes": [
+              "LIVE_SIM_DISABLED",
+              "ORDER_ROUTING_DISABLED",
+              "GATEWAY_COMMAND_DISABLED",
+              "LIVE_SIM_KILL_SWITCH_ACTIVE",
+              "GATEWAY_NOT_ORDERABLE",
+              "ACCOUNT_NOT_SIMULATION"
+            ],
+            "risk_prerequisite_confirmed": true,
+            "server_mode": "SIMULATION",
+            "simulation_account_confirmed": false,
+            "simulation_server_confirmed": true,
+            "status": "BLOCKED",
+            "trading_mode": "OBSERVE",
+            "warnings": [
+              "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+            ]
+          },
+          "server_mode": "SIMULATION",
+          "warnings": [
+            "LIVE_SIM is simulation-account only.",
+            "LIVE_REAL remains disabled.",
+            "Dashboard order buttons are not available."
+          ]
+        }
+      },
+      "reason_codes": [
+        "ORDER_COMMAND_ZERO_EXPECTED",
+        "LIVE_SIM_DISABLED_EXPECTED",
+        "LIVE_SIM_KILL_SWITCH_ON_EXPECTED"
+      ],
+      "stage": "LiveSim",
+      "status": "PASS",
+      "summary": "read-only preflight=WARN, enabled=False, kill=True"
+    },
+    "Risk": {
+      "counts": {
+        "block_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_observation_count": 0,
+        "observe_pass_count": 0,
+        "strategy_observation_count": 0
+      },
+      "details": {
+        "result": {
+          "block_count": 0,
+          "caution_count": 0,
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "observe_only": true,
+          "observe_pass_count": 0,
+          "order_routing_enabled": false,
+          "run_id": "risk_run_2e64445c92ab4179a08fee039b1d7ca3",
+          "status": "COMPLETED",
+          "strategy_observation_count": 0,
+          "trade_date": "2026-06-29"
+        },
+        "status": {
+          "block_count": 0,
+          "caution_count": 0,
+          "config_version": "observe_v1",
+          "configured_observe_only": true,
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "latest_observation_count": 0,
+          "observe_only": true,
+          "observe_pass_count": 0,
+          "order_routing_enabled": false,
+          "stale_tick_sec": 30,
+          "strategy_stale_sec": 300
+        }
+      },
+      "reason_codes": [
+        "RISK_EMPTY"
+      ],
+      "stage": "Risk",
+      "status": "WARN",
+      "summary": "evaluated=0, pass=0"
+    },
+    "Strategy": {
+      "counts": {
+        "candidate_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_observation_count": 0,
+        "matched_observation_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_count": 0,
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "matched_observation_count": 0,
+          "observe_only": true,
+          "run_id": "strategy_run_082e952dfcd9477aac11ebb0ec88e8ce",
+          "status": "COMPLETED",
+          "trade_date": "2026-06-29"
+        },
+        "status": {
+          "allowed_candidate_states": [
+            "CONTEXT_READY",
+            "WATCHING"
+          ],
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "forming_count": 0,
+          "latest_observation_count": 0,
+          "matched_observation_count": 0,
+          "observe_only": true,
+          "require_context_ready": true,
+          "stale_tick_sec": 30
+        }
+      },
+      "reason_codes": [
+        "STRATEGY_EMPTY"
+      ],
+      "stage": "Strategy",
+      "status": "WARN",
+      "summary": "evaluated=0, matched=0"
+    },
+    "Theme": {
+      "counts": {
+        "active_theme_count": 265,
+        "error_count": 0,
+        "member_count": 6441,
+        "snapshot_count": 265,
+        "theme_count_after": 265,
+        "theme_count_before": 265,
+        "watchset_count": 0
+      },
+      "details": {
+        "leadership_result": {
+          "candidate_apply_result": {
+            "candidate_created_count": 0,
+            "candidate_updated_count": 0,
+            "closed_count": 0,
+            "duplicate_source_count": 0,
+            "error_count": 0,
+            "source_event_count": 0,
+            "transition_count": 0
+          },
+          "status": "OK",
+          "watchset_count": 0
+        },
+        "snapshot_result": {
+          "error_count": 0,
+          "processed_theme_count": 265,
+          "snapshot_count": 265
+        }
+      },
+      "reason_codes": [],
+      "stage": "Theme",
+      "status": "PASS",
+      "summary": "members=6441, snapshots=265, watchset=0"
+    }
+  },
+  "status": "COMPLETED_WITH_WARNINGS",
+  "trade_date": "2026-06-29",
+  "warnings": [
+    "Candidate: CANDIDATE_DATA_WAIT",
+    "Strategy: STRATEGY_EMPTY",
+    "Risk: RISK_EMPTY",
+    "EntryTiming: ENTRY_TIMING_NO_INPUT"
+  ]
+}

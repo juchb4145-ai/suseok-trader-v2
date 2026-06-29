@@ -20,7 +20,9 @@ from gateway.kiwoom_client import (
     KiwoomOrderResult,
     broker_env_from_server_gubun,
     condition_event_payload,
+    normalize_realtime_exchange,
     normalize_code,
+    realtime_code_for_exchange,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
 from gateway.transport import GatewayTransportError
@@ -35,10 +37,14 @@ class KiwoomGatewayRuntimeConfig:
     condition_index: int | None = None
     condition_realtime: bool = True
     realtime_codes: tuple[str, ...] = ()
+    realtime_exchange: str = "KRX"
     observe_only: bool = True
     account: str = ""
     realtime_recover_stale_sec: float = 45.0
-    realtime_recover_interval_sec: float = 60.0
+    realtime_recover_interval_sec: float = 300.0
+    realtime_callback_timeout_sec: float = 15.0
+    condition_load_timeout_sec: float = 10.0
+    condition_load_max_retry: int = 1
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -176,12 +182,33 @@ class KiwoomGatewayRuntime:
         self._login_finished_at = ""
         self._login_threaded = False
         self._condition_load_state = "IDLE"
+        self._condition_load_requested_at: datetime | None = None
+        self._condition_load_retry_count = 0
+        self._condition_load_timeout_count = 0
+        self._condition_load_call_in_progress = False
+        self._latest_condition_ver_callback_at: datetime | None = None
+        self._latest_condition_ver_result: dict[str, Any] = {}
         self._registered_realtime_codes: set[str] = set()
         self._last_price_tick_at: datetime | None = None
+        self._last_quote_at: datetime | None = None
+        self._last_realtime_callback_at: datetime | None = None
         self._last_realtime_registration_at: datetime | None = None
         self._last_realtime_recover_at: datetime | None = None
         self._realtime_recover_count = 0
         self._realtime_recover_error = ""
+        self._quote_event_count = 0
+        self._realtime_callback_count = 0
+        self._parsed_price_tick_count = 0
+        self._realtime_parse_error_count = 0
+        self._latest_realtime_parse_error: dict[str, Any] = {}
+        self._real_type_counts: dict[str, int] = {}
+        self._realtime_callback_real_type_counts: dict[str, int] = {}
+        self._last_realtime_registration_result: dict[str, Any] = {}
+        self._realtime_registration_requested_count = 0
+        self._realtime_registration_success_count = 0
+        self._raw_callback_counts: dict[str, int] = {}
+        self._latest_callback_at_by_method: dict[str, str] = {}
+        self._active_x_thread_audit: deque[dict[str, Any]] = deque(maxlen=50)
 
     def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
         self.emit_event(
@@ -294,13 +321,58 @@ class KiwoomGatewayRuntime:
             "login_finished_at": self._login_finished_at,
             "login_threaded": self._login_threaded,
             "condition_load_state": self._condition_load_state,
+            "condition_load_requested_at": _datetime_or_empty(
+                self._condition_load_requested_at
+            ),
+            "condition_load_retry_count": self._condition_load_retry_count,
+            "condition_load_timeout_count": self._condition_load_timeout_count,
+            "latest_condition_ver_callback_at": _datetime_or_empty(
+                self._latest_condition_ver_callback_at
+            ),
+            "latest_condition_ver_result": dict(self._latest_condition_ver_result),
             "registered_realtime_code_count": len(self._registered_realtime_codes),
+            "realtime_registered_codes": sorted(self._registered_realtime_codes),
+            "realtime_exchange": self._realtime_exchange(),
+            "realtime_registered_kiwoom_codes": [
+                realtime_code_for_exchange(code, self._realtime_exchange())
+                for code in sorted(self._registered_realtime_codes)
+            ],
             "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
+            "latest_quote_at": _datetime_or_empty(self._last_quote_at),
+            "latest_realtime_callback_at": _datetime_or_empty(
+                self._last_realtime_callback_at
+            ),
+            "quote_event_count": self._quote_event_count,
+            "raw_realtime_callback_count": self._realtime_callback_count,
+            "realtime_callback_count": self._realtime_callback_count,
+            "parsed_price_tick_count": self._parsed_price_tick_count,
+            "realtime_parse_error_count": self._realtime_parse_error_count,
+            "latest_realtime_parse_error": dict(self._latest_realtime_parse_error),
+            "realtime_real_type_counts": dict(sorted(self._real_type_counts.items())),
+            "realtime_callback_real_type_counts": dict(
+                sorted(self._realtime_callback_real_type_counts.items())
+            ),
             "latest_realtime_registration_at": _datetime_or_empty(
                 self._last_realtime_registration_at
             ),
+            "latest_realtime_registration_result": dict(
+                self._last_realtime_registration_result
+            ),
+            "realtime_registration_requested_count": (
+                self._realtime_registration_requested_count
+            ),
+            "realtime_registration_success_count": self._realtime_registration_success_count,
+            "realtime_subscription_health": self._realtime_subscription_health(),
             "realtime_recover_count": self._realtime_recover_count,
             "realtime_recover_error": self._realtime_recover_error,
+            "raw_callback_counts": dict(sorted(self._raw_callback_counts.items())),
+            "latest_callback_at_by_method": dict(
+                sorted(self._latest_callback_at_by_method.items())
+            ),
+            "active_x_thread_audit": list(self._active_x_thread_audit),
+            "latest_active_x_thread_audit": (
+                dict(self._active_x_thread_audit[-1]) if self._active_x_thread_audit else {}
+            ),
             "queued_event_count": len(self._event_queue),
             "posted_event_count": self._posted_count,
             "poll_count": self._polled_count,
@@ -346,6 +418,7 @@ class KiwoomGatewayRuntime:
 
     def on_condition_load_result(self, success: bool, message: str = "") -> None:
         self._condition_load_state = "LOADED" if success else "FAILED"
+        self._condition_load_requested_at = None
         self.emit(
             "condition_load_result",
             {
@@ -358,6 +431,7 @@ class KiwoomGatewayRuntime:
     def on_condition_loaded(self, conditions: Iterable[ConditionInfo]) -> None:
         loaded = [condition.to_dict() for condition in list(conditions or [])]
         self._condition_load_state = "LOADED"
+        self._condition_load_requested_at = None
         self.emit("condition_loaded", {"conditions": loaded})
         self._send_configured_condition(loaded)
 
@@ -385,13 +459,94 @@ class KiwoomGatewayRuntime:
 
     def on_price_tick(self, payload: Mapping[str, Any]) -> None:
         self._last_price_tick_at = utc_now()
+        self._parsed_price_tick_count += 1
+        self._observe_real_type(payload)
         self.emit("price_tick", dict(payload))
+
+    def on_quote(self, payload: Mapping[str, Any]) -> None:
+        self._last_quote_at = utc_now()
+        self._quote_event_count += 1
+        self._observe_real_type(payload)
+        self.emit("quote_tick", dict(payload))
+
+    def on_realtime_data(
+        self,
+        *,
+        code: str,
+        real_type: str,
+        real_data_present: bool = False,
+    ) -> None:
+        self._last_realtime_callback_at = utc_now()
+        self._realtime_callback_count += 1
+        normalized_real_type = str(real_type or "").strip() or "UNKNOWN"
+        self._realtime_callback_real_type_counts[normalized_real_type] = (
+            self._realtime_callback_real_type_counts.get(normalized_real_type, 0) + 1
+        )
+
+    def on_realtime_registration_result(self, payload: Mapping[str, Any]) -> None:
+        normalized = dict(payload)
+        self._last_realtime_registration_result = normalized
+        self._realtime_registration_requested_count += 1
+        if normalized.get("success") is True:
+            self._realtime_registration_success_count += 1
+        self.emit(
+            "gateway_log",
+            {
+                "message": "realtime registration result",
+                **normalized,
+            },
+        )
+
+    def on_realtime_parse_error(self, payload: Mapping[str, Any]) -> None:
+        self._realtime_parse_error_count += 1
+        self._latest_realtime_parse_error = dict(payload)
+        self.emit(
+            "gateway_error",
+            {
+                "message": "REALTIME_PARSE_ERROR",
+                **dict(payload),
+            },
+        )
+
+    def on_active_x_thread_audit(self, payload: Mapping[str, Any]) -> None:
+        audit = dict(payload)
+        self._active_x_thread_audit.append(audit)
+        method = str(audit.get("method") or "")
+        phase = str(audit.get("phase") or "")
+        if phase == "CALLBACK" and method:
+            self._raw_callback_counts[method] = self._raw_callback_counts.get(method, 0) + 1
+            timestamp = str(audit.get("timestamp") or datetime_to_wire(utc_now()))
+            self._latest_callback_at_by_method[method] = timestamp
+            if method == "OnReceiveConditionVer":
+                self._latest_condition_ver_callback_at = utc_now()
+                self._latest_condition_ver_result = {
+                    "result": audit.get("result"),
+                    "message": audit.get("message"),
+                    "timestamp": timestamp,
+                }
+        if phase in {"CALL", "RESULT"} and method in {
+            "CommConnect",
+            "GetConditionLoad",
+            "SendCondition",
+            "SetRealReg",
+            "QAxWidget.create",
+            "QApplication.exec",
+        }:
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "active_x_thread_audit",
+                    **audit,
+                },
+            )
 
     def register_realtime_codes(self, codes: Iterable[str]) -> None:
         normalized_codes = [normalize_code(code) for code in codes if str(code or "").strip()]
         if not normalized_codes:
             return
-        self.client.register_realtime(normalized_codes)
+        exchange = self._realtime_exchange()
+        kiwoom_codes = [realtime_code_for_exchange(code, exchange) for code in normalized_codes]
+        self.client.register_realtime(kiwoom_codes)
         self._registered_realtime_codes.update(normalized_codes)
         self._last_realtime_registration_at = utc_now()
 
@@ -437,7 +592,10 @@ class KiwoomGatewayRuntime:
             remove_all = getattr(self.client, "remove_all_realtime", None)
             if callable(remove_all):
                 remove_all()
-            self.client.register_realtime(codes)
+            exchange = self._realtime_exchange()
+            self.client.register_realtime(
+                [realtime_code_for_exchange(code, exchange) for code in codes]
+            )
         except Exception as exc:
             self._last_error = str(exc)
             self._realtime_recover_error = str(exc)
@@ -459,6 +617,16 @@ class KiwoomGatewayRuntime:
                 "message": "realtime registration reset after stale price tick",
                 "registered_realtime_code_count": len(codes),
                 "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
+                "latest_quote_at": _datetime_or_empty(self._last_quote_at),
+                "latest_realtime_callback_at": _datetime_or_empty(
+                    self._last_realtime_callback_at
+                ),
+                "quote_event_count": self._quote_event_count,
+                "realtime_callback_count": self._realtime_callback_count,
+                "realtime_real_type_counts": dict(sorted(self._real_type_counts.items())),
+                "realtime_callback_real_type_counts": dict(
+                    sorted(self._realtime_callback_real_type_counts.items())
+                ),
             },
         )
 
@@ -512,18 +680,68 @@ class KiwoomGatewayRuntime:
             close()
 
     def _load_conditions(self) -> None:
+        self._condition_load_state = "LOADING"
+        self._condition_load_requested_at = utc_now()
+        self._condition_load_call_in_progress = True
         try:
             result = int(self.client.load_conditions() or 0)
         except Exception as exc:
             self._condition_load_state = "FAILED"
+            self._condition_load_requested_at = None
+            self._condition_load_call_in_progress = False
             self.emit("gateway_error", {"message": f"CONDITION_LOAD_FAILED:{exc}"})
             return
-        self._condition_load_state = "LOADING" if result > 0 else "FAILED"
+        self._condition_load_call_in_progress = False
+        if result <= 0:
+            self._condition_load_state = "FAILED"
+            self._condition_load_requested_at = None
         if result <= 0:
             self.emit(
                 "condition_load_result",
                 {"success": False, "message": "GetConditionLoad failed"},
             )
+
+    def check_condition_load_timeout(self) -> None:
+        if self._condition_load_call_in_progress:
+            return
+        if self._condition_load_state != "LOADING" or self._condition_load_requested_at is None:
+            return
+        timeout_sec = max(float(self.config.condition_load_timeout_sec), 1.0)
+        now = utc_now()
+        if (now - self._condition_load_requested_at).total_seconds() < timeout_sec:
+            return
+        self._condition_load_timeout_count += 1
+        reason_codes = [
+            "CONDITION_VER_CALLBACK_TIMEOUT",
+            "CONDITION_LOAD_TIMEOUT",
+            "ACTIVE_X_CALLBACK_SUSPECTED",
+            "POSSIBLE_THREADING_ISSUE",
+        ]
+        if self._condition_load_retry_count < max(int(self.config.condition_load_max_retry), 0):
+            self._condition_load_retry_count += 1
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "CONDITION_VER_CALLBACK_TIMEOUT_RETRYING",
+                    "reason_codes": reason_codes,
+                    "condition_load_retry_count": self._condition_load_retry_count,
+                    "condition_load_timeout_sec": timeout_sec,
+                },
+            )
+            self._load_conditions()
+            return
+        self._condition_load_state = "CALLBACK_TIMEOUT"
+        self._condition_load_requested_at = None
+        self.emit(
+            "gateway_error",
+            {
+                "message": "CONDITION_VER_CALLBACK_TIMEOUT",
+                "reason_codes": reason_codes,
+                "condition_load_timeout_count": self._condition_load_timeout_count,
+                "condition_load_retry_count": self._condition_load_retry_count,
+                "condition_load_timeout_sec": timeout_sec,
+            },
+        )
 
     def _send_configured_condition(self, conditions: list[dict[str, Any]]) -> None:
         condition_name = self.config.condition_name
@@ -634,12 +852,58 @@ class KiwoomGatewayRuntime:
         except Exception:
             return normalize_code(code)
 
+    def _observe_real_type(self, payload: Mapping[str, Any]) -> None:
+        metadata = payload.get("metadata")
+        if not isinstance(metadata, Mapping):
+            return
+        real_type = str(metadata.get("real_type") or "").strip() or "UNKNOWN"
+        self._real_type_counts[real_type] = self._real_type_counts.get(real_type, 0) + 1
+
+    def _realtime_subscription_health(self) -> str:
+        if self._realtime_parse_error_count and not self._parsed_price_tick_count:
+            return "PARSE_ERROR"
+        if self._realtime_callback_count > 0:
+            return "CALLBACK_ACTIVE"
+        if not self._registered_realtime_codes and self._realtime_registration_requested_count <= 0:
+            return "NOT_REQUESTED"
+        if self._last_realtime_registration_at is None:
+            return "REGISTERED_WAITING_CALLBACK"
+        age_sec = (utc_now() - self._last_realtime_registration_at).total_seconds()
+        timeout_sec = max(float(self.config.realtime_callback_timeout_sec), 1.0)
+        if age_sec >= timeout_sec:
+            return "CALLBACK_TIMEOUT"
+        return "REGISTERED_WAITING_CALLBACK"
+
+    def _realtime_exchange(self) -> str:
+        return normalize_realtime_exchange(self.config.realtime_exchange)
+
 
 def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
+    client.active_x_thread_audit.connect(
+        lambda payload: runtime.on_active_x_thread_audit(dict(payload))
+    )
+    drain_audit = getattr(client, "drain_thread_audit_events", None)
+    if callable(drain_audit):
+        for payload in drain_audit():
+            runtime.on_active_x_thread_audit(dict(payload))
     client.connected.connect(
         lambda ok, code, message: runtime.on_connected(bool(ok), int(code), str(message or ""))
     )
     client.price_tick_received.connect(lambda payload: runtime.on_price_tick(dict(payload)))
+    client.quote_received.connect(lambda payload: runtime.on_quote(dict(payload)))
+    client.realtime_data_received.connect(
+        lambda code, real_type, real_data_present=False: runtime.on_realtime_data(
+            code=str(code or ""),
+            real_type=str(real_type or ""),
+            real_data_present=bool(real_data_present),
+        )
+    )
+    client.realtime_parse_error.connect(
+        lambda payload: runtime.on_realtime_parse_error(dict(payload))
+    )
+    client.realtime_registration_result.connect(
+        lambda payload: runtime.on_realtime_registration_result(dict(payload))
+    )
     client.message_received.connect(
         lambda message: runtime.emit("gateway_log", {"message": str(message or "")})
     )

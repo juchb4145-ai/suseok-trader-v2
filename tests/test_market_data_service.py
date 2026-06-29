@@ -177,8 +177,7 @@ def test_price_missing_tick_is_ignored_without_polluting_latest_or_bars(tmp_path
     assert sample_count == 0
     assert bar_count == 0
     assert latest is None
-    assert error["event_id"] == "evt_quote_only"
-    assert "INVALID_PRICE_TICK" in error["error_message"]
+    assert error is None
 
 
 def test_condition_event_projection_preserves_actions_and_metadata(tmp_path) -> None:

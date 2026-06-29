@@ -17,6 +17,7 @@ from storage.event_store import (
     get_gateway_status_values,
     list_recent_gateway_events,
 )
+from storage.gateway_command_store import FORBIDDEN_ORDER_COMMAND_TYPES
 
 from services.ai_advisory.storage import (
     build_status as build_ai_advisory_status,
@@ -149,6 +150,20 @@ COMMAND_STATUSES = (
     "CANCELLED",
 )
 
+STAGE_ENDPOINTS = {
+    "Core": "/health",
+    "Gateway": "/api/gateway/status",
+    "MarketData": "/api/market-data/status",
+    "Theme": "/api/themes/status",
+    "Candidate": "/api/candidates/status",
+    "Strategy": "/api/strategy/status",
+    "Risk": "/api/risk/status",
+    "EntryTiming": "/api/entry-timing/status",
+    "LiveSim": "/api/live-sim/status",
+    "OrderSafety": "/api/gateway/commands/status",
+    "ObserveCycle": "/api/operator/observe-cycle/runs/latest",
+}
+
 
 def build_dashboard_snapshot(
     connection: sqlite3.Connection,
@@ -163,12 +178,16 @@ def build_dashboard_snapshot(
 
     gateway_status_values = get_gateway_status_values(connection)
     command_counts = _command_status_counts(connection)
+    command_type_counts = _command_type_counts(connection)
+    order_command_count = _order_command_count(command_type_counts)
     gateway_recent_events = list_recent_gateway_events(connection, limit=bounded_limit)
+    latest_gateway_heartbeat_payload = _latest_gateway_heartbeat_payload(gateway_recent_events)
     gateway_status = _gateway_status_section(
         settings,
         gateway_status_values,
         command_counts,
         recent_event_count=count_recent_gateway_events(connection),
+        latest_heartbeat_payload=latest_gateway_heartbeat_payload,
     )
 
     market_data_status = get_market_data_status(connection, settings=settings)
@@ -296,6 +315,8 @@ def build_dashboard_snapshot(
         risk_status_counts=risk_status_counts,
         entry_timing_status=entry_timing_status,
         latest_order_plan_drafts=latest_order_plan_drafts,
+        command_type_counts=command_type_counts,
+        order_command_count=order_command_count,
         ai_insights=ai_insights,
         ai_request_status_counts=ai_request_status_counts,
         codex_draft_count=codex_draft_count,
@@ -679,7 +700,9 @@ def _gateway_status_section(
     command_counts: dict[str, int],
     *,
     recent_event_count: int,
+    latest_heartbeat_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    heartbeat_payload = dict(latest_heartbeat_payload or {})
     return {
         "last_event_received_at": status_values.get("last_event_received_at"),
         "last_heartbeat_at": status_values.get("last_heartbeat_at"),
@@ -694,6 +717,63 @@ def _gateway_status_section(
         "order_commands_allowed": False,
         "live_sim_order_command_allowed": settings.live_sim_gateway_command_enabled,
         "command_status_counts": command_counts,
+        "kiwoom_logged_in": heartbeat_payload.get("kiwoom_logged_in"),
+        "login_threaded": heartbeat_payload.get("login_threaded"),
+        "server_mode": heartbeat_payload.get("server_mode"),
+        "condition_load_state": heartbeat_payload.get("condition_load_state"),
+        "condition_load_requested_at": heartbeat_payload.get("condition_load_requested_at"),
+        "condition_load_retry_count": heartbeat_payload.get("condition_load_retry_count"),
+        "condition_load_timeout_count": heartbeat_payload.get("condition_load_timeout_count"),
+        "latest_condition_ver_callback_at": heartbeat_payload.get(
+            "latest_condition_ver_callback_at"
+        ),
+        "latest_condition_ver_result": heartbeat_payload.get("latest_condition_ver_result")
+        or {},
+        "registered_realtime_code_count": heartbeat_payload.get(
+            "registered_realtime_code_count"
+        ),
+        "realtime_registered_codes": heartbeat_payload.get("realtime_registered_codes") or [],
+        "realtime_exchange": heartbeat_payload.get("realtime_exchange") or "",
+        "realtime_registered_kiwoom_codes": (
+            heartbeat_payload.get("realtime_registered_kiwoom_codes") or []
+        ),
+        "realtime_registration_requested_count": heartbeat_payload.get(
+            "realtime_registration_requested_count"
+        ),
+        "realtime_registration_success_count": heartbeat_payload.get(
+            "realtime_registration_success_count"
+        ),
+        "latest_realtime_registration_at": heartbeat_payload.get(
+            "latest_realtime_registration_at"
+        ),
+        "latest_realtime_registration_result": heartbeat_payload.get(
+            "latest_realtime_registration_result"
+        )
+        or {},
+        "latest_realtime_callback_at": heartbeat_payload.get(
+            "latest_realtime_callback_at"
+        ),
+        "raw_realtime_callback_count": heartbeat_payload.get("raw_realtime_callback_count"),
+        "realtime_callback_count": heartbeat_payload.get("realtime_callback_count"),
+        "parsed_price_tick_count": heartbeat_payload.get("parsed_price_tick_count"),
+        "realtime_parse_error_count": heartbeat_payload.get("realtime_parse_error_count"),
+        "latest_realtime_parse_error": heartbeat_payload.get("latest_realtime_parse_error")
+        or {},
+        "realtime_subscription_health": heartbeat_payload.get(
+            "realtime_subscription_health"
+        ),
+        "realtime_callback_real_type_counts": heartbeat_payload.get(
+            "realtime_callback_real_type_counts"
+        )
+        or {},
+        "realtime_recover_count": heartbeat_payload.get("realtime_recover_count"),
+        "raw_callback_counts": heartbeat_payload.get("raw_callback_counts") or {},
+        "latest_callback_at_by_method": heartbeat_payload.get("latest_callback_at_by_method")
+        or {},
+        "latest_active_x_thread_audit": heartbeat_payload.get(
+            "latest_active_x_thread_audit"
+        )
+        or {},
     }
 
 
@@ -710,6 +790,8 @@ def _pipeline_summary(
     risk_status_counts: dict[str, int],
     entry_timing_status: dict[str, Any],
     latest_order_plan_drafts: list[dict[str, Any]],
+    command_type_counts: dict[str, int],
+    order_command_count: int,
     ai_insights: list[dict[str, Any]],
     ai_request_status_counts: dict[str, int],
     codex_draft_count: int,
@@ -731,6 +813,7 @@ def _pipeline_summary(
             risk_status=risk_status,
             entry_timing_status=entry_timing_status,
             live_sim_status=live_sim_status,
+            order_command_count=order_command_count,
             latest_observe_cycle=latest_observe_cycle,
         ),
         "latest_observe_cycle": latest_observe_cycle,
@@ -768,11 +851,20 @@ def _pipeline_summary(
         "entry_timing": {
             "latest_plan_count": entry_timing_status["latest_plan_count"],
             "plan_ready_count": entry_timing_status["plan_ready_count"],
+            "wait_retry_count": entry_timing_status.get("wait_retry_count", 0),
+            "data_wait_count": entry_timing_status.get("data_wait_count", 0),
+            "no_plan_count": entry_timing_status.get("no_plan_count", 0),
             "evaluation_count": entry_timing_status["evaluation_count"],
             "error_count": entry_timing_status["error_count"],
             "latest_order_plan_draft_count": len(latest_order_plan_drafts),
             "observe_only": True,
             "not_order_intent": True,
+        },
+        "order_safety": {
+            "order_command_count": order_command_count,
+            "command_type_counts": command_type_counts,
+            "order_commands_allowed": False,
+            "read_only": True,
         },
         "dry_run": {
             "enabled": dry_run_status["enabled"],
@@ -915,6 +1007,7 @@ def _pipeline_stage_statuses(
     risk_status: dict[str, Any],
     entry_timing_status: dict[str, Any],
     live_sim_status: dict[str, Any],
+    order_command_count: int,
     latest_observe_cycle: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     last_run_status = None if latest_observe_cycle is None else latest_observe_cycle.get("status")
@@ -927,36 +1020,8 @@ def _pipeline_stage_statuses(
             updated_at=None,
             reason_codes=[],
         ),
-        _stage_status(
-            "Gateway",
-            "PASS" if gateway_status.get("last_heartbeat_at") else "BLOCK",
-            "Gateway heartbeat exists."
-            if gateway_status.get("last_heartbeat_at")
-            else "Gateway heartbeat is missing.",
-            count=gateway_status.get("recent_event_count"),
-            updated_at=gateway_status.get("last_heartbeat_at"),
-            reason_codes=[]
-            if gateway_status.get("last_heartbeat_at")
-            else ["GATEWAY_HEARTBEAT_MISSING"],
-        ),
-        _stage_status(
-            "MarketData",
-            "BLOCK"
-            if market_data_status.get("projection_error_count")
-            else "PASS"
-            if market_data_status.get("latest_tick_count")
-            else "BLOCK",
-            "Market ticks are present."
-            if market_data_status.get("latest_tick_count")
-            else "No latest ticks are present.",
-            count=market_data_status.get("latest_tick_count"),
-            updated_at=None,
-            reason_codes=["MARKET_PROJECTION_ERROR"]
-            if market_data_status.get("projection_error_count")
-            else []
-            if market_data_status.get("latest_tick_count")
-            else ["TICK_MISSING"],
-        ),
+        _gateway_stage_status(gateway_status),
+        _market_data_stage_status(market_data_status),
         _stage_status(
             "Theme",
             "BLOCK"
@@ -1038,6 +1103,16 @@ def _pipeline_stage_statuses(
             ],
         ),
         _stage_status(
+            "OrderSafety",
+            "BLOCK" if order_command_count else "PASS",
+            "Order-like GatewayCommand rows exist."
+            if order_command_count
+            else "No order-like GatewayCommand row exists.",
+            count=order_command_count,
+            updated_at=None,
+            reason_codes=["ORDER_COMMAND_ZERO_EXPECTED"],
+        ),
+        _stage_status(
             "ObserveCycle",
             "UNKNOWN" if latest_observe_cycle is None else "PASS",
             "No observe cycle run has been recorded yet."
@@ -1067,8 +1142,100 @@ def _stage_status(
         "summary": summary,
         "count": count,
         "updated_at": updated_at,
+        "last_updated_at": updated_at,
         "reason_codes": reason_codes,
+        "endpoint": STAGE_ENDPOINTS.get(stage),
     }
+
+
+def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
+    if not gateway_status.get("last_heartbeat_at"):
+        return _stage_status(
+            "Gateway",
+            "BLOCK",
+            "Gateway heartbeat is missing.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=None,
+            reason_codes=["GATEWAY_HEARTBEAT_MISSING"],
+        )
+    registered_count = int(gateway_status.get("registered_realtime_code_count") or 0)
+    callback_count = int(gateway_status.get("realtime_callback_count") or 0)
+    recover_count = int(gateway_status.get("realtime_recover_count") or 0)
+    condition_state = str(gateway_status.get("condition_load_state") or "").upper()
+    if condition_state == "CALLBACK_TIMEOUT":
+        return _stage_status(
+            "Gateway",
+            "BLOCK",
+            "Condition load callback timeout suggests ActiveX callback delivery trouble.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=gateway_status.get("last_heartbeat_at"),
+            reason_codes=[
+                "CONDITION_VER_CALLBACK_TIMEOUT",
+                "ACTIVE_X_CALLBACK_SUSPECTED",
+                "POSSIBLE_THREADING_ISSUE",
+            ],
+        )
+    health = str(gateway_status.get("realtime_subscription_health") or "")
+    if health == "CALLBACK_TIMEOUT" or (
+        registered_count > 0 and callback_count <= 0 and recover_count > 0
+    ):
+        return _stage_status(
+            "Gateway",
+            "BLOCK",
+            "Realtime registration exists, but Kiwoom realtime callbacks are missing.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=gateway_status.get("last_heartbeat_at"),
+            reason_codes=["REALTIME_CALLBACK_MISSING", "ACTIVE_X_CALLBACK_SUSPECTED"],
+        )
+    if health == "PARSE_ERROR":
+        return _stage_status(
+            "Gateway",
+            "BLOCK",
+            "Realtime callbacks arrived, but price tick parsing failed.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=gateway_status.get("last_heartbeat_at"),
+            reason_codes=["REALTIME_PARSE_ERROR"],
+        )
+    return _stage_status(
+        "Gateway",
+        "PASS",
+        "Gateway heartbeat exists.",
+        count=gateway_status.get("recent_event_count"),
+        updated_at=gateway_status.get("last_heartbeat_at"),
+        reason_codes=[],
+    )
+
+
+def _market_data_stage_status(market_data_status: dict[str, Any]) -> dict[str, Any]:
+    latest_tick_count = int(market_data_status.get("latest_tick_count") or 0)
+    fresh_tick_count = int(market_data_status.get("fresh_tick_count") or 0)
+    stale_tick_count = int(market_data_status.get("stale_tick_count") or 0)
+    recent_projection_error_count = int(
+        market_data_status.get("recent_projection_error_count") or 0
+    )
+    historical_projection_error_count = int(market_data_status.get("projection_error_count") or 0)
+    reason_codes: list[str] = []
+    if recent_projection_error_count:
+        reason_codes.append("MARKET_PROJECTION_ERROR")
+    if latest_tick_count <= 0:
+        reason_codes.append("TICK_MISSING")
+    elif fresh_tick_count <= 0:
+        reason_codes.append("TICK_STALE")
+
+    status = "PASS" if not reason_codes else "BLOCK"
+    summary = (
+        f"fresh_ticks={fresh_tick_count}, stale_ticks={stale_tick_count}, "
+        f"recent_projection_errors={recent_projection_error_count}, "
+        f"historical_projection_errors={historical_projection_error_count}"
+    )
+    return _stage_status(
+        "MarketData",
+        status,
+        summary,
+        count=latest_tick_count,
+        updated_at=None,
+        reason_codes=reason_codes,
+    )
 
 
 def _candidate_rows(
@@ -1157,6 +1324,25 @@ def _command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def _command_type_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    rows = connection.execute(
+        """
+        SELECT LOWER(command_type) AS command_type, COUNT(*) AS count
+        FROM gateway_commands
+        GROUP BY LOWER(command_type)
+        """
+    ).fetchall()
+    return {str(row["command_type"]): int(row["count"]) for row in rows}
+
+
+def _order_command_count(command_type_counts: dict[str, int]) -> int:
+    return sum(
+        int(count)
+        for command_type, count in command_type_counts.items()
+        if command_type in FORBIDDEN_ORDER_COMMAND_TYPES or "order" in command_type
+    )
+
+
 def _enum_counts(
     connection: sqlite3.Connection,
     table_name: str,
@@ -1209,6 +1395,16 @@ def _list_gateway_command_failures(
         item["payload"] = json.loads(item.pop("payload_json"))
         failures.append(item)
     return failures
+
+
+def _latest_gateway_heartbeat_payload(events: list[dict[str, Any]]) -> dict[str, Any]:
+    for event in events:
+        if str(event.get("event_type") or "") != "heartbeat":
+            continue
+        payload = event.get("payload")
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {}
 
 
 def _bounded_limit(limit: int | None, settings: Settings) -> int:

@@ -4,6 +4,7 @@ from apps.core_api import app
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from storage.sqlite import open_connection
+from tools.run_market_open_observe_cycle import write_observe_cycle_report
 
 
 def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, monkeypatch) -> None:
@@ -100,6 +101,55 @@ def test_observe_cycle_requires_token_when_configured(tmp_path, monkeypatch) -> 
     assert auth_probe_missing.status_code == 401
     assert auth_probe_ok.status_code == 200
     assert auth_probe_ok.json()["read_only"] is True
+
+
+def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> None:
+    payload = {
+        "run_id": "cycle_1",
+        "trade_date": "2026-06-29",
+        "status": "COMPLETED",
+        "stage_summary": {
+            "EntryTiming": {
+                "status": "PASS",
+                "reason_codes": [],
+                "summary": "evaluated=1, drafts=1, ready=1",
+                "counts": {"evaluated_count": 1, "plan_ready_count": 1},
+            },
+            "CommandSafety": {
+                "status": "PASS",
+                "reason_codes": ["ORDER_COMMAND_ZERO_EXPECTED"],
+                "summary": "No send_order GatewayCommand was created.",
+                "counts": {"send_order_delta": 0},
+            },
+        },
+        "command_counts_before": {},
+        "command_counts_after": {},
+        "send_order_count_before": 0,
+        "send_order_count_after": 0,
+        "send_order_delta": 0,
+        "warnings": [],
+        "errors": [],
+        "created_at": "2026-06-29T09:01:02+09:00",
+        "observe_only": True,
+        "not_order_intent": True,
+        "no_order_side_effects": True,
+        "live_real_allowed": False,
+        "real_order_allowed": False,
+        "queue_commands": False,
+        "order_controls_available": False,
+    }
+
+    paths = write_observe_cycle_report(payload, report_root=tmp_path / "observe")
+    markdown = paths["run_md"].read_text(encoding="utf-8")
+    saved_payload = paths["run_json"].read_text(encoding="utf-8")
+
+    assert paths["run_json"].exists()
+    assert paths["run_md"].exists()
+    assert "2026-06-29" in str(paths["run_json"])
+    assert '"send_order_delta": 0' in saved_payload
+    assert "CommandSafety" in markdown
+    assert "send_order_delta: `0`" in markdown
+    assert "queue_commands: `False`" in markdown
 
 
 def _theme_payload() -> dict[str, object]:

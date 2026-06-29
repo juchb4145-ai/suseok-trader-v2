@@ -22,6 +22,7 @@ from services.entry_timing.order_plan import (
 from services.entry_timing.price_location import PriceLocationClassifier
 from services.entry_timing.service import (
     evaluate_entry_timing,
+    get_entry_timing_status,
     get_order_plan_draft,
     list_latest_order_plan_drafts,
 )
@@ -257,6 +258,54 @@ def test_service_upserts_duplicate_draft_by_stable_key(tmp_path) -> None:
     assert first.order_plan_drafts[0].idempotency_key == second.order_plan_drafts[0].idempotency_key
     assert latest_count == 1
     assert draft_count == 1
+
+
+def test_entry_timing_status_counts_no_plan_evaluations(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "entry_timing_status.sqlite3")
+    connection.execute(
+        """
+        INSERT INTO entry_timing_evaluations (
+            entry_timing_evaluation_id,
+            trade_date,
+            candidate_instance_id,
+            code,
+            name,
+            evaluated_at,
+            setup_type,
+            entry_timing_state,
+            price_location_state,
+            status,
+            reason_codes_json,
+            evidence_json,
+            observe_only,
+            not_order_intent
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1)
+        """,
+        (
+            "eval_no_plan",
+            "2026-06-29",
+            "candidate_no_plan",
+            "005930",
+            "Samsung",
+            datetime_to_wire(utc_now()),
+            "NONE",
+            "BLOCKED_CONTEXT",
+            "UNKNOWN",
+            "NO_PLAN",
+            "[]",
+            "{}",
+        ),
+    )
+
+    status = get_entry_timing_status(connection, settings=_settings())
+    connection.close()
+
+    assert status["evaluation_count"] == 1
+    assert status["latest_plan_count"] == 0
+    assert status["no_plan_count"] == 1
+    assert status["observe_only"] is True
+    assert status["not_order_intent"] is True
 
 
 def test_entry_timing_core_has_no_forbidden_imports() -> None:

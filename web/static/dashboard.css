@@ -256,6 +256,16 @@ h2 {
   background: rgba(240, 101, 101, 0.18);
 }
 
+.pipeline-stack {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+
+.pipeline-stage-table {
+  min-width: 0;
+}
+
 .funnel {
   display: grid;
   grid-template-columns: repeat(6, minmax(130px, 1fr));

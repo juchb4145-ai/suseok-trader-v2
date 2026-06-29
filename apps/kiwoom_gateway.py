@@ -63,7 +63,10 @@ def configure_qt_paths() -> None:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="32-bit Kiwoom OpenAPI+ Gateway Adapter")
     parser.add_argument("--core-url", default="http://127.0.0.1:8000")
-    parser.add_argument("--token", default=os.environ.get("GATEWAY_CORE_TOKEN", ""))
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("GATEWAY_CORE_TOKEN") or os.environ.get("TRADING_CORE_TOKEN", ""),
+    )
     parser.add_argument("--poll-wait-sec", type=float, default=1.0)
     parser.add_argument("--heartbeat-interval-sec", type=float, default=2.0)
     parser.add_argument("--command-limit", type=int, default=20)
@@ -76,6 +79,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--condition-realtime", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--realtime-codes", default=os.environ.get("KIWOOM_REALTIME_CODES", ""))
     parser.add_argument(
+        "--realtime-exchange",
+        choices=("krx", "nxt", "all"),
+        default=os.environ.get("KIWOOM_REALTIME_EXCHANGE", "krx").strip().lower(),
+        help=(
+            "Exchange code suffix for SetRealReg realtime code list: "
+            "krx=005930, nxt=005930_NX, all=005930_AL."
+        ),
+    )
+    parser.add_argument(
         "--realtime-recover-stale-sec",
         type=float,
         default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_STALE_SEC", "45")),
@@ -83,11 +95,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--realtime-recover-interval-sec",
         type=float,
-        default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_INTERVAL_SEC", "60")),
+        default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_INTERVAL_SEC", "300")),
     )
     parser.add_argument("--observe-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--auto-login", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--threaded-login", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--threaded-login",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Deprecated for Kiwoom ActiveX stability. Default is --no-threaded-login "
+            "so CommConnect runs on the Qt main thread."
+        ),
+    )
     parser.add_argument(
         "--mock-client",
         action="store_true",
@@ -132,11 +152,11 @@ def run_gateway(args: argparse.Namespace) -> int:
     app = QApplication.instance() or QApplication(sys.argv[:1])
 
     if bool(getattr(args, "mock_client", False)):
-        from gateway.kiwoom_client import MockKiwoomClient
+        from gateway.kiwoom_client import MockKiwoomClient, active_x_thread_audit
 
         client = MockKiwoomClient()
     else:
-        from gateway.kiwoom_client import KiwoomClient
+        from gateway.kiwoom_client import KiwoomClient, active_x_thread_audit
 
         client = KiwoomClient()
 
@@ -150,12 +170,16 @@ def run_gateway(args: argparse.Namespace) -> int:
             condition_index=args.condition_index,
             condition_realtime=bool(args.condition_realtime),
             realtime_codes=tuple(_parse_codes(args.realtime_codes)),
+            realtime_exchange=str(args.realtime_exchange or "krx").upper(),
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
             realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
             observe_only=bool(args.observe_only),
         ),
     )
     wire_kiwoom_signals(client, runtime)
+    runtime.on_active_x_thread_audit(
+        active_x_thread_audit("QApplication.event_loop", phase="READY")
+    )
 
     heartbeat_timer = QTimer()
     heartbeat_timer.timeout.connect(lambda: _heartbeat_tick(runtime))
@@ -168,6 +192,10 @@ def run_gateway(args: argparse.Namespace) -> int:
     flush_timer = QTimer()
     flush_timer.timeout.connect(runtime.flush_events)
     flush_timer.start(200)
+
+    condition_watchdog_timer = QTimer()
+    condition_watchdog_timer.timeout.connect(runtime.check_condition_load_timeout)
+    condition_watchdog_timer.start(1000)
 
     QTimer.singleShot(100, lambda: _heartbeat_tick(runtime))
     if bool(args.auto_login):
@@ -183,6 +211,9 @@ def run_gateway(args: argparse.Namespace) -> int:
         runtime.emit("gateway_error", {"message": "KIWOOM_AUTO_LOGIN_DISABLED"})
 
     try:
+        runtime.on_active_x_thread_audit(
+            active_x_thread_audit("QApplication.exec", phase="CALL")
+        )
         return int(app.exec_())
     finally:
         runtime.close()
@@ -192,20 +223,31 @@ def request_kiwoom_login(
     client: object,
     runtime: object,
     *,
-    threaded: bool = True,
+    threaded: bool = False,
 ) -> None:
     if threaded and getattr(runtime, "_login_in_progress", False):
         return
+    if threaded:
+        emit = getattr(runtime, "emit", None)
+        if callable(emit):
+            emit(
+                "gateway_log",
+                {
+                    "message": "THREADED_LOGIN_DEPRECATED_ACTIVE_X_UNSAFE",
+                    "reason_codes": ["POSSIBLE_THREADING_ISSUE"],
+                },
+            )
 
     def run_login() -> None:
         runtime.request_login_started(threaded=threaded)
         try:
             client.login()
-            finish_pending_login = getattr(runtime, "_finish_pending_login_if_connected", None)
-            if callable(finish_pending_login):
-                finish_pending_login()
-            elif runtime.kiwoom_logged_in() and getattr(runtime, "_login_in_progress", False):
-                runtime.on_connected(True, 0, "already connected")
+            if not bool(getattr(client, "login_waits_for_event_loop", False)):
+                finish_pending_login = getattr(runtime, "_finish_pending_login_if_connected", None)
+                if callable(finish_pending_login):
+                    finish_pending_login()
+                elif runtime.kiwoom_logged_in() and getattr(runtime, "_login_in_progress", False):
+                    runtime.on_connected(True, 0, "already connected")
         except Exception as exc:
             runtime.request_login_failed(exc)
 

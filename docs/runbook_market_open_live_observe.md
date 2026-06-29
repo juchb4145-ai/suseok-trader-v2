@@ -37,7 +37,7 @@ python -m apps.kiwoom_gateway `
   --core-url http://127.0.0.1:8000 `
   --token $env:TRADING_CORE_TOKEN `
   --auto-login `
-  --threaded-login `
+  --no-threaded-login `
   --heartbeat-interval-sec 2 `
   --poll-wait-sec 1 `
   --condition-name "YOUR_CONDITION_NAME" `
@@ -66,6 +66,7 @@ Invoke-RestMethod http://127.0.0.1:8000/api/gateway/status
 
 - `heartbeat`가 반복 유입
 - heartbeat payload `kiwoom_logged_in=true`
+- heartbeat payload `login_threaded=false`
 - `broker_name=KIWOOM`
 - OBSERVE에서는 주문 관련 env가 꺼져 있음
 - REAL server로 감지되더라도 OBSERVE 데이터 수집은 가능하나 주문은 금지
@@ -77,8 +78,11 @@ Invoke-RestMethod http://127.0.0.1:8000/api/gateway/status
 - `condition_load_result`
 - `condition_loaded`
 - configured condition send log
+- `latest_condition_ver_callback_at`
+- `condition_load_state != CALLBACK_TIMEOUT`
 
 조건식 이름이 틀리면 Gateway는 tick을 받지 못할 수 있다. 이름이 불확실하면 `--condition-index`를 사용한다.
+`GetConditionLoad()` 이후 10초 이상 `OnReceiveConditionVer`가 없으면 Gateway는 1회 재시도 후 `CALLBACK_TIMEOUT`으로 전환한다. 이 경우 조건식 실패보다 ActiveX callback/thread/event loop 문제를 먼저 본다.
 
 ## 5. Condition Event 확인
 
@@ -109,10 +113,16 @@ Invoke-RestMethod http://127.0.0.1:8000/api/market-data/readiness/005930
 - `market_minute_bars`가 생성됨
 - readiness가 `FRESH` 또는 최소 `DEGRADED`
 - projection error가 증가하지 않음
+- `realtime_registration_success_count > 0`
+- `realtime_callback_count > 0`
+- `latest_realtime_callback_at`가 갱신됨
+- `realtime_subscription_health=CALLBACK_ACTIVE`
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8000/api/market-data/projection-errors
 ```
+
+`SetRealReg result_code=0`은 등록 요청 성공이지 tick 수신 보장이 아니다. 등록 성공 후 정규장 중 15초 이상 `OnReceiveRealData`가 없으면 `realtime_subscription_health=CALLBACK_TIMEOUT`으로 표시된다. `OnReceiveConditionVer`도 같이 안 오면 ActiveX event sink, Qt event loop, 호출 thread를 먼저 확인한다.
 
 ## 7. Theme/Candidate/Strategy/Risk 갱신
 
@@ -159,4 +169,3 @@ OBSERVE run에서는 다음이 유지되어야 한다.
 - Kiwoom login 실패 반복
 - 조건식 오동작으로 예상 밖 종목 대량 등록
 - 주문 관련 env가 켜져 있음
-

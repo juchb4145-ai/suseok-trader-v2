@@ -37,6 +37,7 @@ MARKET_PROJECTION_TABLES: tuple[str, ...] = (
     "market_projection_errors",
 )
 INVALID_PRICE_TICK_REASON_CODES: frozenset[str] = frozenset({"PRICE_MISSING"})
+QUOTE_ONLY_REAL_TYPES: frozenset[str] = frozenset({"주식우선호가"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -304,14 +305,28 @@ def get_market_data_status(
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
+    freshness_counts = _latest_tick_freshness_counts(connection, settings=resolved_settings)
+    recent_window_sec = max(int(resolved_settings.market_data_tick_stale_sec), 60)
     return {
         "enabled": resolved_settings.market_data_enabled,
         "latest_tick_count": _count_rows(connection, "market_ticks_latest"),
+        "latest_tick_freshness_counts": freshness_counts,
+        "fresh_tick_count": freshness_counts.get(MarketDataQualityStatus.FRESH.value, 0),
+        "stale_tick_count": (
+            freshness_counts.get(MarketDataQualityStatus.STALE.value, 0)
+            + freshness_counts.get(MarketDataQualityStatus.DEGRADED.value, 0)
+        ),
         "sample_count": _count_rows(connection, "market_tick_samples"),
         "bar_count": _count_rows(connection, "market_minute_bars"),
         "condition_signal_count": _count_rows(connection, "market_condition_signals"),
         "tr_snapshot_count": _count_rows(connection, "market_tr_snapshots"),
         "projection_error_count": _count_rows(connection, "market_projection_errors"),
+        "recent_projection_error_count": _count_recent_projection_errors(
+            connection,
+            within_sec=recent_window_sec,
+        ),
+        "projection_error_recent_window_sec": recent_window_sec,
+        "latest_projection_error_at": _latest_projection_error_at(connection),
         "tick_stale_sec": resolved_settings.market_data_tick_stale_sec,
         "bar_intervals_sec": list(resolved_settings.market_data_bar_intervals_sec),
         "max_recent_ticks": resolved_settings.market_data_max_recent_ticks,
@@ -373,6 +388,8 @@ def _process_price_tick(
     event: GatewayEvent,
     settings: Settings,
 ) -> int:
+    if _price_tick_payload_real_type(event.payload) in QUOTE_ONLY_REAL_TYPES:
+        return 0
     tick = BrokerPriceTick.from_dict(event.payload)
     reason_codes = _price_tick_payload_reason_codes(event.payload)
     quality_status = assess_price_tick_quality(tick)
@@ -819,6 +836,68 @@ def _price_tick_payload_reason_codes(payload: Mapping[str, Any]) -> list[str]:
     if not isinstance(raw_codes, list | tuple | set):
         return []
     return [str(code).strip().upper() for code in raw_codes if str(code).strip()]
+
+
+def _price_tick_payload_real_type(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    return str(metadata.get("real_type") or "").strip()
+
+
+def _latest_tick_freshness_counts(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> dict[str, int]:
+    counts = {status.value: 0 for status in MarketDataQualityStatus}
+    rows = connection.execute(
+        """
+        SELECT event_ts, quality_status
+        FROM market_ticks_latest
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            base_status = MarketDataQualityStatus(str(row["quality_status"]))
+        except ValueError:
+            base_status = MarketDataQualityStatus.INVALID
+        status = freshness_status(
+            row["event_ts"],
+            stale_sec=settings.market_data_tick_stale_sec,
+            degraded_sec=settings.market_data_degraded_tick_stale_sec,
+            base_status=base_status,
+        )
+        counts[status.value] += 1
+    return counts
+
+
+def _count_recent_projection_errors(
+    connection: sqlite3.Connection,
+    *,
+    within_sec: int,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_projection_errors
+        WHERE created_at >= datetime('now', ?)
+        """,
+        (f"-{max(int(within_sec), 1)} seconds",),
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def _latest_projection_error_at(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        """
+        SELECT created_at
+        FROM market_projection_errors
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    return None if row is None else str(row["created_at"])
 
 
 def _list_replayable_gateway_events(

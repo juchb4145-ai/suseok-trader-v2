@@ -5,6 +5,7 @@ param(
     [string]$TradeDate = "",
     [string]$ConditionName = $env:KIWOOM_CONDITION_NAME,
     [string]$RealtimeCodes = $env:KIWOOM_REALTIME_CODES,
+    [string]$RealtimeExchange = $(if ($env:KIWOOM_REALTIME_EXCHANGE) { $env:KIWOOM_REALTIME_EXCHANGE } else { "krx" }),
     [switch]$RunObserveCycle,
     [switch]$RunCore
 )
@@ -38,6 +39,8 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
 
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
+Write-Host "Core URL: $CoreUrl"
+Write-Host "Dashboard URL: $CoreUrl/dashboard"
 Write-Host ""
 Write-Host "64-bit Core command:"
 Write-Host "  $Python64 -m uvicorn apps.core_api:app --host 127.0.0.1 --port $CorePort --reload"
@@ -48,7 +51,10 @@ $GatewayCommand = @(
     "--core-url $CoreUrl",
     "--token `$env:GATEWAY_CORE_TOKEN",
     "--observe-only",
-    "--auto-login"
+    "--auto-login",
+    "--no-threaded-login",
+    "--realtime-exchange $RealtimeExchange",
+    "--realtime-recover-interval-sec 300"
 )
 if (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
     $GatewayCommand += "--condition-name `"$ConditionName`""
@@ -64,6 +70,14 @@ Write-Host "  $Python64 -m tools.ops_market_open_rca --core-url $CoreUrl --token
 Write-Host ""
 Write-Host "Observe cycle command:"
 Write-Host "  $Python64 -m tools.run_market_open_observe_cycle"
+Write-Host ""
+Write-Host "Read-only check endpoints after Core/Gateway start:"
+Write-Host "  $CoreUrl/health"
+Write-Host "  $CoreUrl/api/status"
+Write-Host "  $CoreUrl/api/gateway/status"
+Write-Host "  $CoreUrl/api/gateway/events/recent?limit=20"
+Write-Host "  $CoreUrl/api/market-data/status"
+Write-Host "  $CoreUrl/api/dashboard/snapshot"
 
 if ($RunObserveCycle) {
     $Args = @("-m", "tools.run_market_open_observe_cycle")

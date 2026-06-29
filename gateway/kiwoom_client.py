@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -39,6 +40,17 @@ REALTIME_STOCK_FIDS = [
 ]
 
 PRICE_TICK_REAL_TYPES = frozenset({"주식체결", "주식시세"})
+QUOTE_REAL_TYPES = frozenset({"주식우선호가"})
+REALTIME_EXCHANGE_SUFFIXES = {
+    "KRX": "",
+    "NXT": "_NX",
+    "ALL": "_AL",
+}
+REALTIME_SUFFIX_EXCHANGES = {
+    "_NX": "NXT",
+    "_AL": "ALL",
+    "_KR": "KRX",
+}
 
 ERROR_MESSAGES = {
     0: "정상처리",
@@ -72,6 +84,13 @@ ERROR_MESSAGES = {
     -340: "계좌정보없음",
     -500: "종목코드없음",
 }
+LOGIN_EVENT_TIMEOUT_CODE = -1000
+DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS = int(
+    os.environ.get("KIWOOM_LOGIN_EVENT_LOOP_TIMEOUT_MS", "60000")
+)
+DEFAULT_CONDITION_EVENT_LOOP_TIMEOUT_MS = int(
+    os.environ.get("KIWOOM_CONDITION_EVENT_LOOP_TIMEOUT_MS", "10000")
+)
 
 ORDER_CHEJAN_FIDS = (
     9201,
@@ -132,6 +151,13 @@ class ConditionInfo:
         return {"index": self.index, "name": self.name}
 
 
+@dataclass(frozen=True, kw_only=True)
+class KiwoomRealtimeCode:
+    base_code: str
+    kiwoom_code: str
+    exchange: str
+
+
 class Signal:
     def __init__(self) -> None:
         self._handlers: list[Callable[..., None]] = []
@@ -142,6 +168,28 @@ class Signal:
     def emit(self, *args: Any, **kwargs: Any) -> None:
         for handler in list(self._handlers):
             handler(*args, **kwargs)
+
+
+def active_x_thread_audit(method: str, *, phase: str = "CALL", **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "method": str(method),
+        "phase": str(phase),
+        "timestamp": datetime_to_wire(utc_now()),
+        "python_thread_id": threading.get_ident(),
+        "python_thread_name": threading.current_thread().name,
+        "qt_thread_id": _current_qt_thread_id(),
+    }
+    payload.update(extra)
+    return payload
+
+
+def _current_qt_thread_id() -> str:
+    try:
+        from PyQt5.QtCore import QThread
+
+        return str(QThread.currentThreadId())
+    except Exception:
+        return ""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -248,6 +296,8 @@ class KiwoomChejanParser:
 
 
 class KiwoomClient:
+    login_waits_for_event_loop = True
+
     def __init__(self) -> None:
         try:
             from PyQt5.QAxContainer import QAxWidget
@@ -260,6 +310,11 @@ class KiwoomClient:
         self.connected = Signal()
         self.price_received = Signal()
         self.price_tick_received = Signal()
+        self.quote_received = Signal()
+        self.realtime_data_received = Signal()
+        self.realtime_parse_error = Signal()
+        self.realtime_registration_result = Signal()
+        self.active_x_thread_audit = Signal()
         self.order_result = Signal()
         self.execution_received = Signal()
         self.chejan_event_received = Signal()
@@ -273,13 +328,21 @@ class KiwoomClient:
         self.condition_load_state = ConditionLoadState.IDLE
         self._conditions: list[ConditionInfo] = []
         self._realtime_screen_codes: dict[str, set[str]] = {}
+        self._pending_thread_audit_events: list[dict[str, Any]] = []
+        self._login_event_loop: Any | None = None
+        self._login_callback_result: tuple[int, str] | None = None
+        self._condition_event_loop: Any | None = None
+        self._condition_callback_result: tuple[bool, str] | None = None
         self.chejan_parser = KiwoomChejanParser()
 
+        self._record_thread_audit("QAxWidget.create", phase="CALL")
         self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
         if self.ocx.isNull():
+            self._record_thread_audit("QAxWidget.create_fallback", phase="CALL")
             self.ocx = QAxWidget("KHOpenAPI.KHOpenAPICtrl.1")
         if self.ocx.isNull():
             raise RuntimeError("Kiwoom OpenAPI+ ActiveX control is not registered.")
+        self._record_thread_audit("QAxWidget.create", phase="RESULT", is_null=False)
 
         self.ocx.OnEventConnect.connect(self._on_event_connect)
         self.ocx.OnReceiveRealData.connect(self._on_receive_real_data)
@@ -290,8 +353,40 @@ class KiwoomClient:
         self.ocx.OnReceiveRealCondition.connect(self._on_receive_real_condition)
         self.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
 
-    def login(self) -> int:
-        return int(self.ocx.dynamicCall("CommConnect()") or 0)
+    def login(self, timeout_ms: int | None = None) -> int:
+        wait_timeout_ms = int(timeout_ms or DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS)
+        loop, timer, timed_out = self._prepare_callback_wait(
+            "OnEventConnect",
+            wait_timeout_ms,
+        )
+        self._login_event_loop = loop
+        self._login_callback_result = None
+        self._record_thread_audit("CommConnect", phase="CALL")
+        result = int(self.ocx.dynamicCall("CommConnect()") or 0)
+        self._record_thread_audit("CommConnect", phase="RESULT", result_code=result)
+        if result != 0:
+            self._cleanup_callback_wait(timer)
+            self._login_event_loop = None
+            self._login_callback_result = None
+            return result
+        self._exec_callback_wait(loop, timer)
+        callback_result = self._login_callback_result
+        timed_out_value = bool(timed_out["value"])
+        self._login_event_loop = None
+        self._login_callback_result = None
+        if callback_result is None:
+            code = LOGIN_EVENT_TIMEOUT_CODE
+            message = f"OnEventConnect callback timeout after {wait_timeout_ms}ms"
+        else:
+            code, message = callback_result
+        self._record_thread_audit(
+            "OnEventConnect.wait",
+            phase="RESULT",
+            timed_out=timed_out_value,
+            result_code=code,
+        )
+        self.connected.emit(code == 0, code, message)
+        return result
 
     def get_accounts(self) -> list[str]:
         raw = self.ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO") or ""
@@ -319,23 +414,61 @@ class KiwoomClient:
         return [normalize_code(code) for code in raw.split(";") if str(code).strip()]
 
     def register_realtime(self, codes: Iterable[str], screen_no: str | None = None) -> None:
-        code_list = [normalize_code(code) for code in codes if str(code or "").strip()]
+        code_list = [
+            normalize_kiwoom_realtime_code(code)
+            for code in codes
+            if str(code or "").strip()
+        ]
         screen_map = self._realtime_screen_code_map()
         for index in range(0, len(code_list), 100):
             chunk = code_list[index : index + 100]
             if not chunk:
                 continue
+            parsed_chunk = [parse_kiwoom_realtime_code(code) for code in chunk]
             chunk_screen_no = screen_no or f"{5000 + index // 100:04d}"
             screen_codes = screen_map.setdefault(chunk_screen_no, set())
             opt_type = "1" if screen_codes else "0"
+            fid_string = realtime_stock_fid_string()
+            self._record_thread_audit(
+                "SetRealReg",
+                phase="CALL",
+                screen_no=chunk_screen_no,
+                code_count=len(chunk),
+                kiwoom_codes=list(chunk),
+                fid_count=len(REALTIME_STOCK_FIDS),
+                opt_type=opt_type,
+            )
             result = self.ocx.dynamicCall(
                 "SetRealReg(QString, QString, QString, QString)",
                 chunk_screen_no,
                 ";".join(chunk),
-                realtime_stock_fid_string(),
+                fid_string,
                 opt_type,
             )
             result_code = int(result or 0)
+            self._record_thread_audit(
+                "SetRealReg",
+                phase="RESULT",
+                screen_no=chunk_screen_no,
+                kiwoom_codes=list(chunk),
+                result_code=result_code,
+                success=result_code >= 0,
+            )
+            self.realtime_registration_result.emit(
+                {
+                    "screen_no": chunk_screen_no,
+                    "codes": [item.base_code for item in parsed_chunk],
+                    "kiwoom_codes": [item.kiwoom_code for item in parsed_chunk],
+                    "exchange_by_code": {
+                        item.base_code: item.exchange for item in parsed_chunk
+                    },
+                    "fid_string": fid_string,
+                    "fid_count": len(REALTIME_STOCK_FIDS),
+                    "opt_type": opt_type,
+                    "result_code": result_code,
+                    "success": result_code >= 0,
+                }
+            )
             if result_code < 0:
                 raise RuntimeError(
                     f"실시간 등록 실패: {ERROR_MESSAGES.get(result_code, str(result_code))}"
@@ -362,15 +495,41 @@ class KiwoomClient:
         self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", "ALL")
         self._realtime_screen_code_map().clear()
 
-    def load_conditions(self) -> int:
+    def load_conditions(self, timeout_ms: int | None = None) -> int:
         self.condition_load_state = ConditionLoadState.LOADING
         self.condition_state_changed.emit(self.condition_load_state.value, "")
+        wait_timeout_ms = int(timeout_ms or DEFAULT_CONDITION_EVENT_LOOP_TIMEOUT_MS)
+        loop, timer, timed_out = self._prepare_callback_wait(
+            "OnReceiveConditionVer",
+            wait_timeout_ms,
+        )
+        self._condition_event_loop = loop
+        self._condition_callback_result = None
+        self._record_thread_audit("GetConditionLoad", phase="CALL")
         result = int(self.ocx.dynamicCall("GetConditionLoad()") or 0)
+        self._record_thread_audit("GetConditionLoad", phase="RESULT", result_code=result)
         if result <= 0:
+            self._cleanup_callback_wait(timer)
+            self._condition_event_loop = None
+            self._condition_callback_result = None
             self.condition_load_state = ConditionLoadState.FAILED
             message = "GetConditionLoad failed"
             self.condition_state_changed.emit(self.condition_load_state.value, message)
             self.condition_load_result.emit(False, message)
+            return result
+        self._exec_callback_wait(loop, timer)
+        callback_result = self._condition_callback_result
+        timed_out_value = bool(timed_out["value"])
+        self._condition_event_loop = None
+        self._condition_callback_result = None
+        self._record_thread_audit(
+            "OnReceiveConditionVer.wait",
+            phase="RESULT",
+            timed_out=timed_out_value,
+            result_code=1 if callback_result and callback_result[0] else 0,
+        )
+        if callback_result is not None:
+            self._emit_condition_load_result(*callback_result)
         return result
 
     def condition_name_list(self) -> list[ConditionInfo]:
@@ -389,7 +548,15 @@ class KiwoomClient:
         search_type: int | None = None,
     ) -> int:
         n_search = int(search_type if search_type is not None else (1 if realtime else 0))
-        return int(
+        self._record_thread_audit(
+            "SendCondition",
+            phase="CALL",
+            screen_no=str(screen_no),
+            condition_name=str(condition_name),
+            condition_index=int(condition_index),
+            search_type=n_search,
+        )
+        result = int(
             self.ocx.dynamicCall(
                 "SendCondition(QString, QString, int, int)",
                 str(screen_no),
@@ -399,6 +566,13 @@ class KiwoomClient:
             )
             or 0
         )
+        self._record_thread_audit(
+            "SendCondition",
+            phase="RESULT",
+            result_code=result,
+            success=result >= 0,
+        )
+        return result
 
     def stop_condition(self, screen_no: str, condition_name: str, condition_index: int) -> None:
         self.ocx.dynamicCall(
@@ -468,21 +642,43 @@ class KiwoomClient:
         return result
 
     def _on_event_connect(self, error_code: int) -> None:
+        self._record_thread_audit(
+            "OnEventConnect",
+            phase="CALLBACK",
+            error_code=int(error_code),
+        )
         code = int(error_code)
-        self.connected.emit(code == 0, code, ERROR_MESSAGES.get(code, str(code)))
+        message = ERROR_MESSAGES.get(code, str(code))
+        if self._login_event_loop is not None:
+            self._login_callback_result = (code, message)
+            self._login_event_loop.exit()
+            return
+        self.connected.emit(code == 0, code, message)
 
     def _on_receive_msg(self, screen_no: str, rq_name: str, tr_code: str, message: str) -> None:
+        self._record_thread_audit(
+            "OnReceiveMsg",
+            phase="CALLBACK",
+            screen_no=str(screen_no or ""),
+            rq_name=str(rq_name or ""),
+            tr_code=str(tr_code or ""),
+        )
         self.message_received.emit(f"{screen_no} {rq_name} {tr_code}: {message}")
 
     def _on_receive_condition_ver(self, result: int, message: str) -> None:
-        success = int(result) == 1
-        self.condition_load_state = (
-            ConditionLoadState.LOADED if success else ConditionLoadState.FAILED
+        self._record_thread_audit(
+            "OnReceiveConditionVer",
+            phase="CALLBACK",
+            result=int(result),
+            message=str(message or ""),
         )
-        self.condition_state_changed.emit(self.condition_load_state.value, str(message or ""))
-        self.condition_load_result.emit(success, str(message or ""))
-        if success:
-            self.condition_loaded.emit(self.condition_name_list())
+        success = int(result) == 1
+        result_message = str(message or "")
+        if self._condition_event_loop is not None:
+            self._condition_callback_result = (success, result_message)
+            self._condition_event_loop.exit()
+            return
+        self._emit_condition_load_result(success, result_message)
 
     def _on_receive_tr_condition(
         self,
@@ -492,6 +688,13 @@ class KiwoomClient:
         condition_index: int,
         next_flag: str,
     ) -> None:
+        self._record_thread_audit(
+            "OnReceiveTrCondition",
+            phase="CALLBACK",
+            screen_no=str(screen_no or ""),
+            condition_name=str(condition_name or ""),
+            condition_index=int(condition_index),
+        )
         self.condition_tr_received.emit(
             str(screen_no or ""),
             str(code_list or ""),
@@ -507,6 +710,14 @@ class KiwoomClient:
         condition_name: str,
         condition_index: str,
     ) -> None:
+        self._record_thread_audit(
+            "OnReceiveRealCondition",
+            phase="CALLBACK",
+            code=normalize_code(code),
+            event_type=str(event_type or ""),
+            condition_name=str(condition_name or ""),
+            condition_index=str(condition_index or ""),
+        )
         try:
             index = int(condition_index)
         except (TypeError, ValueError):
@@ -530,6 +741,14 @@ class KiwoomClient:
         message: str,
         splm_msg: str,
     ) -> None:
+        self._record_thread_audit(
+            "OnReceiveTrData",
+            phase="CALLBACK",
+            screen_no=str(screen_no or ""),
+            rq_name=str(rq_name or ""),
+            tr_code=str(tr_code or ""),
+            error_code=str(error_code or ""),
+        )
         self.tr_data_received.emit(
             str(screen_no or ""),
             str(rq_name or ""),
@@ -543,17 +762,60 @@ class KiwoomClient:
         )
 
     def _on_receive_real_data(self, code: str, real_type: str, real_data: str) -> None:
-        if not is_price_tick_real_type(real_type):
+        parsed_code = parse_kiwoom_realtime_code(code)
+        self._record_thread_audit(
+            "OnReceiveRealData",
+            phase="CALLBACK",
+            code=parsed_code.base_code,
+            kiwoom_code=parsed_code.kiwoom_code,
+            exchange=parsed_code.exchange,
+            real_type=str(real_type or "").strip(),
+            real_data_present=bool(str(real_data or "")),
+        )
+        real_type_text = str(real_type or "").strip()
+        normalized_code = parsed_code.base_code
+        self.realtime_data_received.emit(
+            normalized_code,
+            real_type_text,
+            bool(str(real_data or "")),
+        )
+        if is_quote_real_type(real_type_text):
+            raw_values = {
+                fid: self._real_raw(code, fid)
+                for fid in (FID_BEST_ASK, FID_BEST_BID, FID_TRADE_TIME)
+            }
+            payload = parse_quote_from_fids(
+                code=parsed_code.kiwoom_code,
+                name=self.get_code_name(normalized_code),
+                raw_fids=raw_values,
+                real_type=real_type_text,
+                real_data=str(real_data or ""),
+            )
+            self.quote_received.emit(payload)
+            return
+        if not is_price_tick_real_type(real_type_text):
             return
         raw_values = {fid: self._real_raw(code, fid) for fid in REALTIME_STOCK_FIDS}
-        normalized_code = normalize_code(code)
-        payload = parse_price_tick_from_fids(
-            code=normalized_code,
-            name=self.get_code_name(normalized_code),
-            raw_fids=raw_values,
-            real_type=str(real_type or ""),
-            real_data=str(real_data or ""),
-        )
+        try:
+            payload = parse_price_tick_from_fids(
+                code=parsed_code.kiwoom_code,
+                name=self.get_code_name(normalized_code),
+                raw_fids=raw_values,
+                real_type=real_type_text,
+                real_data=str(real_data or ""),
+            )
+        except Exception as exc:
+            self.realtime_parse_error.emit(
+                {
+                    "code": normalized_code,
+                    "real_type": real_type_text,
+                    "error": str(exc),
+                    "raw_fids_present": sorted(
+                        fid for fid, value in raw_values.items() if str(value or "").strip()
+                    ),
+                }
+            )
+            return
         self.price_received.emit(
             normalized_code,
             payload["price"],
@@ -565,6 +827,13 @@ class KiwoomClient:
         self.price_tick_received.emit(payload)
 
     def _on_receive_chejan_data(self, gubun: str, item_count: int, fid_list: str) -> None:
+        self._record_thread_audit(
+            "OnReceiveChejanData",
+            phase="CALLBACK",
+            gubun=str(gubun or ""),
+            item_count=int(item_count or 0),
+            fid_list=str(fid_list or ""),
+        )
         raw_fids = read_chejan_raw(
             lambda fid: self._chejan(fid),
             gubun=str(gubun),
@@ -589,6 +858,66 @@ class KiwoomClient:
     def _chejan(self, fid: int) -> str:
         return str(self.ocx.dynamicCall("GetChejanData(int)", int(fid)) or "").strip()
 
+    def _record_thread_audit(self, method: str, *, phase: str = "CALL", **extra: Any) -> None:
+        payload = active_x_thread_audit(method, phase=phase, **extra)
+        if not hasattr(self, "_pending_thread_audit_events"):
+            self._pending_thread_audit_events = []
+        if not hasattr(self, "active_x_thread_audit"):
+            self.active_x_thread_audit = Signal()
+        self._pending_thread_audit_events.append(payload)
+        self.active_x_thread_audit.emit(payload)
+
+    def drain_thread_audit_events(self) -> list[dict[str, Any]]:
+        events = list(self._pending_thread_audit_events)
+        self._pending_thread_audit_events.clear()
+        return events
+
+    def _emit_condition_load_result(self, success: bool, message: str = "") -> None:
+        self.condition_load_state = (
+            ConditionLoadState.LOADED if success else ConditionLoadState.FAILED
+        )
+        self.condition_state_changed.emit(self.condition_load_state.value, str(message or ""))
+        self.condition_load_result.emit(bool(success), str(message or ""))
+        if success:
+            self.condition_loaded.emit(self.condition_name_list())
+
+    def _prepare_callback_wait(
+        self,
+        method: str,
+        timeout_ms: int,
+    ) -> tuple[Any, Any, dict[str, bool]]:
+        from PyQt5.QtCore import QEventLoop, QTimer
+
+        loop = QEventLoop()
+        timer = QTimer()
+        timer.setSingleShot(True)
+        timed_out = {"value": False}
+
+        def on_timeout() -> None:
+            timed_out["value"] = True
+            self._record_thread_audit(method, phase="TIMEOUT", timeout_ms=int(timeout_ms))
+            loop.exit()
+
+        timer.timeout.connect(on_timeout)
+        timer.setInterval(int(timeout_ms))
+        self._record_thread_audit(method, phase="WAIT", timeout_ms=int(timeout_ms))
+        return loop, timer, timed_out
+
+    def _exec_callback_wait(self, loop: Any, timer: Any) -> None:
+        timer.start()
+        try:
+            loop.exec_()
+        finally:
+            self._cleanup_callback_wait(timer)
+
+    @staticmethod
+    def _cleanup_callback_wait(timer: Any) -> None:
+        try:
+            if timer is not None and timer.isActive():
+                timer.stop()
+        except RuntimeError:
+            pass
+
     def _realtime_screen_code_map(self) -> dict[str, set[str]]:
         screen_map = getattr(self, "_realtime_screen_codes", None)
         if not isinstance(screen_map, dict):
@@ -602,6 +931,11 @@ class MockKiwoomClient:
         self.connected = Signal()
         self.price_received = Signal()
         self.price_tick_received = Signal()
+        self.quote_received = Signal()
+        self.realtime_data_received = Signal()
+        self.realtime_parse_error = Signal()
+        self.realtime_registration_result = Signal()
+        self.active_x_thread_audit = Signal()
         self.order_result = Signal()
         self.execution_received = Signal()
         self.chejan_event_received = Signal()
@@ -623,6 +957,7 @@ class MockKiwoomClient:
         self._tr_rows: list[dict[str, str]] = []
         self._names = {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
         self.server_gubun = "1"
+        self._pending_thread_audit_events: list[dict[str, Any]] = []
 
     def login(self) -> int:
         self.connected.emit(True, 0, "MOCK 로그인 성공")
@@ -650,7 +985,29 @@ class MockKiwoomClient:
         return ["005930", "000660"]
 
     def register_realtime(self, codes: Iterable[str], screen_no: str | None = None) -> None:
-        self.registered_codes.update(normalize_code(code) for code in codes)
+        kiwoom_codes = [
+            normalize_kiwoom_realtime_code(code)
+            for code in codes
+            if str(code or "").strip()
+        ]
+        parsed_codes = [parse_kiwoom_realtime_code(code) for code in kiwoom_codes]
+        self.registered_codes.update(kiwoom_codes)
+        if kiwoom_codes:
+            self.realtime_registration_result.emit(
+                {
+                    "screen_no": screen_no or "5000",
+                    "codes": [item.base_code for item in parsed_codes],
+                    "kiwoom_codes": kiwoom_codes,
+                    "exchange_by_code": {
+                        item.base_code: item.exchange for item in parsed_codes
+                    },
+                    "fid_string": realtime_stock_fid_string(),
+                    "fid_count": len(REALTIME_STOCK_FIDS),
+                    "opt_type": "0",
+                    "result_code": 0,
+                    "success": True,
+                }
+            )
 
     def remove_realtime(self, codes: Iterable[str], screen_no: str | None = None) -> None:
         for code in codes:
@@ -660,6 +1017,11 @@ class MockKiwoomClient:
 
     def remove_all_realtime(self) -> None:
         self.registered_codes.clear()
+
+    def drain_thread_audit_events(self) -> list[dict[str, Any]]:
+        events = list(self._pending_thread_audit_events)
+        self._pending_thread_audit_events.clear()
+        return events
 
     def load_conditions(self) -> int:
         self.condition_load_state = ConditionLoadState.LOADING
@@ -762,6 +1124,54 @@ def normalize_code(value: object) -> str:
     return validate_stock_code(text)
 
 
+def normalize_realtime_exchange(value: object) -> str:
+    text = str(value or "KRX").strip().upper()
+    aliases = {
+        "": "KRX",
+        "K": "KRX",
+        "KRX": "KRX",
+        "N": "NXT",
+        "NX": "NXT",
+        "NXT": "NXT",
+        "A": "ALL",
+        "AL": "ALL",
+        "ALL": "ALL",
+        "SOR": "ALL",
+        "INTEGRATED": "ALL",
+    }
+    exchange = aliases.get(text)
+    if exchange is None:
+        raise ValueError(f"unsupported realtime exchange: {value}")
+    return exchange
+
+
+def parse_kiwoom_realtime_code(value: object) -> KiwoomRealtimeCode:
+    text = str(value or "").strip().upper()
+    exchange = "KRX"
+    for suffix, suffix_exchange in REALTIME_SUFFIX_EXCHANGES.items():
+        if text.endswith(suffix):
+            text = text[: -len(suffix)]
+            exchange = suffix_exchange
+            break
+    base_code = normalize_code(text)
+    suffix = REALTIME_EXCHANGE_SUFFIXES[exchange]
+    return KiwoomRealtimeCode(
+        base_code=base_code,
+        kiwoom_code=f"{base_code}{suffix}",
+        exchange=exchange,
+    )
+
+
+def normalize_kiwoom_realtime_code(value: object) -> str:
+    return parse_kiwoom_realtime_code(value).kiwoom_code
+
+
+def realtime_code_for_exchange(code: object, exchange: object = "KRX") -> str:
+    base_code = normalize_code(code)
+    normalized_exchange = normalize_realtime_exchange(exchange)
+    return f"{base_code}{REALTIME_EXCHANGE_SUFFIXES[normalized_exchange]}"
+
+
 def parse_condition_name_list(raw: str) -> list[ConditionInfo]:
     conditions: list[ConditionInfo] = []
     for item in str(raw or "").split(";"):
@@ -785,6 +1195,60 @@ def is_price_tick_real_type(real_type: str) -> bool:
     return str(real_type or "").strip() in PRICE_TICK_REAL_TYPES
 
 
+def is_quote_real_type(real_type: str) -> bool:
+    return str(real_type or "").strip() in QUOTE_REAL_TYPES
+
+
+def parse_quote_from_fids(
+    *,
+    code: str,
+    name: str,
+    raw_fids: Mapping[int | str, Any],
+    real_type: str = "",
+    real_data: str = "",
+) -> dict[str, Any]:
+    parsed_code = parse_kiwoom_realtime_code(code)
+    raw_values = {int(fid): str(value or "").strip() for fid, value in dict(raw_fids).items()}
+    reason_codes: list[str] = []
+    best_ask, ask_ok = _parse_real_int(raw_values.get(FID_BEST_ASK))
+    best_bid, bid_ok = _parse_real_int(raw_values.get(FID_BEST_BID))
+    if not ask_ok or best_ask <= 0:
+        reason_codes.append("BEST_ASK_MISSING")
+        best_ask = 0
+    if not bid_ok or best_bid <= 0:
+        reason_codes.append("BEST_BID_MISSING")
+        best_bid = 0
+    if best_ask > 0 and best_bid > 0 and best_ask < best_bid:
+        reason_codes.append("BEST_BID_ASK_ADJUSTED")
+        best_ask = best_bid
+
+    trade_time_raw = raw_values.get(FID_TRADE_TIME, "")
+    spread_price = max(0, best_ask - best_bid) if best_ask > 0 and best_bid > 0 else 0
+    spread_ticks = _spread_ticks(best_bid, best_ask)
+    return {
+        "code": parsed_code.base_code,
+        "name": str(name or "").strip() or parsed_code.base_code,
+        "best_ask": best_ask,
+        "best_bid": best_bid,
+        "spread_ticks": spread_ticks,
+        "trade_time": datetime_to_wire(parse_kiwoom_trade_time(trade_time_raw)),
+        "metadata": {
+            "real_type": str(real_type or ""),
+            "trade_time": str(trade_time_raw or "").strip(),
+            "raw_fids_present": [
+                fid for fid, value in sorted(raw_values.items()) if _has_real_value(value)
+            ],
+            "reason_codes": sorted(set(reason_codes)),
+            "spread_price": spread_price,
+            "quote_only": True,
+            "exchange": parsed_code.exchange,
+            "kiwoom_code": parsed_code.kiwoom_code,
+        },
+        "quote_only": True,
+        "not_price_tick": True,
+    }
+
+
 def parse_price_tick_from_fids(
     *,
     code: str,
@@ -793,6 +1257,7 @@ def parse_price_tick_from_fids(
     real_type: str = "",
     real_data: str = "",
 ) -> dict[str, Any]:
+    parsed_code = parse_kiwoom_realtime_code(code)
     raw_values = {int(fid): str(value or "").strip() for fid, value in dict(raw_fids).items()}
     reason_codes: list[str] = []
     parse_fallback = False
@@ -867,6 +1332,8 @@ def parse_price_tick_from_fids(
         "reason_codes": sorted(set(reason_codes)),
         "spread_price": spread_price,
         "open_price": open_price,
+        "exchange": parsed_code.exchange,
+        "kiwoom_code": parsed_code.kiwoom_code,
     }
     if real_data:
         metadata["real_data_present"] = True
@@ -874,8 +1341,8 @@ def parse_price_tick_from_fids(
         metadata["trade_value_unit"] = trade_value_unit
 
     tick = BrokerPriceTick(
-        code=normalize_code(code),
-        name=str(name or "").strip() or normalize_code(code),
+        code=parsed_code.base_code,
+        name=str(name or "").strip() or parsed_code.base_code,
         price=price,
         change_rate=change_rate,
         volume=volume,
