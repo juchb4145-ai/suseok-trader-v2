@@ -250,8 +250,22 @@ const renderNoBuy = (snapshot) => {
 };
 
 const renderPipeline = (snapshot) => {
-  const funnel = ((snapshot.pipeline_summary || {}).funnel || []);
-  document.getElementById("pipeline-funnel").innerHTML = funnel
+  const pipeline = snapshot.pipeline_summary || {};
+  const stages = pipeline.stage_statuses || [];
+  const funnel = pipeline.funnel || [];
+  const stageHtml = stages.length
+    ? table(
+        ["Stage", "상태", "count", "updated", "reason"],
+        stages.map((stage) => [
+          stage.stage,
+          badge(stage.status || "UNKNOWN"),
+          number(stage.count),
+          text(stage.updated_at),
+          reasonList(stage.reason_codes),
+        ]),
+      )
+    : emptyState("운영 파이프라인 stage 요약이 없습니다.");
+  const funnelHtml = funnel
     .map((step) => `
       <div class="funnel-step">
         <div class="funnel-label">${escapeHtml(step.label)}</div>
@@ -259,6 +273,7 @@ const renderPipeline = (snapshot) => {
       </div>
     `)
     .join("");
+  document.getElementById("pipeline-funnel").innerHTML = `${stageHtml}<div class="funnel">${funnelHtml}</div>`;
   const errors = snapshot.errors || {};
   document.getElementById("events-errors").innerHTML = [
     logGroup("Gateway events", (snapshot.recent_events || {}).gateway_events || []),

@@ -142,6 +142,45 @@ def test_price_tick_duplicate_and_negative_delta_are_not_double_counted(tmp_path
     assert bar["tick_count"] == 2
 
 
+def test_price_missing_tick_is_ignored_without_polluting_latest_or_bars(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    event = price_tick_event("evt_quote_only", price=1, volume=0, trade_value=0)
+    payload = dict(event.payload)
+    payload["metadata"] = {
+        "real_type": "주식우선호가",
+        "reason_codes": ["PRICE_MISSING", "TRADE_VALUE_MISSING"],
+    }
+    event = GatewayEvent(
+        event_id=event.event_id,
+        event_type=event.event_type,
+        source=event.source,
+        payload=payload,
+        ts=event.ts,
+    )
+
+    append_result = append_gateway_event(connection, event)
+    result = process_gateway_event(connection, event, settings=Settings())
+
+    sample_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_tick_samples"
+    ).fetchone()["count"]
+    bar_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_minute_bars"
+    ).fetchone()["count"]
+    error = connection.execute("SELECT * FROM market_projection_errors").fetchone()
+    latest = get_latest_tick(connection, "005930")
+    connection.close()
+
+    assert append_result.status == "ACCEPTED"
+    assert result.status == "IGNORED"
+    assert result.ignored_count == 1
+    assert sample_count == 0
+    assert bar_count == 0
+    assert latest is None
+    assert error["event_id"] == "evt_quote_only"
+    assert "INVALID_PRICE_TICK" in error["error_message"]
+
+
 def test_condition_event_projection_preserves_actions_and_metadata(tmp_path) -> None:
     connection = initialize_database(tmp_path / "market.sqlite3")
     enter = GatewayEvent(

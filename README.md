@@ -169,6 +169,32 @@ python -m tools.evaluate_risk
 
 이 절차는 관찰 파이프라인 확인용입니다. 실제 주문이 나가지 않습니다.
 
+장중 OBSERVE profile과 Core/Gateway token 정렬:
+
+```powershell
+.\tools\start_market_open_observe.ps1
+```
+
+장중 운영 RCA:
+
+```powershell
+python -m tools.ops_market_open_rca `
+  --core-url http://127.0.0.1:8000 `
+  --token $env:TRADING_CORE_TOKEN `
+  --trade-date 2026-06-29
+```
+
+observe-only end-to-end cycle:
+
+```powershell
+python -m tools.run_market_open_observe_cycle --trade-date 2026-06-29
+```
+
+이 cycle은 Theme, Candidate, Strategy, Risk, EntryTiming을 run_once로 묶고 LIVE_SIM은
+preflight/status만 읽습니다. `queue_commands=false` 기본값을 바꾸지 않으며
+`GatewayCommand(send_order)`를 만들지 않아야 정상입니다. 자세한 gap table과 확인 순서는
+[docs/market_open_runtime_gap_report.md](docs/market_open_runtime_gap_report.md)를 참고하세요.
+
 ## Dashboard 확인 방법
 
 Core 실행 후 브라우저에서 확인합니다.

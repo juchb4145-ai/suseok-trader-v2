@@ -56,6 +56,10 @@ from services.candidate_service import (
 )
 from services.config import Settings
 from services.dashboard_ai_explanations import build_ai_explanation_cards
+from services.entry_timing.service import (
+    get_entry_timing_status,
+    list_latest_order_plan_drafts,
+)
 from services.exit_engine import (
     get_exit_status,
     list_exit_errors,
@@ -98,6 +102,9 @@ from services.risk_gate import (
     list_risk_errors,
 )
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
+from services.runtime.market_open_observe_cycle import (
+    get_latest_market_open_observe_cycle_run,
+)
 from services.strategy_engine import (
     get_strategy_status,
     list_latest_strategy_observations,
@@ -169,10 +176,12 @@ def build_dashboard_snapshot(
     candidate_status = get_candidate_status(connection, settings=settings)
     strategy_status = get_strategy_status(connection, settings)
     risk_status = get_risk_status(connection, settings)
+    entry_timing_status = get_entry_timing_status(connection, settings=settings)
     dry_run_status = get_dry_run_status(connection, settings)
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
+    latest_observe_cycle = get_latest_market_open_observe_cycle_run(connection)
     no_buy_sentinel = build_no_buy_sentinel_snapshot(
         connection,
         settings=settings,
@@ -186,6 +195,10 @@ def build_dashboard_snapshot(
     candidates = list_candidates(connection, active_only=True, limit=bounded_limit)
     strategy_observations = list_latest_strategy_observations(connection, limit=bounded_limit)
     risk_observations = list_latest_risk_observations(connection, limit=bounded_limit)
+    latest_order_plan_drafts = list_latest_order_plan_drafts(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
     ai_insights = list_ai_insights(connection, limit=bounded_limit)
     ai_requests = list_ai_requests(connection, limit=bounded_limit)
     ai_request_status_counts = get_ai_request_status_counts(connection)
@@ -281,6 +294,8 @@ def build_dashboard_snapshot(
         strategy_status_counts=strategy_status_counts,
         risk_status=risk_status,
         risk_status_counts=risk_status_counts,
+        entry_timing_status=entry_timing_status,
+        latest_order_plan_drafts=latest_order_plan_drafts,
         ai_insights=ai_insights,
         ai_request_status_counts=ai_request_status_counts,
         codex_draft_count=codex_draft_count,
@@ -289,6 +304,7 @@ def build_dashboard_snapshot(
         live_sim_status=live_sim_status,
         ai_advisory_status=ai_advisory_status,
         no_buy_sentinel=no_buy_sentinel,
+        latest_observe_cycle=latest_observe_cycle,
         settings=settings,
     )
 
@@ -692,6 +708,8 @@ def _pipeline_summary(
     strategy_status_counts: dict[str, int],
     risk_status: dict[str, Any],
     risk_status_counts: dict[str, int],
+    entry_timing_status: dict[str, Any],
+    latest_order_plan_drafts: list[dict[str, Any]],
     ai_insights: list[dict[str, Any]],
     ai_request_status_counts: dict[str, int],
     codex_draft_count: int,
@@ -700,9 +718,22 @@ def _pipeline_summary(
     live_sim_status: dict[str, Any],
     ai_advisory_status: dict[str, Any],
     no_buy_sentinel: dict[str, Any],
+    latest_observe_cycle: dict[str, Any] | None,
     settings: Settings,
 ) -> dict[str, Any]:
     return {
+        "stage_statuses": _pipeline_stage_statuses(
+            gateway_status=gateway_status,
+            market_data_status=market_data_status,
+            theme_status=theme_status,
+            candidate_status=candidate_status,
+            strategy_status=strategy_status,
+            risk_status=risk_status,
+            entry_timing_status=entry_timing_status,
+            live_sim_status=live_sim_status,
+            latest_observe_cycle=latest_observe_cycle,
+        ),
+        "latest_observe_cycle": latest_observe_cycle,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],
@@ -733,6 +764,15 @@ def _pipeline_summary(
             "observe_pass_count": risk_status["observe_pass_count"],
             "caution_count": risk_status["caution_count"],
             "block_count": risk_status["block_count"],
+        },
+        "entry_timing": {
+            "latest_plan_count": entry_timing_status["latest_plan_count"],
+            "plan_ready_count": entry_timing_status["plan_ready_count"],
+            "evaluation_count": entry_timing_status["evaluation_count"],
+            "error_count": entry_timing_status["error_count"],
+            "latest_order_plan_draft_count": len(latest_order_plan_drafts),
+            "observe_only": True,
+            "not_order_intent": True,
         },
         "dry_run": {
             "enabled": dry_run_status["enabled"],
@@ -842,6 +882,11 @@ def _pipeline_summary(
                 "count": risk_status["latest_observation_count"],
             },
             {
+                "key": "entry_timing_plans",
+                "label": "EntryTiming Plans",
+                "count": entry_timing_status["latest_plan_count"],
+            },
+            {
                 "key": "dry_run_intents",
                 "label": "DRY_RUN Intents",
                 "count": dry_run_status["intent_count"],
@@ -857,6 +902,172 @@ def _pipeline_summary(
                 "count": 1 if no_buy_sentinel.get("no_buy_detected") else 0,
             },
         ],
+    }
+
+
+def _pipeline_stage_statuses(
+    *,
+    gateway_status: dict[str, Any],
+    market_data_status: dict[str, Any],
+    theme_status: dict[str, Any],
+    candidate_status: dict[str, Any],
+    strategy_status: dict[str, Any],
+    risk_status: dict[str, Any],
+    entry_timing_status: dict[str, Any],
+    live_sim_status: dict[str, Any],
+    latest_observe_cycle: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    last_run_status = None if latest_observe_cycle is None else latest_observe_cycle.get("status")
+    return [
+        _stage_status(
+            "Core",
+            "PASS",
+            "Core snapshot was generated.",
+            count=None,
+            updated_at=None,
+            reason_codes=[],
+        ),
+        _stage_status(
+            "Gateway",
+            "PASS" if gateway_status.get("last_heartbeat_at") else "BLOCK",
+            "Gateway heartbeat exists."
+            if gateway_status.get("last_heartbeat_at")
+            else "Gateway heartbeat is missing.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=gateway_status.get("last_heartbeat_at"),
+            reason_codes=[]
+            if gateway_status.get("last_heartbeat_at")
+            else ["GATEWAY_HEARTBEAT_MISSING"],
+        ),
+        _stage_status(
+            "MarketData",
+            "BLOCK"
+            if market_data_status.get("projection_error_count")
+            else "PASS"
+            if market_data_status.get("latest_tick_count")
+            else "BLOCK",
+            "Market ticks are present."
+            if market_data_status.get("latest_tick_count")
+            else "No latest ticks are present.",
+            count=market_data_status.get("latest_tick_count"),
+            updated_at=None,
+            reason_codes=["MARKET_PROJECTION_ERROR"]
+            if market_data_status.get("projection_error_count")
+            else []
+            if market_data_status.get("latest_tick_count")
+            else ["TICK_MISSING"],
+        ),
+        _stage_status(
+            "Theme",
+            "BLOCK"
+            if not theme_status.get("member_count")
+            else "PASS"
+            if theme_status.get("latest_snapshot_count")
+            else "WARN",
+            "Theme snapshots are present."
+            if theme_status.get("latest_snapshot_count")
+            else "Theme snapshot has not been built.",
+            count=theme_status.get("latest_snapshot_count"),
+            updated_at=None,
+            reason_codes=["THEME_MEMBERSHIP_EMPTY"]
+            if not theme_status.get("member_count")
+            else []
+            if theme_status.get("latest_snapshot_count")
+            else ["THEME_SNAPSHOT_NOT_BUILT"],
+        ),
+        _stage_status(
+            "Candidate",
+            "PASS" if candidate_status.get("active_candidate_count") else "WARN",
+            "Active candidates are present."
+            if candidate_status.get("active_candidate_count")
+            else "No active candidate exists.",
+            count=candidate_status.get("active_candidate_count"),
+            updated_at=None,
+            reason_codes=(
+                [] if candidate_status.get("active_candidate_count") else ["CANDIDATE_EMPTY"]
+            ),
+        ),
+        _stage_status(
+            "Strategy",
+            "PASS" if strategy_status.get("latest_observation_count") else "WARN",
+            "Strategy observations are present."
+            if strategy_status.get("latest_observation_count")
+            else "No strategy observation exists.",
+            count=strategy_status.get("latest_observation_count"),
+            updated_at=None,
+            reason_codes=(
+                [] if strategy_status.get("latest_observation_count") else ["STRATEGY_EMPTY"]
+            ),
+        ),
+        _stage_status(
+            "Risk",
+            "PASS" if risk_status.get("latest_observation_count") else "WARN",
+            "Risk observations are present."
+            if risk_status.get("latest_observation_count")
+            else "No risk observation exists.",
+            count=risk_status.get("latest_observation_count"),
+            updated_at=None,
+            reason_codes=[] if risk_status.get("latest_observation_count") else ["RISK_EMPTY"],
+        ),
+        _stage_status(
+            "EntryTiming",
+            "PASS" if entry_timing_status.get("latest_plan_count") else "WARN",
+            "OrderPlanDrafts exist as observe-only drafts."
+            if entry_timing_status.get("latest_plan_count")
+            else "No order plan draft exists.",
+            count=entry_timing_status.get("latest_plan_count"),
+            updated_at=None,
+            reason_codes=(
+                [] if entry_timing_status.get("latest_plan_count") else ["ORDER_PLAN_EMPTY"]
+            ),
+        ),
+        _stage_status(
+            "LiveSim",
+            "PASS",
+            "LIVE_SIM safety flags are read-only in this dashboard.",
+            count=live_sim_status.get("order_count"),
+            updated_at=None,
+            reason_codes=[
+                *([] if live_sim_status.get("enabled") else ["LIVE_SIM_DISABLED_EXPECTED"]),
+                *(
+                    []
+                    if not live_sim_status.get("kill_switch")
+                    else ["LIVE_SIM_KILL_SWITCH_ON_EXPECTED"]
+                ),
+                "ORDER_COMMAND_ZERO_EXPECTED",
+            ],
+        ),
+        _stage_status(
+            "ObserveCycle",
+            "UNKNOWN" if latest_observe_cycle is None else "PASS",
+            "No observe cycle run has been recorded yet."
+            if latest_observe_cycle is None
+            else f"Latest observe cycle status: {last_run_status}",
+            count=0 if latest_observe_cycle is None else 1,
+            updated_at=(
+                None if latest_observe_cycle is None else latest_observe_cycle.get("created_at")
+            ),
+            reason_codes=["CANDIDATE_REBUILD_NOT_RUN"] if latest_observe_cycle is None else [],
+        ),
+    ]
+
+
+def _stage_status(
+    stage: str,
+    status: str,
+    summary: str,
+    *,
+    count: Any,
+    updated_at: Any,
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    return {
+        "stage": stage,
+        "status": status,
+        "summary": summary,
+        "count": count,
+        "updated_at": updated_at,
+        "reason_codes": reason_codes,
     }
 
 

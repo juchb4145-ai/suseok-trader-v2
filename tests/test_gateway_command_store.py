@@ -4,11 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import utc_now
+from domain.broker.utils import datetime_to_wire, utc_now
 from storage.event_store import append_gateway_event
 from storage.gateway_command_store import (
     GatewayCommandStatus,
     enqueue_command,
+    expire_stale_gateway_commands,
+    get_command_status_counts,
     poll_commands,
 )
 from storage.sqlite import initialize_database
@@ -149,6 +151,50 @@ def test_expired_command_is_not_polled(tmp_path) -> None:
     assert commands == []
     assert row["status"] == GatewayCommandStatus.EXPIRED.value
     assert row["attempts"] == 0
+
+
+def test_stale_dispatched_command_is_failed_and_queue_health_refreshed(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    enqueue_command(connection, make_command("cmd_stale_dispatched"))
+    poll_commands(connection)
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET dispatched_at = ?
+        WHERE command_id = 'cmd_stale_dispatched'
+        """,
+        (datetime_to_wire(utc_now() - timedelta(seconds=180)),),
+    )
+    connection.execute(
+        """
+        INSERT INTO gateway_status (key, value, updated_at)
+        VALUES ('command_queue_healthy', 'false', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (datetime_to_wire(utc_now()),),
+    )
+    connection.commit()
+
+    result = expire_stale_gateway_commands(connection, dispatched_timeout_sec=120)
+    counts = get_command_status_counts(connection)
+    row = connection.execute(
+        """
+        SELECT status, completed_at, last_error
+        FROM gateway_commands
+        WHERE command_id = 'cmd_stale_dispatched'
+        """
+    ).fetchone()
+    status = connection.execute(
+        "SELECT value FROM gateway_status WHERE key = 'command_queue_healthy'"
+    ).fetchone()
+    connection.close()
+
+    assert result["timed_out_dispatched_count"] == 1
+    assert counts[GatewayCommandStatus.FAILED.value] == 1
+    assert row["status"] == GatewayCommandStatus.FAILED.value
+    assert row["completed_at"] is not None
+    assert "timed out" in row["last_error"]
+    assert status["value"] == "true"
 
 
 def test_forbidden_order_command_type_is_rejected(tmp_path) -> None:

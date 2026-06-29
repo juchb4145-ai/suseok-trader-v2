@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.broker.utils import normalize_value, parse_timestamp, utc_now
 from storage.event_store import get_gateway_status_values
+from storage.gateway_command_store import get_command_status_counts
 
 from services.ai_advisory.storage import build_status as build_ai_advisory_status
 from services.config import Settings, TradingMode, load_settings
@@ -717,6 +718,7 @@ def _add_no_buy_check(
 
 def _safe_gateway_status(connection: sqlite3.Connection) -> dict[str, str]:
     try:
+        get_command_status_counts(connection)
         return get_gateway_status_values(connection)
     except sqlite3.Error:
         return {}

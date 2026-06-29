@@ -138,3 +138,12 @@ def get_gateway_command_status() -> dict[str, dict[str, int]]:
         connection.close()
 
     return {"counts": counts}
+
+
+@router.get("/auth/probe", dependencies=[Depends(require_local_token)])
+def gateway_auth_probe() -> dict[str, Any]:
+    return {
+        "authenticated": True,
+        "read_only": True,
+        "no_order_side_effects": True,
+    }

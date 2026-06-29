@@ -5,7 +5,7 @@ import sqlite3
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from typing import Any
@@ -47,6 +47,7 @@ FORBIDDEN_ORDER_COMMAND_TYPES: frozenset[str] = frozenset(
         "live_order",
     }
 )
+DEFAULT_DISPATCH_TIMEOUT_SEC = 120
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -188,6 +189,7 @@ def poll_commands(
     deadline = time.monotonic() + bounded_wait_sec
 
     while True:
+        expire_stale_gateway_commands(connection)
         commands = _dispatch_ready_commands(connection, bounded_limit)
         if commands or time.monotonic() >= deadline:
             return commands
@@ -243,7 +245,7 @@ def record_command_event(
 
 
 def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
-    expire_queued_commands(connection)
+    expire_stale_gateway_commands(connection)
     rows = connection.execute(
         """
         SELECT status, COUNT(*) AS count
@@ -254,6 +256,8 @@ def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
     counts = {status.value: 0 for status in GatewayCommandStatus}
     for row in rows:
         counts[row["status"]] = row["count"]
+    _upsert_command_queue_health(connection, healthy=True)
+    connection.commit()
     return counts
 
 
@@ -275,6 +279,59 @@ def expire_queued_commands(connection: sqlite3.Connection) -> None:
         ),
     )
     connection.commit()
+
+
+def expire_stale_gateway_commands(
+    connection: sqlite3.Connection,
+    *,
+    dispatched_timeout_sec: int = DEFAULT_DISPATCH_TIMEOUT_SEC,
+) -> dict[str, int]:
+    now_dt = utc_now()
+    now = datetime_to_wire(now_dt)
+    dispatched_cutoff = datetime_to_wire(
+        now_dt - timedelta(seconds=max(int(dispatched_timeout_sec), 1))
+    )
+    queued_cursor = connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?, completed_at = ?
+        WHERE status = ?
+            AND expires_at IS NOT NULL
+            AND expires_at <= ?
+        """,
+        (
+            GatewayCommandStatus.EXPIRED.value,
+            now,
+            GatewayCommandStatus.QUEUED.value,
+            now,
+        ),
+    )
+    dispatched_cursor = connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?,
+            completed_at = ?,
+            last_error = COALESCE(
+                last_error,
+                'Gateway command dispatch timed out before ack/failure event.'
+            )
+        WHERE status = ?
+            AND dispatched_at IS NOT NULL
+            AND dispatched_at <= ?
+        """,
+        (
+            GatewayCommandStatus.FAILED.value,
+            now,
+            GatewayCommandStatus.DISPATCHED.value,
+            dispatched_cutoff,
+        ),
+    )
+    _upsert_command_queue_health(connection, healthy=True)
+    connection.commit()
+    return {
+        "expired_queued_count": max(int(queued_cursor.rowcount or 0), 0),
+        "timed_out_dispatched_count": max(int(dispatched_cursor.rowcount or 0), 0),
+    }
 
 
 def validate_command_type_allowed(
@@ -505,6 +562,19 @@ def _find_active_dedupe_error(connection: sqlite3.Connection, idempotency_key: s
         (idempotency_key,),
     )
     return None
+
+
+def _upsert_command_queue_health(connection: sqlite3.Connection, *, healthy: bool) -> None:
+    connection.execute(
+        """
+        INSERT INTO gateway_status (key, value, updated_at)
+        VALUES ('command_queue_healthy', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = excluded.updated_at
+        """,
+        ("true" if healthy else "false", datetime_to_wire(utc_now())),
+    )
 
 
 def _status_for_command_event(event_type: str) -> GatewayCommandStatus | None:

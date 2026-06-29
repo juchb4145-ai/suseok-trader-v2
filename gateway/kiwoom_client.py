@@ -38,6 +38,8 @@ REALTIME_STOCK_FIDS = [
     FID_EXECUTION_STRENGTH,
 ]
 
+PRICE_TICK_REAL_TYPES = frozenset({"주식체결", "주식시세"})
+
 ERROR_MESSAGES = {
     0: "정상처리",
     -10: "실패",
@@ -541,6 +543,8 @@ class KiwoomClient:
         )
 
     def _on_receive_real_data(self, code: str, real_type: str, real_data: str) -> None:
+        if not is_price_tick_real_type(real_type):
+            return
         raw_values = {fid: self._real_raw(code, fid) for fid in REALTIME_STOCK_FIDS}
         normalized_code = normalize_code(code)
         payload = parse_price_tick_from_fids(
@@ -775,6 +779,10 @@ def parse_condition_name_list(raw: str) -> list[ConditionInfo]:
 
 def realtime_stock_fid_string() -> str:
     return ";".join(str(fid) for fid in REALTIME_STOCK_FIDS)
+
+
+def is_price_tick_real_type(real_type: str) -> bool:
+    return str(real_type or "").strip() in PRICE_TICK_REAL_TYPES
 
 
 def parse_price_tick_from_fids(

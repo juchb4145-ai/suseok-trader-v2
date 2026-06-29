@@ -75,6 +75,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--condition-realtime", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--realtime-codes", default=os.environ.get("KIWOOM_REALTIME_CODES", ""))
+    parser.add_argument(
+        "--realtime-recover-stale-sec",
+        type=float,
+        default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_STALE_SEC", "45")),
+    )
+    parser.add_argument(
+        "--realtime-recover-interval-sec",
+        type=float,
+        default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_INTERVAL_SEC", "60")),
+    )
     parser.add_argument("--observe-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--auto-login", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--threaded-login", action=argparse.BooleanOptionalAction, default=True)
@@ -140,6 +150,8 @@ def run_gateway(args: argparse.Namespace) -> int:
             condition_index=args.condition_index,
             condition_realtime=bool(args.condition_realtime),
             realtime_codes=tuple(_parse_codes(args.realtime_codes)),
+            realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
+            realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
             observe_only=bool(args.observe_only),
         ),
     )
@@ -189,6 +201,11 @@ def request_kiwoom_login(
         runtime.request_login_started(threaded=threaded)
         try:
             client.login()
+            finish_pending_login = getattr(runtime, "_finish_pending_login_if_connected", None)
+            if callable(finish_pending_login):
+                finish_pending_login()
+            elif runtime.kiwoom_logged_in() and getattr(runtime, "_login_in_progress", False):
+                runtime.on_connected(True, 0, "already connected")
         except Exception as exc:
             runtime.request_login_failed(exc)
 

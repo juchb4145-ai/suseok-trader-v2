@@ -4,6 +4,7 @@ import importlib
 import sys
 from datetime import UTC, datetime
 
+from apps.kiwoom_gateway import request_kiwoom_login
 from domain.broker.commands import GatewayCommand
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
@@ -23,9 +24,11 @@ from gateway.kiwoom_client import (
     MockKiwoomClient,
     broker_env_from_server_gubun,
     condition_event_payload,
+    is_price_tick_real_type,
     parse_price_tick_from_fids,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
+from gateway.kiwoom_runtime import KiwoomGatewayRuntime, KiwoomGatewayRuntimeConfig
 from storage.event_store import append_gateway_event
 from storage.sqlite import initialize_database
 
@@ -95,6 +98,221 @@ def test_price_tick_parser_preserves_fallback_reason_codes() -> None:
     assert "EXECUTION_STRENGTH_MISSING" in reason_codes
     assert "DAY_HIGH_LOW_MISSING" in reason_codes
     assert "BEST_BID_ASK_MISSING" in reason_codes
+
+
+def test_quote_only_real_type_is_not_treated_as_price_tick() -> None:
+    assert is_price_tick_real_type("주식체결") is True
+    assert is_price_tick_real_type("주식시세") is True
+    assert is_price_tick_real_type("주식우선호가") is False
+    assert is_price_tick_real_type("") is False
+
+
+def test_login_request_finishes_when_kiwoom_is_already_connected() -> None:
+    class Client:
+        def login(self) -> int:
+            return 0
+
+    class Runtime:
+        def __init__(self) -> None:
+            self._login_in_progress = False
+            self.connected_calls: list[tuple[bool, int, str]] = []
+
+        def request_login_started(self, *, threaded: bool) -> None:
+            self._login_in_progress = True
+
+        def request_login_failed(self, exc: Exception) -> None:
+            raise AssertionError(exc)
+
+        def kiwoom_logged_in(self) -> bool:
+            return True
+
+        def on_connected(self, ok: bool, code: int, message: str) -> None:
+            self._login_in_progress = False
+            self.connected_calls.append((ok, code, message))
+
+    runtime = Runtime()
+
+    request_kiwoom_login(Client(), runtime, threaded=False)
+
+    assert runtime.connected_calls == [(True, 0, "already connected")]
+    assert runtime._login_in_progress is False
+
+
+def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> None:
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_codes=("005930", "000660")),
+    )
+    runtime.request_login_started(threaded=False)
+
+    runtime.emit_heartbeat()
+
+    assert runtime._login_in_progress is False
+    assert runtime._login_result_code == 0
+    assert client.registered_codes == {"005930", "000660"}
+    assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def test_runtime_heartbeat_allows_market_data_login_fallback_without_account() -> None:
+    class ConnectedWithoutAccounts(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.ocx = self
+
+        def dynamicCall(self, signature: str) -> int:
+            if str(signature).startswith("GetConnectState"):
+                return 1
+            return 0
+
+        def get_accounts(self) -> list[str]:
+            return []
+
+    client = ConnectedWithoutAccounts()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_codes=("005930",)),
+    )
+    runtime.request_login_started(threaded=False)
+
+    runtime.emit_heartbeat()
+
+    payload = runtime.heartbeat_payload()
+
+    assert runtime._login_in_progress is False
+    assert runtime._login_result_code == 0
+    assert client.registered_codes == {"005930"}
+    assert payload["orderable"] is False
+
+
+def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
+    command = GatewayCommand(
+        command_id="cmd_boom",
+        command_type="register_realtime",
+        source="core",
+        payload={"codes": ["005930"]},
+    )
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            return [command]
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    class Handler:
+        def handle(self, command: GatewayCommand) -> list[GatewayEvent]:
+            raise RuntimeError("boom")
+
+    core = Core()
+    runtime = KiwoomGatewayRuntime(client=MockKiwoomClient(), core_client=core)
+    runtime.command_handler = Handler()
+
+    runtime.poll_and_handle_commands()
+
+    assert [event.event_type for event in core.events] == [
+        "command_failed",
+        "gateway_error",
+    ]
+    assert core.events[0].command_id == "cmd_boom"
+    assert runtime._last_error == "boom"
+
+
+def test_runtime_tracks_realtime_register_command_after_ack() -> None:
+    command = GatewayCommand(
+        command_id="cmd_register_runtime",
+        command_type="register_realtime",
+        source="core",
+        payload={"codes": ["A005930", "000660"]},
+    )
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            return [command]
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    client = MockKiwoomClient()
+    core = Core()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=core)
+
+    runtime.poll_and_handle_commands()
+
+    assert client.registered_codes == {"005930", "000660"}
+    assert runtime._registered_realtime_codes == {"005930", "000660"}
+    assert [event.event_type for event in core.events] == ["command_started", "command_ack"]
+
+
+def test_runtime_recovers_realtime_registration_when_price_ticks_stall() -> None:
+    class RecoverClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.remove_all_calls = 0
+
+        def remove_all_realtime(self) -> None:
+            self.remove_all_calls += 1
+            super().remove_all_realtime()
+
+    client = RecoverClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            realtime_recover_stale_sec=1,
+            realtime_recover_interval_sec=60,
+        ),
+    )
+    runtime.register_realtime_codes(["005930", "000660"])
+    runtime._last_realtime_registration_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    runtime.emit_heartbeat()
+
+    assert client.remove_all_calls == 1
+    assert client.registered_codes == {"005930", "000660"}
+    assert runtime._realtime_recover_count == 1
+    assert any(
+        event.event_type == "gateway_log"
+        and event.payload["message"] == "realtime registration reset after stale price tick"
+        for event in runtime._event_queue
+    )
+
+
+def test_runtime_price_tick_refreshes_realtime_recovery_clock() -> None:
+    class RecoverClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.remove_all_calls = 0
+
+        def remove_all_realtime(self) -> None:
+            self.remove_all_calls += 1
+            super().remove_all_realtime()
+
+    client = RecoverClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            realtime_recover_stale_sec=60,
+            realtime_recover_interval_sec=60,
+        ),
+    )
+    runtime.register_realtime_codes(["005930"])
+    runtime._last_realtime_registration_at = datetime(2026, 1, 1, tzinfo=UTC)
+    runtime.on_price_tick({"code": "005930", "price": 70000})
+
+    runtime.emit_heartbeat()
+
+    assert client.remove_all_calls == 0
+    assert runtime._realtime_recover_count == 0
 
 
 def test_condition_event_parser_normalizes_action_and_code() -> None:
@@ -290,4 +508,3 @@ def _live_sim_order_command(command_id: str = "cmd_live_sim") -> GatewayCommand:
             },
         },
     )
-

@@ -282,6 +282,10 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "account": "account",
         "condition_load_state": "condition_load_state",
         "registered_realtime_code_count": "registered_realtime_code_count",
+        "latest_price_tick_at": "latest_price_tick_at",
+        "latest_realtime_registration_at": "latest_realtime_registration_at",
+        "realtime_recover_count": "realtime_recover_count",
+        "realtime_recover_error": "realtime_recover_error",
         "command_queue_healthy": "command_queue_healthy",
     }
     for status_key, payload_key in status_keys.items():

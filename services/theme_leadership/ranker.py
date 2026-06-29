@@ -107,7 +107,14 @@ class ThemeLeadershipRanker:
             )
 
         snapshots.sort(
-            key=lambda snapshot: (-snapshot.score, snapshot.theme_name, snapshot.theme_id)
+            key=lambda snapshot: (
+                -snapshot.score,
+                -snapshot.fresh_member_count,
+                -snapshot.valid_member_count,
+                -snapshot.total_turnover_krw,
+                snapshot.theme_name,
+                snapshot.theme_id,
+            )
         )
         return [_with_rank(snapshot, rank=index + 1) for index, snapshot in enumerate(snapshots)]
 

@@ -15,6 +15,7 @@ from domain.broker.utils import (
     utc_now,
 )
 from storage.event_store import get_gateway_status_values
+from storage.gateway_command_store import get_command_status_counts
 
 from services.ai_advisory.storage import build_status as build_ai_advisory_status
 from services.candidate_service import list_candidates
@@ -104,6 +105,7 @@ def build_no_buy_sentinel_snapshot(
         connection,
         lookback_minutes=resolved_settings.no_buy_sentinel_lookback_minutes,
     )
+    get_command_status_counts(connection)
     live_sim_status = get_live_sim_status(connection, resolved_settings)
     latest_reconcile = (
         get_latest_live_sim_reconcile(connection)
@@ -468,7 +470,7 @@ def _resolve_status(
 ) -> NoBuyStatus:
     if intent_count > 0 or order_count > 0 or command_count > 0:
         return NoBuyStatus.OK_TRADING_ACTIVITY
-    if plan_ready_count > 0 and bool(gateway_summary.get("unavailable")):
+    if bool(gateway_summary.get("unavailable")):
         return NoBuyStatus.GATEWAY_UNAVAILABLE
     if plan_ready_count > 0 and bool(config_summary.get("critical_disabled")):
         return NoBuyStatus.CONFIG_DISABLED
@@ -504,12 +506,18 @@ def _resolve_status(
         if ai_summary.get("classification") == "AI_NO_TRADE":
             return NoBuyStatus.AI_NO_TRADE
         return NoBuyStatus.UNKNOWN
+    if bool(gateway_summary.get("realtime_stalled")):
+        return NoBuyStatus.GATEWAY_REALTIME_STALLED
     if wait_retry_count > 0 or data_wait_count > 0:
         return NoBuyStatus.ENTRY_TIMING_WAIT
     if candidate_count > 0 or watchset_count > 0:
         return NoBuyStatus.ORDER_PLAN_NOT_READY
     if theme_snapshots and all(str(item.get("state")) == "DATA_WAIT" for item in theme_snapshots):
         return NoBuyStatus.THEME_DATA_WAIT
+    if candidate_count == 0 and watchset_count == 0 and _theme_snapshots_show_market_no_trade(
+        theme_snapshots
+    ):
+        return NoBuyStatus.MARKET_NO_TRADE
     if ai_summary.get("classification") == "AI_NO_TRADE":
         return NoBuyStatus.AI_NO_TRADE
     if candidate_count == 0 and watchset_count == 0:
@@ -660,23 +668,52 @@ def _empty_ai_summary() -> dict[str, Any]:
 
 
 def _gateway_summary(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+    command_counts = get_command_status_counts(connection)
     values = get_gateway_status_values(connection)
+    has_gateway_status = bool(values)
+    queue_value = values.get("command_queue_healthy")
+    has_gateway_health_signal = any(
+        key in values
+        for key in ("last_heartbeat_at", "gateway_orderable", "registered_realtime_code_count")
+    ) or (
+        queue_value is not None and str(queue_value).lower() != "true"
+    )
     heartbeat = values.get("last_heartbeat_at")
     heartbeat_age_sec = _age_seconds(heartbeat)
     max_age = max(settings.no_buy_sentinel_lookback_minutes * 60, 1)
     orderable = str(values.get("gateway_orderable", "")).lower() == "true"
-    queue_healthy = str(values.get("command_queue_healthy", "")).lower() == "true"
+    queue_healthy = True if queue_value is None else str(queue_value).lower() == "true"
+    registered_count = _int(values.get("registered_realtime_code_count"))
+    latest_price_tick_at = _latest_gateway_price_tick_at(connection)
+    latest_price_tick_age_sec = _age_seconds(latest_price_tick_at)
+    realtime_stalled = bool(
+        orderable
+        and registered_count > 0
+        and (
+            latest_price_tick_at is None
+            or latest_price_tick_age_sec > settings.market_data_degraded_tick_stale_sec
+        )
+    )
     stale = heartbeat is None or heartbeat_age_sec > max_age
-    unavailable = stale or not orderable or not queue_healthy
+    unavailable = has_gateway_health_signal and (stale or not orderable or not queue_healthy)
     return {
+        "has_gateway_status": has_gateway_status,
+        "has_gateway_health_signal": has_gateway_health_signal,
         "last_heartbeat_at": heartbeat,
         "heartbeat_age_sec": None if heartbeat is None else heartbeat_age_sec,
         "heartbeat_stale": stale,
         "gateway_orderable": orderable,
         "command_queue_healthy": queue_healthy,
+        "registered_realtime_code_count": registered_count,
+        "latest_price_tick_at": latest_price_tick_at,
+        "latest_price_tick_age_sec": (
+            None if latest_price_tick_at is None else latest_price_tick_age_sec
+        ),
+        "realtime_stalled": realtime_stalled,
         "account_mode": values.get("account_mode"),
         "broker_env": values.get("broker_env"),
         "server_mode": values.get("server_mode"),
+        "command_counts": command_counts,
         "unavailable": unavailable,
     }
 
@@ -733,6 +770,8 @@ def _operator_checklist(
             base.append("오늘 LIVE_SIM intent/order/command 활동이 있어 무매수 상태가 아닙니다.")
         case NoBuyStatus.THEME_DATA_WAIT:
             base.append("ThemeLeadership DATA_WAIT 원인을 확인합니다.")
+        case NoBuyStatus.MARKET_NO_TRADE:
+            base.append("데이터는 들어왔지만 주도/확산 테마가 없어 시장 관망 상태입니다.")
         case NoBuyStatus.ENTRY_TIMING_WAIT:
             base.append("EntryTiming WAIT_RETRY/DATA_WAIT 후보의 reason code를 확인합니다.")
         case NoBuyStatus.LIVE_SIM_SAFETY_BLOCK:
@@ -748,6 +787,8 @@ def _operator_checklist(
             base.append(f"설정 flag 비활성 항목을 확인합니다: {flags or '-'}")
         case NoBuyStatus.GATEWAY_UNAVAILABLE:
             base.append("Gateway heartbeat/orderable/command queue 상태를 확인합니다.")
+        case NoBuyStatus.GATEWAY_REALTIME_STALLED:
+            base.append("Gateway 로그인은 되어 있지만 price_tick 수신이 멈췄습니다.")
         case NoBuyStatus.AI_NO_TRADE:
             base.append("AI 관망 사유를 확인하되 시스템 안전 판단과 분리해서 봅니다.")
         case NoBuyStatus.NO_CANDIDATE:
@@ -759,6 +800,19 @@ def _operator_checklist(
     if ai_summary.get("classification") == "AI_UNAVAILABLE":
         base.append("AI 실패/timeout/invalid schema는 시스템 무매수 원인으로 보지 않습니다.")
     return base
+
+
+def _theme_snapshots_show_market_no_trade(
+    theme_snapshots: Sequence[Mapping[str, Any]],
+) -> bool:
+    states = {str(item.get("state") or "").upper() for item in theme_snapshots}
+    if not states:
+        return False
+    tradable_states = {"LEADING", "SPREADING", "LEADER_ONLY"}
+    observed_no_trade_states = {"WEAK", "WATCH", "FADING"}
+    return bool(states.intersection(observed_no_trade_states)) and not states.intersection(
+        tradable_states
+    )
 
 
 def _save_snapshot(connection: sqlite3.Connection, snapshot: NoBuySentinelSnapshot) -> None:
@@ -942,6 +996,8 @@ def _system_reason_codes(
         reasons.append("GATEWAY_NOT_ORDERABLE")
     if not gateway_summary.get("command_queue_healthy", True):
         reasons.append("GATEWAY_COMMAND_QUEUE_UNHEALTHY")
+    if gateway_summary.get("realtime_stalled"):
+        reasons.append("GATEWAY_REALTIME_STALLED")
     reasons.extend(config_summary.get("disabled_flags", []))
     if _reconcile_blocks(latest_reconcile):
         reasons.append("LIVE_SIM_RECONCILE_MISMATCH_BLOCK")
@@ -1001,6 +1057,20 @@ def _count_live_sim_commands(connection: sqlite3.Connection, *, lookback_minutes
         (cutoff,),
     ).fetchone()
     return int(row["count"] or 0)
+
+
+def _latest_gateway_price_tick_at(connection: sqlite3.Connection) -> str | None:
+    row = connection.execute(
+        """
+        SELECT MAX(event_ts) AS latest_at
+        FROM gateway_events
+        WHERE event_type = 'price_tick'
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    value = row["latest_at"]
+    return str(value) if value else None
 
 
 def _market_session(settings: Settings, *, manual: bool) -> str:

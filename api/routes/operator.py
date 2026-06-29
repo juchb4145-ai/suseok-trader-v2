@@ -10,6 +10,11 @@ from services.operator.no_buy_sentinel import (
     rebuild_no_buy_sentinel_snapshot,
 )
 from services.operator.operator_status import build_operator_status
+from services.runtime.market_open_observe_cycle import (
+    get_latest_market_open_observe_cycle_run,
+    list_market_open_observe_cycle_runs,
+    run_market_open_observe_cycle_once,
+)
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -97,3 +102,56 @@ def operator_no_buy_rebuild(
         return snapshot.to_dict()
     finally:
         connection.close()
+
+
+@router.post("/observe-cycle/run-once", dependencies=[Depends(require_local_token)])
+def operator_observe_cycle_run_once(
+    trade_date: str | None = Query(default=None),
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_market_open_observe_cycle_once(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+            limit=limit,
+        )
+        return result.to_dict()
+    finally:
+        connection.close()
+
+
+@router.get("/observe-cycle/runs")
+def operator_observe_cycle_runs(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        runs = list_market_open_observe_cycle_runs(connection, limit=limit)
+    finally:
+        connection.close()
+    return {
+        "runs": runs,
+        "read_only": True,
+        "observe_only": True,
+        "no_order_controls": True,
+    }
+
+
+@router.get("/observe-cycle/runs/latest")
+def operator_observe_cycle_run_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        run = get_latest_market_open_observe_cycle_run(connection)
+    finally:
+        connection.close()
+    return {
+        "run": run,
+        "read_only": True,
+        "observe_only": True,
+        "no_order_controls": True,
+    }

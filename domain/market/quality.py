@@ -8,7 +8,7 @@ from domain.market.models import MarketDataQualityStatus
 
 
 def assess_price_tick_quality(tick: BrokerPriceTick) -> MarketDataQualityStatus:
-    if tick.price <= 0 or tick.volume < 0 or tick.trade_value < 0:
+    if tick.price <= 1 or tick.volume < 0 or tick.trade_value < 0:
         return MarketDataQualityStatus.INVALID
     if tick.best_bid and tick.best_ask and tick.best_ask < tick.best_bid:
         return MarketDataQualityStatus.INVALID

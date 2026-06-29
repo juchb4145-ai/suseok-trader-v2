@@ -36,6 +36,7 @@ MARKET_PROJECTION_TABLES: tuple[str, ...] = (
     "market_tr_snapshots",
     "market_projection_errors",
 )
+INVALID_PRICE_TICK_REASON_CODES: frozenset[str] = frozenset({"PRICE_MISSING"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -114,6 +115,14 @@ def process_gateway_event(
             status="ERROR",
             error_count=1,
             error_message=str(exc),
+        )
+
+    if event_type == "price_tick" and applied_count == 0:
+        return MarketDataProcessResult(
+            event_id=event.event_id,
+            event_type=event_type,
+            status="IGNORED",
+            ignored_count=1,
         )
 
     return MarketDataProcessResult(
@@ -365,6 +374,19 @@ def _process_price_tick(
     settings: Settings,
 ) -> int:
     tick = BrokerPriceTick.from_dict(event.payload)
+    reason_codes = _price_tick_payload_reason_codes(event.payload)
+    quality_status = assess_price_tick_quality(tick)
+    invalid_reasons = sorted(
+        set(reason_codes).intersection(INVALID_PRICE_TICK_REASON_CODES)
+    )
+    if invalid_reasons or quality_status is MarketDataQualityStatus.INVALID:
+        _record_projection_error(
+            connection,
+            event,
+            error_message=f"INVALID_PRICE_TICK:{','.join(invalid_reasons) or quality_status.value}",
+        )
+        return 0
+
     event_ts, received_at = _event_store_times(connection, event)
     previous = connection.execute(
         """
@@ -382,7 +404,6 @@ def _process_price_tick(
         previous_trade_value = float(previous["cumulative_trade_value"])
         trade_value_delta = max(float(tick.trade_value) - previous_trade_value, 0.0)
 
-    quality_status = assess_price_tick_quality(tick)
     now = datetime_to_wire(utc_now())
     connection.execute(
         """
@@ -708,7 +729,20 @@ def _projection_exists(
         f"SELECT 1 FROM {table_name} WHERE event_id = ? LIMIT 1",
         (event_id,),
     ).fetchone()
-    return row is not None
+    if row is not None:
+        return True
+    if event_type == "price_tick":
+        row = connection.execute(
+            """
+            SELECT 1
+            FROM market_projection_errors
+            WHERE event_id = ?
+            LIMIT 1
+            """,
+            (event_id,),
+        ).fetchone()
+        return row is not None
+    return False
 
 
 def _event_store_times(
@@ -775,6 +809,16 @@ def _extract_row_code(row: Mapping[str, Any]) -> str | None:
         except ValueError:
             return None
     return None
+
+
+def _price_tick_payload_reason_codes(payload: Mapping[str, Any]) -> list[str]:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return []
+    raw_codes = metadata.get("reason_codes")
+    if not isinstance(raw_codes, list | tuple | set):
+        return []
+    return [str(code).strip().upper() for code in raw_codes if str(code).strip()]
 
 
 def _list_replayable_gateway_events(

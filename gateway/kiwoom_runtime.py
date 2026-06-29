@@ -4,6 +4,7 @@ import os
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
@@ -11,6 +12,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 
 from gateway.core_client import CoreClient
+from gateway.event_factory import make_command_failed_event
 from gateway.kiwoom_client import (
     ConditionInfo,
     KiwoomChejanParseResult,
@@ -35,6 +37,8 @@ class KiwoomGatewayRuntimeConfig:
     realtime_codes: tuple[str, ...] = ()
     observe_only: bool = True
     account: str = ""
+    realtime_recover_stale_sec: float = 45.0
+    realtime_recover_interval_sec: float = 60.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -173,6 +177,11 @@ class KiwoomGatewayRuntime:
         self._login_threaded = False
         self._condition_load_state = "IDLE"
         self._registered_realtime_codes: set[str] = set()
+        self._last_price_tick_at: datetime | None = None
+        self._last_realtime_registration_at: datetime | None = None
+        self._last_realtime_recover_at: datetime | None = None
+        self._realtime_recover_count = 0
+        self._realtime_recover_error = ""
 
     def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
         self.emit_event(
@@ -189,6 +198,8 @@ class KiwoomGatewayRuntime:
 
     def emit_heartbeat(self) -> None:
         self._heartbeat_sequence += 1
+        self._finish_pending_login_if_connected()
+        self._recover_realtime_if_stalled()
         payload = self.heartbeat_payload()
         payload["sequence"] = self._heartbeat_sequence
         self.emit("heartbeat", payload)
@@ -224,8 +235,29 @@ class KiwoomGatewayRuntime:
         self._polled_count += 1
         for command in commands:
             self._handled_command_count += 1
-            for event in self.command_handler.handle(command):
-                self.emit_event(event)
+            try:
+                events = self.command_handler.handle(command)
+                self._track_realtime_command(command, events)
+                for event in events:
+                    self.emit_event(event)
+            except Exception as exc:
+                self._last_error = str(exc)
+                self.emit_event(
+                    make_command_failed_event(
+                        command,
+                        str(exc),
+                        source=self.config.source,
+                    )
+                )
+                self.emit(
+                    "gateway_error",
+                    {
+                        "message": "COMMAND_HANDLE_FAILED",
+                        "command_id": command.command_id,
+                        "command_type": command.command_type,
+                        "error": str(exc),
+                    },
+                )
         self.flush_events()
 
     def heartbeat_payload(self) -> dict[str, Any]:
@@ -263,6 +295,12 @@ class KiwoomGatewayRuntime:
             "login_threaded": self._login_threaded,
             "condition_load_state": self._condition_load_state,
             "registered_realtime_code_count": len(self._registered_realtime_codes),
+            "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
+            "latest_realtime_registration_at": _datetime_or_empty(
+                self._last_realtime_registration_at
+            ),
+            "realtime_recover_count": self._realtime_recover_count,
+            "realtime_recover_error": self._realtime_recover_error,
             "queued_event_count": len(self._event_queue),
             "posted_event_count": self._posted_count,
             "poll_count": self._polled_count,
@@ -345,12 +383,84 @@ class KiwoomGatewayRuntime:
         if payload["action"] == "ENTER" and self.config.condition_realtime:
             self.register_realtime_codes([normalized_code])
 
+    def on_price_tick(self, payload: Mapping[str, Any]) -> None:
+        self._last_price_tick_at = utc_now()
+        self.emit("price_tick", dict(payload))
+
     def register_realtime_codes(self, codes: Iterable[str]) -> None:
         normalized_codes = [normalize_code(code) for code in codes if str(code or "").strip()]
         if not normalized_codes:
             return
         self.client.register_realtime(normalized_codes)
         self._registered_realtime_codes.update(normalized_codes)
+        self._last_realtime_registration_at = utc_now()
+
+    def _track_realtime_command(
+        self,
+        command: GatewayCommand,
+        events: Iterable[GatewayEvent],
+    ) -> None:
+        if not any(event.event_type == "command_ack" for event in events):
+            return
+        command_type = command.command_type.strip().lower()
+        if command_type not in {"register_realtime", "remove_realtime"}:
+            return
+        codes = _command_codes(command.payload)
+        if command_type == "register_realtime":
+            self._registered_realtime_codes.update(codes)
+            self._last_realtime_registration_at = utc_now()
+            return
+        for code in codes:
+            self._registered_realtime_codes.discard(code)
+        if not self._registered_realtime_codes:
+            self._last_realtime_registration_at = None
+
+    def _recover_realtime_if_stalled(self) -> None:
+        codes = sorted(self._registered_realtime_codes)
+        if not codes or not self.kiwoom_logged_in():
+            return
+        stale_sec = float(self.config.realtime_recover_stale_sec)
+        if stale_sec <= 0:
+            return
+        now = utc_now()
+        baseline = _latest_datetime(self._last_price_tick_at, self._last_realtime_registration_at)
+        if baseline is None or (now - baseline).total_seconds() < stale_sec:
+            return
+        interval_sec = max(float(self.config.realtime_recover_interval_sec), 1.0)
+        if (
+            self._last_realtime_recover_at is not None
+            and (now - self._last_realtime_recover_at).total_seconds() < interval_sec
+        ):
+            return
+        self._last_realtime_recover_at = now
+        try:
+            remove_all = getattr(self.client, "remove_all_realtime", None)
+            if callable(remove_all):
+                remove_all()
+            self.client.register_realtime(codes)
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._realtime_recover_error = str(exc)
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "REALTIME_RECOVER_FAILED",
+                    "registered_realtime_code_count": len(codes),
+                    "error": str(exc),
+                },
+            )
+            return
+        self._last_realtime_registration_at = now
+        self._realtime_recover_count += 1
+        self._realtime_recover_error = ""
+        self.emit(
+            "gateway_log",
+            {
+                "message": "realtime registration reset after stale price tick",
+                "registered_realtime_code_count": len(codes),
+                "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
+            },
+        )
 
     def on_chejan_result(self, result: KiwoomChejanParseResult) -> None:
         chejan_payload = self.pending_orders.enrich_chejan_payload(result.to_event_payload())
@@ -382,6 +492,19 @@ class KiwoomGatewayRuntime:
             except Exception:
                 return False
         return bool(self._accounts())
+
+    def _finish_pending_login_if_connected(self) -> None:
+        if (
+            self._login_in_progress
+            and self._login_result_code is None
+            and self._login_ready_for_fallback()
+        ):
+            self.on_connected(True, 0, "already connected")
+
+    def _login_ready_for_fallback(self) -> bool:
+        if not self.kiwoom_logged_in():
+            return False
+        return bool(self._server_gubun())
 
     def close(self) -> None:
         close = getattr(self.core_client, "close", None)
@@ -516,7 +639,7 @@ def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
     client.connected.connect(
         lambda ok, code, message: runtime.on_connected(bool(ok), int(code), str(message or ""))
     )
-    client.price_tick_received.connect(lambda payload: runtime.emit("price_tick", dict(payload)))
+    client.price_tick_received.connect(lambda payload: runtime.on_price_tick(dict(payload)))
     client.message_received.connect(
         lambda message: runtime.emit("gateway_log", {"message": str(message or "")})
     )
@@ -556,3 +679,27 @@ def _mask_account(value: str) -> str:
     if len(text) <= 4:
         return "*" * len(text)
     return f"{'*' * (len(text) - 4)}{text[-4:]}"
+
+
+def _command_codes(payload: Mapping[str, Any]) -> list[str]:
+    raw_codes = payload.get("codes", payload.get("code", []))
+    if isinstance(raw_codes, str):
+        candidates = raw_codes.replace(",", ";").split(";")
+    elif isinstance(raw_codes, Iterable):
+        candidates = [str(code) for code in raw_codes]
+    else:
+        candidates = []
+    return [normalize_code(code) for code in candidates if str(code).strip()]
+
+
+def _latest_datetime(*values: datetime | None) -> datetime | None:
+    candidates = [value for value in values if value is not None]
+    if not candidates:
+        return None
+    return max(candidates)
+
+
+def _datetime_or_empty(value: datetime | None) -> str:
+    if value is None:
+        return ""
+    return datetime_to_wire(value)

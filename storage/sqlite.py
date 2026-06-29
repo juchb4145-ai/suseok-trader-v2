@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 APP_NAME = "suseok-trader-v2"
 
 
@@ -738,6 +738,35 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
 
 
 def _create_operator_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_open_observe_cycle_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            status TEXT NOT NULL,
+            stage_summary_json TEXT NOT NULL DEFAULT '{}',
+            command_counts_json TEXT NOT NULL DEFAULT '{}',
+            warnings_json TEXT NOT NULL DEFAULT '[]',
+            errors_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            no_order_side_effects INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_open_observe_cycle_runs_created
+        ON market_open_observe_cycle_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_open_observe_cycle_runs_trade_created
+        ON market_open_observe_cycle_runs (trade_date, created_at)
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS live_sim_operating_runs (

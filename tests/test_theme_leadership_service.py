@@ -16,6 +16,11 @@ from services.theme_leadership import (
     build_candidate_source_events,
     rebuild_theme_leadership,
 )
+from services.theme_leadership.bootstrap_watchset import (
+    DEFAULT_BOOTSTRAP_SOURCE,
+    queue_bootstrap_realtime_registration,
+    select_bootstrap_realtime_codes,
+)
 from services.theme_leadership.classifier import ThemeStateClassifier, ThemeStateInput
 from services.theme_leadership.ranker import ThemeLeadershipRanker
 from services.theme_leadership.snapshot import RealtimeSnapshotBuilder
@@ -102,6 +107,55 @@ def test_theme_leadership_builders_rank_leading_theme_and_watchset(tmp_path) -> 
     }
     assert len(watchset.items) == 3
     assert all(item.source_type.startswith("THEME_") for item in watchset.items)
+
+
+def test_ranker_prioritizes_observed_zero_score_theme_over_empty_theme(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "observed-zero-score.sqlite3")
+    settings = _settings()
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "empty_theme",
+            "가나다 미관측",
+            [("011000", "미관측A"), ("011001", "미관측B")],
+        ),
+    )
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "weak_semiconductor",
+            "반도체 약세",
+            [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        ),
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(
+            code="005930",
+            name="삼성전자",
+            change_rate=-5.0,
+            trade_value=0,
+        ),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(
+            code="000660",
+            name="SK하이닉스",
+            price=120000,
+            change_rate=-5.0,
+            trade_value=0,
+        ),
+        settings,
+    )
+
+    result = rebuild_theme_leadership(connection, settings=settings)
+    connection.close()
+
+    assert result.snapshots[0].theme_id == "weak_semiconductor"
+    assert result.snapshots[0].state is ThemeState.WEAK
+    assert result.snapshots[0].valid_member_count == 2
 
 
 def test_leader_only_theme_keeps_followers_out_of_watchset(tmp_path) -> None:
@@ -281,6 +335,59 @@ def test_limits_and_candidate_source_events_are_observe_only_without_orders(tmp_
     assert dry_run_intent_count == 0
     assert live_sim_intent_count == 0
     assert all(event.payload["observe_only"] is True for event in result.candidate_source_events)
+
+
+def test_bootstrap_watchset_queues_only_realtime_registration(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "bootstrap-watchset.sqlite3")
+    settings = _settings(theme_leadership_max_total_watchset=3)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "semiconductor",
+            "반도체",
+            [
+                ("005930", "삼성전자"),
+                ("000660", "SK하이닉스"),
+                ("035420", "NAVER"),
+            ],
+        ),
+    )
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "it",
+            "IT",
+            [
+                ("005930", "삼성전자"),
+                ("034220", "LG디스플레이"),
+                ("066570", "LG전자"),
+            ],
+        ),
+    )
+
+    selection = select_bootstrap_realtime_codes(
+        connection,
+        settings=settings,
+        anchor_codes=["005930"],
+        max_codes=3,
+    )
+    result = queue_bootstrap_realtime_registration(
+        connection,
+        settings=settings,
+        anchor_codes=["005930"],
+        max_codes=3,
+    )
+    row = connection.execute(
+        "SELECT command_type, source, payload_json FROM gateway_commands"
+    ).fetchone()
+    connection.close()
+
+    assert selection.selected_codes
+    assert result.status == "QUEUED"
+    assert row["command_type"] == "register_realtime"
+    assert row["source"] == DEFAULT_BOOTSTRAP_SOURCE
+    assert "send_order" not in row["payload_json"]
+    assert '"observe_only":true' in row["payload_json"]
 
 
 def test_classifiers_and_candidate_event_builder_contract() -> None:

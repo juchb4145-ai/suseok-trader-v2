@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from domain.broker.utils import datetime_to_wire, utc_now
-from gateway.event_factory import make_condition_event
+from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.ai_advisory.storage import save_candidate_scores, save_scoring_run
 from services.config import Settings
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
@@ -161,6 +161,109 @@ def test_entry_timing_and_theme_data_wait_statuses(tmp_path) -> None:
 
     assert entry_snapshot["status"] == "ENTRY_TIMING_WAIT"
     assert theme_snapshot["status"] == "THEME_DATA_WAIT"
+
+
+def test_market_no_trade_is_separated_from_theme_data_wait(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-no-trade.sqlite3")
+    settings = _theme_settings()
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "weak_theme",
+            "약세테마",
+            [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        ),
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(code="005930", name="삼성전자", change_rate=-2.0),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(code="000660", name="SK하이닉스", price=120000, change_rate=-1.0),
+        settings,
+    )
+
+    snapshot = build_no_buy_sentinel_snapshot(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        manual=True,
+        write_snapshot=False,
+    ).to_dict()
+    connection.close()
+
+    assert snapshot["status"] == "MARKET_NO_TRADE"
+    assert snapshot["stage_summary"]["theme"]["state_counts"]["WEAK"] == 1
+
+
+def test_gateway_realtime_stalled_is_separated_from_theme_data_wait(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "realtime-stalled.sqlite3")
+    settings = _theme_settings(
+        market_data_tick_stale_sec=10,
+        market_data_degraded_tick_stale_sec=30,
+    )
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "condition_theme",
+            "조건테마",
+            [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        ),
+    )
+    _upsert_gateway_status(connection, "last_heartbeat_at", datetime_to_wire(utc_now()))
+    _upsert_gateway_status(connection, "gateway_orderable", "true")
+    _upsert_gateway_status(connection, "command_queue_healthy", "true")
+    _upsert_gateway_status(connection, "registered_realtime_code_count", "2")
+    connection.commit()
+
+    snapshot = build_no_buy_sentinel_snapshot(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        manual=True,
+        write_snapshot=False,
+    ).to_dict()
+    connection.close()
+
+    assert snapshot["status"] == "GATEWAY_REALTIME_STALLED"
+    assert snapshot["system_summary"]["gateway"]["realtime_stalled"] is True
+    assert "GATEWAY_REALTIME_STALLED" in snapshot["reason_summary"]["reason_counts"]
+
+
+def test_gateway_unavailable_overrides_theme_data_wait(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "gateway-unavailable.sqlite3")
+    settings = _theme_settings()
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            "condition_theme",
+            "조건테마",
+            [("005930", "삼성전자"), ("000660", "SK하이닉스")],
+        ),
+    )
+    _append_and_project(
+        connection,
+        make_condition_event(code="005930", name="삼성전자"),
+        settings,
+    )
+    _upsert_gateway_status(connection, "last_heartbeat_at", datetime_to_wire(utc_now()))
+    _upsert_gateway_status(connection, "gateway_orderable", "false")
+    _upsert_gateway_status(connection, "command_queue_healthy", "true")
+    connection.commit()
+
+    snapshot = build_no_buy_sentinel_snapshot(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        manual=True,
+        write_snapshot=False,
+    ).to_dict()
+    connection.close()
+
+    assert snapshot["status"] == "GATEWAY_UNAVAILABLE"
+    assert snapshot["system_summary"]["gateway"]["unavailable"] is True
 
 
 def test_ai_unavailable_is_not_system_block_and_unknown_falls_back(tmp_path) -> None:
@@ -336,3 +439,14 @@ def _insert_open_position(connection) -> None:
         (now, now, now),
     )
     connection.commit()
+
+
+def _upsert_gateway_status(connection, key: str, value: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO gateway_status (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, datetime_to_wire(utc_now())),
+    )
