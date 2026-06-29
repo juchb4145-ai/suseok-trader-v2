@@ -1163,6 +1163,9 @@ def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
     recover_count = int(gateway_status.get("realtime_recover_count") or 0)
     condition_state = str(gateway_status.get("condition_load_state") or "").upper()
     if condition_state == "CALLBACK_TIMEOUT":
+        condition_health = str(
+            gateway_status.get("condition_callback_health") or "ACTIVE_X_CALLBACK_SUSPECTED"
+        ).upper()
         return _stage_status(
             "Gateway",
             "BLOCK",
@@ -1171,12 +1174,16 @@ def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
             updated_at=gateway_status.get("last_heartbeat_at"),
             reason_codes=[
                 "CONDITION_VER_CALLBACK_TIMEOUT",
-                "ACTIVE_X_CALLBACK_SUSPECTED",
-                "POSSIBLE_THREADING_ISSUE",
+                condition_health,
             ],
         )
     health = str(gateway_status.get("realtime_subscription_health") or "")
-    if health == "CALLBACK_TIMEOUT" or (
+    callback_missing_health = {
+        "CALLBACK_TIMEOUT",
+        "CORE_IO_BLOCKING_SUSPECTED",
+        "ACTIVE_X_CALLBACK_SUSPECTED",
+    }
+    if health in callback_missing_health or (
         registered_count > 0 and callback_count <= 0 and recover_count > 0
     ):
         return _stage_status(
@@ -1185,7 +1192,10 @@ def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
             "Realtime registration exists, but Kiwoom realtime callbacks are missing.",
             count=gateway_status.get("recent_event_count"),
             updated_at=gateway_status.get("last_heartbeat_at"),
-            reason_codes=["REALTIME_CALLBACK_MISSING", "ACTIVE_X_CALLBACK_SUSPECTED"],
+            reason_codes=[
+                "REALTIME_CALLBACK_MISSING",
+                health if health in callback_missing_health else "ACTIVE_X_CALLBACK_SUSPECTED",
+            ],
         )
     if health == "PARSE_ERROR":
         return _stage_status(

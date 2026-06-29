@@ -781,17 +781,17 @@ class KiwoomClient:
         )
 
     def _on_receive_real_data(self, code: str, real_type: str, real_data: str) -> None:
-        parsed_code = parse_kiwoom_realtime_code(code)
+        raw_code = str(code or "")
+        real_type_text = str(real_type or "").strip()
         self._record_thread_audit(
             "OnReceiveRealData",
             phase="CALLBACK",
-            code=parsed_code.base_code,
-            kiwoom_code=parsed_code.kiwoom_code,
-            exchange=parsed_code.exchange,
-            real_type=str(real_type or "").strip(),
+            code=normalize_code(raw_code),
+            kiwoom_code=raw_code,
+            real_type=real_type_text,
             real_data_present=bool(str(real_data or "")),
         )
-        real_type_text = str(real_type or "").strip()
+        parsed_code = parse_kiwoom_realtime_code(code)
         normalized_code = parsed_code.base_code
         self.realtime_data_received.emit(
             normalized_code,

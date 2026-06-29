@@ -12,6 +12,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 
 from gateway.core_client import CoreClient
+from gateway.core_io_worker import CoreIoWorker
 from gateway.event_factory import make_command_failed_event
 from gateway.kiwoom_client import (
     ConditionInfo,
@@ -20,8 +21,8 @@ from gateway.kiwoom_client import (
     KiwoomOrderResult,
     broker_env_from_server_gubun,
     condition_event_payload,
-    normalize_realtime_exchange,
     normalize_code,
+    normalize_realtime_exchange,
     realtime_code_for_exchange,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
@@ -45,6 +46,10 @@ class KiwoomGatewayRuntimeConfig:
     realtime_callback_timeout_sec: float = 15.0
     condition_load_timeout_sec: float = 10.0
     condition_load_max_retry: int = 1
+    core_io_enabled: bool = True
+    command_polling_enabled: bool = True
+    event_posting_enabled: bool = True
+    core_io_worker_enabled: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -214,6 +219,9 @@ class KiwoomGatewayRuntime:
         self._raw_callback_counts: dict[str, int] = {}
         self._latest_callback_at_by_method: dict[str, str] = {}
         self._active_x_thread_audit: deque[dict[str, Any]] = deque(maxlen=50)
+        self._core_worker: CoreIoWorker | None = None
+        self._local_event_count = 0
+        self._latest_local_event: dict[str, Any] = {}
 
     def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
         self.emit_event(
@@ -236,7 +244,52 @@ class KiwoomGatewayRuntime:
         payload["sequence"] = self._heartbeat_sequence
         self.emit("heartbeat", payload)
 
+    def start_core_io_worker(self) -> None:
+        if not self.config.core_io_enabled or not self.config.core_io_worker_enabled:
+            return
+        if self._core_worker is None:
+            self._core_worker = CoreIoWorker(
+                core_client=self.core_client,
+                command_limit=self.config.command_limit,
+                command_wait_sec=self.config.command_wait_sec,
+                command_polling_enabled=self.config.command_polling_enabled,
+                event_posting_enabled=self.config.event_posting_enabled,
+            )
+        self._core_worker.start()
+
+    def stop_core_io_worker(self) -> None:
+        if self._core_worker is not None:
+            self._core_worker.stop()
+
+    def sync_core_io_status(self) -> None:
+        if self._core_worker is None:
+            return
+        snapshot = self._core_worker.snapshot()
+        self._posted_count = snapshot.posted_count
+        self._polled_count = snapshot.poll_count
+        if snapshot.last_error:
+            self._last_error = snapshot.last_error
+
+    def drain_core_io_worker(self, *, limit: int = 100) -> None:
+        if self._core_worker is None:
+            return
+        commands = self._core_worker.drain_commands(limit=limit)
+        self.sync_core_io_status()
+        if commands:
+            self.handle_commands(commands)
+            self.flush_events()
+
     def flush_events(self, *, limit: int = 200) -> None:
+        if not self.config.core_io_enabled or not self.config.event_posting_enabled:
+            self._drain_events_locally(limit=limit)
+            return
+        if self._core_worker is not None:
+            drained = 0
+            while self._event_queue and drained < max(int(limit), 1):
+                self._core_worker.enqueue_event(self._event_queue.popleft())
+                drained += 1
+            self.sync_core_io_status()
+            return
         drained = 0
         while self._event_queue and drained < max(int(limit), 1):
             event = self._event_queue[0]
@@ -253,6 +306,8 @@ class KiwoomGatewayRuntime:
             drained += 1
 
     def poll_and_handle_commands(self) -> None:
+        if not self.config.core_io_enabled or not self.config.command_polling_enabled:
+            return
         try:
             commands = self.core_client.poll_commands(
                 limit=self.config.command_limit,
@@ -265,6 +320,10 @@ class KiwoomGatewayRuntime:
             self._last_error = str(exc)
             return
         self._polled_count += 1
+        self.handle_commands(commands)
+        self.flush_events()
+
+    def handle_commands(self, commands: Iterable[GatewayCommand]) -> None:
         for command in commands:
             self._handled_command_count += 1
             try:
@@ -290,9 +349,25 @@ class KiwoomGatewayRuntime:
                         "error": str(exc),
                     },
                 )
-        self.flush_events()
+
+    def _drain_events_locally(self, *, limit: int = 200) -> None:
+        drained = 0
+        while self._event_queue and drained < max(int(limit), 1):
+            event = self._event_queue.popleft()
+            self._local_event_count += 1
+            self._latest_local_event = event.to_dict()
+            drained += 1
 
     def heartbeat_payload(self) -> dict[str, Any]:
+        self.sync_core_io_status()
+        worker_snapshot = self._core_worker.snapshot() if self._core_worker is not None else None
+        worker_event_queue_size = (
+            worker_snapshot.event_queue_size if worker_snapshot is not None else 0
+        )
+        worker_command_queue_size = (
+            worker_snapshot.command_queue_size if worker_snapshot is not None else 0
+        )
+        worker_last_error = worker_snapshot.last_error if worker_snapshot is not None else ""
         logged_in = self.kiwoom_logged_in()
         accounts = self._accounts() if logged_in else []
         account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
@@ -313,11 +388,26 @@ class KiwoomGatewayRuntime:
             "server_mode": broker_env,
             "account_mode": broker_env,
             "server_gubun": server_gubun,
-            "last_error": self._last_error,
+            "last_error": self._last_error or worker_last_error,
             "reconnect_count": 0,
             "rate_limit": {"adapter": "kiwoom", "local": True},
-            "command_queue_size": 0,
-            "event_queue_size": len(self._event_queue),
+            "command_queue_size": worker_command_queue_size,
+            "event_queue_size": len(self._event_queue) + worker_event_queue_size,
+            "core_io_enabled": self.config.core_io_enabled,
+            "command_polling_enabled": self.config.command_polling_enabled,
+            "event_posting_enabled": self.config.event_posting_enabled,
+            "core_io_worker_enabled": self.config.core_io_worker_enabled,
+            "core_io_worker_running": (
+                bool(worker_snapshot.running) if worker_snapshot is not None else False
+            ),
+            "core_io_worker_thread_id": (
+                worker_snapshot.thread_id if worker_snapshot is not None else None
+            ),
+            "core_io_worker_event_queue_size": worker_event_queue_size,
+            "core_io_worker_command_queue_size": worker_command_queue_size,
+            "core_io_worker_last_error": worker_last_error,
+            "local_event_count": self._local_event_count,
+            "latest_local_event": dict(self._latest_local_event),
             "login_in_progress": self._login_in_progress,
             "login_requested": self._login_requested,
             "login_result_code": self._login_result_code,
@@ -343,6 +433,7 @@ class KiwoomGatewayRuntime:
             ),
             "condition_load_retry_count": self._condition_load_retry_count,
             "condition_load_timeout_count": self._condition_load_timeout_count,
+            "condition_callback_health": self._condition_callback_health(),
             "latest_condition_ver_callback_at": _datetime_or_empty(
                 self._latest_condition_ver_callback_at
             ),
@@ -390,12 +481,52 @@ class KiwoomGatewayRuntime:
             "latest_active_x_thread_audit": (
                 dict(self._active_x_thread_audit[-1]) if self._active_x_thread_audit else {}
             ),
-            "queued_event_count": len(self._event_queue),
+            "queued_event_count": len(self._event_queue) + worker_event_queue_size,
             "posted_event_count": self._posted_count,
             "poll_count": self._polled_count,
             "handled_command_count": self._handled_command_count,
             "observe_only": self.config.observe_only,
             "live_real_allowed": False,
+        }
+
+    def isolation_status_payload(self) -> dict[str, Any]:
+        payload = self.heartbeat_payload()
+        return {
+            "qt_main_thread_id": self._latest_qt_thread_id_for(
+                "QApplication.event_loop",
+                "QApplication.exec",
+            ),
+            "active_x_thread_id": self._latest_qt_thread_id_for(
+                "QAxWidget.create",
+                "SetRealReg",
+                "GetConditionLoad",
+                "CommConnect",
+            ),
+            "login_requested_at": payload["login_started_at"],
+            "on_event_connect_count": payload["raw_callback_counts"].get("OnEventConnect", 0),
+            "condition_load_requested_at": payload["condition_load_requested_at"],
+            "condition_ver_callback_count": payload["raw_callback_counts"].get(
+                "OnReceiveConditionVer",
+                0,
+            ),
+            "realtime_registration_success_count": payload[
+                "realtime_registration_success_count"
+            ],
+            "raw_realtime_callback_count": payload["raw_realtime_callback_count"],
+            "parsed_price_tick_count": payload["parsed_price_tick_count"],
+            "realtime_parse_error_count": payload["realtime_parse_error_count"],
+            "latest_condition_ver_callback_at": payload["latest_condition_ver_callback_at"],
+            "latest_realtime_callback_at": payload["latest_realtime_callback_at"],
+            "latest_price_tick_at": payload["latest_price_tick_at"],
+            "condition_load_state": payload["condition_load_state"],
+            "condition_callback_health": payload["condition_callback_health"],
+            "realtime_subscription_health": payload["realtime_subscription_health"],
+            "core_io_enabled": payload["core_io_enabled"],
+            "command_polling_enabled": payload["command_polling_enabled"],
+            "event_posting_enabled": payload["event_posting_enabled"],
+            "queued_event_count": payload["queued_event_count"],
+            "local_event_count": payload["local_event_count"],
+            "last_error": payload["last_error"],
         }
 
     def request_login_started(self, *, threaded: bool) -> None:
@@ -753,6 +884,7 @@ class KiwoomGatewayRuntime:
         return bool(self._server_gubun())
 
     def close(self) -> None:
+        self.stop_core_io_worker()
         close = getattr(self.core_client, "close", None)
         if callable(close):
             close()
@@ -792,9 +924,10 @@ class KiwoomGatewayRuntime:
         reason_codes = [
             "CONDITION_VER_CALLBACK_TIMEOUT",
             "CONDITION_LOAD_TIMEOUT",
-            "ACTIVE_X_CALLBACK_SUSPECTED",
-            "POSSIBLE_THREADING_ISSUE",
+            self._callback_suspect_reason_code(),
         ]
+        if self._login_threaded:
+            reason_codes.append("POSSIBLE_THREADING_ISSUE")
         if self._condition_load_retry_count < max(int(self.config.condition_load_max_retry), 0):
             self._condition_load_retry_count += 1
             self.emit(
@@ -937,6 +1070,29 @@ class KiwoomGatewayRuntime:
         real_type = str(metadata.get("real_type") or "").strip() or "UNKNOWN"
         self._real_type_counts[real_type] = self._real_type_counts.get(real_type, 0) + 1
 
+    def _condition_callback_health(self) -> str:
+        if self._latest_condition_ver_callback_at is not None:
+            return "CALLBACK_ACTIVE"
+        if self._condition_load_state == "LOADING":
+            return "LOADING_WAITING_CALLBACK"
+        if self._condition_load_state == "CALLBACK_TIMEOUT":
+            return self._callback_suspect_reason_code()
+        return self._condition_load_state
+
+    def _callback_suspect_reason_code(self) -> str:
+        if not self.config.core_io_enabled:
+            return "ACTIVE_X_CALLBACK_SUSPECTED"
+        if self._core_io_on_main_thread_observed():
+            return "CORE_IO_BLOCKING_SUSPECTED"
+        return "ACTIVE_X_CALLBACK_SUSPECTED"
+
+    def _core_io_on_main_thread_observed(self) -> bool:
+        if self.config.core_io_worker_enabled or self._core_worker is not None:
+            return False
+        if not self.config.core_io_enabled:
+            return False
+        return self._posted_count > 0 or self._polled_count > 0
+
     def _realtime_subscription_health(self) -> str:
         if self._realtime_parse_error_count and not self._parsed_price_tick_count:
             return "PARSE_ERROR"
@@ -949,11 +1105,22 @@ class KiwoomGatewayRuntime:
         age_sec = (utc_now() - self._last_realtime_registration_at).total_seconds()
         timeout_sec = max(float(self.config.realtime_callback_timeout_sec), 1.0)
         if age_sec >= timeout_sec:
+            if not self.config.core_io_enabled:
+                return "ACTIVE_X_CALLBACK_SUSPECTED"
+            if self._core_io_on_main_thread_observed():
+                return "CORE_IO_BLOCKING_SUSPECTED"
             return "CALLBACK_TIMEOUT"
         return "REGISTERED_WAITING_CALLBACK"
 
     def _realtime_exchange(self) -> str:
         return normalize_realtime_exchange(self.config.realtime_exchange)
+
+    def _latest_qt_thread_id_for(self, *methods: str) -> str:
+        method_set = {str(method) for method in methods}
+        for audit in reversed(self._active_x_thread_audit):
+            if str(audit.get("method") or "") in method_set:
+                return str(audit.get("qt_thread_id") or "")
+        return ""
 
 
 def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:

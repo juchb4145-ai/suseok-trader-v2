@@ -167,8 +167,23 @@ python -m apps.kiwoom_gateway `
 - `latest_condition_ver_callback_at`
 - `realtime_registration_success_count`
 - `realtime_callback_count`
+- `raw_realtime_callback_count`
 - `latest_realtime_callback_at`
 - `realtime_subscription_health`
+- `core_io_worker_running`
+- `core_io_worker_event_queue_size`
+- `core_io_worker_command_queue_size`
+
+Core HTTP IO 영향을 떼어 보려면 isolation mode를 사용한다. 이 모드는 Core로 event POST/command polling을 하지 않고 60초 동안 callback counter를 console에 출력한다.
+
+```powershell
+.\venv_32\Scripts\python.exe -m apps.kiwoom_gateway `
+  --disable-core-io `
+  --observe-only `
+  --auto-login `
+  --no-threaded-login `
+  --realtime-codes 005930,000660
+```
 
 | 증상 | 확인 |
 | --- | --- |
@@ -180,6 +195,8 @@ python -m apps.kiwoom_gateway `
 | tick 없음 | condition hit 또는 `--realtime-codes` 등록 여부 확인 |
 | `condition_load_state=CALLBACK_TIMEOUT` | `GetConditionLoad` 이후 `OnReceiveConditionVer` 미수신. ActiveX callback/thread/event loop 확인 |
 | `realtime_subscription_health=CALLBACK_TIMEOUT` | `SetRealReg` 등록 성공 후 `OnReceiveRealData` 미수신. `active_x_thread_audit`, `login_threaded=false` 확인 |
+| `realtime_subscription_health=CORE_IO_BLOCKING_SUSPECTED` | main-thread Core IO가 관측된 상태에서 callback timeout. Core IO worker 사용 여부 확인 |
+| `realtime_subscription_health=ACTIVE_X_CALLBACK_SUSPECTED` | isolation mode에서도 callback timeout. ActiveX event sink/환경 확인 |
 | `realtime_subscription_health=PARSE_ERROR` | raw callback은 왔으나 FID parsing 실패. `latest_realtime_parse_error` 확인 |
 | LIVE_SIM command rejected | `/api/gateway/events/recent`의 `command_failed.error_message` 확인 |
 | REAL server detected | 모의투자 로그인인지 확인. REAL이면 주문은 의도적으로 거부됨 |

@@ -413,13 +413,12 @@ def _render_error_detail_lines(summary: Mapping[str, Any]) -> list[str]:
     ]
     for stage_name, event_id, code, error, payload in rows[:20]:
         lines.append(
-            "| {stage} | {event_id} | {code} | {error} | {payload} |".format(
-                stage=_md_cell(stage_name),
-                event_id=_md_cell(event_id),
-                code=_md_cell(code),
-                error=_md_cell(error),
-                payload=_md_cell(payload),
-            )
+            "| "
+            f"{_md_cell(stage_name)} | "
+            f"{_md_cell(event_id)} | "
+            f"{_md_cell(code)} | "
+            f"{_md_cell(error)} | "
+            f"{_md_cell(payload)} |"
         )
     return lines
 
@@ -658,6 +657,9 @@ def _classify_gateway_recent_events(
             {"latest_heartbeat": latest_heartbeat, "gateway_errors": error_messages[:5]},
         )
     elif str(latest_heartbeat.get("condition_load_state") or "").upper() == "CALLBACK_TIMEOUT":
+        condition_health = str(
+            latest_heartbeat.get("condition_callback_health") or "ACTIVE_X_CALLBACK_SUSPECTED"
+        ).upper()
         _mark(
             stages,
             "Gateway",
@@ -665,8 +667,7 @@ def _classify_gateway_recent_events(
             [
                 "CONDITION_VER_CALLBACK_TIMEOUT",
                 "CONDITION_LOAD_TIMEOUT",
-                "ACTIVE_X_CALLBACK_SUSPECTED",
-                "POSSIBLE_THREADING_ISSUE",
+                condition_health,
             ],
             (
                 "GetConditionLoad was requested, but OnReceiveConditionVer did not "
@@ -723,6 +724,11 @@ def _classify_gateway_recent_events(
     latest_callback_at = str(latest_heartbeat.get("latest_realtime_callback_at") or "").strip()
     recover_count = _optional_int(latest_heartbeat.get("realtime_recover_count")) or 0
     health = str(latest_heartbeat.get("realtime_subscription_health") or "").upper()
+    callback_missing_health = {
+        "CALLBACK_TIMEOUT",
+        "CORE_IO_BLOCKING_SUSPECTED",
+        "ACTIVE_X_CALLBACK_SUSPECTED",
+    }
     if health == "PARSE_ERROR":
         _mark(
             stages,
@@ -733,7 +739,7 @@ def _classify_gateway_recent_events(
             {"latest_heartbeat": latest_heartbeat},
         )
     if (
-        health == "CALLBACK_TIMEOUT"
+        health in callback_missing_health
         or registered_count
         and registered_count > 0
         and not has_price_tick
@@ -742,8 +748,11 @@ def _classify_gateway_recent_events(
         _mark(
             stages,
             "Gateway",
-            "BLOCK" if health == "CALLBACK_TIMEOUT" or recover_count > 0 else "WARN",
-            ["REALTIME_CALLBACK_MISSING", "ACTIVE_X_CALLBACK_SUSPECTED"],
+            "BLOCK" if health in callback_missing_health or recover_count > 0 else "WARN",
+            [
+                "REALTIME_CALLBACK_MISSING",
+                health if health in callback_missing_health else "ACTIVE_X_CALLBACK_SUSPECTED",
+            ],
             (
                 "Realtime registration exists, but Kiwoom OnReceiveRealData callbacks "
                 "are not visible."
@@ -919,7 +928,10 @@ def _classify_candidate(
     elif active_count <= 0:
         reasons = ["CANDIDATE_EMPTY"]
         theme_status = _payload(endpoint_results, "themes_status")
-        market_ticks = _list_from_payload(_payload(endpoint_results, "market_data_ticks_latest"), "ticks")
+        market_ticks = _list_from_payload(
+            _payload(endpoint_results, "market_data_ticks_latest"),
+            "ticks",
+        )
         if int(theme_status.get("member_count") or 0) <= 0:
             reasons.append("THEME_MEMBERSHIP_EMPTY")
         if not market_ticks:

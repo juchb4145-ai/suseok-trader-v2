@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import sys
+import threading
+import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
@@ -27,10 +31,10 @@ from gateway.kiwoom_client import (
     Signal,
     broker_env_from_server_gubun,
     condition_event_payload,
-    is_quote_real_type,
     is_price_tick_real_type,
-    parse_quote_from_fids,
+    is_quote_real_type,
     parse_price_tick_from_fids,
+    parse_quote_from_fids,
     realtime_code_for_exchange,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
@@ -73,6 +77,29 @@ def test_kiwoom_gateway_realtime_exchange_option() -> None:
     assert parse_args([]).realtime_exchange == "krx"
     assert parse_args(["--realtime-exchange", "nxt"]).realtime_exchange == "nxt"
     assert parse_args(["--realtime-exchange", "all"]).realtime_exchange == "all"
+
+
+def test_kiwoom_gateway_core_io_isolation_options() -> None:
+    args = parse_args(
+        [
+            "--disable-core-io",
+            "--disable-command-polling",
+            "--disable-event-posting",
+        ]
+    )
+
+    assert args.disable_core_io is True
+    assert args.disable_command_polling is True
+    assert args.disable_event_posting is True
+
+
+def test_kiwoom_gateway_app_drains_worker_commands_instead_of_sync_polling() -> None:
+    from apps import kiwoom_gateway
+
+    source = inspect.getsource(kiwoom_gateway.run_gateway)
+
+    assert "command_timer.timeout.connect(runtime.drain_core_io_worker)" in source
+    assert "command_timer.timeout.connect(runtime.poll_and_handle_commands)" not in source
 
 
 def test_price_tick_parser_maps_required_fids_and_metadata() -> None:
@@ -418,7 +445,7 @@ def test_condition_ver_callback_exits_condition_loop_before_runtime_signal() -> 
 
 def test_kiwoom_client_creates_activex_with_set_control() -> None:
     class FakeQAxWidget:
-        instances: list["FakeQAxWidget"] = []
+        instances: list[FakeQAxWidget] = []
 
         def __init__(self, control_name: str | None = None) -> None:
             self.constructor_control_name = control_name
@@ -570,6 +597,111 @@ def test_runtime_heartbeat_allows_market_data_login_fallback_without_account() -
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930"}
     assert payload["orderable"] is False
+
+
+def test_runtime_disable_core_io_never_calls_core_client() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.poll_calls = 0
+            self.post_calls = 0
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            self.poll_calls += 1
+            return []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.post_calls += 1
+
+    core = Core()
+    runtime = KiwoomGatewayRuntime(
+        client=MockKiwoomClient(),
+        core_client=core,
+        config=KiwoomGatewayRuntimeConfig(
+            core_io_enabled=False,
+            command_polling_enabled=False,
+            event_posting_enabled=False,
+        ),
+    )
+
+    runtime.emit("gateway_log", {"message": "local only"})
+    runtime.flush_events()
+    runtime.poll_and_handle_commands()
+    payload = runtime.heartbeat_payload()
+
+    assert core.poll_calls == 0
+    assert core.post_calls == 0
+    assert payload["core_io_enabled"] is False
+    assert payload["local_event_count"] == 1
+    assert payload["queued_event_count"] == 0
+
+
+def test_core_io_worker_keeps_http_off_main_thread_and_commands_on_main_thread() -> None:
+    main_thread_id = threading.get_ident()
+    command = GatewayCommand(
+        command_id="cmd_worker_register",
+        command_type="register_realtime",
+        source="core",
+        payload={"codes": ["005930"]},
+    )
+
+    class Core:
+        def __init__(self) -> None:
+            self.commands = [command]
+            self.events: list[GatewayEvent] = []
+            self.poll_thread_ids: list[int] = []
+            self.post_thread_ids: list[int] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            self.poll_thread_ids.append(threading.get_ident())
+            time.sleep(0.01)
+            if self.commands:
+                return [self.commands.pop(0)]
+            return []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.post_thread_ids.append(threading.get_ident())
+            self.events.append(event)
+
+    class TrackingClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_thread_ids: list[int] = []
+
+        def register_realtime(self, codes, screen_no=None) -> None:  # type: ignore[no-untyped-def]
+            self.register_thread_ids.append(threading.get_ident())
+            super().register_realtime(codes, screen_no=screen_no)
+
+    core = Core()
+    client = TrackingClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=core,
+        config=KiwoomGatewayRuntimeConfig(
+            command_wait_sec=0.01,
+            core_io_worker_enabled=True,
+        ),
+    )
+    runtime.start_core_io_worker()
+    try:
+        runtime.emit("gateway_log", {"message": "queued through worker"})
+        runtime.flush_events()
+        _wait_until(lambda: bool(core.poll_thread_ids))
+        _wait_until(lambda: _drain_worker_once(runtime) or bool(client.register_thread_ids))
+        runtime.flush_events()
+        _wait_until(lambda: len(core.events) >= 3)
+    finally:
+        runtime.close()
+
+    assert core.poll_thread_ids
+    assert core.post_thread_ids
+    assert all(thread_id != main_thread_id for thread_id in core.poll_thread_ids)
+    assert all(thread_id != main_thread_id for thread_id in core.post_thread_ids)
+    assert client.register_thread_ids == [main_thread_id]
+    assert client.registered_codes == {"005930"}
+    assert [event.event_type for event in core.events][-2:] == [
+        "command_started",
+        "command_ack",
+    ]
 
 
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
@@ -818,6 +950,25 @@ def test_realtime_registration_success_without_callback_reports_waiting_or_timeo
     assert timeout_payload["realtime_subscription_health"] == "CALLBACK_TIMEOUT"
 
 
+def test_realtime_timeout_marks_core_io_blocking_when_main_thread_io_was_observed() -> None:
+    runtime = KiwoomGatewayRuntime(
+        client=MockKiwoomClient(),
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_callback_timeout_sec=15),
+    )
+
+    runtime.register_realtime_codes(["005930"])
+    runtime.on_realtime_registration_result(
+        {"codes": ["005930"], "result_code": 0, "success": True}
+    )
+    runtime._last_realtime_registration_at = datetime(2026, 1, 1, tzinfo=UTC)
+    runtime._polled_count = 1
+
+    assert runtime.heartbeat_payload()["realtime_subscription_health"] == (
+        "CORE_IO_BLOCKING_SUSPECTED"
+    )
+
+
 def test_condition_load_timeout_retries_once_then_marks_callback_timeout() -> None:
     class ConditionClient(MockKiwoomClient):
         def __init__(self) -> None:
@@ -849,9 +1000,11 @@ def test_condition_load_timeout_retries_once_then_marks_callback_timeout() -> No
     payload = runtime.heartbeat_payload()
 
     assert payload["condition_load_state"] == "CALLBACK_TIMEOUT"
+    assert payload["condition_callback_health"] == "ACTIVE_X_CALLBACK_SUSPECTED"
     assert payload["condition_load_timeout_count"] == 2
     assert runtime._event_queue[-1].event_type == "gateway_error"
     assert runtime._event_queue[-1].payload["message"] == "CONDITION_VER_CALLBACK_TIMEOUT"
+    assert "ACTIVE_X_CALLBACK_SUSPECTED" in runtime._event_queue[-1].payload["reason_codes"]
 
 
 def test_condition_event_parser_normalizes_action_and_code() -> None:
@@ -1012,6 +1165,20 @@ def test_kiwoom_handler_rejects_live_real_and_cancel_modify() -> None:
     assert "simulation server" in real_rejected[0].payload["error_message"]
     assert cancel_rejected[0].event_type == "command_failed"
     assert modify_rejected[0].event_type == "command_failed"
+
+
+def _wait_until(predicate: Callable[[], bool], *, timeout_sec: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout_sec
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition was not reached before timeout")
+
+
+def _drain_worker_once(runtime: KiwoomGatewayRuntime) -> bool:
+    runtime.drain_core_io_worker()
+    return False
 
 
 def _live_sim_order_command(command_id: str = "cmd_live_sim") -> GatewayCommand:

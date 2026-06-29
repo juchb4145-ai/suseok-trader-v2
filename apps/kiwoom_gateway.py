@@ -4,6 +4,7 @@ import argparse
 import dataclasses as _dataclasses
 import datetime as _datetime
 import enum as _enum
+import json
 import os
 import struct
 import sys
@@ -109,6 +110,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--disable-core-io",
+        action="store_true",
+        help="Diagnostic isolation mode: do not poll commands or post events to Core.",
+    )
+    parser.add_argument(
+        "--disable-command-polling",
+        action="store_true",
+        help="Do not poll Core commands; Kiwoom ActiveX callbacks still run.",
+    )
+    parser.add_argument(
+        "--disable-event-posting",
+        action="store_true",
+        help="Do not post Gateway events to Core; events are drained locally.",
+    )
+    parser.add_argument(
+        "--isolation-report-interval-sec",
+        type=float,
+        default=5.0,
+        help="Console status interval for --disable-core-io callback diagnostics.",
+    )
+    parser.add_argument(
         "--mock-client",
         action="store_true",
         help="Use an in-process mock Kiwoom client for adapter smoke tests.",
@@ -150,6 +172,16 @@ def run_gateway(args: argparse.Namespace) -> int:
         ) from exc
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    core_io_enabled = not bool(getattr(args, "disable_core_io", False))
+    command_polling_enabled = core_io_enabled and not bool(
+        getattr(args, "disable_command_polling", False)
+    )
+    event_posting_enabled = core_io_enabled and not bool(
+        getattr(args, "disable_event_posting", False)
+    )
+    core_io_worker_enabled = core_io_enabled and (
+        command_polling_enabled or event_posting_enabled
+    )
 
     if bool(getattr(args, "mock_client", False)):
         from gateway.kiwoom_client import MockKiwoomClient, active_x_thread_audit
@@ -174,20 +206,34 @@ def run_gateway(args: argparse.Namespace) -> int:
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
             realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
             observe_only=bool(args.observe_only),
+            core_io_enabled=core_io_enabled,
+            command_polling_enabled=command_polling_enabled,
+            event_posting_enabled=event_posting_enabled,
+            core_io_worker_enabled=core_io_worker_enabled,
         ),
     )
     wire_kiwoom_signals(client, runtime)
     runtime.on_active_x_thread_audit(
         active_x_thread_audit("QApplication.event_loop", phase="READY")
     )
+    runtime.start_core_io_worker()
+    if not core_io_enabled:
+        runtime.emit(
+            "gateway_log",
+            {
+                "message": "CORE_IO_DISABLED_ISOLATION_MODE",
+                "command_polling_enabled": False,
+                "event_posting_enabled": False,
+            },
+        )
 
     heartbeat_timer = QTimer()
     heartbeat_timer.timeout.connect(lambda: _heartbeat_tick(runtime))
     heartbeat_timer.start(int(max(float(args.heartbeat_interval_sec), 1.0) * 1000))
 
     command_timer = QTimer()
-    command_timer.timeout.connect(runtime.poll_and_handle_commands)
-    command_timer.start(max(int(float(args.poll_wait_sec) * 1000), 200))
+    command_timer.timeout.connect(runtime.drain_core_io_worker)
+    command_timer.start(100)
 
     flush_timer = QTimer()
     flush_timer.timeout.connect(runtime.flush_events)
@@ -196,6 +242,22 @@ def run_gateway(args: argparse.Namespace) -> int:
     condition_watchdog_timer = QTimer()
     condition_watchdog_timer.timeout.connect(runtime.check_condition_load_timeout)
     condition_watchdog_timer.start(1000)
+
+    isolation_report_timer = QTimer()
+    if not core_io_enabled:
+        interval_ms = int(max(float(args.isolation_report_interval_sec), 1.0) * 1000)
+        max_reports = max(int(60000 / interval_ms), 1)
+        report_state = {"count": 0}
+
+        def report_isolation_status() -> None:
+            _print_isolation_status(runtime)
+            report_state["count"] += 1
+            if report_state["count"] >= max_reports:
+                isolation_report_timer.stop()
+
+        isolation_report_timer.timeout.connect(report_isolation_status)
+        isolation_report_timer.start(interval_ms)
+        QTimer.singleShot(1000, report_isolation_status)
 
     QTimer.singleShot(100, lambda: _heartbeat_tick(runtime))
     if bool(args.auto_login):
@@ -261,6 +323,17 @@ def request_kiwoom_login(
 def _heartbeat_tick(runtime: object) -> None:
     runtime.emit_heartbeat()
     runtime.flush_events()
+
+
+def _print_isolation_status(runtime: object) -> None:
+    status_payload = getattr(runtime, "isolation_status_payload", None)
+    if not callable(status_payload):
+        return
+    print(
+        "[kiwoom_gateway][isolation] "
+        + json.dumps(status_payload(), ensure_ascii=False, sort_keys=True),
+        flush=True,
+    )
 
 
 def _parse_codes(raw: object) -> list[str]:

@@ -18,8 +18,8 @@ from storage.event_store import (
 from storage.gateway_command_store import (
     FORBIDDEN_ORDER_COMMAND_TYPES,
     GatewayCommandStatus,
-    get_command_type_counts,
     get_command_status_counts,
+    get_command_type_counts,
     poll_commands,
 )
 from storage.sqlite import open_connection
@@ -121,6 +121,24 @@ def get_gateway_status() -> dict[str, Any]:
         "login_block_reason_codes": _json_value(
             status_values.get("login_block_reason_codes")
         ),
+        "core_io_enabled": _json_value(status_values.get("core_io_enabled")),
+        "command_polling_enabled": _json_value(
+            status_values.get("command_polling_enabled")
+        ),
+        "event_posting_enabled": _json_value(status_values.get("event_posting_enabled")),
+        "core_io_worker_enabled": _json_value(status_values.get("core_io_worker_enabled")),
+        "core_io_worker_running": _json_value(status_values.get("core_io_worker_running")),
+        "core_io_worker_thread_id": _json_value(
+            status_values.get("core_io_worker_thread_id")
+        ),
+        "core_io_worker_event_queue_size": _json_value(
+            status_values.get("core_io_worker_event_queue_size")
+        ),
+        "core_io_worker_command_queue_size": _json_value(
+            status_values.get("core_io_worker_command_queue_size")
+        ),
+        "core_io_worker_last_error": status_values.get("core_io_worker_last_error"),
+        "local_event_count": _json_value(status_values.get("local_event_count")),
         "condition_load_state": status_values.get("condition_load_state"),
         "condition_load_requested_at": status_values.get("condition_load_requested_at"),
         "condition_load_retry_count": _json_value(
@@ -129,6 +147,7 @@ def get_gateway_status() -> dict[str, Any]:
         "condition_load_timeout_count": _json_value(
             status_values.get("condition_load_timeout_count")
         ),
+        "condition_callback_health": status_values.get("condition_callback_health"),
         "latest_condition_ver_callback_at": status_values.get(
             "latest_condition_ver_callback_at"
         ),
