@@ -601,6 +601,28 @@ def _classify_gateway_recent_events(
         and _dict_or_empty(event.get("payload")).get("logged_in") is False
         for event in event_items
     ) or any("KIWOOM_LOGIN" in message for message in error_messages)
+    login_block_reason_codes = [
+        str(code)
+        for code in list(latest_heartbeat.get("login_block_reason_codes") or [])
+        if str(code or "").strip()
+    ]
+    comm_connect_state = str(latest_heartbeat.get("comm_connect_state") or "").upper()
+    if login_block_reason_codes or comm_connect_state.startswith("EVENT_TIMEOUT"):
+        _mark(
+            stages,
+            "Gateway",
+            "BLOCK",
+            login_block_reason_codes
+            or [
+                "ON_EVENT_CONNECT_TIMEOUT",
+                "ACTIVE_X_LOGIN_BLOCKED",
+            ],
+            (
+                "Kiwoom CommConnect/OnEventConnect did not complete; "
+                "realtime registration was not attempted."
+            ),
+            {"latest_heartbeat": latest_heartbeat, "gateway_errors": error_messages[:5]},
+        )
     if (
         not login_failed
         and latest_heartbeat.get("login_requested") is True

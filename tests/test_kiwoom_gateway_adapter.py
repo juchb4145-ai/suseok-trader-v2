@@ -416,6 +416,42 @@ def test_condition_ver_callback_exits_condition_loop_before_runtime_signal() -> 
     assert result_calls == []
 
 
+def test_kiwoom_client_creates_activex_with_set_control() -> None:
+    class FakeQAxWidget:
+        instances: list["FakeQAxWidget"] = []
+
+        def __init__(self, control_name: str | None = None) -> None:
+            self.constructor_control_name = control_name
+            self.control_name = ""
+            self.set_control_calls: list[str] = []
+            FakeQAxWidget.instances.append(self)
+
+        def setControl(self, control_name: str) -> bool:
+            self.control_name = str(control_name)
+            self.set_control_calls.append(self.control_name)
+            return self.control_name == "KHOPENAPI.KHOpenAPICtrl.1"
+
+        def isNull(self) -> bool:
+            return self.control_name != "KHOPENAPI.KHOpenAPICtrl.1"
+
+    client = object.__new__(KiwoomClient)
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    audits: list[dict[str, object]] = []
+    client.active_x_thread_audit.connect(audits.append)
+
+    widget = client._create_ocx_widget(FakeQAxWidget)
+
+    assert widget.set_control_calls == ["KHOPENAPI.KHOpenAPICtrl.1"]
+    assert widget.constructor_control_name is None
+    assert any(
+        audit["method"] == "QAxWidget.setControl"
+        and audit["phase"] == "RESULT"
+        and audit["result"] is True
+        for audit in audits
+    )
+
+
 def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> None:
     client = MockKiwoomClient()
     runtime = KiwoomGatewayRuntime(
@@ -431,6 +467,56 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def test_runtime_heartbeat_skips_connect_state_fallback_for_event_loop_client() -> None:
+    class EventLoopLoginClient(MockKiwoomClient):
+        login_waits_for_event_loop = True
+
+    client = EventLoopLoginClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_codes=("005930", "000660")),
+    )
+    runtime.request_login_started(threaded=False)
+
+    runtime.emit_heartbeat()
+
+    assert runtime._login_in_progress is True
+    assert runtime._login_result_code is None
+    assert client.registered_codes == set()
+    assert any(
+        event.event_type == "gateway_log"
+        and event.payload["message"] == "LOGIN_CONNECT_STATE_FALLBACK_SKIPPED_EVENT_LOOP_CLIENT"
+        for event in runtime._event_queue
+    )
+
+
+def test_runtime_reports_comm_connect_no_return_after_event_timeout() -> None:
+    runtime = KiwoomGatewayRuntime(client=MockKiwoomClient(), core_client=object())
+
+    runtime.on_active_x_thread_audit(
+        {
+            "method": "CommConnect",
+            "phase": "CALL",
+            "timestamp": "2026-06-29T09:00:00Z",
+        }
+    )
+    runtime.on_active_x_thread_audit(
+        {
+            "method": "OnEventConnect",
+            "phase": "TIMEOUT",
+            "timeout_ms": 60000,
+            "timestamp": "2026-06-29T09:01:00Z",
+        }
+    )
+
+    payload = runtime.heartbeat_payload()
+
+    assert payload["comm_connect_state"] == "EVENT_TIMEOUT_NO_COMM_CONNECT_RESULT"
+    assert "COMM_CONNECT_NO_RETURN" in payload["login_block_reason_codes"]
+    assert "ON_EVENT_CONNECT_TIMEOUT" in payload["login_block_reason_codes"]
 
 
 def test_runtime_nxt_realtime_exchange_registers_suffixed_kiwoom_codes() -> None:

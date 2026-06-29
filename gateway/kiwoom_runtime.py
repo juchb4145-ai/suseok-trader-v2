@@ -181,6 +181,11 @@ class KiwoomGatewayRuntime:
         self._login_started_at = ""
         self._login_finished_at = ""
         self._login_threaded = False
+        self._login_connect_state_fallback_skipped = False
+        self._latest_comm_connect_call_at: datetime | None = None
+        self._latest_comm_connect_result_at: datetime | None = None
+        self._latest_comm_connect_result_code: int | None = None
+        self._latest_on_event_connect_timeout_at: datetime | None = None
         self._condition_load_state = "IDLE"
         self._condition_load_requested_at: datetime | None = None
         self._condition_load_retry_count = 0
@@ -320,6 +325,18 @@ class KiwoomGatewayRuntime:
             "login_started_at": self._login_started_at,
             "login_finished_at": self._login_finished_at,
             "login_threaded": self._login_threaded,
+            "comm_connect_state": self._comm_connect_state(),
+            "latest_comm_connect_call_at": _datetime_or_empty(
+                self._latest_comm_connect_call_at
+            ),
+            "latest_comm_connect_result_at": _datetime_or_empty(
+                self._latest_comm_connect_result_at
+            ),
+            "latest_comm_connect_result_code": self._latest_comm_connect_result_code,
+            "latest_on_event_connect_timeout_at": _datetime_or_empty(
+                self._latest_on_event_connect_timeout_at
+            ),
+            "login_block_reason_codes": self._login_block_reason_codes(),
             "condition_load_state": self._condition_load_state,
             "condition_load_requested_at": _datetime_or_empty(
                 self._condition_load_requested_at
@@ -513,6 +530,19 @@ class KiwoomGatewayRuntime:
         self._active_x_thread_audit.append(audit)
         method = str(audit.get("method") or "")
         phase = str(audit.get("phase") or "")
+        if method == "CommConnect" and phase == "CALL":
+            self._latest_comm_connect_call_at = utc_now()
+            self._latest_comm_connect_result_at = None
+            self._latest_comm_connect_result_code = None
+            self._latest_on_event_connect_timeout_at = None
+        elif method == "CommConnect" and phase == "RESULT":
+            self._latest_comm_connect_result_at = utc_now()
+            try:
+                self._latest_comm_connect_result_code = int(audit.get("result_code"))
+            except (TypeError, ValueError):
+                self._latest_comm_connect_result_code = None
+        elif method == "OnEventConnect" and phase == "TIMEOUT":
+            self._latest_on_event_connect_timeout_at = utc_now()
         if phase == "CALLBACK" and method:
             self._raw_callback_counts[method] = self._raw_callback_counts.get(method, 0) + 1
             timestamp = str(audit.get("timestamp") or datetime_to_wire(utc_now()))
@@ -530,6 +560,9 @@ class KiwoomGatewayRuntime:
             "SendCondition",
             "SetRealReg",
             "QAxWidget.create",
+            "QAxWidget.setControl",
+            "QAxWidget.signal_connect",
+            "QAxWidget.create_constructor_fallback",
             "QApplication.exec",
         }:
             self.emit(
@@ -662,12 +695,57 @@ class KiwoomGatewayRuntime:
         return bool(self._accounts())
 
     def _finish_pending_login_if_connected(self) -> None:
-        if (
-            self._login_in_progress
-            and self._login_result_code is None
-            and self._login_ready_for_fallback()
-        ):
+        if not self._login_in_progress or self._login_result_code is not None:
+            return
+        if bool(getattr(self.client, "login_waits_for_event_loop", False)):
+            if not self._login_connect_state_fallback_skipped:
+                self._login_connect_state_fallback_skipped = True
+                self.emit(
+                    "gateway_log",
+                    {
+                        "message": "LOGIN_CONNECT_STATE_FALLBACK_SKIPPED_EVENT_LOOP_CLIENT",
+                        "reason_codes": ["ACTIVE_X_CALLBACK_REQUIRED"],
+                    },
+                )
+            return
+        if self._login_ready_for_fallback():
             self.on_connected(True, 0, "already connected")
+
+    def _comm_connect_state(self) -> str:
+        if self._latest_on_event_connect_timeout_at is not None:
+            if self._latest_comm_connect_result_at is None:
+                return "EVENT_TIMEOUT_NO_COMM_CONNECT_RESULT"
+            return "EVENT_TIMEOUT_AFTER_COMM_CONNECT_RESULT"
+        if self._raw_callback_counts.get("OnEventConnect", 0) > 0:
+            return "EVENT_CALLBACK_RECEIVED"
+        if self._latest_comm_connect_call_at is None:
+            return "NOT_REQUESTED"
+        if self._latest_comm_connect_result_at is None:
+            return "CALLED_WAITING_RESULT"
+        return "RETURNED_WAITING_EVENT"
+
+    def _login_block_reason_codes(self) -> list[str]:
+        state = self._comm_connect_state()
+        reason_codes: list[str] = []
+        if state == "EVENT_TIMEOUT_NO_COMM_CONNECT_RESULT":
+            reason_codes.extend(
+                [
+                    "COMM_CONNECT_NO_RETURN",
+                    "ON_EVENT_CONNECT_TIMEOUT",
+                    "KIWOOM_LOGIN_DIALOG_OR_VERSION_SUSPECTED",
+                    "ACTIVE_X_LOGIN_BLOCKED",
+                ]
+            )
+        elif state == "EVENT_TIMEOUT_AFTER_COMM_CONNECT_RESULT":
+            reason_codes.extend(
+                [
+                    "ON_EVENT_CONNECT_TIMEOUT",
+                    "ACTIVE_X_CALLBACK_SUSPECTED",
+                ]
+            )
+        if self._login_connect_state_fallback_skipped:
+            reason_codes.append("CONNECT_STATE_FALLBACK_SKIPPED")
+        return reason_codes
 
     def _login_ready_for_fallback(self) -> bool:
         if not self.kiwoom_logged_in():

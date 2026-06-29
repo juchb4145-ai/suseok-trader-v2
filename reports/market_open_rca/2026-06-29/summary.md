@@ -2,21 +2,21 @@
 
 - trade_date: `2026-06-29`
 - overall_status: `BLOCK`
-- generated_at: `2026-06-29T06:29:35.884423+00:00`
+- generated_at: `2026-06-29T09:58:43.334658+00:00`
 - core_url: `http://127.0.0.1:8000`
 - mode: read-only, queue_commands=false, LIVE_REAL disallowed
 
 | Stage | Status | Reason codes | Summary |
 | --- | --- | --- | --- |
 | Core | PASS | - | Core health and /api/status are ok. |
-| Gateway | BLOCK | CONDITION_VER_CALLBACK_TIMEOUT, CONDITION_LOAD_TIMEOUT, ACTIVE_X_CALLBACK_SUSPECTED, POSSIBLE_THREADING_ISSUE, REALTIME_CALLBACK_MISSING, CORE_STATUS_ERROR | Realtime registration exists, but Kiwoom OnReceiveRealData callbacks are not visible. |
+| Gateway | BLOCK | COMM_CONNECT_NO_RETURN, ON_EVENT_CONNECT_TIMEOUT, KIWOOM_LOGIN_DIALOG_OR_VERSION_SUSPECTED, ACTIVE_X_LOGIN_BLOCKED, CONNECT_STATE_FALLBACK_SKIPPED, CORE_STATUS_ERROR | Kiwoom CommConnect/OnEventConnect did not complete; realtime registration was not attempted. |
 | MarketData | BLOCK | TICK_STALE, NO_CONDITION_HIT | All latest ticks are stale by threshold 10s. |
 | Theme | PASS | - | theme_snapshots=100, LEADING=0, SPREADING=0 |
 | Candidate | WARN | CANDIDATE_EMPTY | No active candidates exist. |
 | Strategy | WARN | STRATEGY_EMPTY | Strategy ran but is empty. |
 | Risk | WARN | RISK_EMPTY | Risk ran but is empty. |
 | EntryTiming | WARN | ENTRY_TIMING_NO_INPUT | EntryTiming has not evaluated inputs; PLAN_READY=0, WAIT_RETRY=0, DATA_WAIT=0, NO_PLAN=0 |
-| LiveSim | PASS | LIVE_SIM_DISABLED_EXPECTED, LIVE_SIM_KILL_SWITCH_ON_EXPECTED | LIVE_SIM read-only status collected; command queue remains disabled. |
+| LiveSim | WARN | LIVE_SIM_DISABLED_EXPECTED, LIVE_SIM_KILL_SWITCH_ON_EXPECTED | LIVE_SIM operator status has blocking reasons for order modes. |
 | OrderSafety | PASS | ORDER_COMMAND_ZERO_EXPECTED | No order-like GatewayCommand exists in command status. |
 
 ## Error Details

@@ -335,14 +335,7 @@ class KiwoomClient:
         self._condition_callback_result: tuple[bool, str] | None = None
         self.chejan_parser = KiwoomChejanParser()
 
-        self._record_thread_audit("QAxWidget.create", phase="CALL")
-        self.ocx = QAxWidget("KHOPENAPI.KHOpenAPICtrl.1")
-        if self.ocx.isNull():
-            self._record_thread_audit("QAxWidget.create_fallback", phase="CALL")
-            self.ocx = QAxWidget("KHOpenAPI.KHOpenAPICtrl.1")
-        if self.ocx.isNull():
-            raise RuntimeError("Kiwoom OpenAPI+ ActiveX control is not registered.")
-        self._record_thread_audit("QAxWidget.create", phase="RESULT", is_null=False)
+        self.ocx = self._create_ocx_widget(QAxWidget)
 
         self.ocx.OnEventConnect.connect(self._on_event_connect)
         self.ocx.OnReceiveRealData.connect(self._on_receive_real_data)
@@ -352,8 +345,11 @@ class KiwoomClient:
         self.ocx.OnReceiveTrCondition.connect(self._on_receive_tr_condition)
         self.ocx.OnReceiveRealCondition.connect(self._on_receive_real_condition)
         self.ocx.OnReceiveTrData.connect(self._on_receive_tr_data)
+        self._record_thread_audit("QAxWidget.signal_connect", phase="RESULT", success=True)
 
     def login(self, timeout_ms: int | None = None) -> int:
+        from PyQt5.QtCore import QTimer
+
         wait_timeout_ms = int(timeout_ms or DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS)
         loop, timer, timed_out = self._prepare_callback_wait(
             "OnEventConnect",
@@ -361,20 +357,30 @@ class KiwoomClient:
         )
         self._login_event_loop = loop
         self._login_callback_result = None
-        self._record_thread_audit("CommConnect", phase="CALL")
-        result = int(self.ocx.dynamicCall("CommConnect()") or 0)
-        self._record_thread_audit("CommConnect", phase="RESULT", result_code=result)
-        if result != 0:
-            self._cleanup_callback_wait(timer)
-            self._login_event_loop = None
-            self._login_callback_result = None
-            return result
+        result_holder: dict[str, int | None] = {"value": None}
+
+        def call_comm_connect() -> None:
+            self._record_thread_audit("CommConnect", phase="CALL")
+            result_holder["value"] = int(self.ocx.dynamicCall("CommConnect()") or 0)
+            self._record_thread_audit(
+                "CommConnect",
+                phase="RESULT",
+                result_code=result_holder["value"],
+            )
+            if result_holder["value"] != 0 and self._login_event_loop is not None:
+                self._login_event_loop.exit()
+
+        QTimer.singleShot(0, call_comm_connect)
         self._exec_callback_wait(loop, timer)
+        result = result_holder["value"]
         callback_result = self._login_callback_result
         timed_out_value = bool(timed_out["value"])
         self._login_event_loop = None
         self._login_callback_result = None
-        if callback_result is None:
+        if result is not None and result != 0:
+            code = int(result)
+            message = ERROR_MESSAGES.get(code, str(code))
+        elif callback_result is None:
             code = LOGIN_EVENT_TIMEOUT_CODE
             message = f"OnEventConnect callback timeout after {wait_timeout_ms}ms"
         else:
@@ -386,7 +392,7 @@ class KiwoomClient:
             result_code=code,
         )
         self.connected.emit(code == 0, code, message)
-        return result
+        return int(result if result is not None else LOGIN_EVENT_TIMEOUT_CODE)
 
     def get_accounts(self) -> list[str]:
         raw = self.ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO") or ""
@@ -496,6 +502,8 @@ class KiwoomClient:
         self._realtime_screen_code_map().clear()
 
     def load_conditions(self, timeout_ms: int | None = None) -> int:
+        from PyQt5.QtCore import QTimer
+
         self.condition_load_state = ConditionLoadState.LOADING
         self.condition_state_changed.emit(self.condition_load_state.value, "")
         wait_timeout_ms = int(timeout_ms or DEFAULT_CONDITION_EVENT_LOOP_TIMEOUT_MS)
@@ -505,11 +513,23 @@ class KiwoomClient:
         )
         self._condition_event_loop = loop
         self._condition_callback_result = None
-        self._record_thread_audit("GetConditionLoad", phase="CALL")
-        result = int(self.ocx.dynamicCall("GetConditionLoad()") or 0)
-        self._record_thread_audit("GetConditionLoad", phase="RESULT", result_code=result)
+        result_holder: dict[str, int | None] = {"value": None}
+
+        def call_get_condition_load() -> None:
+            self._record_thread_audit("GetConditionLoad", phase="CALL")
+            result_holder["value"] = int(self.ocx.dynamicCall("GetConditionLoad()") or 0)
+            self._record_thread_audit(
+                "GetConditionLoad",
+                phase="RESULT",
+                result_code=result_holder["value"],
+            )
+            if result_holder["value"] <= 0 and self._condition_event_loop is not None:
+                self._condition_event_loop.exit()
+
+        QTimer.singleShot(0, call_get_condition_load)
+        self._exec_callback_wait(loop, timer)
+        result = int(result_holder["value"] or 0)
         if result <= 0:
-            self._cleanup_callback_wait(timer)
             self._condition_event_loop = None
             self._condition_callback_result = None
             self.condition_load_state = ConditionLoadState.FAILED
@@ -517,7 +537,6 @@ class KiwoomClient:
             self.condition_state_changed.emit(self.condition_load_state.value, message)
             self.condition_load_result.emit(False, message)
             return result
-        self._exec_callback_wait(loop, timer)
         callback_result = self._condition_callback_result
         timed_out_value = bool(timed_out["value"])
         self._condition_event_loop = None
@@ -924,6 +943,59 @@ class KiwoomClient:
             screen_map = {}
             self._realtime_screen_codes = screen_map
         return screen_map
+
+    def _create_ocx_widget(self, qax_widget_type: Any) -> Any:
+        control_names = ("KHOPENAPI.KHOpenAPICtrl.1", "KHOpenAPI.KHOpenAPICtrl.1")
+        last_widget = None
+        widget_type = type("KiwoomAxWidget", (qax_widget_type,), {})
+        for control_name in control_names:
+            self._record_thread_audit(
+                "QAxWidget.create",
+                phase="CALL",
+                control_name=control_name,
+                creation_mode="subclass_setControl",
+            )
+            widget = widget_type()
+            last_widget = widget
+            self._record_thread_audit(
+                "QAxWidget.setControl",
+                phase="CALL",
+                control_name=control_name,
+            )
+            set_result = bool(widget.setControl(control_name))
+            is_null = bool(widget.isNull())
+            self._record_thread_audit(
+                "QAxWidget.setControl",
+                phase="RESULT",
+                control_name=control_name,
+                result=set_result,
+                is_null=is_null,
+            )
+            if set_result and not is_null:
+                self._record_thread_audit(
+                    "QAxWidget.create",
+                    phase="RESULT",
+                    control_name=control_name,
+                    creation_mode="subclass_setControl",
+                    is_null=False,
+                )
+                return widget
+        if last_widget is not None:
+            self._record_thread_audit(
+                "QAxWidget.create_constructor_fallback",
+                phase="CALL",
+                control_name=control_names[0],
+            )
+            fallback_widget = qax_widget_type(control_names[0])
+            if not bool(fallback_widget.isNull()):
+                self._record_thread_audit(
+                    "QAxWidget.create_constructor_fallback",
+                    phase="RESULT",
+                    control_name=control_names[0],
+                    is_null=False,
+                )
+                return fallback_widget
+        raise RuntimeError("Kiwoom OpenAPI+ ActiveX control is not registered.")
 
 
 class MockKiwoomClient:

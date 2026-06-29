@@ -109,6 +109,18 @@ def get_gateway_status() -> dict[str, Any]:
         "last_heartbeat_at": status_values.get("last_heartbeat_at"),
         "kiwoom_logged_in": _json_value(status_values.get("kiwoom_logged_in")),
         "login_threaded": _json_value(status_values.get("login_threaded")),
+        "comm_connect_state": status_values.get("comm_connect_state"),
+        "latest_comm_connect_call_at": status_values.get("latest_comm_connect_call_at"),
+        "latest_comm_connect_result_at": status_values.get("latest_comm_connect_result_at"),
+        "latest_comm_connect_result_code": _json_value(
+            status_values.get("latest_comm_connect_result_code")
+        ),
+        "latest_on_event_connect_timeout_at": status_values.get(
+            "latest_on_event_connect_timeout_at"
+        ),
+        "login_block_reason_codes": _json_value(
+            status_values.get("login_block_reason_codes")
+        ),
         "condition_load_state": status_values.get("condition_load_state"),
         "condition_load_requested_at": status_values.get("condition_load_requested_at"),
         "condition_load_retry_count": _json_value(

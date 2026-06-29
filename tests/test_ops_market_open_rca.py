@@ -346,6 +346,35 @@ def test_rca_classifies_registered_realtime_without_callbacks_as_block() -> None
     assert "REALTIME_CALLBACK_MISSING" in gateway["reason_codes"]
 
 
+def test_rca_classifies_comm_connect_no_return_as_block() -> None:
+    results = _healthy_results()
+    results["gateway_events_recent"]["data"]["events"] = [
+        {
+            "event_type": "heartbeat",
+            "event_ts": _now(),
+            "payload": {
+                "kiwoom_logged_in": False,
+                "login_requested": True,
+                "login_in_progress": False,
+                "comm_connect_state": "EVENT_TIMEOUT_NO_COMM_CONNECT_RESULT",
+                "login_block_reason_codes": [
+                    "COMM_CONNECT_NO_RETURN",
+                    "ON_EVENT_CONNECT_TIMEOUT",
+                    "KIWOOM_LOGIN_DIALOG_OR_VERSION_SUSPECTED",
+                ],
+            },
+        },
+    ]
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    gateway = _stage(summary, "Gateway")
+
+    assert summary["overall_status"] == "BLOCK"
+    assert gateway["status"] == "BLOCK"
+    assert "COMM_CONNECT_NO_RETURN" in gateway["reason_codes"]
+    assert "ON_EVENT_CONNECT_TIMEOUT" in gateway["reason_codes"]
+
+
 def _healthy_results() -> dict[str, dict[str, object]]:
     now = _now()
     return {
