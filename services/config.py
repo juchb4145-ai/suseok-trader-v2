@@ -121,7 +121,7 @@ class Settings:
     naver_theme_import_enabled: bool = False
     naver_theme_import_base_url: str = "https://finance.naver.com/sise/theme.naver"
     naver_theme_import_timeout_seconds: float = 10.0
-    naver_theme_import_max_themes: int = 50
+    naver_theme_import_max_themes: int = 500
     naver_theme_import_request_sleep_seconds: float = 0.3
     naver_theme_import_replace: bool = False
     naver_theme_import_min_member_count: int = 2
@@ -1281,7 +1281,7 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             min_value=0.0,
         ),
         naver_theme_import_max_themes=_parse_int(
-            env.get("NAVER_THEME_IMPORT_MAX_THEMES", "50"),
+            env.get("NAVER_THEME_IMPORT_MAX_THEMES", "500"),
             "NAVER_THEME_IMPORT_MAX_THEMES",
             min_value=1,
         ),

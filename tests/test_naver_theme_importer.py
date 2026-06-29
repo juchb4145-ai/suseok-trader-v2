@@ -6,6 +6,7 @@ from pathlib import Path
 from services.config import Settings
 from services.theme_importers.models import NaverTheme, NaverThemeMember, ThemeImportParserError
 from services.theme_importers.naver_theme import (
+    NaverThemeFetcher,
     NaverThemeFetchResult,
     parse_theme_detail,
     parse_theme_list,
@@ -42,6 +43,71 @@ def test_naver_theme_list_and_detail_parse_fixture_html() -> None:
     assert themes[0].change_rate_text == "+3.20%"
     assert [member.code for member in members] == ["005930", "A000660", "005930"]
     assert members[0].reason_text == "메모리 반도체와 파운드리 사업을 영위."
+
+
+def test_naver_theme_fetcher_follows_theme_list_pagination() -> None:
+    base_url = "https://finance.naver.com/sise/theme.naver"
+    first_page = """
+    <html><body>
+      <table class="type_1 theme">
+        <tr>
+          <td>
+            <a href="/sise/sise_group_detail.naver?type=theme&amp;no=101">반도체</a>
+          </td>
+          <td>+1%</td>
+        </tr>
+      </table>
+      <table class="Nnavi">
+        <tr>
+          <td><a href="/sise/theme.naver?&amp;page=1">1</a></td>
+          <td><a href="/sise/theme.naver?&amp;page=2">2</a></td>
+          <td><a href="/sise/theme.naver?&amp;page=3">3</a></td>
+        </tr>
+      </table>
+    </body></html>
+    """
+    second_page = """
+    <html><body><table class="type_1 theme">
+      <tr>
+        <td>
+          <a href="/sise/sise_group_detail.naver?type=theme&amp;no=202">2차전지</a>
+        </td>
+        <td>+2%</td>
+      </tr>
+    </table></body></html>
+    """
+    third_page = """
+    <html><body><table class="type_1 theme">
+      <tr>
+        <td>
+          <a href="/sise/sise_group_detail.naver?type=theme&amp;no=303">로봇</a>
+        </td>
+        <td>+3%</td>
+      </tr>
+    </table></body></html>
+    """
+    detail_html = (FIXTURES / "naver_theme_detail_sample.html").read_text(encoding="utf-8")
+    pages = {
+        base_url: first_page,
+        "https://finance.naver.com/sise/theme.naver?&page=2": second_page,
+        "https://finance.naver.com/sise/theme.naver?&page=3": third_page,
+    }
+
+    class FakePagedFetcher(NaverThemeFetcher):
+        def _fetch_text(self, url: str) -> str:
+            if "sise_group_detail.naver" in url:
+                return detail_html
+            return pages[url]
+
+    result = FakePagedFetcher(base_url=base_url, request_sleep_seconds=0.0).fetch()
+    limited = FakePagedFetcher(base_url=base_url, request_sleep_seconds=0.0).fetch(
+        limit_themes=2
+    )
+
+    assert [theme.source_theme_id for theme in result.themes] == ["101", "202", "303"]
+    assert [theme.rank for theme in result.themes] == [1, 2, 3]
+    assert set(result.members_by_source_theme_id) == {"101", "202", "303"}
+    assert [theme.source_theme_id for theme in limited.themes] == ["101", "202"]
 
 
 def test_naver_normalize_validates_codes_and_removes_duplicates() -> None:

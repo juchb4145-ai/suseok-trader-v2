@@ -55,7 +55,7 @@ class NaverThemeFetcher:
         fetched_at = datetime_to_wire(utc_now())
         errors: list[ThemeImportParserError] = []
         try:
-            list_html = self._fetch_text(self.base_url)
+            first_list_html = self._fetch_text(self.base_url)
         except Exception as exc:
             return NaverThemeFetchResult(
                 fetched_at=fetched_at,
@@ -70,10 +70,34 @@ class NaverThemeFetcher:
                 ),
             )
 
-        themes, list_errors = parse_theme_list(list_html, base_url=self.base_url)
-        errors.extend(list_errors)
-        if limit_themes is not None:
-            themes = themes[: max(int(limit_themes), 0)]
+        themes: list[NaverTheme] = []
+        seen_theme_ids: set[str] = set()
+        list_pages = _theme_list_page_urls(first_list_html, base_url=self.base_url)
+        for page_index, page_url in enumerate(list_pages):
+            if limit_themes is not None and len(themes) >= max(int(limit_themes), 0):
+                break
+            if page_index > 0 and self.request_sleep_seconds > 0:
+                time.sleep(self.request_sleep_seconds)
+            try:
+                list_html = first_list_html if page_index == 0 else self._fetch_text(page_url)
+            except Exception as exc:
+                errors.append(
+                    ThemeImportParserError(
+                        stage="fetch_list",
+                        message=str(exc),
+                        source_url=page_url,
+                    )
+                )
+                continue
+            page_themes, list_errors = parse_theme_list(list_html, base_url=page_url)
+            errors.extend(list_errors)
+            for theme in page_themes:
+                if theme.source_theme_id in seen_theme_ids:
+                    continue
+                seen_theme_ids.add(theme.source_theme_id)
+                themes.append(_with_global_rank(theme, len(themes) + 1))
+                if limit_themes is not None and len(themes) >= max(int(limit_themes), 0):
+                    break
 
         members_by_source_theme_id: dict[str, Sequence[NaverThemeMember]] = {}
         for index, theme in enumerate(themes):
@@ -188,6 +212,39 @@ def parse_theme_list(
             )
         )
     return themes, errors
+
+
+def _theme_list_page_urls(html: str, *, base_url: str) -> list[str]:
+    soup = BeautifulSoup(html, "html.parser")
+    urls_by_page: dict[int, str] = {1: base_url}
+    for anchor in soup.find_all("a", href=True):
+        href = str(anchor.get("href") or "")
+        if "theme.naver" not in href:
+            continue
+        absolute_url = urllib.parse.urljoin(base_url, href)
+        page = _query_value(absolute_url, "page")
+        if page is None:
+            continue
+        try:
+            page_number = int(page)
+        except ValueError:
+            continue
+        if page_number >= 1:
+            urls_by_page.setdefault(page_number, absolute_url)
+    return [urls_by_page[page] for page in sorted(urls_by_page)]
+
+
+def _with_global_rank(theme: NaverTheme, rank: int) -> NaverTheme:
+    metadata = dict(theme.metadata)
+    metadata["naver_rank"] = rank
+    return NaverTheme(
+        source_theme_id=theme.source_theme_id,
+        theme_name=theme.theme_name,
+        source_url=theme.source_url,
+        rank=rank,
+        change_rate_text=theme.change_rate_text,
+        metadata=metadata,
+    )
 
 
 def parse_theme_detail(

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses as _dataclasses
+import datetime as _datetime
+import enum as _enum
 import os
 import struct
 import sys
@@ -10,6 +13,37 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def configure_python_compat() -> None:
+    if not hasattr(_datetime, "UTC"):
+        _datetime.UTC = _datetime.timezone.utc  # noqa: UP017
+    if not hasattr(_enum, "StrEnum"):
+
+        class StrEnum(str, _enum.Enum):  # noqa: UP042
+            pass
+
+        _enum.StrEnum = StrEnum
+    if sys.version_info < (3, 10) and not getattr(
+        _dataclasses.dataclass,
+        "_suseok_kw_only_compat",
+        False,
+    ):
+        original_dataclass = _dataclasses.dataclass
+
+        def dataclass_compat(cls=None, /, **kwargs):  # type: ignore[no-untyped-def]
+            kwargs.pop("kw_only", None)
+            kwargs.pop("slots", None)
+            if cls is None:
+                return lambda candidate: original_dataclass(candidate, **kwargs)
+            return original_dataclass(cls, **kwargs)
+
+        dataclass_compat._suseok_kw_only_compat = True  # type: ignore[attr-defined]
+        _dataclasses.dataclass = dataclass_compat
+
+
+configure_python_compat()
+
 
 def configure_qt_paths() -> None:
     try:
@@ -85,6 +119,8 @@ def run_gateway(args: argparse.Namespace) -> int:
             "same 32-bit Python environment as Kiwoom OpenAPI+."
         ) from exc
 
+    app = QApplication.instance() or QApplication(sys.argv[:1])
+
     if bool(getattr(args, "mock_client", False)):
         from gateway.kiwoom_client import MockKiwoomClient
 
@@ -94,7 +130,6 @@ def run_gateway(args: argparse.Namespace) -> int:
 
         client = KiwoomClient()
 
-    app = QApplication.instance() or QApplication(sys.argv[:1])
     runtime = KiwoomGatewayRuntime(
         client=client,
         core_client=CoreClient(core_url=args.core_url, token=args.token),

@@ -68,7 +68,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.naver_theme_import_enabled is False
     assert settings.naver_theme_import_base_url == "https://finance.naver.com/sise/theme.naver"
     assert settings.naver_theme_import_timeout_seconds == 10
-    assert settings.naver_theme_import_max_themes == 50
+    assert settings.naver_theme_import_max_themes == 500
     assert settings.naver_theme_import_request_sleep_seconds == 0.3
     assert settings.naver_theme_import_replace is False
     assert settings.naver_theme_import_min_member_count == 2

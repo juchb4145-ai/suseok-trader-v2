@@ -170,7 +170,7 @@ def parse_float(value: object, field_name: str, *, min_value: float | None = Non
     if isinstance(value, bool):
         raise BrokerValidationError(f"{field_name} must be a number")
 
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         parsed = float(value)
     elif isinstance(value, Decimal):
         parsed = float(value)
