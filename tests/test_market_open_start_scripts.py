@@ -24,3 +24,18 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "MULTI_PROFILE" in script
     assert "LEGACY_SINGLE" in script
     assert 'queue_commands = "true"' not in script.lower()
+
+
+def test_stop_core_gateway_script_targets_core_gateway_processes_only() -> None:
+    script = (ROOT_DIR / "tools" / "stop_core_gateway.ps1").read_text(encoding="utf-8")
+    lowered = script.lower()
+
+    assert "get-ciminstance -classname win32_process" in lowered
+    assert "apps\\.core_api:app" in script
+    assert "apps\\.mock_gateway" in script
+    assert "apps\\.kiwoom_gateway" in script
+    assert "parentprocessid" in lowered
+    assert 'conhost.exe' in lowered
+    assert "$pscmdlet.shouldprocess" in lowered
+    assert "stop-process" in lowered
+    assert "get-process python" not in lowered
