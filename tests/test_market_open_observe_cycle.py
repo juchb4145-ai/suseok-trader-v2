@@ -3,6 +3,8 @@ from __future__ import annotations
 from apps.core_api import app
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
+from domain.broker.utils import utc_now
+from services.config import candidate_timezone
 from storage.sqlite import open_connection
 from tools.run_market_open_observe_cycle import write_observe_cycle_report
 
@@ -20,6 +22,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     monkeypatch.setenv("RISK_GATE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("RISK_GATE_STRATEGY_STALE_SEC", "999999999")
     monkeypatch.setenv("ENTRY_TIMING_STALE_MAX_SECONDS", "999999999")
+    trade_date = utc_now().astimezone(candidate_timezone("Asia/Seoul")).date().isoformat()
 
     with TestClient(app) as client:
         tick = client.post(
@@ -42,7 +45,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
         )
         latest_ticks = client.get("/api/market-data/ticks/latest")
         theme_import = client.post("/api/themes/import", json=_theme_payload())
-        result = client.post("/api/operator/observe-cycle/run-once?trade_date=2026-06-29")
+        result = client.post(f"/api/operator/observe-cycle/run-once?trade_date={trade_date}")
         latest_run = client.get("/api/operator/observe-cycle/runs/latest")
         commands = client.get("/api/gateway/commands/status")
 
@@ -55,6 +58,8 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     assert theme_import.status_code == 200
     assert result.status_code == 200
     assert stages["Theme"]["status"] in {"PASS", "WARN"}
+    assert stages["RealtimeSubscription"]["counts"]["queue_commands"] is False
+    assert stages["RealtimeSubscription"]["counts"]["planned_register_count"] >= 0
     assert stages["Candidate"]["counts"]["active_candidate_count"] >= 1
     assert stages["Strategy"]["counts"]["evaluated_count"] >= 0
     assert stages["Risk"]["counts"]["evaluated_count"] >= 0

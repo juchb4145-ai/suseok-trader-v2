@@ -59,6 +59,15 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
+    assert settings.realtime_subscription_enabled is True
+    assert settings.realtime_subscription_queue_commands is False
+    assert settings.realtime_subscription_max_total == 50
+    assert settings.realtime_subscription_max_per_theme == 5
+    assert settings.realtime_subscription_anchor_codes == ("005930", "000660")
+    assert settings.realtime_subscription_stale_sec == 60
+    assert settings.realtime_subscription_remove_stale_after_sec == 600
+    assert settings.realtime_subscription_allow_remove is False
+    assert settings.realtime_subscription_exchange == "KRX"
     assert settings.theme_service_enabled is True
     assert settings.theme_min_active_members == 2
     assert settings.theme_min_fresh_coverage_ratio == 0.3
@@ -236,6 +245,23 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "minute-aligned" in str(exc)
     else:
         raise AssertionError("expected invalid market data interval configuration")
+
+
+def test_realtime_subscription_settings_are_validated() -> None:
+    invalid_cases = {
+        "REALTIME_SUBSCRIPTION_MAX_TOTAL": "1",
+        "REALTIME_SUBSCRIPTION_MAX_PER_THEME": "0",
+        "REALTIME_SUBSCRIPTION_ANCHOR_CODES": "005930,BAD",
+        "REALTIME_SUBSCRIPTION_REMOVE_STALE_AFTER_SEC": "10",
+        "REALTIME_SUBSCRIPTION_EXCHANGE": "MIXED",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid realtime subscription setting for {key}")
 
 
 def test_theme_ratio_settings_are_validated() -> None:

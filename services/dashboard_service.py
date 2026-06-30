@@ -96,6 +96,7 @@ from services.oms.dry_run_service import (
     list_dry_run_positions,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
+from services.realtime_subscription import build_realtime_subscription_plan
 from services.risk_gate import (
     get_risk_status,
     list_latest_risk_observations,
@@ -125,6 +126,7 @@ DASHBOARD_SECTIONS = [
     "system",
     "gateway",
     "market_data",
+    "realtime_subscription",
     "themes",
     "candidates",
     "strategy",
@@ -154,6 +156,7 @@ STAGE_ENDPOINTS = {
     "Core": "/health",
     "Gateway": "/api/gateway/status",
     "MarketData": "/api/market-data/status",
+    "RealtimeSubscription": "/api/operator/realtime-subscriptions/plan",
     "Theme": "/api/themes/status",
     "Candidate": "/api/candidates/status",
     "Strategy": "/api/strategy/status",
@@ -191,6 +194,12 @@ def build_dashboard_snapshot(
     )
 
     market_data_status = get_market_data_status(connection, settings=settings)
+    realtime_subscription = build_realtime_subscription_plan(
+        connection,
+        settings=settings,
+        registered_codes=gateway_status["realtime_registered_codes"],
+        queue_commands=False,
+    ).to_dict()
     theme_status = get_theme_status(connection, settings=settings)
     candidate_status = get_candidate_status(connection, settings=settings)
     strategy_status = get_strategy_status(connection, settings)
@@ -306,6 +315,7 @@ def build_dashboard_snapshot(
     pipeline_summary = _pipeline_summary(
         gateway_status=gateway_status,
         market_data_status=market_data_status,
+        realtime_subscription=realtime_subscription,
         theme_status=theme_status,
         theme_state_counts=theme_state_counts,
         candidate_status=candidate_status,
@@ -340,6 +350,7 @@ def build_dashboard_snapshot(
             "status": market_data_status,
             "latest_ticks": latest_ticks,
         },
+        "realtime_subscription": realtime_subscription,
         "themes": {
             "status": theme_status,
             "latest_snapshots": latest_theme_snapshots,
@@ -781,6 +792,7 @@ def _pipeline_summary(
     *,
     gateway_status: dict[str, Any],
     market_data_status: dict[str, Any],
+    realtime_subscription: dict[str, Any],
     theme_status: dict[str, Any],
     theme_state_counts: dict[str, int],
     candidate_status: dict[str, Any],
@@ -807,6 +819,7 @@ def _pipeline_summary(
         "stage_statuses": _pipeline_stage_statuses(
             gateway_status=gateway_status,
             market_data_status=market_data_status,
+            realtime_subscription=realtime_subscription,
             theme_status=theme_status,
             candidate_status=candidate_status,
             strategy_status=strategy_status,
@@ -826,6 +839,20 @@ def _pipeline_summary(
             "latest_tick_count": market_data_status["latest_tick_count"],
             "bar_count": market_data_status["bar_count"],
             "projection_error_count": market_data_status["projection_error_count"],
+        },
+        "realtime_subscription": {
+            "status": realtime_subscription.get("status"),
+            "planned_register_count": realtime_subscription.get("counts", {}).get(
+                "planned_register_count", 0
+            ),
+            "planned_remove_count": realtime_subscription.get("counts", {}).get(
+                "planned_remove_count", 0
+            ),
+            "already_registered_count": realtime_subscription.get("counts", {}).get(
+                "already_registered_count", 0
+            ),
+            "queue_commands": False,
+            "read_only": True,
         },
         "themes": {
             "theme_count": theme_status["theme_count"],
@@ -954,6 +981,13 @@ def _pipeline_summary(
                 "count": market_data_status["latest_tick_count"],
             },
             {
+                "key": "realtime_subscription_targets",
+                "label": "Realtime Plan",
+                "count": realtime_subscription.get("counts", {}).get(
+                    "planned_register_count", 0
+                ),
+            },
+            {
                 "key": "theme_snapshots",
                 "label": "Theme Snapshots",
                 "count": theme_status["latest_snapshot_count"],
@@ -1001,6 +1035,7 @@ def _pipeline_stage_statuses(
     *,
     gateway_status: dict[str, Any],
     market_data_status: dict[str, Any],
+    realtime_subscription: dict[str, Any],
     theme_status: dict[str, Any],
     candidate_status: dict[str, Any],
     strategy_status: dict[str, Any],
@@ -1022,6 +1057,7 @@ def _pipeline_stage_statuses(
         ),
         _gateway_stage_status(gateway_status),
         _market_data_stage_status(market_data_status),
+        _realtime_subscription_stage_status(realtime_subscription),
         _stage_status(
             "Theme",
             "BLOCK"
@@ -1146,6 +1182,29 @@ def _stage_status(
         "reason_codes": reason_codes,
         "endpoint": STAGE_ENDPOINTS.get(stage),
     }
+
+
+def _realtime_subscription_stage_status(payload: dict[str, Any]) -> dict[str, Any]:
+    counts = payload.get("counts") or {}
+    planned_register_count = int(counts.get("planned_register_count") or 0)
+    planned_remove_count = int(counts.get("planned_remove_count") or 0)
+    reason_codes = []
+    status_value = str(payload.get("status") or "").upper()
+    if status_value == "DISABLED":
+        reason_codes.append("REALTIME_SUBSCRIPTION_DISABLED")
+    elif planned_register_count <= 0 and planned_remove_count <= 0:
+        reason_codes.append("REALTIME_SUBSCRIPTION_NOOP")
+    return _stage_status(
+        "RealtimeSubscription",
+        "WARN" if status_value == "DISABLED" else "PASS",
+        (
+            f"register={planned_register_count}, remove={planned_remove_count}, "
+            f"registered={counts.get('already_registered_count', 0)}"
+        ),
+        count=planned_register_count,
+        updated_at=None,
+        reason_codes=reason_codes,
+    )
 
 
 def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:

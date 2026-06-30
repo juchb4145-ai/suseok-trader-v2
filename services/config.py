@@ -107,6 +107,15 @@ class Settings:
     market_data_bar_intervals_sec: tuple[int, ...] = (60, 180, 300)
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
+    realtime_subscription_enabled: bool = True
+    realtime_subscription_queue_commands: bool = False
+    realtime_subscription_max_total: int = 50
+    realtime_subscription_max_per_theme: int = 5
+    realtime_subscription_anchor_codes: tuple[str, ...] = ("005930", "000660")
+    realtime_subscription_stale_sec: int = 60
+    realtime_subscription_remove_stale_after_sec: int = 600
+    realtime_subscription_allow_remove: bool = False
+    realtime_subscription_exchange: str = "KRX"
     theme_service_enabled: bool = True
     theme_min_active_members: int = 2
     theme_min_fresh_coverage_ratio: float = 0.3
@@ -404,6 +413,40 @@ class Settings:
             self.theme_leadership_min_fresh_coverage_ratio,
             "THEME_LEADERSHIP_MIN_FRESH_COVERAGE_RATIO",
         )
+        for field_name in (
+            "realtime_subscription_max_total",
+            "realtime_subscription_max_per_theme",
+            "realtime_subscription_stale_sec",
+            "realtime_subscription_remove_stale_after_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.realtime_subscription_remove_stale_after_sec < self.realtime_subscription_stale_sec:
+            raise ValueError(
+                "REALTIME_SUBSCRIPTION_REMOVE_STALE_AFTER_SEC must be >= "
+                "REALTIME_SUBSCRIPTION_STALE_SEC"
+            )
+        if self.realtime_subscription_max_per_theme > self.realtime_subscription_max_total:
+            raise ValueError(
+                "REALTIME_SUBSCRIPTION_MAX_PER_THEME must be <= REALTIME_SUBSCRIPTION_MAX_TOTAL"
+            )
+        object.__setattr__(
+            self,
+            "realtime_subscription_anchor_codes",
+            _normalize_stock_code_list(self.realtime_subscription_anchor_codes),
+        )
+        if len(self.realtime_subscription_anchor_codes) > self.realtime_subscription_max_total:
+            raise ValueError(
+                "REALTIME_SUBSCRIPTION_MAX_TOTAL must be >= "
+                "the number of REALTIME_SUBSCRIPTION_ANCHOR_CODES"
+            )
+        object.__setattr__(
+            self,
+            "realtime_subscription_exchange",
+            _normalize_non_empty(self.realtime_subscription_exchange),
+        )
+        if self.realtime_subscription_exchange not in {"KRX", "NXT", "ALL"}:
+            raise ValueError("REALTIME_SUBSCRIPTION_EXCHANGE must be one of KRX, NXT, ALL")
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -1225,6 +1268,43 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("MARKET_DATA_MAX_RECENT_TICKS", "1000"),
             "MARKET_DATA_MAX_RECENT_TICKS",
             min_value=1,
+        ),
+        realtime_subscription_enabled=_parse_bool(
+            env.get("REALTIME_SUBSCRIPTION_ENABLED", "true")
+        ),
+        realtime_subscription_queue_commands=_parse_bool(
+            env.get("REALTIME_SUBSCRIPTION_QUEUE_COMMANDS", "false")
+        ),
+        realtime_subscription_max_total=_parse_int(
+            env.get("REALTIME_SUBSCRIPTION_MAX_TOTAL", "50"),
+            "REALTIME_SUBSCRIPTION_MAX_TOTAL",
+            min_value=1,
+        ),
+        realtime_subscription_max_per_theme=_parse_int(
+            env.get("REALTIME_SUBSCRIPTION_MAX_PER_THEME", "5"),
+            "REALTIME_SUBSCRIPTION_MAX_PER_THEME",
+            min_value=1,
+        ),
+        realtime_subscription_anchor_codes=_parse_stock_code_csv_list(
+            env.get("REALTIME_SUBSCRIPTION_ANCHOR_CODES", "005930,000660"),
+            "REALTIME_SUBSCRIPTION_ANCHOR_CODES",
+        ),
+        realtime_subscription_stale_sec=_parse_int(
+            env.get("REALTIME_SUBSCRIPTION_STALE_SEC", "60"),
+            "REALTIME_SUBSCRIPTION_STALE_SEC",
+            min_value=1,
+        ),
+        realtime_subscription_remove_stale_after_sec=_parse_int(
+            env.get("REALTIME_SUBSCRIPTION_REMOVE_STALE_AFTER_SEC", "600"),
+            "REALTIME_SUBSCRIPTION_REMOVE_STALE_AFTER_SEC",
+            min_value=1,
+        ),
+        realtime_subscription_allow_remove=_parse_bool(
+            env.get("REALTIME_SUBSCRIPTION_ALLOW_REMOVE", "false")
+        ),
+        realtime_subscription_exchange=env.get(
+            "REALTIME_SUBSCRIPTION_EXCHANGE",
+            env.get("KIWOOM_REALTIME_EXCHANGE", "KRX"),
         ),
         theme_service_enabled=_parse_bool(env.get("THEME_SERVICE_ENABLED", "true")),
         theme_min_active_members=_parse_int(
@@ -2220,6 +2300,25 @@ def _parse_csv_list(value: str, field_name: str) -> tuple[str, ...]:
     if any(part == "" for part in parts):
         raise ValueError(f"{field_name} must be a comma-separated non-empty list")
     return _normalize_list_values(parts)
+
+
+def _normalize_stock_code_list(values: tuple[str, ...]) -> tuple[str, ...]:
+    from domain.broker.utils import validate_stock_code
+
+    normalized = tuple(validate_stock_code(value) for value in values)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("configuration stock code list values must not contain duplicates")
+    return normalized
+
+
+def _parse_stock_code_csv_list(value: str, field_name: str) -> tuple[str, ...]:
+    parts = tuple(part.strip() for part in value.split(","))
+    if any(part == "" for part in parts):
+        raise ValueError(f"{field_name} must be a comma-separated non-empty stock code list")
+    try:
+        return _normalize_stock_code_list(parts)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must contain 6-digit domestic stock codes") from exc
 
 
 def _parse_intervals(value: str) -> tuple[int, ...]:

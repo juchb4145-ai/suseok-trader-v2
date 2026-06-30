@@ -17,6 +17,7 @@ from services.candidate_service import (
 from services.config import Settings, load_settings
 from services.entry_timing.service import evaluate_entry_timing, get_entry_timing_status
 from services.live_sim.live_sim_service import get_live_sim_status
+from services.realtime_subscription import build_realtime_subscription_plan
 from services.risk_gate import evaluate_risk_observations, get_risk_status
 from services.runtime.preflight import OperatingMode, run_live_sim_preflight
 from services.strategy_engine import evaluate_candidates, get_strategy_status
@@ -143,6 +144,25 @@ def run_market_open_observe_cycle_once(
         error = _stage_error("Theme", exc)
         errors.append(error)
         stages["Theme"] = _blocked_stage("Theme", "THEME_SNAPSHOT_NOT_BUILT", str(exc))
+
+    try:
+        realtime_subscription_plan = build_realtime_subscription_plan(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+            queue_commands=False,
+        )
+        stages["RealtimeSubscription"] = _realtime_subscription_stage(
+            realtime_subscription_plan.to_dict()
+        )
+    except Exception as exc:
+        error = _stage_error("RealtimeSubscription", exc)
+        errors.append(error)
+        stages["RealtimeSubscription"] = _blocked_stage(
+            "RealtimeSubscription",
+            "REALTIME_SUBSCRIPTION_PLAN_FAILED",
+            str(exc),
+        )
 
     try:
         candidate_result = rebuild_candidates_from_observations(
@@ -430,6 +450,45 @@ def _candidate_stage(
             "error_count": error_count,
         },
         details={"result": result, "status": status},
+    )
+
+
+def _realtime_subscription_stage(plan: Mapping[str, Any]) -> ObserveCycleStageResult:
+    counts = _dict_or_empty(plan.get("counts"))
+    planned_register_count = int(counts.get("planned_register_count") or 0)
+    planned_remove_count = int(counts.get("planned_remove_count") or 0)
+    status = STAGE_PASS
+    reason_codes: list[str] = []
+    if str(plan.get("status") or "").upper() == "DISABLED":
+        status = STAGE_WARN
+        reason_codes.append("REALTIME_SUBSCRIPTION_DISABLED")
+    elif planned_register_count <= 0 and planned_remove_count <= 0:
+        reason_codes.append("REALTIME_SUBSCRIPTION_NOOP")
+    return ObserveCycleStageResult(
+        stage="RealtimeSubscription",
+        status=status,
+        reason_codes=tuple(_dedupe(reason_codes)),
+        summary=(
+            f"register={planned_register_count}, remove={planned_remove_count}, "
+            f"registered={counts.get('already_registered_count', 0)}"
+        ),
+        counts={
+            "planned_register_count": planned_register_count,
+            "planned_remove_count": planned_remove_count,
+            "already_registered_count": counts.get("already_registered_count", 0),
+            "anchor_count": counts.get("anchor_count", 0),
+            "condition_count": counts.get("condition_count", 0),
+            "candidate_count": counts.get("candidate_count", 0),
+            "theme_watchset_count": counts.get("theme_watchset_count", 0),
+            "queue_commands": False,
+        },
+        details={
+            "plan": plan,
+            "read_only": True,
+            "observe_only": True,
+            "queue_commands": False,
+            "no_order_side_effects": True,
+        },
     )
 
 

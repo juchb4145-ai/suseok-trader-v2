@@ -23,6 +23,16 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
             headers={"X-Local-Token": "secret-token"},
         )
         latest_after = client.get("/api/operator/no-buy/latest?trade_date=2026-06-27")
+        realtime_plan = client.get(
+            "/api/operator/realtime-subscriptions/plan?trade_date=2026-06-27"
+        )
+        realtime_unauthorized = client.post(
+            "/api/operator/realtime-subscriptions/run-once?trade_date=2026-06-27"
+        )
+        realtime_run = client.post(
+            "/api/operator/realtime-subscriptions/run-once?trade_date=2026-06-27",
+            headers={"X-Local-Token": "secret-token"},
+        )
 
     connection = open_connection(db_path)
     after_counts = _counts(connection)
@@ -40,6 +50,14 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
     assert rebuilt.status_code == 200
     assert rebuilt.json()["read_only"] is True
     assert latest_after.json()["snapshot"]["snapshot_id"] == rebuilt.json()["snapshot_id"]
+    assert realtime_plan.status_code == 200
+    assert realtime_plan.json()["read_only"] is True
+    assert realtime_plan.json()["queue_commands"] is False
+    assert realtime_plan.json()["command_count"] == 0
+    assert realtime_unauthorized.status_code == 401
+    assert realtime_run.status_code == 200
+    assert realtime_run.json()["no_order_side_effects"] is True
+    assert realtime_run.json()["command_count"] == 0
     assert after_counts == before_counts
     assert int(snapshot_count) == 1
 
@@ -60,6 +78,7 @@ def _set_operator_env(monkeypatch, db_path) -> None:
     monkeypatch.setenv("LIVE_SIM_PILOT_PIPELINE_ENABLED", "true")
     monkeypatch.setenv("LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED", "true")
     monkeypatch.setenv("LIVE_SIM_ORDER_PLAN_STALE_SEC", "999999999")
+    monkeypatch.setenv("REALTIME_SUBSCRIPTION_QUEUE_COMMANDS", "false")
 
 
 def _counts(connection) -> dict[str, int]:

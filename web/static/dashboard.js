@@ -99,6 +99,35 @@ const renderSystem = (snapshot) => {
   ].join("");
 };
 
+const renderRealtimeSubscription = (snapshot) => {
+  const plan = snapshot.realtime_subscription || {};
+  const counts = plan.counts || {};
+  const registered = plan.registered_realtime_codes || [];
+  const registerTargets = plan.register_targets || [];
+  const removeTargets = plan.remove_targets || [];
+  const missingCandidates = plan.missing_candidate_subscriptions || [];
+  document.getElementById("realtime-subscription-badges").innerHTML = [
+    badge(plan.status || "UNKNOWN"),
+    badge("OBSERVE", `queue ${text(plan.queue_commands)}`),
+    badge(plan.exchange || "KRX", `exchange ${text(plan.exchange || "KRX")}`),
+  ].join("");
+  document.getElementById("realtime-subscription-status").innerHTML = [
+    metric("Registered", counts.already_registered_count ?? registered.length),
+    metric("Plan register/remove", `${counts.planned_register_count || 0} / ${counts.planned_remove_count || 0}`),
+    metric("Anchors", counts.anchor_count || 0),
+    metric("Condition/Candidate", `${counts.condition_count || 0} / ${counts.candidate_count || 0}`),
+    metric("Theme watchset", counts.theme_watchset_count || 0),
+    metric("Missing candidates", counts.missing_candidate_subscription_count || 0),
+  ].join("");
+  document.getElementById("realtime-subscription-tables").innerHTML = [
+    miniList("Registered", registered, (code) => code),
+    subscriptionTable("Plan register", registerTargets),
+    subscriptionTable("Plan remove", removeTargets),
+    subscriptionTable("Missing candidate subs", missingCandidates),
+    miniList("Reason summary", Object.entries(plan.reason_summary || {}), ([reason, count]) => `${reason}: ${count}`),
+  ].join("");
+};
+
 const renderMarketTheme = (snapshot) => {
   const themes = snapshot.themes || {};
   const noBuy = snapshot.no_buy_sentinel || {};
@@ -315,6 +344,24 @@ const nearMissTable = (rows) =>
     ]),
   );
 
+const subscriptionTable = (title, rows) => `
+  <article class="log-card">
+    <h3>${escapeHtml(title)} <span class="muted">(${rows.length})</span></h3>
+    ${
+      rows.length
+        ? table(
+            ["종목", "source", "reason"],
+            rows.slice(0, 8).map((row) => [
+              `${text(row.name)} ${text(row.code)}`,
+              (row.source_types || [row.state || row.action || "-"]).join(", "),
+              reasonList(row.reason_codes),
+            ]),
+          )
+        : '<p class="muted">최근 항목 없음</p>'
+    }
+  </article>
+`;
+
 const table = (headers, rows) => `
   <table>
     <thead>
@@ -404,6 +451,7 @@ const renderSnapshot = (snapshot) => {
   document.getElementById("refresh-state").textContent = `${state.refreshMs / 1000}초 자동 갱신`;
   renderSafety(snapshot);
   renderSystem(snapshot);
+  renderRealtimeSubscription(snapshot);
   renderMarketTheme(snapshot);
   renderCandidatePlan(snapshot);
   renderLiveSimOps(snapshot);

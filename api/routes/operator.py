@@ -10,6 +10,10 @@ from services.operator.no_buy_sentinel import (
     rebuild_no_buy_sentinel_snapshot,
 )
 from services.operator.operator_status import build_operator_status
+from services.realtime_subscription import (
+    build_realtime_subscription_plan,
+    run_realtime_subscription_once,
+)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
@@ -155,3 +159,44 @@ def operator_observe_cycle_run_latest() -> dict[str, Any]:
         "observe_only": True,
         "no_order_controls": True,
     }
+
+
+@router.get("/realtime-subscriptions/plan")
+def operator_realtime_subscriptions_plan(
+    trade_date: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        plan = build_realtime_subscription_plan(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+            queue_commands=False,
+        )
+        payload = plan.to_dict()
+        payload["read_only"] = True
+        payload["queue_commands"] = False
+        payload["command_count"] = 0
+        return payload
+    finally:
+        connection.close()
+
+
+@router.post("/realtime-subscriptions/run-once", dependencies=[Depends(require_local_token)])
+def operator_realtime_subscriptions_run_once(
+    trade_date: str | None = Query(default=None),
+    queue_commands: bool | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        plan = run_realtime_subscription_once(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+            queue_commands=queue_commands,
+        )
+        return plan.to_dict()
+    finally:
+        connection.close()

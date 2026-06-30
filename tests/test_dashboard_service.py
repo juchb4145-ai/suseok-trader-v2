@@ -40,6 +40,7 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         "Core",
         "Gateway",
         "MarketData",
+        "RealtimeSubscription",
         "Theme",
         "Candidate",
         "Strategy",
@@ -49,12 +50,16 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         "OrderSafety",
     }.issubset(stage_statuses)
     assert stage_statuses["OrderSafety"]["status"] == "PASS"
+    assert stage_statuses["RealtimeSubscription"]["endpoint"] == (
+        "/api/operator/realtime-subscriptions/plan"
+    )
     assert stage_statuses["OrderSafety"]["count"] == 0
     assert stage_statuses["OrderSafety"]["endpoint"] == "/api/gateway/commands/status"
     assert all("last_updated_at" in row for row in stage_statuses.values())
     assert {
         "gateway",
         "market_data",
+        "realtime_subscription",
         "themes",
         "candidates",
         "strategy",
@@ -74,6 +79,7 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     connection.close()
     assert snapshot["gateway"]["recent_event_count"] >= 3
     assert snapshot["pipeline_summary"]["market_data"]["latest_tick_count"] == 1
+    assert "register_targets" in snapshot["realtime_subscription"]
     assert snapshot["pipeline_summary"]["themes"]["latest_snapshot_count"] >= 1
     assert snapshot["pipeline_summary"]["candidates"]["candidate_count"] >= 1
     assert snapshot["pipeline_summary"]["strategy"]["latest_observation_count"] >= 1
