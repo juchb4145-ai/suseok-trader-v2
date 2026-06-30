@@ -34,7 +34,7 @@ body {
 }
 
 .app-shell {
-  max-width: 1480px;
+  max-width: 1760px;
   min-width: 320px;
   margin: 0 auto;
   padding: 24px;
@@ -263,7 +263,38 @@ h2 {
 }
 
 .pipeline-stage-table {
+  width: 100%;
   min-width: 0;
+}
+
+.pipeline-stage-table table {
+  min-width: 1180px;
+  table-layout: fixed;
+}
+
+.pipeline-stage-table th:nth-child(1),
+.pipeline-stage-table td:nth-child(1) {
+  width: 140px;
+}
+
+.pipeline-stage-table th:nth-child(2),
+.pipeline-stage-table td:nth-child(2) {
+  width: 116px;
+}
+
+.pipeline-stage-table th:nth-child(3),
+.pipeline-stage-table td:nth-child(3) {
+  width: 120px;
+}
+
+.pipeline-stage-table th:nth-child(4),
+.pipeline-stage-table td:nth-child(4) {
+  width: 250px;
+}
+
+.pipeline-stage-table .badge {
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 .funnel {
@@ -398,6 +429,8 @@ td {
 }
 
 .developer-panel {
+  width: 100%;
+  max-width: none;
   background: rgba(14, 20, 26, 0.9);
 }
 
@@ -655,7 +688,7 @@ td {
   color: var(--muted);
 }
 
-details {
+details:not(.developer-panel) {
   max-width: 440px;
 }
 
