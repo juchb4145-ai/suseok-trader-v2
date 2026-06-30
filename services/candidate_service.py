@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -24,6 +24,11 @@ from domain.market.models import MarketDataQualityStatus
 from domain.theme.state import ThemeMemberRole
 from storage.gateway_command_store import canonical_json
 
+from services.condition_fusion import (
+    is_profile_condition_metadata,
+    list_condition_fusion,
+    rebuild_condition_fusion,
+)
 from services.config import Settings, candidate_timezone, load_settings
 from services.market_data_service import get_latest_tick, get_market_data_readiness
 
@@ -93,6 +98,7 @@ def ingest_condition_sources(
         return CandidateSourceIngestResult()
 
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
+    rebuild_condition_fusion(connection, target_trade_date, settings=resolved_settings)
     rows = connection.execute(
         """
         SELECT *
@@ -101,8 +107,36 @@ def ingest_condition_sources(
         """
     ).fetchall()
     result = _MutableIngestResult()
+    for fusion in list_condition_fusion(
+        connection,
+        trade_date=target_trade_date,
+        settings=resolved_settings,
+        limit=500,
+    ):
+        if not fusion.get("active_roles"):
+            continue
+        try:
+            source_event = _fusion_row_to_source_event(fusion, target_trade_date)
+            applied = create_or_merge_candidate_from_source(
+                connection,
+                source_event,
+                settings=resolved_settings,
+            )
+            result.add_apply(applied)
+        except Exception as exc:
+            result.error_count += 1
+            _record_projection_error(
+                connection,
+                candidate_instance_id=None,
+                source_event_id=fusion.get("latest_event_id"),
+                code=fusion.get("code"),
+                error_message=str(exc),
+                payload=fusion,
+            )
     for row in rows:
         if _trade_date_for_timestamp(row["event_ts"], resolved_settings) != target_trade_date:
+            continue
+        if is_profile_condition_metadata(_condition_row_metadata(row)):
             continue
         try:
             source_event = _condition_row_to_source_event(row, target_trade_date, resolved_settings)
@@ -700,6 +734,44 @@ def _condition_row_to_source_event(
     )
 
 
+def _fusion_row_to_source_event(
+    fusion: Mapping[str, Any],
+    trade_date: str,
+) -> CandidateSourceEvent:
+    roles = [str(role).upper() for role in fusion.get("active_roles", ())]
+    source_type = _fusion_source_type(roles, bool(fusion.get("risk_blocked")))
+    reasons = _fusion_reason_codes(fusion)
+    condition_names = [str(name) for name in fusion.get("condition_names", ())]
+    condition_name = " + ".join(condition_names) or "Condition Fusion"
+    source_id = f"condition_fusion:{fusion['code']}"
+    latest_hit_at = fusion.get("latest_hit_at") or fusion.get("updated_at")
+    return CandidateSourceEvent(
+        source_event_id=_source_event_id(
+            "condition_fusion",
+            trade_date,
+            fusion["code"],
+            fusion.get("latest_event_id") or latest_hit_at,
+            ",".join(roles),
+        ),
+        trade_date=trade_date,
+        code=fusion["code"],
+        name=fusion.get("name") or fusion["code"],
+        source_type=source_type,
+        source_id=source_id,
+        action="OBSERVE",
+        condition_id=source_id,
+        condition_name=condition_name,
+        event_ts=latest_hit_at,
+        observed_at=fusion.get("updated_at") or latest_hit_at,
+        payload={
+            **dict(fusion),
+            "sensor_evidence": True,
+            "not_buy_signal": True,
+        },
+        reason_codes=reasons,
+    )
+
+
 def _theme_row_to_source_event(row: sqlite3.Row, trade_date: str) -> CandidateSourceEvent:
     member_role = ThemeMemberRole(str(row["member_role"]).upper())
     if member_role is ThemeMemberRole.LEADER_CANDIDATE:
@@ -1238,7 +1310,9 @@ def _fsm_context(
 ) -> dict[str, Any]:
     source_types = {row["source_type"] for row in active_sources}
     theme_source = bool(source_types & _theme_source_values())
-    condition_source = CandidateSourceType.CONDITION_ENTER.value in source_types
+    condition_source = bool(source_types & _condition_source_values())
+    fusion_reasons = _active_condition_fusion_reason_codes(active_sources)
+    observation_blocked = _active_condition_fusion_blocked(active_sources)
     latest_source_seen = _latest_source_seen_at(active_sources)
     source_stale = (
         latest_source_seen is not None
@@ -1268,7 +1342,8 @@ def _fsm_context(
         "theme_state": theme_context.get("theme_state"),
         "condition_source": condition_source,
         "condition_signal_present": condition_source,
-        "reason_codes": _readiness_reason_codes(readiness),
+        "observation_blocked": observation_blocked,
+        "reason_codes": merge_reason_codes(_readiness_reason_codes(readiness), fusion_reasons),
     }
 
 
@@ -1478,6 +1553,105 @@ def _latest_source_seen_at(active_sources: list[sqlite3.Row]) -> str | None:
 
 def _theme_source_values() -> set[str]:
     return {source_type.value for source_type in THEME_SOURCE_TYPES}
+
+
+def _condition_source_values() -> set[str]:
+    return {
+        CandidateSourceType.CONDITION_ENTER.value,
+        CandidateSourceType.CONDITION_DISCOVERY.value,
+        CandidateSourceType.CONDITION_LEADER.value,
+        CandidateSourceType.CONDITION_PULLBACK.value,
+        CandidateSourceType.CONDITION_BREAKOUT.value,
+        CandidateSourceType.CONDITION_RISK_BLOCK.value,
+    }
+
+
+def _fusion_source_type(
+    roles: Sequence[str],
+    risk_blocked: bool,
+) -> CandidateSourceType:
+    role_set = {str(role).upper() for role in roles}
+    if risk_blocked or "RISK_BLOCK" in role_set:
+        return CandidateSourceType.CONDITION_RISK_BLOCK
+    if "LEADER" in role_set:
+        return CandidateSourceType.CONDITION_LEADER
+    if "PULLBACK" in role_set:
+        return CandidateSourceType.CONDITION_PULLBACK
+    if "BREAKOUT" in role_set:
+        return CandidateSourceType.CONDITION_BREAKOUT
+    return CandidateSourceType.CONDITION_DISCOVERY
+
+
+def _fusion_reason_codes(fusion: Mapping[str, Any]) -> list[str]:
+    role_reasons = {
+        "DISCOVERY": CandidateReasonCode.CONDITION_DISCOVERY_OBSERVED.value,
+        "LEADER": CandidateReasonCode.CONDITION_LEADER_OBSERVED.value,
+        "PULLBACK": CandidateReasonCode.CONDITION_PULLBACK_OBSERVED.value,
+        "BREAKOUT": CandidateReasonCode.CONDITION_BREAKOUT_OBSERVED.value,
+        "RISK_BLOCK": CandidateReasonCode.CONDITION_RISK_BLOCKED.value,
+    }
+    reasons = [
+        CandidateReasonCode.CONDITION_SENSOR_EVIDENCE.value,
+        CandidateReasonCode.MARKET_SENSOR_NOT_BUY_SIGNAL.value,
+    ]
+    for role in fusion.get("active_roles", ()):
+        reason = role_reasons.get(str(role).upper())
+        if reason:
+            reasons.append(reason)
+    for reason in fusion.get("reason_codes", ()):
+        text = str(reason).upper()
+        if text == "DISCOVERY_OBSERVATION_ONLY":
+            reasons.append(CandidateReasonCode.DISCOVERY_OBSERVATION_ONLY.value)
+        elif text == "RISK_BLOCKED_BY_CONDITION":
+            reasons.append(CandidateReasonCode.CONDITION_RISK_BLOCKED.value)
+        elif text == "CONDITION_FUSION_PRIORITY_READY":
+            reasons.append(CandidateReasonCode.CONDITION_FUSION_PRIORITY_READY.value)
+        else:
+            reasons.append(text)
+    return merge_reason_codes(reasons)
+
+
+def _active_condition_fusion_reason_codes(active_sources: list[sqlite3.Row]) -> list[str]:
+    reasons: list[str] = []
+    for row in active_sources:
+        if row["source_type"] not in _condition_source_values():
+            continue
+        payload = _source_payload(row)
+        reasons.extend(str(reason) for reason in payload.get("reason_codes", ()))
+    return merge_reason_codes(reasons)
+
+
+def _active_condition_fusion_blocked(active_sources: list[sqlite3.Row]) -> bool:
+    for row in active_sources:
+        if row["source_type"] not in _condition_source_values():
+            continue
+        payload = _source_payload(row)
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), Mapping) else {}
+        if bool(payload.get("risk_blocked")):
+            return True
+        if row["source_type"] == CandidateSourceType.CONDITION_RISK_BLOCK.value:
+            return True
+        if isinstance(metadata, Mapping) and metadata.get("candidate_promotion_allowed") is False:
+            return True
+        if isinstance(metadata, Mapping) and metadata.get("discovery_only") is True:
+            return True
+    return False
+
+
+def _source_payload(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        loaded = json.loads(row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _condition_row_metadata(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        loaded = json.loads(row["metadata_json"])
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _candidate_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

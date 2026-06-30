@@ -10,6 +10,12 @@ from datetime import UTC, datetime
 
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
+from domain.broker.condition_profiles import (
+    ConditionProfile,
+    ConditionRole,
+    ConditionSessionProfile,
+    PriceSubscribePolicy,
+)
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
@@ -767,6 +773,154 @@ def test_runtime_tracks_realtime_register_command_after_ack() -> None:
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
     assert [event.event_type for event in core.events] == ["command_started", "command_ack"]
+
+
+def test_multi_condition_profiles_send_sequential_with_distinct_screens(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+    client = MockKiwoomClient()
+    client.set_conditions([(1, "Discovery"), (2, "Leader"), (3, "Pullback")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                ),
+                ConditionProfile(
+                    condition_name="Leader",
+                    role=ConditionRole.LEADER,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=900,
+                ),
+                ConditionProfile(
+                    condition_name="Pullback",
+                    role=ConditionRole.PULLBACK,
+                    realtime_search=False,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=800,
+                ),
+            ),
+        ),
+    )
+
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    assert [call["screen_no"] for call in client.send_condition_calls] == [
+        "7600",
+        "7601",
+        "7602",
+    ]
+    assert [call["condition_name"] for call in client.send_condition_calls] == [
+        "Discovery",
+        "Leader",
+        "Pullback",
+    ]
+    assert client.send_condition_calls[2]["realtime"] is False
+    assert runtime.heartbeat_payload()["condition_profile_screen_map"] == {
+        "7600": "discovery:auto:discovery",
+        "7601": "leader:auto:leader",
+        "7602": "pullback:auto:pullback",
+    }
+
+
+def test_condition_tr_initial_results_batch_register_with_role_metadata(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+    client = MockKiwoomClient()
+    client.set_conditions([(1, "Discovery")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                    max_initial=10,
+                ),
+            ),
+        ),
+    )
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    runtime.on_condition_tr_received(
+        screen_no="7600",
+        code_list="005930;000660;",
+        condition_name="Discovery",
+        condition_index=1,
+    )
+
+    events = [event for event in runtime._event_queue if event.event_type == "condition_event"]
+    assert len(events) == 2
+    first_metadata = events[0].payload["metadata"]
+    assert first_metadata["condition_role"] == "DISCOVERY"
+    assert first_metadata["condition_profile_id"] == "discovery:auto:discovery"
+    assert first_metadata["sensor_evidence"] is True
+    assert first_metadata["not_buy_signal"] is True
+    assert first_metadata["condition_admission"]["register_batch"] is True
+    assert client.registered_codes == {"005930", "000660"}
+
+
+def test_real_condition_enter_immediate_and_risk_block_no_subscribe(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.MORNING_TREND,
+    )
+    client = MockKiwoomClient()
+    client.set_conditions([(2, "Leader"), (9, "RiskBlock")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Leader",
+                    role=ConditionRole.LEADER,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                ),
+                ConditionProfile(
+                    condition_name="RiskBlock",
+                    role=ConditionRole.RISK_BLOCK,
+                    price_subscribe_policy=PriceSubscribePolicy.NONE,
+                ),
+            ),
+        ),
+    )
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    leader_decision = runtime.on_condition_event(
+        code="005930",
+        event_type="I",
+        condition_name="Leader",
+        condition_index=2,
+        source="real_condition",
+    )
+    risk_decision = runtime.on_condition_event(
+        code="000660",
+        event_type="I",
+        condition_name="RiskBlock",
+        condition_index=9,
+        source="real_condition",
+    )
+
+    assert leader_decision is not None
+    assert leader_decision.register_immediate is True
+    assert risk_decision is not None
+    assert risk_decision.subscribed is False
+    assert "RISK_BLOCK_NO_PRICE_SUBSCRIBE" in risk_decision.reason_codes
+    assert client.registered_codes == {"005930"}
 
 
 def test_runtime_recovers_realtime_registration_when_price_ticks_stall() -> None:

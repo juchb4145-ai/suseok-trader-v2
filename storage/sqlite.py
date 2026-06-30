@@ -1438,6 +1438,29 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS candidate_condition_fusion (
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            active_roles_json TEXT NOT NULL DEFAULT '[]',
+            hit_count INTEGER NOT NULL DEFAULT 0,
+            latest_hit_at TEXT,
+            condition_names_json TEXT NOT NULL DEFAULT '[]',
+            positive_score REAL NOT NULL DEFAULT 0,
+            risk_blocked INTEGER NOT NULL DEFAULT 0,
+            priority_score REAL NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            subscribed INTEGER NOT NULL DEFAULT 0,
+            market_readiness_status TEXT,
+            latest_event_id TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (trade_date, code)
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS candidate_projection_errors (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             candidate_instance_id TEXT,
@@ -1483,6 +1506,12 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_candidate_transitions_candidate_time
         ON candidate_state_transitions (candidate_instance_id, transitioned_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_condition_fusion_priority
+        ON candidate_condition_fusion (trade_date, priority_score, risk_blocked)
         """
     )
     connection.execute(

@@ -128,6 +128,28 @@ const renderRealtimeSubscription = (snapshot) => {
   ].join("");
 };
 
+const renderConditionFusion = (snapshot) => {
+  const fusion = snapshot.condition_fusion || {};
+  const status = fusion.status || {};
+  const profiles = fusion.profiles || [];
+  const codes = fusion.codes || [];
+  document.getElementById("condition-fusion-badges").innerHTML = [
+    badge("OBSERVE", "sensor evidence"),
+    badge("OBSERVE", "not buy signal"),
+    badge(status.risk_blocked_count ? "BLOCKED" : "OBSERVE", `risk ${status.risk_blocked_count || 0}`),
+  ].join("");
+  document.getElementById("condition-fusion-status").innerHTML = [
+    metric("Profiles", status.profile_count || profiles.length),
+    metric("Fused codes", status.fused_code_count || codes.length),
+    metric("Subscribed", status.subscribed_count || 0),
+    metric("Risk blocked", status.risk_blocked_count || 0),
+  ].join("");
+  document.getElementById("condition-fusion-tables").innerHTML = [
+    conditionProfileTable(profiles),
+    conditionCodeTable(codes),
+  ].join("");
+};
+
 const renderMarketTheme = (snapshot) => {
   const themes = snapshot.themes || {};
   const noBuy = snapshot.no_buy_sentinel || {};
@@ -362,6 +384,47 @@ const subscriptionTable = (title, rows) => `
   </article>
 `;
 
+const conditionProfileTable = (rows) => `
+  <article class="log-card">
+    <h3>Condition profiles <span class="muted">(${rows.length})</span></h3>
+    ${
+      rows.length
+        ? table(
+            ["조건식", "role", "hit", "enter/exit", "sub/skipped"],
+            rows.slice(0, 8).map((row) => [
+              `${text(row.condition_name)} ${text(row.condition_index)}`,
+              badge(row.role || "DISCOVERY"),
+              number(row.hit_count),
+              `${number(row.enter_count)} / ${number(row.exit_count)}`,
+              `${number(row.subscribed_count)} / ${number(row.skipped_count)}`,
+            ]),
+          )
+        : '<p class="muted">조건 profile hit가 없습니다.</p>'
+    }
+  </article>
+`;
+
+const conditionCodeTable = (rows) => `
+  <article class="log-card">
+    <h3>Fused codes <span class="muted">(${rows.length})</span></h3>
+    ${
+      rows.length
+        ? table(
+            ["종목", "roles", "priority", "risk/sub", "readiness", "reason"],
+            rows.slice(0, 8).map((row) => [
+              `${text(row.name)} ${text(row.code)}`,
+              (row.active_roles || []).map((role) => badge(role)).join(""),
+              number(row.priority_score),
+              `${text(row.risk_blocked)} / ${text(row.subscribed)}`,
+              text(row.market_readiness_status),
+              reasonList(row.reason_codes),
+            ]),
+          )
+        : '<p class="muted">fusion 종목이 없습니다.</p>'
+    }
+  </article>
+`;
+
 const table = (headers, rows) => `
   <table>
     <thead>
@@ -452,6 +515,7 @@ const renderSnapshot = (snapshot) => {
   renderSafety(snapshot);
   renderSystem(snapshot);
   renderRealtimeSubscription(snapshot);
+  renderConditionFusion(snapshot);
   renderMarketTheme(snapshot);
   renderCandidatePlan(snapshot);
   renderLiveSimOps(snapshot);

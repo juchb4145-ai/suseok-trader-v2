@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from collections import deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -8,9 +9,20 @@ from datetime import datetime
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
+from domain.broker.condition_profiles import (
+    ConditionProfile,
+    ConditionSessionProfile,
+    condition_profiles_from_config,
+    current_condition_session_profile,
+    normalize_condition_profile_payload,
+)
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 
+from gateway.condition_admission import (
+    ConditionAdmissionDecision,
+    GatewayConditionAdmissionController,
+)
 from gateway.core_client import CoreClient
 from gateway.core_io_worker import CoreIoWorker
 from gateway.event_factory import make_command_failed_event
@@ -37,6 +49,8 @@ class KiwoomGatewayRuntimeConfig:
     condition_name: str | None = None
     condition_index: int | None = None
     condition_realtime: bool = True
+    condition_profiles: tuple[ConditionProfile, ...] = ()
+    condition_send_interval_sec: float = 0.25
     realtime_codes: tuple[str, ...] = ()
     realtime_exchange: str = "KRX"
     observe_only: bool = True
@@ -198,6 +212,17 @@ class KiwoomGatewayRuntime:
         self._condition_load_call_in_progress = False
         self._latest_condition_ver_callback_at: datetime | None = None
         self._latest_condition_ver_result: dict[str, Any] = {}
+        self._condition_profiles: tuple[ConditionProfile, ...] = condition_profiles_from_config(
+            profiles=self.config.condition_profiles,
+            legacy_condition_name=self.config.condition_name,
+            legacy_condition_index=self.config.condition_index,
+            legacy_realtime=self.config.condition_realtime,
+        )
+        self._condition_profile_by_screen: dict[str, ConditionProfile] = {}
+        self._condition_profile_by_key: dict[tuple[str, int], ConditionProfile] = {}
+        self._condition_send_results: list[dict[str, Any]] = []
+        self._condition_reason_codes: list[str] = []
+        self._condition_admission = GatewayConditionAdmissionController()
         self._registered_realtime_codes: set[str] = set()
         self._last_price_tick_at: datetime | None = None
         self._last_quote_at: datetime | None = None
@@ -433,6 +458,19 @@ class KiwoomGatewayRuntime:
             ),
             "condition_load_retry_count": self._condition_load_retry_count,
             "condition_load_timeout_count": self._condition_load_timeout_count,
+            "condition_reason_codes": list(self._condition_reason_codes),
+            "condition_session_profile": self._condition_session_profile().value,
+            "condition_profiles": [
+                normalize_condition_profile_payload(profile)
+                for profile in self._condition_profiles
+            ],
+            "condition_profile_screen_map": {
+                screen_no: profile.profile_id
+                for screen_no, profile in sorted(self._condition_profile_by_screen.items())
+            },
+            "condition_send_results": list(self._condition_send_results),
+            "condition_profile_metrics": self._condition_admission.metrics(),
+            "adaptive_realtime_budget": self._condition_admission.latest_budget(),
             "condition_callback_health": self._condition_callback_health(),
             "latest_condition_ver_callback_at": _datetime_or_empty(
                 self._latest_condition_ver_callback_at
@@ -567,12 +605,15 @@ class KiwoomGatewayRuntime:
     def on_condition_load_result(self, success: bool, message: str = "") -> None:
         self._condition_load_state = "LOADED" if success else "FAILED"
         self._condition_load_requested_at = None
+        if not success:
+            self._add_condition_reason("CONDITION_LOAD_FAILED")
         self.emit(
             "condition_load_result",
             {
                 "success": bool(success),
                 "message": str(message or ""),
                 "conditions": [condition.to_dict() for condition in self._conditions()],
+                "reason_codes": [] if success else ["CONDITION_LOAD_FAILED"],
             },
         )
 
@@ -581,7 +622,7 @@ class KiwoomGatewayRuntime:
         self._condition_load_state = "LOADED"
         self._condition_load_requested_at = None
         self.emit("condition_loaded", {"conditions": loaded})
-        self._send_configured_condition(loaded)
+        self._send_configured_conditions(loaded)
 
     def on_condition_event(
         self,
@@ -591,19 +632,73 @@ class KiwoomGatewayRuntime:
         condition_name: str,
         condition_index: int,
         source: str,
-    ) -> None:
+        screen_no: str | None = None,
+        batch_allowed: bool = False,
+    ) -> ConditionAdmissionDecision | None:
         normalized_code = normalize_code(code)
+        profile = self._profile_for_condition_event(
+            condition_name=condition_name,
+            condition_index=condition_index,
+            screen_no=screen_no,
+        )
+        profile_metadata = self._condition_profile_metadata(
+            profile=profile,
+            callback_source=source,
+            screen_no=screen_no,
+        )
         payload = condition_event_payload(
             code=normalized_code,
             event_type=event_type,
             condition_name=condition_name,
             condition_index=condition_index,
             name=self._code_name(normalized_code),
-            metadata={"source_event": source},
+            metadata=profile_metadata,
         )
+        decision: ConditionAdmissionDecision | None = None
+        if profile is not None:
+            decision = self._condition_admission.decide(
+                profile=profile,
+                action=str(payload["action"]),
+                source=source,
+                registered_realtime_count=len(self._registered_realtime_codes),
+                runtime_metrics=self._runtime_realtime_metrics(),
+                session_profile=self._condition_session_profile(),
+                batch_allowed=batch_allowed,
+            )
+            payload["metadata"]["condition_admission"] = decision.to_dict()
         self.emit("condition_event", payload)
-        if payload["action"] == "ENTER" and self.config.condition_realtime:
+        if decision is not None and decision.register_immediate:
             self.register_realtime_codes([normalized_code])
+        return decision
+
+    def on_condition_tr_received(
+        self,
+        *,
+        screen_no: str,
+        code_list: str,
+        condition_name: str,
+        condition_index: int,
+        next_flag: str = "",
+    ) -> None:
+        del next_flag
+        batch_codes: list[str] = []
+        for code in str(code_list or "").split(";"):
+            if not code.strip():
+                continue
+            normalized_code = normalize_code(code)
+            decision = self.on_condition_event(
+                code=normalized_code,
+                event_type="I",
+                condition_name=str(condition_name or ""),
+                condition_index=int(condition_index or -1),
+                source="tr_condition",
+                screen_no=str(screen_no or ""),
+                batch_allowed=True,
+            )
+            if decision is not None and decision.register_batch:
+                batch_codes.append(normalized_code)
+        if batch_codes:
+            self.register_realtime_codes(batch_codes)
 
     def on_price_tick(self, payload: Mapping[str, Any]) -> None:
         self._last_price_tick_at = utc_now()
@@ -899,16 +994,22 @@ class KiwoomGatewayRuntime:
             self._condition_load_state = "FAILED"
             self._condition_load_requested_at = None
             self._condition_load_call_in_progress = False
+            self._add_condition_reason("CONDITION_LOAD_EXCEPTION")
             self.emit("gateway_error", {"message": f"CONDITION_LOAD_FAILED:{exc}"})
             return
         self._condition_load_call_in_progress = False
         if result <= 0:
             self._condition_load_state = "FAILED"
             self._condition_load_requested_at = None
+            self._add_condition_reason("CONDITION_LOAD_FAILED")
         if result <= 0:
             self.emit(
                 "condition_load_result",
-                {"success": False, "message": "GetConditionLoad failed"},
+                {
+                    "success": False,
+                    "message": "GetConditionLoad failed",
+                    "reason_codes": ["CONDITION_LOAD_FAILED"],
+                },
             )
 
     def check_condition_load_timeout(self) -> None:
@@ -926,6 +1027,8 @@ class KiwoomGatewayRuntime:
             "CONDITION_LOAD_TIMEOUT",
             self._callback_suspect_reason_code(),
         ]
+        for reason in reason_codes:
+            self._add_condition_reason(reason)
         if self._login_threaded:
             reason_codes.append("POSSIBLE_THREADING_ISSUE")
         if self._condition_load_retry_count < max(int(self.config.condition_load_max_retry), 0):
@@ -954,43 +1057,202 @@ class KiwoomGatewayRuntime:
             },
         )
 
-    def _send_configured_condition(self, conditions: list[dict[str, Any]]) -> None:
-        condition_name = self.config.condition_name
-        condition_index = self.config.condition_index
-        if condition_index is None and condition_name:
-            for condition in conditions:
-                if str(condition.get("name") or "") == condition_name:
-                    condition_index = int(condition.get("index") or 0)
-                    break
-        if condition_name is None and condition_index is not None:
-            for condition in conditions:
-                if int(condition.get("index") or -1) == condition_index:
-                    condition_name = str(condition.get("name") or "")
-                    break
-        if condition_name is None or condition_index is None:
+    def _send_configured_conditions(self, conditions: list[dict[str, Any]]) -> None:
+        profiles = self._resolve_condition_profiles(conditions)
+        self._condition_profiles = tuple(profile for profile in profiles if profile.enabled)
+        if not self._condition_profiles:
             return
-        try:
-            result = int(
-                self.client.send_condition(
-                    "7600",
-                    condition_name,
-                    int(condition_index),
-                    realtime=self.config.condition_realtime,
+        last_send_at = 0.0
+        for offset, profile in enumerate(self._condition_profiles):
+            if profile.condition_index is None:
+                self._add_condition_reason("CONDITION_PROFILE_INDEX_UNRESOLVED")
+                self._record_condition_send_result(
+                    profile,
+                    result_code=-1,
+                    success=False,
+                    reason_codes=["CONDITION_PROFILE_INDEX_UNRESOLVED"],
                 )
-                or 0
+                continue
+            screen_no = profile.screen_no or f"{7600 + offset:04d}"
+            resolved = profile.with_resolution(screen_no=screen_no)
+            self._register_condition_profile_mapping(resolved)
+            interval = max(float(self.config.condition_send_interval_sec), 0.0)
+            elapsed = time.monotonic() - last_send_at
+            if last_send_at and elapsed < interval:
+                time.sleep(interval - elapsed)
+            try:
+                result = int(
+                    self.client.send_condition(
+                        screen_no,
+                        resolved.condition_name,
+                        int(resolved.condition_index),
+                        realtime=resolved.realtime_search,
+                    )
+                    or 0
+                )
+            except Exception as exc:
+                self._add_condition_reason("CONDITION_SEND_EXCEPTION")
+                self._record_condition_send_result(
+                    resolved,
+                    result_code=-1,
+                    success=False,
+                    reason_codes=["CONDITION_SEND_EXCEPTION"],
+                    error=str(exc),
+                )
+                self.emit(
+                    "gateway_error",
+                    {
+                        "message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}",
+                        "condition_profile": resolved.to_dict(),
+                        "reason_codes": ["CONDITION_SEND_EXCEPTION"],
+                    },
+                )
+                continue
+            last_send_at = time.monotonic()
+            success = result == 1
+            reason_codes = [] if success else ["CONDITION_SEND_FAILED"]
+            if not success:
+                self._add_condition_reason("CONDITION_SEND_FAILED")
+            self._record_condition_send_result(
+                resolved,
+                result_code=result,
+                success=success,
+                reason_codes=reason_codes,
             )
-        except Exception as exc:
-            self.emit("gateway_error", {"message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}"})
-            return
-        self.emit(
-            "gateway_log",
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "configured condition profile send requested",
+                    "condition_profile": resolved.to_dict(),
+                    "condition_name": resolved.condition_name,
+                    "condition_index": resolved.condition_index,
+                    "screen_no": screen_no,
+                    "result_code": result,
+                    "success": success,
+                    "reason_codes": reason_codes,
+                },
+            )
+
+    def _resolve_condition_profiles(
+        self,
+        conditions: list[dict[str, Any]],
+    ) -> tuple[ConditionProfile, ...]:
+        resolved: list[ConditionProfile] = []
+        for offset, profile in enumerate(self._condition_profiles):
+            condition_name = profile.condition_name
+            condition_index = profile.condition_index
+            if condition_index is None and condition_name:
+                for condition in conditions:
+                    if str(condition.get("name") or "") == condition_name:
+                        condition_index = int(condition.get("index") or 0)
+                        break
+            if condition_name and condition_index is None:
+                self._add_condition_reason("CONDITION_PROFILE_NAME_NOT_FOUND")
+            if not condition_name and condition_index is not None:
+                for condition in conditions:
+                    if int(condition.get("index") or -1) == condition_index:
+                        condition_name = str(condition.get("name") or "")
+                        break
+            screen_no = profile.screen_no or f"{7600 + offset:04d}"
+            resolved.append(
+                profile.with_resolution(
+                    condition_name=condition_name,
+                    condition_index=condition_index,
+                    screen_no=screen_no,
+                )
+            )
+        return tuple(resolved)
+
+    def _register_condition_profile_mapping(self, profile: ConditionProfile) -> None:
+        if profile.screen_no:
+            self._condition_profile_by_screen[profile.screen_no] = profile
+        if profile.condition_index is not None:
+            self._condition_profile_by_key[
+                (profile.condition_name, int(profile.condition_index))
+            ] = profile
+
+    def _profile_for_condition_event(
+        self,
+        *,
+        condition_name: str,
+        condition_index: int,
+        screen_no: str | None = None,
+    ) -> ConditionProfile | None:
+        screen = str(screen_no or "").strip()
+        if screen and screen in self._condition_profile_by_screen:
+            return self._condition_profile_by_screen[screen]
+        key = (str(condition_name or "").strip(), int(condition_index))
+        if key in self._condition_profile_by_key:
+            return self._condition_profile_by_key[key]
+        for profile in self._condition_profiles:
+            if profile.condition_index is not None and int(profile.condition_index) == int(
+                condition_index
+            ):
+                return profile
+            if profile.condition_name == key[0]:
+                return profile
+        return None
+
+    def _condition_profile_metadata(
+        self,
+        *,
+        profile: ConditionProfile | None,
+        callback_source: str,
+        screen_no: str | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "source_event": callback_source,
+            "callback_source": callback_source,
+            "screen_no": str(screen_no or ""),
+        }
+        if profile is None:
+            return metadata
+        session = self._condition_session_profile()
+        metadata.update(
             {
-                "message": "configured condition send requested",
-                "condition_name": condition_name,
-                "condition_index": condition_index,
-                "result_code": result,
-            },
+                "sensor_evidence": True,
+                "not_buy_signal": True,
+                "condition_profile_id": profile.profile_id,
+                "condition_role": profile.role.value,
+                "condition_priority": profile.priority,
+                "condition_ttl_sec": profile.ttl_sec,
+                "condition_session_profile": session.value,
+                "regular_session_seed_only": (
+                    session is ConditionSessionProfile.PREOPEN_NXT
+                ),
+                "condition_profile": normalize_condition_profile_payload(profile),
+            }
         )
+        return metadata
+
+    def _record_condition_send_result(
+        self,
+        profile: ConditionProfile,
+        *,
+        result_code: int,
+        success: bool,
+        reason_codes: list[str],
+        error: str = "",
+    ) -> None:
+        self._condition_send_results.append(
+            {
+                "profile_id": profile.profile_id,
+                "condition_name": profile.condition_name,
+                "condition_index": profile.condition_index,
+                "screen_no": profile.screen_no,
+                "role": profile.role.value,
+                "result_code": int(result_code),
+                "success": bool(success),
+                "reason_codes": list(reason_codes),
+                "error": error,
+                "sent_at": datetime_to_wire(utc_now()),
+            }
+        )
+
+    def _add_condition_reason(self, reason_code: str) -> None:
+        reason = str(reason_code or "").strip().upper()
+        if reason and reason not in self._condition_reason_codes:
+            self._condition_reason_codes.append(reason)
 
     def _register_initial_realtime(self) -> None:
         if self.config.realtime_codes:
@@ -1115,6 +1377,18 @@ class KiwoomGatewayRuntime:
     def _realtime_exchange(self) -> str:
         return normalize_realtime_exchange(self.config.realtime_exchange)
 
+    def _condition_session_profile(self) -> ConditionSessionProfile:
+        return current_condition_session_profile()
+
+    def _runtime_realtime_metrics(self) -> dict[str, Any]:
+        return {
+            "registered_realtime_code_count": len(self._registered_realtime_codes),
+            "parsed_price_tick_count": self._parsed_price_tick_count,
+            "realtime_parse_error_count": self._realtime_parse_error_count,
+            "realtime_callback_count": self._realtime_callback_count,
+            "realtime_subscription_health": self._realtime_subscription_health(),
+        }
+
     def _latest_qt_thread_id_for(self, *methods: str) -> str:
         method_set = {str(method) for method in methods}
         for audit in reversed(self._active_x_thread_audit):
@@ -1167,19 +1441,22 @@ def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
             source="real_condition",
         )
     )
-    client.condition_tr_received.connect(
-        lambda screen_no, code_list, condition_name, condition_index, next_flag: [
-            runtime.on_condition_event(
-                code=code,
-                event_type="I",
-                condition_name=str(condition_name or ""),
-                condition_index=int(condition_index or -1),
-                source="tr_condition",
-            )
-            for code in str(code_list or "").split(";")
-            if code.strip()
-        ]
-    )
+    def handle_condition_tr(
+        screen_no: str,
+        code_list: str,
+        condition_name: str,
+        condition_index: int,
+        next_flag: str,
+    ) -> None:
+        runtime.on_condition_tr_received(
+            screen_no=str(screen_no or ""),
+            code_list=str(code_list or ""),
+            condition_name=str(condition_name or ""),
+            condition_index=int(condition_index or -1),
+            next_flag=str(next_flag or ""),
+        )
+
+    client.condition_tr_received.connect(handle_condition_tr)
     client.chejan_event_received.connect(lambda result: runtime.on_chejan_result(result))
 
 

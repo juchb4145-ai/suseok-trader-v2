@@ -6,6 +6,11 @@ from enum import StrEnum
 class CandidateSourceType(StrEnum):
     CONDITION_ENTER = "CONDITION_ENTER"
     CONDITION_EXIT = "CONDITION_EXIT"
+    CONDITION_DISCOVERY = "CONDITION_DISCOVERY"
+    CONDITION_LEADER = "CONDITION_LEADER"
+    CONDITION_PULLBACK = "CONDITION_PULLBACK"
+    CONDITION_BREAKOUT = "CONDITION_BREAKOUT"
+    CONDITION_RISK_BLOCK = "CONDITION_RISK_BLOCK"
     THEME_LEADER = "THEME_LEADER"
     THEME_CO_LEADER = "THEME_CO_LEADER"
     THEME_FOLLOWER = "THEME_FOLLOWER"
@@ -39,5 +44,10 @@ CONDITION_SOURCE_TYPES: frozenset[CandidateSourceType] = frozenset(
     {
         CandidateSourceType.CONDITION_ENTER,
         CandidateSourceType.CONDITION_EXIT,
+        CandidateSourceType.CONDITION_DISCOVERY,
+        CandidateSourceType.CONDITION_LEADER,
+        CandidateSourceType.CONDITION_PULLBACK,
+        CandidateSourceType.CONDITION_BREAKOUT,
+        CandidateSourceType.CONDITION_RISK_BLOCK,
     }
 )

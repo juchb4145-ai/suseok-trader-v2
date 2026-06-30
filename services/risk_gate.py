@@ -386,6 +386,10 @@ def check_candidate_context(context: RiskInputContext, settings: Settings) -> Ri
         reasons.append(RiskReasonCode.CANDIDATE_NOT_CONTEXT_READY.value)
         status = RiskCheckStatus.CAUTION_OBSERVED
         severity = RiskSeverity.MEDIUM
+    if "CONDITION_RISK_BLOCKED" in set(context.reason_codes):
+        reasons.append(RiskReasonCode.CONDITION_RISK_BLOCKED.value)
+        status = RiskCheckStatus.BLOCK_OBSERVED
+        severity = _higher_severity(severity, RiskSeverity.HIGH)
     if context.active_source_count <= 0:
         reasons.append(RiskReasonCode.ACTIVE_SOURCE_MISSING.value)
         status = RiskCheckStatus.BLOCK_OBSERVED

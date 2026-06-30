@@ -856,6 +856,15 @@ def _context_precheck(
     settings: Settings,
 ) -> tuple[StrategyObservationStatus | None, list[str]]:
     state = context.candidate_state.upper()
+    reason_set = set(context.reason_codes)
+    if "CONDITION_RISK_BLOCKED" in reason_set:
+        return StrategyObservationStatus.NOT_EVALUATED, [
+            StrategyReasonCode.CONDITION_RISK_BLOCKED.value
+        ]
+    if "DISCOVERY_OBSERVATION_ONLY" in reason_set:
+        return StrategyObservationStatus.NOT_EVALUATED, [
+            StrategyReasonCode.DISCOVERY_OBSERVATION_ONLY.value
+        ]
     if state in {CandidateState.CLOSED.value, CandidateState.STALE.value}:
         return StrategyObservationStatus.STALE_CONTEXT, [
             StrategyReasonCode.CANDIDATE_STALE.value

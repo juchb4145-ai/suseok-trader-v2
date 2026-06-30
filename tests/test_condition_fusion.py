@@ -1,0 +1,174 @@
+from __future__ import annotations
+
+from domain.broker.utils import utc_now
+from gateway.event_factory import make_condition_event, make_price_tick_event
+from services.candidate_service import (
+    ingest_condition_sources,
+    list_candidates,
+    refresh_candidate_context,
+)
+from services.condition_fusion import list_condition_fusion, rebuild_condition_fusion
+from services.config import Settings, candidate_timezone
+from services.market_data_service import process_gateway_event
+from storage.event_store import append_gateway_event
+from storage.sqlite import initialize_database
+
+
+def test_condition_fusion_scores_discovery_low_and_leader_pullback_high(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "condition-fusion.sqlite3")
+    settings = _settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(
+        connection,
+        _condition_event("005930", "Discovery", "DISCOVERY", priority=10),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        _condition_event("000660", "Leader", "LEADER", priority=500),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        _condition_event("000660", "Pullback", "PULLBACK", priority=450),
+        settings,
+    )
+
+    result = rebuild_condition_fusion(connection, trade_date, settings=settings)
+    rows = {row["code"]: row for row in list_condition_fusion(connection, settings=settings)}
+    connection.close()
+
+    assert result.processed_event_count == 3
+    assert rows["005930"]["active_roles"] == ["DISCOVERY"]
+    assert rows["005930"]["priority_score"] <= 25
+    assert "DISCOVERY_OBSERVATION_ONLY" in rows["005930"]["reason_codes"]
+    assert rows["000660"]["active_roles"] == ["LEADER", "PULLBACK"]
+    assert rows["000660"]["priority_score"] > rows["005930"]["priority_score"]
+    assert "LEADER_PULLBACK_FUSION_PRIORITY" in rows["000660"]["reason_codes"]
+
+
+def test_condition_fusion_marks_risk_blocked_and_candidate_source_types(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "condition-fusion-candidate.sqlite3")
+    settings = _settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(
+        connection,
+        _condition_event("005930", "Leader", "LEADER", priority=500),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        _condition_event("005930", "RiskBlock", "RISK_BLOCK", priority=0),
+        settings,
+    )
+    _append_and_project(connection, make_price_tick_event(code="005930"), settings)
+
+    ingest_result = ingest_condition_sources(connection, trade_date, settings=settings)
+    candidates = list_candidates(connection, trade_date=trade_date, active_only=True)
+    candidate = candidates[0]
+    refresh_candidate_context(connection, candidate["candidate_instance_id"], settings=settings)
+    refreshed = list_candidates(connection, trade_date=trade_date, active_only=True)[0]
+    fusion = list_condition_fusion(connection, settings=settings)[0]
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    latest_source = connection.execute(
+        """
+        SELECT source_type, payload_json
+        FROM candidate_sources_latest
+        WHERE code = '005930'
+        """
+    ).fetchone()
+    connection.close()
+
+    assert ingest_result.source_event_count == 1
+    assert fusion["risk_blocked"] is True
+    assert "RISK_BLOCKED_BY_CONDITION" in fusion["reason_codes"]
+    assert latest_source["source_type"] == "CONDITION_RISK_BLOCK"
+    assert "CONDITION_RISK_BLOCKED" in refreshed["reason_codes"]
+    assert refreshed["state"] == "BLOCKED_OBSERVATION"
+    assert command_count == 0
+
+
+def test_discovery_only_condition_fusion_blocks_strategy_promotion(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "condition-discovery-only.sqlite3")
+    settings = _settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(
+        connection,
+        _condition_event("005930", "Discovery", "DISCOVERY", priority=10),
+        settings,
+    )
+    _append_and_project(connection, make_price_tick_event(code="005930"), settings)
+
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate = list_candidates(connection, trade_date=trade_date, active_only=True)[0]
+    refresh_candidate_context(connection, candidate["candidate_instance_id"], settings=settings)
+    refreshed = list_candidates(connection, trade_date=trade_date, active_only=True)[0]
+    connection.close()
+
+    assert refreshed["primary_source_type"] == "CONDITION_DISCOVERY"
+    assert "DISCOVERY_OBSERVATION_ONLY" in refreshed["reason_codes"]
+    assert refreshed["state"] == "BLOCKED_OBSERVATION"
+
+
+def _condition_event(
+    code: str,
+    name: str,
+    role: str,
+    *,
+    priority: int,
+):
+    return make_condition_event(
+        condition_id=f"cond-{name}",
+        condition_name=name,
+        code=code,
+        name=code,
+        action="ENTER",
+        metadata={
+            "sensor_evidence": True,
+            "not_buy_signal": True,
+            "condition_profile_id": f"profile-{name}",
+            "condition_role": role,
+            "condition_profile": {
+                "profile_id": f"profile-{name}",
+                "condition_name": name,
+                "condition_index": priority,
+                "role": role,
+                "priority": priority,
+                "ttl_sec": 999_999_999,
+                "enabled": True,
+                "price_subscribe_policy": "immediate",
+            },
+            "condition_admission": {
+                "subscribed": role != "RISK_BLOCK",
+                "reason_codes": ["TEST"],
+            },
+        },
+    )
+
+
+def _settings() -> Settings:
+    return Settings(
+        market_data_tick_stale_sec=999_999_999,
+        market_data_degraded_tick_stale_sec=999_999_999,
+        candidate_source_stale_sec=999_999_999,
+        candidate_tick_stale_sec=999_999_999,
+        candidate_episode_ttl_sec=999_999_999,
+    )
+
+
+def _trade_date(settings: Settings) -> str:
+    return (
+        utc_now()
+        .astimezone(candidate_timezone(settings.candidate_trade_date_timezone))
+        .date()
+        .isoformat()
+    )
+
+
+def _append_and_project(connection, event, settings: Settings) -> None:
+    append_result = append_gateway_event(connection, event)
+    assert append_result.status == "ACCEPTED"
+    result = process_gateway_event(connection, event, settings=settings)
+    assert result.status == "APPLIED"

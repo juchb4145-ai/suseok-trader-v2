@@ -55,6 +55,10 @@ from services.candidate_service import (
     list_candidate_projection_errors,
     list_candidates,
 )
+from services.condition_fusion import (
+    get_condition_profile_metrics,
+    list_condition_fusion,
+)
 from services.config import Settings
 from services.dashboard_ai_explanations import build_ai_explanation_cards
 from services.entry_timing.service import (
@@ -125,6 +129,7 @@ DASHBOARD_SECTIONS = [
     "safety",
     "system",
     "gateway",
+    "condition_fusion",
     "market_data",
     "realtime_subscription",
     "themes",
@@ -200,6 +205,17 @@ def build_dashboard_snapshot(
         registered_codes=gateway_status["realtime_registered_codes"],
         queue_commands=False,
     ).to_dict()
+    condition_fusion_rows = list_condition_fusion(
+        connection,
+        settings=settings,
+        registered_codes=gateway_status["realtime_registered_codes"],
+        limit=bounded_limit,
+    )
+    condition_profile_metrics = get_condition_profile_metrics(
+        connection,
+        settings=settings,
+        limit=bounded_limit,
+    )
     theme_status = get_theme_status(connection, settings=settings)
     candidate_status = get_candidate_status(connection, settings=settings)
     strategy_status = get_strategy_status(connection, settings)
@@ -346,6 +362,23 @@ def build_dashboard_snapshot(
         "safety": build_safety_section(settings),
         "system": _system_section(settings, generated_at),
         "gateway": gateway_status,
+        "condition_fusion": {
+            "status": {
+                "profile_count": len(condition_profile_metrics),
+                "fused_code_count": len(condition_fusion_rows),
+                "risk_blocked_count": sum(
+                    1 for row in condition_fusion_rows if row.get("risk_blocked")
+                ),
+                "subscribed_count": sum(
+                    1 for row in condition_fusion_rows if row.get("subscribed")
+                ),
+                "read_only": True,
+                "not_buy_signal": True,
+            },
+            "profiles": condition_profile_metrics
+            or gateway_status.get("condition_profile_metrics", []),
+            "codes": condition_fusion_rows,
+        },
         "market_data": {
             "status": market_data_status,
             "latest_ticks": latest_ticks,
@@ -735,6 +768,16 @@ def _gateway_status_section(
         "condition_load_requested_at": heartbeat_payload.get("condition_load_requested_at"),
         "condition_load_retry_count": heartbeat_payload.get("condition_load_retry_count"),
         "condition_load_timeout_count": heartbeat_payload.get("condition_load_timeout_count"),
+        "condition_reason_codes": heartbeat_payload.get("condition_reason_codes") or [],
+        "condition_session_profile": heartbeat_payload.get("condition_session_profile"),
+        "condition_profiles": heartbeat_payload.get("condition_profiles") or [],
+        "condition_profile_screen_map": heartbeat_payload.get("condition_profile_screen_map")
+        or {},
+        "condition_send_results": heartbeat_payload.get("condition_send_results") or [],
+        "condition_profile_metrics": heartbeat_payload.get("condition_profile_metrics")
+        or [],
+        "adaptive_realtime_budget": heartbeat_payload.get("adaptive_realtime_budget")
+        or {},
         "latest_condition_ver_callback_at": heartbeat_payload.get(
             "latest_condition_ver_callback_at"
         ),

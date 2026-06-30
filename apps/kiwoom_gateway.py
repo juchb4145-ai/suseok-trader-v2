@@ -73,6 +73,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--command-limit", type=int, default=20)
     parser.add_argument("--condition-name", default=os.environ.get("KIWOOM_CONDITION_NAME"))
     parser.add_argument(
+        "--condition-profiles",
+        default=os.environ.get("KIWOOM_CONDITION_PROFILES", ""),
+        help=(
+            "JSON array/object of Kiwoom condition profiles. "
+            "When omitted, --condition-name/--condition-index are used as one legacy profile."
+        ),
+    )
+    parser.add_argument(
         "--condition-index",
         type=int,
         default=_optional_int_env("KIWOOM_CONDITION_INDEX"),
@@ -148,6 +156,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_gateway(args: argparse.Namespace) -> int:
+    from domain.broker.condition_profiles import parse_condition_profiles
     from gateway.core_client import CoreClient
     from gateway.kiwoom_runtime import (
         KiwoomGatewayRuntime,
@@ -201,6 +210,7 @@ def run_gateway(args: argparse.Namespace) -> int:
             condition_name=args.condition_name,
             condition_index=args.condition_index,
             condition_realtime=bool(args.condition_realtime),
+            condition_profiles=parse_condition_profiles(args.condition_profiles),
             realtime_codes=tuple(_parse_codes(args.realtime_codes)),
             realtime_exchange=str(args.realtime_exchange or "krx").upper(),
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
