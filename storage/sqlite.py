@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 27
 APP_NAME = "suseok-trader-v2"
 
 
@@ -36,6 +36,9 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_advisory_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_market_data_tables(connection)
+    _create_market_reference_tables(connection)
+    _create_market_index_tables(connection)
+    _create_market_regime_tables(connection)
     _create_theme_projection_tables(connection)
     _create_candidate_projection_tables(connection)
     _create_strategy_projection_tables(connection)
@@ -1120,6 +1123,160 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_projection_errors_created_at
         ON market_projection_errors (created_at)
+        """
+    )
+
+
+def _create_market_reference_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_symbol_memberships (
+            code TEXT PRIMARY KEY,
+            market TEXT NOT NULL,
+            name TEXT,
+            event_id TEXT NOT NULL,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_symbol_memberships_market
+        ON market_symbol_memberships (market, code)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_symbol_memberships_event_id
+        ON market_symbol_memberships (event_id)
+        """
+    )
+
+
+def _create_market_index_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_ticks_latest (
+            index_code TEXT PRIMARY KEY,
+            index_name TEXT NOT NULL,
+            price REAL NOT NULL,
+            change_rate REAL NOT NULL,
+            change_value REAL NOT NULL,
+            trade_time TEXT NOT NULL,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_tick_samples (
+            event_id TEXT PRIMARY KEY,
+            index_code TEXT NOT NULL,
+            index_name TEXT NOT NULL,
+            price REAL NOT NULL,
+            change_rate REAL NOT NULL,
+            change_value REAL NOT NULL,
+            trade_time TEXT NOT NULL,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_bars (
+            index_code TEXT NOT NULL,
+            interval_sec INTEGER NOT NULL,
+            bucket_start TEXT NOT NULL,
+            open REAL NOT NULL,
+            high REAL NOT NULL,
+            low REAL NOT NULL,
+            close REAL NOT NULL,
+            change_rate_open REAL NOT NULL,
+            change_rate_close REAL NOT NULL,
+            tick_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (index_code, interval_sec, bucket_start)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_projection_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            event_type TEXT,
+            index_code TEXT,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_samples_code_event_ts
+        ON market_index_tick_samples (index_code, event_ts)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_bars_code_interval_bucket
+        ON market_index_bars (index_code, interval_sec, bucket_start)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_projection_errors_created_at
+        ON market_index_projection_errors (created_at)
+        """
+    )
+
+
+def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_regime_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            target_code TEXT NOT NULL,
+            market TEXT,
+            primary_index_code TEXT NOT NULL,
+            secondary_index_code TEXT,
+            regime_status TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            primary_return_5m REAL,
+            primary_drawdown_15m REAL,
+            secondary_return_5m REAL,
+            secondary_drawdown_15m REAL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            snapshot_at TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_target_time
+        ON market_regime_snapshots (target_code, snapshot_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_status_time
+        ON market_regime_snapshots (regime_status, snapshot_at)
         """
     )
 

@@ -98,6 +98,9 @@ def load_strategy_candidate_context(
     readiness = candidate_context.get("readiness", {}) if candidate_context else {}
     market_context = candidate_context.get("market_context", {}) if candidate_context else {}
     source_context = candidate_context.get("source_context", {}) if candidate_context else {}
+    market_regime = _dict_or_empty(
+        market_context.get("market_regime") if market_context else None
+    )
 
     latest_tick_from_context = market_context.get("latest_tick") if market_context else None
     tick_source = (
@@ -121,10 +124,12 @@ def load_strategy_candidate_context(
         tick=tick_source,
         bars=bars,
         readiness=readiness,
+        market_regime=market_regime,
     )
     raw_context = {
         "candidate": _candidate_row_to_dict(candidate),
         "candidate_context": candidate_context,
+        "market_regime": market_regime,
         "latest_tick": tick_source,
         "latest_bars": {
             "60": latest_1m,
@@ -153,6 +158,16 @@ def load_strategy_candidate_context(
         market_readiness_status=_first_text(
             candidate["market_readiness_status"],
             readiness.get("quality_status"),
+        ),
+        market_regime_status=_first_text(market_regime.get("regime_status")),
+        market_regime_quality_status=_first_text(market_regime.get("quality_status")),
+        primary_index_code=_first_text(market_regime.get("primary_index_code")),
+        secondary_index_code=_first_text(market_regime.get("secondary_index_code")),
+        primary_index_return_5m=_first_number(market_regime.get("primary_return_5m")),
+        primary_index_drawdown_15m=_first_number(market_regime.get("primary_drawdown_15m")),
+        secondary_index_return_5m=_first_number(market_regime.get("secondary_return_5m")),
+        secondary_index_drawdown_15m=_first_number(
+            market_regime.get("secondary_drawdown_15m")
         ),
         tick_age_sec=tick_age,
         price=price,
@@ -813,6 +828,7 @@ def _context_reason_codes(
     tick: Mapping[str, Any],
     bars: Mapping[int, sqlite3.Row | None],
     readiness: Mapping[str, Any],
+    market_regime: Mapping[str, Any],
 ) -> list[str]:
     reasons = _json_load_array(candidate["reason_codes_json"])
     if not candidate_context:
@@ -831,6 +847,7 @@ def _context_reason_codes(
         reasons.append(StrategyReasonCode.BAR_5M_MISSING.value)
     if not candidate["theme_id"]:
         reasons.append(StrategyReasonCode.THEME_CONTEXT_MISSING.value)
+    reasons.extend(_market_regime_reason_codes(market_regime))
     return _merge_reasons(reasons)
 
 
@@ -849,6 +866,26 @@ def _map_market_reason(reason: object) -> list[str]:
     if value == "BAR_MISSING_300":
         return [StrategyReasonCode.BAR_5M_MISSING.value]
     return [value] if value else []
+
+
+def _market_regime_reason_codes(market_regime: Mapping[str, Any]) -> list[str]:
+    if not market_regime:
+        return []
+    status = str(market_regime.get("regime_status") or "").upper()
+    quality_status = str(market_regime.get("quality_status") or "").upper()
+    source_reasons = {str(reason).upper() for reason in market_regime.get("reason_codes", [])}
+    reasons: list[str] = []
+    if status == "RISK_ON":
+        reasons.append(StrategyReasonCode.MARKET_REGIME_ALIGNED.value)
+    elif status == "WEAK":
+        reasons.append(StrategyReasonCode.MARKET_REGIME_WEAK.value)
+    elif status == "RISK_OFF":
+        reasons.append(StrategyReasonCode.MARKET_REGIME_RISK_OFF.value)
+    elif status == "DATA_WAIT" or quality_status in {"MISSING", "DEGRADED"}:
+        reasons.append(StrategyReasonCode.MARKET_REGIME_DATA_WAIT.value)
+    if quality_status == "STALE" or "MARKET_INDEX_STALE" in source_reasons:
+        reasons.append(StrategyReasonCode.MARKET_INDEX_STALE.value)
+    return reasons
 
 
 def _context_precheck(
@@ -933,6 +970,8 @@ def _observation_from_setups(
     extra_reasons: Sequence[str],
 ) -> StrategyObservation:
     primary = _primary_setup(setup_observations, overall_status)
+    market_regime = _dict_or_empty(context.raw_context.get("market_regime"))
+    regime_multiplier = _market_regime_multiplier(market_regime)
     reason_codes = _merge_reasons(
         [
             *context.reason_codes,
@@ -961,12 +1000,18 @@ def _observation_from_setups(
             "observe_only": True,
             "context_hash": context.raw_context.get("context_hash"),
             "candidate_state": context.candidate_state,
+            "market_regime": market_regime,
+            "market_regime_multiplier": regime_multiplier,
             "primary_selection": primary.setup_type.value if primary is not None else None,
         },
         config_version=settings.strategy_config_version,
         observe_only=True,
-        score=primary.score if primary is not None else 0.0,
-        confidence=primary.confidence if primary is not None else 0.0,
+        score=_apply_multiplier(primary.score, regime_multiplier) if primary is not None else 0.0,
+        confidence=(
+            _apply_multiplier(primary.confidence, regime_multiplier)
+            if primary is not None
+            else 0.0
+        ),
     )
 
 
@@ -1001,6 +1046,28 @@ def _primary_setup(
         setup_observations,
         key=lambda setup: (_status_rank(setup.status), setup.score, setup.confidence),
     )
+
+
+def _market_regime_multiplier(market_regime: Mapping[str, Any]) -> float:
+    if not market_regime:
+        return 1.0
+    status = str(market_regime.get("regime_status") or "").upper()
+    quality_status = str(market_regime.get("quality_status") or "").upper()
+    if quality_status == "STALE":
+        return 0.80
+    if status == "RISK_ON":
+        return 1.05
+    if status == "WEAK":
+        return 0.85
+    if status == "RISK_OFF":
+        return 0.60
+    if status in {"DATA_WAIT", "STALE"}:
+        return 0.80
+    return 1.0
+
+
+def _apply_multiplier(value: float, multiplier: float) -> float:
+    return min(max(float(value) * float(multiplier), 0.0), 1.0)
 
 
 def _status_rank(status: StrategyObservationStatus) -> int:

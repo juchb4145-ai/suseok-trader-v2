@@ -13,6 +13,7 @@ from services.risk_gate import (
     check_chase_overheat,
     check_duplicate_cooldown,
     check_liquidity_spread,
+    check_market_regime,
     check_strategy_context,
     check_theme_context,
     evaluate_risk_for_candidate,
@@ -116,6 +117,57 @@ def test_strategy_context_statuses_are_observation_only() -> None:
     assert forming.status is RiskCheckStatus.CAUTION_OBSERVED
     assert no_setup.status is RiskCheckStatus.BLOCK_OBSERVED
     assert missing.status is RiskCheckStatus.DATA_WAIT
+
+
+def test_market_regime_risk_policy_is_observe_only_and_quality_aware() -> None:
+    settings = _settings()
+    weak = check_market_regime(
+        _context(
+            market_regime_status="WEAK",
+            market_regime_quality_status="FRESH",
+            primary_index_code="KOSPI",
+            raw_context={"market_regime": {"regime_status": "WEAK", "reason_codes": []}},
+        ),
+        settings,
+    )
+    risk_off = check_market_regime(
+        _context(
+            market_regime_status="RISK_OFF",
+            market_regime_quality_status="FRESH",
+            primary_index_code="KOSPI",
+            primary_index_return_5m=-0.5,
+            raw_context={
+                "market_regime": {
+                    "regime_status": "RISK_OFF",
+                    "quality_status": "FRESH",
+                    "reason_codes": ["PRIMARY_INDEX_RISK_OFF"],
+                }
+            },
+        ),
+        settings,
+    )
+    stale = check_market_regime(
+        _context(
+            market_regime_status="DATA_WAIT",
+            market_regime_quality_status="STALE",
+            primary_index_code="KOSPI",
+            raw_context={
+                "market_regime": {
+                    "regime_status": "DATA_WAIT",
+                    "quality_status": "STALE",
+                    "reason_codes": ["MARKET_INDEX_STALE"],
+                }
+            },
+        ),
+        settings,
+    )
+
+    assert weak.status is RiskCheckStatus.CAUTION_OBSERVED
+    assert RiskReasonCode.MARKET_REGIME_WEAK.value in weak.reason_codes
+    assert risk_off.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert RiskReasonCode.PRIMARY_INDEX_RISK_OFF.value in risk_off.reason_codes
+    assert stale.status is RiskCheckStatus.CAUTION_OBSERVED
+    assert RiskReasonCode.MARKET_INDEX_STALE.value in stale.reason_codes
 
 
 def test_theme_candidate_chase_and_liquidity_checks() -> None:

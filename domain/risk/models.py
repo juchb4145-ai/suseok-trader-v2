@@ -41,6 +41,14 @@ class RiskInputContext:
     theme_fresh_coverage_ratio: float | None = None
     theme_rising_ratio: float | None = None
     market_readiness_status: str | None = None
+    market_regime_status: str | None = None
+    market_regime_quality_status: str | None = None
+    primary_index_code: str | None = None
+    secondary_index_code: str | None = None
+    primary_index_return_5m: float | None = None
+    primary_index_drawdown_15m: float | None = None
+    secondary_index_return_5m: float | None = None
+    secondary_index_drawdown_15m: float | None = None
     tick_age_sec: float | None = None
     price: float | None = None
     change_rate: float | None = None
@@ -77,6 +85,10 @@ class RiskInputContext:
             "theme_state",
             "theme_role",
             "market_readiness_status",
+            "market_regime_status",
+            "market_regime_quality_status",
+            "primary_index_code",
+            "secondary_index_code",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -108,6 +120,15 @@ class RiskInputContext:
                     field_name,
                     parse_float(value, field_name, min_value=0.0),
                 )
+        for field_name in (
+            "primary_index_return_5m",
+            "primary_index_drawdown_15m",
+            "secondary_index_return_5m",
+            "secondary_index_drawdown_15m",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, parse_float(value, field_name))
         if self.change_rate is not None:
             object.__setattr__(self, "change_rate", parse_float(self.change_rate, "change_rate"))
         if self.spread_ticks is not None:
@@ -159,6 +180,14 @@ class RiskInputContext:
             "theme_fresh_coverage_ratio": self.theme_fresh_coverage_ratio,
             "theme_rising_ratio": self.theme_rising_ratio,
             "market_readiness_status": self.market_readiness_status,
+            "market_regime_status": self.market_regime_status,
+            "market_regime_quality_status": self.market_regime_quality_status,
+            "primary_index_code": self.primary_index_code,
+            "secondary_index_code": self.secondary_index_code,
+            "primary_index_return_5m": self.primary_index_return_5m,
+            "primary_index_drawdown_15m": self.primary_index_drawdown_15m,
+            "secondary_index_return_5m": self.secondary_index_return_5m,
+            "secondary_index_drawdown_15m": self.secondary_index_drawdown_15m,
             "tick_age_sec": self.tick_age_sec,
             "price": self.price,
             "change_rate": self.change_rate,

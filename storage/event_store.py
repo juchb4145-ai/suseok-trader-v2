@@ -36,6 +36,7 @@ SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
         "gateway_error",
         "gateway_log",
         "market_symbols",
+        "market_index_tick",
         "kiwoom_order_chejan",
         "kiwoom_balance_chejan",
         "kiwoom_special_chejan",

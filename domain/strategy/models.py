@@ -32,6 +32,14 @@ class StrategyCandidateContext:
     theme_state: str | None = None
     theme_role: str | None = None
     market_readiness_status: str | None = None
+    market_regime_status: str | None = None
+    market_regime_quality_status: str | None = None
+    primary_index_code: str | None = None
+    secondary_index_code: str | None = None
+    primary_index_return_5m: float | None = None
+    primary_index_drawdown_15m: float | None = None
+    secondary_index_return_5m: float | None = None
+    secondary_index_drawdown_15m: float | None = None
     tick_age_sec: float | None = None
     price: float | None = None
     change_rate: float | None = None
@@ -71,6 +79,10 @@ class StrategyCandidateContext:
             "theme_state",
             "theme_role",
             "market_readiness_status",
+            "market_regime_status",
+            "market_regime_quality_status",
+            "primary_index_code",
+            "secondary_index_code",
         ):
             value = getattr(self, field_name)
             if value is not None:
@@ -95,6 +107,15 @@ class StrategyCandidateContext:
                     field_name,
                     parse_float(value, field_name, min_value=min_value),
                 )
+        for field_name in (
+            "primary_index_return_5m",
+            "primary_index_drawdown_15m",
+            "secondary_index_return_5m",
+            "secondary_index_drawdown_15m",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, parse_float(value, field_name))
         for field_name in ("above_vwap", "bar_1m_ready", "bar_3m_ready", "bar_5m_ready"):
             object.__setattr__(self, field_name, parse_bool(getattr(self, field_name), field_name))
         for field_name in ("source_count", "active_source_count"):
@@ -120,6 +141,14 @@ class StrategyCandidateContext:
             "theme_state": self.theme_state,
             "theme_role": self.theme_role,
             "market_readiness_status": self.market_readiness_status,
+            "market_regime_status": self.market_regime_status,
+            "market_regime_quality_status": self.market_regime_quality_status,
+            "primary_index_code": self.primary_index_code,
+            "secondary_index_code": self.secondary_index_code,
+            "primary_index_return_5m": self.primary_index_return_5m,
+            "primary_index_drawdown_15m": self.primary_index_drawdown_15m,
+            "secondary_index_return_5m": self.secondary_index_return_5m,
+            "secondary_index_drawdown_15m": self.secondary_index_drawdown_15m,
             "tick_age_sec": self.tick_age_sec,
             "price": self.price,
             "change_rate": self.change_rate,

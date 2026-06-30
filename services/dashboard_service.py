@@ -92,6 +92,11 @@ from services.market_data_service import (
     list_latest_ticks,
     list_projection_errors,
 )
+from services.market_index_service import (
+    get_market_index_status,
+    list_latest_market_index_ticks,
+)
+from services.market_regime_service import get_market_regime_status
 from services.oms.dry_run_service import (
     get_dry_run_status,
     list_dry_run_errors,
@@ -131,6 +136,8 @@ DASHBOARD_SECTIONS = [
     "gateway",
     "condition_fusion",
     "market_data",
+    "market_indexes",
+    "market_regime",
     "realtime_subscription",
     "themes",
     "candidates",
@@ -200,6 +207,8 @@ def build_dashboard_snapshot(
     )
 
     market_data_status = get_market_data_status(connection, settings=settings)
+    market_index_status = get_market_index_status(connection, settings=settings)
+    market_regime_status = get_market_regime_status(connection, settings=settings)
     realtime_subscription = build_realtime_subscription_plan(
         connection,
         settings=settings,
@@ -241,6 +250,10 @@ def build_dashboard_snapshot(
     ).to_dict()
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
+    latest_market_index_ticks = list_latest_market_index_ticks(
+        connection,
+        limit=bounded_limit,
+    )
     latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
     candidates = list_candidates(connection, active_only=True, limit=bounded_limit)
     strategy_observations = list_latest_strategy_observations(connection, limit=bounded_limit)
@@ -374,6 +387,11 @@ def build_dashboard_snapshot(
             "status": market_data_status,
             "latest_ticks": latest_ticks,
         },
+        "market_indexes": {
+            "status": market_index_status,
+            "latest_ticks": latest_market_index_ticks,
+        },
+        "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "themes": {
             "status": theme_status,
@@ -1427,8 +1445,18 @@ def _candidate_rows(
     candidates: list[dict[str, Any]],
     include_detail: bool,
 ) -> list[dict[str, Any]]:
+    def with_market_regime(item: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = item.get("candidate_instance_id")
+        if not candidate_id:
+            return item
+        regime = _candidate_market_regime_summary(connection, str(candidate_id))
+        if regime:
+            item = dict(item)
+            item["market_regime"] = regime
+        return item
+
     if not include_detail:
-        return candidates
+        return [with_market_regime(dict(candidate)) for candidate in candidates]
     detailed = []
     for candidate in candidates:
         item = get_candidate(
@@ -1438,8 +1466,42 @@ def _candidate_rows(
             include_sources=True,
             include_transitions=True,
         )
-        detailed.append(item or candidate)
+        detailed.append(with_market_regime(item or candidate))
     return detailed
+
+
+def _candidate_market_regime_summary(
+    connection: sqlite3.Connection,
+    candidate_instance_id: str,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT market_context_json
+        FROM candidate_context_latest
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_instance_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        market_context = json.loads(row["market_context_json"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(market_context, dict):
+        return None
+    regime = market_context.get("market_regime")
+    if not isinstance(regime, dict):
+        return None
+    return {
+        "primary_index_code": regime.get("primary_index_code"),
+        "secondary_index_code": regime.get("secondary_index_code"),
+        "primary_return_5m": regime.get("primary_return_5m"),
+        "primary_drawdown_15m": regime.get("primary_drawdown_15m"),
+        "regime_status": regime.get("regime_status"),
+        "quality_status": regime.get("quality_status"),
+        "reason_codes": regime.get("reason_codes", []),
+    }
 
 
 def _strategy_rows(

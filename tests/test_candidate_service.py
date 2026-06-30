@@ -221,6 +221,12 @@ def test_candidate_context_refresh_transitions_through_data_wait_watching_and_re
     assert ready_candidate["state"] == CandidateState.CONTEXT_READY.value
     assert ready_candidate["context"]["readiness"]["has_1m_bar"] is True
     assert ready_candidate["context"]["readiness"]["vwap_ready"] is True
+    assert ready_candidate["context"]["market_context"]["market_regime"]["regime_status"] == (
+        "DATA_WAIT"
+    )
+    assert ready_candidate["context"]["market_context"]["market_regime"]["primary_index_code"] == (
+        "UNKNOWN"
+    )
     assert repeated.transition_count == 0
     assert [row["to_state"] for row in ready_candidate["transitions"]] == [
         CandidateState.DETECTED.value,

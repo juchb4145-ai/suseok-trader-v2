@@ -31,6 +31,7 @@ from services.condition_fusion import (
 )
 from services.config import Settings, candidate_timezone, load_settings
 from services.market_data_service import get_latest_tick, get_market_data_readiness
+from services.market_regime_service import get_market_regime_for_code
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -355,6 +356,11 @@ def refresh_candidate_context(
         all_sources = _list_latest_source_rows(connection, normalized_id, active_only=False)
         readiness = get_market_data_readiness(connection, row["code"], settings=resolved_settings)
         latest_tick = get_latest_tick(connection, row["code"])
+        market_regime = get_market_regime_for_code(
+            connection,
+            row["code"],
+            settings=resolved_settings,
+        )
         theme_context = _build_theme_context(connection, row, active_sources)
         source_context = _build_source_context(
             connection,
@@ -365,6 +371,7 @@ def refresh_candidate_context(
         market_context = {
             "latest_tick": latest_tick,
             "readiness": readiness,
+            "market_regime": market_regime,
         }
         context = _fsm_context(
             row,

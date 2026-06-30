@@ -62,6 +62,34 @@ def test_evaluate_candidate_strategy_saves_latest_and_setups(tmp_path) -> None:
     assert command_count == 0
 
 
+def test_market_regime_risk_on_lifts_strategy_score_and_evidence(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "strategy_market_regime.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+
+    base = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    _set_candidate_market_regime(
+        connection,
+        candidate_id,
+        {
+            "regime_status": "RISK_ON",
+            "quality_status": "FRESH",
+            "primary_index_code": "KOSPI",
+            "secondary_index_code": "KOSDAQ",
+            "primary_return_5m": 0.2,
+            "primary_drawdown_15m": 0.0,
+            "reason_codes": ["MARKET_REGIME_ALIGNED"],
+        },
+    )
+    risk_on = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    connection.close()
+
+    assert risk_on.score >= base.score
+    assert risk_on.confidence >= base.confidence
+    assert risk_on.evidence_json["market_regime"]["regime_status"] == "RISK_ON"
+    assert "MARKET_REGIME_ALIGNED" in risk_on.reason_codes
+
+
 def test_candidate_data_wait_and_stale_context_statuses(tmp_path) -> None:
     connection = initialize_database(tmp_path / "strategy_states.sqlite3")
     settings = _settings(strategy_engine_stale_tick_sec=5)
@@ -428,5 +456,27 @@ def _insert_condition_fusion(
             f"evt-{code}",
             now,
         ),
+    )
+    connection.commit()
+
+
+def _set_candidate_market_regime(connection, candidate_id: str, regime: dict[str, object]) -> None:
+    row = connection.execute(
+        """
+        SELECT market_context_json
+        FROM candidate_context_latest
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()
+    market_context = json.loads(row["market_context_json"])
+    market_context["market_regime"] = regime
+    connection.execute(
+        """
+        UPDATE candidate_context_latest
+        SET market_context_json = ?
+        WHERE candidate_instance_id = ?
+        """,
+        (json.dumps(market_context, ensure_ascii=False), candidate_id),
     )
     connection.commit()

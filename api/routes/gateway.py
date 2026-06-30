@@ -9,6 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
+from services.market_index_service import MARKET_INDEX_EVENT_TYPES, process_market_index_event
+from services.market_reference_service import (
+    MARKET_SYMBOL_EVENT_TYPES,
+    process_market_symbols_event,
+)
+from services.market_regime_service import rebuild_market_regime_snapshot
 from storage.event_store import (
     append_gateway_event,
     count_recent_gateway_events,
@@ -42,15 +48,24 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     projection_status: str | None = None
+    projection_statuses: dict[str, str] = {}
     try:
         result = append_gateway_event(connection, event)
-        if (
-            result.status == "ACCEPTED"
-            and not result.duplicate
-            and event.event_type.strip().lower() in MARKET_DATA_EVENT_TYPES
-        ):
-            projection_result = process_gateway_event(connection, event, settings=settings)
-            projection_status = projection_result.status
+        if result.status == "ACCEPTED" and not result.duplicate:
+            event_type = event.event_type.strip().lower()
+            if event_type in MARKET_DATA_EVENT_TYPES:
+                projection_result = process_gateway_event(connection, event, settings=settings)
+                projection_status = projection_result.status
+                projection_statuses["market_data"] = projection_result.status
+            if event_type in MARKET_SYMBOL_EVENT_TYPES:
+                reference_result = process_market_symbols_event(connection, event)
+                projection_statuses["market_reference"] = reference_result.status
+            if event_type in MARKET_INDEX_EVENT_TYPES:
+                index_result = process_market_index_event(connection, event, settings=settings)
+                projection_statuses["market_index"] = index_result.status
+                if index_result.status == "APPLIED" and settings.market_regime_enabled:
+                    regime = rebuild_market_regime_snapshot(connection, settings=settings)
+                    projection_statuses["market_regime"] = regime["regime_status"]
         if result.status == "ACCEPTED" and not result.duplicate:
             handle_live_sim_gateway_event(connection, event, settings=settings)
     finally:
@@ -75,6 +90,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     }
     if projection_status is not None:
         response["projection_status"] = projection_status
+    if projection_statuses:
+        response["projection_statuses"] = projection_statuses
     return response
 
 

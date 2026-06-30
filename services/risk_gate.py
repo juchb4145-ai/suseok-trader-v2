@@ -119,6 +119,9 @@ def load_risk_input_context(
     readiness = candidate_context.get("readiness", {}) if candidate_context else {}
     market_context = candidate_context.get("market_context", {}) if candidate_context else {}
     source_context = candidate_context.get("source_context", {}) if candidate_context else {}
+    market_regime = _dict_or_empty(
+        market_context.get("market_regime") if market_context else None
+    )
     latest_tick_from_context = market_context.get("latest_tick") if market_context else None
     tick_source = (
         _row_to_dict(tick) if tick is not None else _dict_or_empty(latest_tick_from_context)
@@ -146,6 +149,7 @@ def load_risk_input_context(
         "candidate": _candidate_row_to_dict(candidate) if candidate is not None else {},
         "candidate_missing": candidate is None,
         "candidate_context": candidate_context,
+        "market_regime": market_regime,
         "strategy_observation": _strategy_row_to_dict(strategy) if strategy is not None else {},
         "strategy_setup_observations": setups,
         "latest_tick": tick_source,
@@ -205,6 +209,16 @@ def load_risk_input_context(
             candidate["market_readiness_status"] if candidate is not None else None,
             readiness.get("quality_status"),
             tick_source.get("quality_status"),
+        ),
+        market_regime_status=_first_text(market_regime.get("regime_status")),
+        market_regime_quality_status=_first_text(market_regime.get("quality_status")),
+        primary_index_code=_first_text(market_regime.get("primary_index_code")),
+        secondary_index_code=_first_text(market_regime.get("secondary_index_code")),
+        primary_index_return_5m=_first_number(market_regime.get("primary_return_5m")),
+        primary_index_drawdown_15m=_first_number(market_regime.get("primary_drawdown_15m")),
+        secondary_index_return_5m=_first_number(market_regime.get("secondary_return_5m")),
+        secondary_index_drawdown_15m=_first_number(
+            market_regime.get("secondary_drawdown_15m")
         ),
         tick_age_sec=tick_age,
         price=price,
@@ -713,18 +727,87 @@ def check_duplicate_cooldown(
     )
 
 
-def check_market_context_placeholder(
+def check_market_regime(
     context: RiskInputContext,
     settings: Settings,
 ) -> RiskCheckObservation:
-    del context, settings
+    market_regime = _dict_or_empty(context.raw_context.get("market_regime"))
+    evidence = {
+        "market_regime": market_regime,
+        "regime_status": context.market_regime_status,
+        "quality_status": context.market_regime_quality_status,
+        "primary_index_code": context.primary_index_code,
+        "secondary_index_code": context.secondary_index_code,
+        "primary_index_return_5m": context.primary_index_return_5m,
+        "primary_index_drawdown_15m": context.primary_index_drawdown_15m,
+        "secondary_index_return_5m": context.secondary_index_return_5m,
+        "secondary_index_drawdown_15m": context.secondary_index_drawdown_15m,
+        "risk_off_return_5m": settings.market_regime_risk_off_return_5m,
+        "risk_off_drawdown_15m": settings.market_regime_risk_off_drawdown_15m,
+    }
+    if not market_regime:
+        if context.market_regime_status is None and context.market_regime_quality_status is None:
+            return _check(
+                RiskCategory.MARKET_CONTEXT,
+                RiskCheckStatus.NOT_EVALUATED,
+                RiskSeverity.INFO,
+                [RiskReasonCode.MARKET_REGIME_MISSING],
+                "Market regime context is absent in a legacy observe-only context.",
+                evidence,
+            )
+        return _check(
+            RiskCategory.MARKET_CONTEXT,
+            RiskCheckStatus.CAUTION_OBSERVED,
+            RiskSeverity.MEDIUM,
+            [RiskReasonCode.MARKET_REGIME_MISSING],
+            "Market regime context is missing; observe-only caution recorded.",
+            evidence,
+        )
+
+    source_reasons = {
+        str(reason).upper() for reason in market_regime.get("reason_codes", [])
+    }
+    regime_status = str(context.market_regime_status or "").upper()
+    quality_status = str(context.market_regime_quality_status or "").upper()
+    reasons: list[str] = []
+    status = RiskCheckStatus.PASS_OBSERVED
+    severity = RiskSeverity.INFO
+
+    if "MARKET_INDEX_STALE" in source_reasons or quality_status in {"STALE", "DEGRADED"}:
+        reasons.append(RiskReasonCode.MARKET_INDEX_STALE.value)
+        status = RiskCheckStatus.CAUTION_OBSERVED
+        severity = _higher_severity(severity, RiskSeverity.MEDIUM)
+    if regime_status in {"", "DATA_WAIT"} or quality_status in {"", "MISSING"}:
+        reasons.append(RiskReasonCode.MARKET_REGIME_MISSING.value)
+        status = RiskCheckStatus.CAUTION_OBSERVED
+        severity = _higher_severity(severity, RiskSeverity.MEDIUM)
+    elif regime_status == "RISK_OFF":
+        if "SECONDARY_INDEX_RISK_OFF" in source_reasons:
+            reasons.append(RiskReasonCode.SECONDARY_INDEX_RISK_OFF.value)
+        else:
+            reasons.append(RiskReasonCode.PRIMARY_INDEX_RISK_OFF.value)
+        if _intraday_shock_observed(context, settings):
+            reasons.append(RiskReasonCode.MARKET_INDEX_INTRADAY_SHOCK.value)
+        if quality_status == "FRESH":
+            status = RiskCheckStatus.BLOCK_OBSERVED
+            severity = RiskSeverity.HIGH
+        else:
+            status = RiskCheckStatus.CAUTION_OBSERVED
+            severity = _higher_severity(severity, RiskSeverity.MEDIUM)
+    elif regime_status == "WEAK":
+        reasons.append(RiskReasonCode.MARKET_REGIME_WEAK.value)
+        status = RiskCheckStatus.CAUTION_OBSERVED
+        severity = _higher_severity(severity, RiskSeverity.MEDIUM)
+
+    if not reasons:
+        reasons.append(RiskReasonCode.OBSERVE_ONLY.value)
     return _check(
         RiskCategory.MARKET_CONTEXT,
-        RiskCheckStatus.NOT_EVALUATED,
-        RiskSeverity.INFO,
-        [RiskReasonCode.MARKET_CONTEXT_UNAVAILABLE],
-        "Market regime context is not available in this observe-only phase.",
-        {"market_regime_service_available": False},
+        status,
+        severity,
+        reasons,
+        "Market regime risk observed.",
+        evidence,
     )
 
 
@@ -740,6 +823,16 @@ def check_portfolio_placeholder(
         [RiskReasonCode.PORTFOLIO_CONTEXT_UNAVAILABLE],
         "Portfolio context is not available before the later OMS phase.",
         {"portfolio_service_available": False},
+    )
+
+
+def _intraday_shock_observed(context: RiskInputContext, settings: Settings) -> bool:
+    return (
+        context.primary_index_return_5m is not None
+        and context.primary_index_return_5m <= settings.market_regime_risk_off_return_5m
+    ) or (
+        context.primary_index_drawdown_15m is not None
+        and context.primary_index_drawdown_15m <= settings.market_regime_risk_off_drawdown_15m
     )
 
 
@@ -1219,7 +1312,7 @@ def _evaluate_context(
 ) -> RiskObservation:
     checks = [
         check_data_quality(context, settings),
-        check_market_context_placeholder(context, settings),
+        check_market_regime(context, settings),
         check_theme_context(context, settings),
         check_candidate_context(context, settings),
         check_strategy_context(context, settings),
@@ -1259,6 +1352,7 @@ def _evaluate_context(
             "context_hash": context.raw_context.get("context_hash"),
             "strategy_status": context.strategy_status,
             "candidate_state": context.candidate_state,
+            "market_regime": context.raw_context.get("market_regime", {}),
             "config_version": settings.risk_gate_config_version,
         },
         config_version=settings.risk_gate_config_version,

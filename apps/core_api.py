@@ -19,6 +19,9 @@ from api.routes.gateway import router as gateway_router
 from api.routes.health import router as health_router
 from api.routes.live_sim import router as live_sim_router
 from api.routes.market_data import router as market_data_router
+from api.routes.market_index import router as market_index_router
+from api.routes.market_reference import router as market_reference_router
+from api.routes.market_regime import router as market_regime_router
 from api.routes.operator import router as operator_router
 from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
@@ -55,6 +58,9 @@ def create_app() -> FastAPI:
     application.include_router(ai_live_sim_review_router)
     application.include_router(gateway_router)
     application.include_router(market_data_router)
+    application.include_router(market_reference_router)
+    application.include_router(market_index_router)
+    application.include_router(market_regime_router)
     application.include_router(themes_router)
     application.include_router(theme_leadership_router)
     application.include_router(candidates_router)

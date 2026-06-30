@@ -107,6 +107,13 @@ class Settings:
     market_data_bar_intervals_sec: tuple[int, ...] = (60, 180, 300)
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
+    market_regime_enabled: bool = True
+    market_index_stale_sec: int = 30
+    market_regime_risk_on_return_5m: float = 0.15
+    market_regime_weak_drawdown_15m: float = -0.40
+    market_regime_risk_off_return_5m: float = -0.35
+    market_regime_risk_off_drawdown_15m: float = -0.80
+    market_regime_secondary_risk_off_return_5m: float = -0.60
     realtime_subscription_enabled: bool = True
     realtime_subscription_queue_commands: bool = False
     realtime_subscription_max_total: int = 50
@@ -373,6 +380,8 @@ class Settings:
             raise ValueError(
                 "MARKET_DATA_DEGRADED_TICK_STALE_SEC must be >= MARKET_DATA_TICK_STALE_SEC"
             )
+        if self.market_index_stale_sec < 1:
+            raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
         for field_name in (
             "theme_min_fresh_coverage_ratio",
             "theme_leading_rising_ratio",
@@ -1268,6 +1277,32 @@ def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
             env.get("MARKET_DATA_MAX_RECENT_TICKS", "1000"),
             "MARKET_DATA_MAX_RECENT_TICKS",
             min_value=1,
+        ),
+        market_regime_enabled=_parse_bool(env.get("MARKET_REGIME_ENABLED", "true")),
+        market_index_stale_sec=_parse_int(
+            env.get("MARKET_INDEX_STALE_SEC", "30"),
+            "MARKET_INDEX_STALE_SEC",
+            min_value=1,
+        ),
+        market_regime_risk_on_return_5m=_parse_float(
+            env.get("MARKET_REGIME_RISK_ON_RETURN_5M", "0.15"),
+            "MARKET_REGIME_RISK_ON_RETURN_5M",
+        ),
+        market_regime_weak_drawdown_15m=_parse_float(
+            env.get("MARKET_REGIME_WEAK_DRAWDOWN_15M", "-0.40"),
+            "MARKET_REGIME_WEAK_DRAWDOWN_15M",
+        ),
+        market_regime_risk_off_return_5m=_parse_float(
+            env.get("MARKET_REGIME_RISK_OFF_RETURN_5M", "-0.35"),
+            "MARKET_REGIME_RISK_OFF_RETURN_5M",
+        ),
+        market_regime_risk_off_drawdown_15m=_parse_float(
+            env.get("MARKET_REGIME_RISK_OFF_DRAWDOWN_15M", "-0.80"),
+            "MARKET_REGIME_RISK_OFF_DRAWDOWN_15M",
+        ),
+        market_regime_secondary_risk_off_return_5m=_parse_float(
+            env.get("MARKET_REGIME_SECONDARY_RISK_OFF_RETURN_5M", "-0.60"),
+            "MARKET_REGIME_SECONDARY_RISK_OFF_RETURN_5M",
         ),
         realtime_subscription_enabled=_parse_bool(
             env.get("REALTIME_SUBSCRIPTION_ENABLED", "true")
