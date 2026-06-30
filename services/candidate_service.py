@@ -356,7 +356,12 @@ def refresh_candidate_context(
         readiness = get_market_data_readiness(connection, row["code"], settings=resolved_settings)
         latest_tick = get_latest_tick(connection, row["code"])
         theme_context = _build_theme_context(connection, row, active_sources)
-        source_context = _build_source_context(active_sources, all_sources)
+        source_context = _build_source_context(
+            connection,
+            row,
+            active_sources=active_sources,
+            all_sources=all_sources,
+        )
         market_context = {
             "latest_tick": latest_tick,
             "readiness": readiness,
@@ -1289,14 +1294,71 @@ def _build_theme_context(
 
 
 def _build_source_context(
+    connection: sqlite3.Connection,
+    candidate: sqlite3.Row,
+    *,
     active_sources: list[sqlite3.Row],
     all_sources: list[sqlite3.Row],
 ) -> dict[str, Any]:
+    condition_fusion = _condition_fusion_context_for_candidate(connection, candidate)
     return {
         "active_source_count": len(active_sources),
         "source_count": len(all_sources),
         "active_sources": [_latest_source_row_to_dict(row) for row in active_sources],
         "sources": [_latest_source_row_to_dict(row) for row in all_sources],
+        "condition_fusion": condition_fusion,
+        "condition_fusion_priority_score": condition_fusion[
+            "condition_fusion_priority_score"
+        ],
+        "active_condition_roles": condition_fusion["active_condition_roles"],
+        "condition_risk_blocked": condition_fusion["condition_risk_blocked"],
+        "condition_fusion_reason_codes": condition_fusion[
+            "condition_fusion_reason_codes"
+        ],
+        "condition_names": condition_fusion["condition_names"],
+        "condition_latest_hit_at": condition_fusion["condition_latest_hit_at"],
+    }
+
+
+def _condition_fusion_context_for_candidate(
+    connection: sqlite3.Connection,
+    candidate: sqlite3.Row,
+) -> dict[str, Any]:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM candidate_condition_fusion
+        WHERE trade_date = ? AND code = ?
+        """,
+        (candidate["trade_date"], candidate["code"]),
+    ).fetchone()
+    if row is None:
+        return {
+            "present": False,
+            "source": "candidate_condition_fusion",
+            "condition_fusion_priority_score": 0.0,
+            "active_condition_roles": [],
+            "condition_risk_blocked": False,
+            "condition_fusion_reason_codes": [],
+            "condition_names": [],
+            "condition_latest_hit_at": None,
+            "condition_fusion_updated_at": None,
+            "condition_fusion_not_buy_signal": True,
+        }
+    active_roles = _read_json_array(row["active_roles_json"])
+    reason_codes = _read_json_array(row["reason_codes_json"])
+    condition_names = _read_json_array(row["condition_names_json"])
+    return {
+        "present": True,
+        "source": "candidate_condition_fusion",
+        "condition_fusion_priority_score": float(row["priority_score"] or 0.0),
+        "active_condition_roles": active_roles,
+        "condition_risk_blocked": bool(row["risk_blocked"]),
+        "condition_fusion_reason_codes": reason_codes,
+        "condition_names": condition_names,
+        "condition_latest_hit_at": row["latest_hit_at"],
+        "condition_fusion_updated_at": row["updated_at"],
+        "condition_fusion_not_buy_signal": True,
     }
 
 

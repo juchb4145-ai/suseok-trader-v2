@@ -62,11 +62,13 @@ class OrderPlanDraftBuilder:
         suggested_notional = float(quantity * limit_price.limit_price)
         created_at = utc_now()
         expires_at = created_at + timedelta(seconds=self.settings.entry_timing_plan_ttl_seconds)
+        priority_score, priority_reasons, condition_priority = _order_plan_priority(item)
         reasons = _dedupe(
             [
                 *evaluation.reason_codes,
                 *status_reasons,
                 *limit_price.reason_codes,
+                *priority_reasons,
                 "BUY_LIMIT_ONLY",
                 "PLAN_READY_NOT_ORDER_APPROVAL"
                 if status is OrderPlanStatus.PLAN_READY
@@ -89,7 +91,7 @@ class OrderPlanDraftBuilder:
             theme_state=item.theme_state,
             theme_rank=item.theme_rank,
             stock_role=item.stock_role,
-            priority_score=item.theme_priority_score,
+            priority_score=priority_score,
             current_price=float(item.current_price or 0),
             limit_price=float(limit_price.limit_price),
             limit_price_source=limit_price.source,
@@ -109,6 +111,7 @@ class OrderPlanDraftBuilder:
                 "safety_gate_required": True,
                 "observe_only": True,
                 "not_order_signal": True,
+                "condition_fusion_priority": condition_priority,
             },
             created_at=created_at,
         )
@@ -211,6 +214,44 @@ def calculate_limit_price(
         source=source,
         reason_codes=tuple(reasons),
     )
+
+
+def _order_plan_priority(
+    item: EntryTimingInput,
+) -> tuple[float | None, list[str], dict[str, object]]:
+    base_score = item.theme_priority_score
+    fusion_score = item.condition_fusion_priority_score
+    condition_priority = {
+        "condition_fusion_priority_score": fusion_score,
+        "active_condition_roles": list(item.active_condition_roles),
+        "condition_risk_blocked": item.condition_risk_blocked,
+        "condition_fusion_reason_codes": list(item.condition_fusion_reason_codes),
+        "condition_names": list(item.condition_names),
+        "condition_latest_hit_at": item.condition_latest_hit_at,
+        "not_order_signal": True,
+        "not_order_approval": True,
+        "used": False,
+        "contribution": 0.0,
+    }
+    if base_score is None:
+        return None, [], condition_priority
+    reasons: list[str] = []
+    score = float(base_score)
+    blocked = item.condition_risk_blocked or "DISCOVERY_OBSERVATION_ONLY" in {
+        str(reason).upper() for reason in item.condition_fusion_reason_codes
+    }
+    if fusion_score is not None and fusion_score > 0 and not blocked:
+        contribution = min(float(fusion_score) * 0.02, 25.0)
+        score += contribution
+        condition_priority["used"] = True
+        condition_priority["contribution"] = contribution
+        reasons.extend(
+            [
+                "CONDITION_FUSION_PRIORITY_USED",
+                "CONDITION_FUSION_NOT_ORDER_APPROVAL",
+            ]
+        )
+    return score, reasons, condition_priority
 
 
 def make_order_plan_idempotency_key(

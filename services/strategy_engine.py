@@ -1029,14 +1029,14 @@ def _candidate_rows_for_evaluation(
     clauses: list[str] = []
     params: list[Any] = []
     if candidate_instance_id is not None:
-        clauses.append("candidate_instance_id = ?")
+        clauses.append("c.candidate_instance_id = ?")
         params.append(require_non_empty_str(candidate_instance_id, "candidate_instance_id"))
     if trade_date is not None:
-        clauses.append("trade_date = ?")
+        clauses.append("c.trade_date = ?")
         params.append(require_non_empty_str(trade_date, "trade_date"))
     if candidate_state is not None:
         normalized_state = parse_str_enum(candidate_state, CandidateState, "candidate_state")
-        clauses.append("state = ?")
+        clauses.append("c.state = ?")
         params.append(normalized_state.value)
     elif candidate_instance_id is None:
         states = [CandidateState.CONTEXT_READY.value]
@@ -1046,19 +1046,32 @@ def _candidate_rows_for_evaluation(
         ):
             states.append(CandidateState.WATCHING.value)
         placeholders = ",".join("?" for _ in states)
-        clauses.append(f"state IN ({placeholders})")
+        clauses.append(f"c.state IN ({placeholders})")
         params.extend(states)
+    if candidate_instance_id is None:
+        clauses.append("c.state != ?")
+        params.append(CandidateState.BLOCKED_OBSERVATION.value)
+        clauses.append("(f.risk_blocked IS NULL OR f.risk_blocked = 0)")
     where_sql = "" if not clauses else "WHERE " + " AND ".join(clauses)
     params.append(limit)
     return connection.execute(
         f"""
-        SELECT *
-        FROM candidates
+        SELECT c.*
+        FROM candidates AS c
+        LEFT JOIN candidate_condition_fusion AS f
+            ON f.trade_date = c.trade_date AND f.code = c.code
         {where_sql}
         ORDER BY
-            CASE state WHEN 'CONTEXT_READY' THEN 0 WHEN 'WATCHING' THEN 1 ELSE 2 END,
-            last_seen_at ASC,
-            candidate_instance_id ASC
+            CASE c.state WHEN 'CONTEXT_READY' THEN 0 WHEN 'WATCHING' THEN 1 ELSE 2 END,
+            CASE WHEN COALESCE(f.risk_blocked, 0) = 0 THEN 0 ELSE 1 END,
+            COALESCE(f.priority_score, 0) DESC,
+            CASE
+                WHEN c.theme_state IN ('LEADING', 'SPREADING', 'LEADER_ONLY') THEN 0
+                WHEN c.theme_state IS NOT NULL THEN 1
+                ELSE 2
+            END,
+            c.last_seen_at DESC,
+            c.candidate_instance_id ASC
         LIMIT ?
         """,
         tuple(params),

@@ -194,6 +194,9 @@ def load_entry_timing_input(
 
     code = validate_stock_code(candidate["code"])
     context = _candidate_context(connection, normalized_id)
+    condition_fusion = _condition_fusion_from_context(context)
+    if not condition_fusion.get("present"):
+        condition_fusion = _condition_fusion_from_table(connection, candidate)
     source_meta = _candidate_theme_source_metadata(connection, normalized_id)
     tick = _latest_tick(connection, code)
     latest_1m = _latest_bar(connection, code, 60)
@@ -216,6 +219,7 @@ def load_entry_timing_input(
         [
             *_json_array(source_meta.get("reason_codes")),
             *_json_array(theme_meta.get("reason_codes")),
+            *_json_array(condition_fusion.get("condition_fusion_reason_codes")),
             *_json_array(candidate["reason_codes_json"]),
         ]
     )
@@ -272,6 +276,16 @@ def load_entry_timing_input(
         ),
         risk_observation_status=risk["overall_status"] if risk is not None else None,
         risk_reason_codes=risk_reasons,
+        condition_fusion_priority_score=_first_number(
+            condition_fusion.get("condition_fusion_priority_score")
+        ),
+        active_condition_roles=_json_array(condition_fusion.get("active_condition_roles")),
+        condition_risk_blocked=bool(condition_fusion.get("condition_risk_blocked")),
+        condition_fusion_reason_codes=_json_array(
+            condition_fusion.get("condition_fusion_reason_codes")
+        ),
+        condition_names=_string_array(condition_fusion.get("condition_names")),
+        condition_latest_hit_at=_first_text(condition_fusion.get("condition_latest_hit_at")),
         observed_at=_first_text(
             tick["event_ts"] if tick is not None else None,
             context.get("refreshed_at"),
@@ -285,6 +299,7 @@ def load_entry_timing_input(
         raw_context={
             "candidate": _row_to_dict(candidate),
             "candidate_context": context,
+            "condition_fusion": condition_fusion,
             "source_metadata": source_meta,
             "theme_metadata": theme_meta,
             "latest_tick": _row_to_dict(tick) if tick is not None else {},
@@ -636,29 +651,49 @@ def _candidate_rows_for_evaluation(
     clauses: list[str] = []
     params: list[Any] = []
     if candidate_instance_id is not None:
-        clauses.append("candidate_instance_id = ?")
+        clauses.append("c.candidate_instance_id = ?")
         params.append(require_non_empty_str(candidate_instance_id, "candidate_instance_id"))
     else:
-        clauses.append("trade_date = ?")
+        clauses.append("c.trade_date = ?")
         params.append(trade_date)
         placeholders = ",".join("?" for _ in _ENTRY_CANDIDATE_STATES)
-        clauses.append(f"state IN ({placeholders})")
+        clauses.append(f"c.state IN ({placeholders})")
         params.extend(_ENTRY_CANDIDATE_STATES)
+        clauses.append("c.state != ?")
+        params.append(CandidateState.BLOCKED_OBSERVATION.value)
+        clauses.append("(f.risk_blocked IS NULL OR f.risk_blocked = 0)")
+        clauses.append(
+            """
+            (
+                f.reason_codes_json IS NULL
+                OR f.reason_codes_json NOT LIKE '%DISCOVERY_OBSERVATION_ONLY%'
+            )
+            """
+        )
     params.append(limit)
     return connection.execute(
         f"""
-        SELECT *
-        FROM candidates
+        SELECT c.*
+        FROM candidates AS c
+        LEFT JOIN candidate_condition_fusion AS f
+            ON f.trade_date = c.trade_date AND f.code = c.code
         WHERE {" AND ".join(clauses)}
         ORDER BY
-            CASE state
+            CASE c.state
                 WHEN 'CONTEXT_READY' THEN 0
                 WHEN 'WATCHING' THEN 1
                 WHEN 'DATA_WAIT' THEN 2
                 ELSE 3
             END,
-            last_seen_at DESC,
-            candidate_instance_id ASC
+            CASE WHEN COALESCE(f.risk_blocked, 0) = 0 THEN 0 ELSE 1 END,
+            COALESCE(f.priority_score, 0) DESC,
+            CASE
+                WHEN c.theme_state IN ('LEADING', 'SPREADING', 'LEADER_ONLY') THEN 0
+                WHEN c.theme_state IS NOT NULL THEN 1
+                ELSE 2
+            END,
+            c.last_seen_at DESC,
+            c.candidate_instance_id ASC
         LIMIT ?
         """,
         tuple(params),
@@ -945,6 +980,76 @@ def _candidate_context(
     }
 
 
+def _condition_fusion_from_context(context: Mapping[str, Any]) -> dict[str, Any]:
+    source_context = _dict_or_empty(context.get("source_context"))
+    nested = _dict_or_empty(source_context.get("condition_fusion"))
+    return {
+        "present": bool(nested.get("present") or source_context.get("condition_fusion_present")),
+        "condition_fusion_priority_score": _first_number(
+            nested.get("condition_fusion_priority_score"),
+            source_context.get("condition_fusion_priority_score"),
+        )
+        or 0.0,
+        "active_condition_roles": _json_array(
+            nested.get("active_condition_roles")
+            if nested.get("active_condition_roles") is not None
+            else source_context.get("active_condition_roles")
+        ),
+        "condition_risk_blocked": bool(
+            nested.get("condition_risk_blocked")
+            if nested.get("condition_risk_blocked") is not None
+            else source_context.get("condition_risk_blocked")
+        ),
+        "condition_fusion_reason_codes": _json_array(
+            nested.get("condition_fusion_reason_codes")
+            if nested.get("condition_fusion_reason_codes") is not None
+            else source_context.get("condition_fusion_reason_codes")
+        ),
+        "condition_names": _string_array(
+            nested.get("condition_names")
+            if nested.get("condition_names") is not None
+            else source_context.get("condition_names")
+        ),
+        "condition_latest_hit_at": _first_text(
+            nested.get("condition_latest_hit_at"),
+            source_context.get("condition_latest_hit_at"),
+        ),
+    }
+
+
+def _condition_fusion_from_table(
+    connection: sqlite3.Connection,
+    candidate: sqlite3.Row,
+) -> dict[str, Any]:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM candidate_condition_fusion
+        WHERE trade_date = ? AND code = ?
+        """,
+        (candidate["trade_date"], candidate["code"]),
+    ).fetchone()
+    if row is None:
+        return {
+            "present": False,
+            "condition_fusion_priority_score": 0.0,
+            "active_condition_roles": [],
+            "condition_risk_blocked": False,
+            "condition_fusion_reason_codes": [],
+            "condition_names": [],
+            "condition_latest_hit_at": None,
+        }
+    return {
+        "present": True,
+        "condition_fusion_priority_score": _first_number(row["priority_score"]) or 0.0,
+        "active_condition_roles": _json_array(row["active_roles_json"]),
+        "condition_risk_blocked": bool(row["risk_blocked"]),
+        "condition_fusion_reason_codes": _json_array(row["reason_codes_json"]),
+        "condition_names": _string_array(row["condition_names_json"]),
+        "condition_latest_hit_at": _first_text(row["latest_hit_at"]),
+    }
+
+
 def _latest_tick(connection: sqlite3.Connection, code: str) -> sqlite3.Row | None:
     return connection.execute(
         "SELECT * FROM market_ticks_latest WHERE code = ?",
@@ -1202,6 +1307,21 @@ def _json_array(value: object) -> list[str]:
     if not isinstance(loaded, Sequence) or isinstance(loaded, str):
         return []
     return [str(item).upper() for item in loaded if str(item).strip()]
+
+
+def _string_array(value: object) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return [value.strip()] if value.strip() else []
+    else:
+        loaded = value
+    if not isinstance(loaded, Sequence) or isinstance(loaded, str):
+        return []
+    return [str(item).strip() for item in loaded if str(item).strip()]
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:

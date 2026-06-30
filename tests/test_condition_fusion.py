@@ -3,6 +3,7 @@ from __future__ import annotations
 from domain.broker.utils import utc_now
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.candidate_service import (
+    get_candidate,
     ingest_condition_sources,
     list_candidates,
     refresh_candidate_context,
@@ -110,6 +111,42 @@ def test_discovery_only_condition_fusion_blocks_strategy_promotion(tmp_path) -> 
     assert refreshed["primary_source_type"] == "CONDITION_DISCOVERY"
     assert "DISCOVERY_OBSERVATION_ONLY" in refreshed["reason_codes"]
     assert refreshed["state"] == "BLOCKED_OBSERVATION"
+
+
+def test_candidate_context_includes_condition_fusion_fields(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "condition-fusion-context.sqlite3")
+    settings = _settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(
+        connection,
+        _condition_event("005930", "Leader", "LEADER", priority=90),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        _condition_event("005930", "Pullback", "PULLBACK", priority=95),
+        settings,
+    )
+    _append_and_project(connection, make_price_tick_event(code="005930"), settings)
+
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate = list_candidates(connection, trade_date=trade_date, active_only=True)[0]
+    refresh_candidate_context(connection, candidate["candidate_instance_id"], settings=settings)
+    refreshed = get_candidate(
+        connection,
+        candidate["candidate_instance_id"],
+        include_context=True,
+    )
+    connection.close()
+
+    source_context = refreshed["context"]["source_context"]
+    assert source_context["condition_fusion"]["present"] is True
+    assert source_context["condition_fusion_priority_score"] > 0
+    assert source_context["active_condition_roles"] == ["LEADER", "PULLBACK"]
+    assert source_context["condition_risk_blocked"] is False
+    assert "CONDITION_FUSION_PRIORITY_READY" in source_context["condition_fusion_reason_codes"]
+    assert source_context["condition_names"] == ["Leader", "Pullback"]
+    assert source_context["condition_latest_hit_at"]
 
 
 def _condition_event(

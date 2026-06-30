@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from domain.broker.utils import datetime_to_wire, utc_now
@@ -29,7 +30,7 @@ from services.entry_timing.service import (
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 from storage.sqlite import initialize_database
-from tests.test_strategy_service import _insert_strategy_fixture
+from tests.test_strategy_service import _insert_condition_fusion, _insert_strategy_fixture
 
 
 def test_price_location_classifier_distinguishes_pullback_vwap_and_overextended() -> None:
@@ -61,6 +62,24 @@ def test_leader_leading_good_pullback_creates_plan_ready_draft() -> None:
     assert draft.observe_only is True
     assert draft.not_order_intent is True
     assert draft.limit_price > 0
+
+
+def test_order_plan_priority_uses_condition_fusion_as_small_observe_weight() -> None:
+    settings = _settings()
+    item = _entry_input(
+        condition_fusion_priority_score=1000.0,
+        active_condition_roles=("LEADER", "PULLBACK"),
+        condition_fusion_reason_codes=("CONDITION_FUSION_PRIORITY_READY",),
+    )
+    evaluation = EntryTimingEngine(settings=settings).evaluate(item)
+    draft = OrderPlanDraftBuilder(settings=settings).build(item, evaluation)
+
+    assert draft is not None
+    assert draft.status is OrderPlanStatus.PLAN_READY
+    assert draft.priority_score == 100.0
+    assert "CONDITION_FUSION_PRIORITY_USED" in draft.reason_codes
+    assert "CONDITION_FUSION_NOT_ORDER_APPROVAL" in draft.reason_codes
+    assert draft.evidence_json["condition_fusion_priority"]["not_order_approval"] is True
 
 
 def test_co_leader_spreading_vwap_reclaim_creates_ready_draft() -> None:
@@ -166,6 +185,57 @@ def test_stale_vi_upper_limit_and_risk_block_prevent_plan_ready() -> None:
     assert builder.build(risk_block_item, risk_block) is None
 
 
+def test_condition_risk_and_discovery_only_prevent_plan_ready() -> None:
+    settings = _settings()
+    engine = EntryTimingEngine(settings=settings)
+    builder = OrderPlanDraftBuilder(settings=settings)
+
+    risk_item = _entry_input(
+        condition_risk_blocked=True,
+        condition_fusion_reason_codes=("CONDITION_RISK_BLOCKED",),
+    )
+    discovery_item = _entry_input(
+        condition_fusion_priority_score=25.0,
+        active_condition_roles=("DISCOVERY",),
+        condition_fusion_reason_codes=("DISCOVERY_OBSERVATION_ONLY",),
+        theme_reason_codes=("DISCOVERY_OBSERVATION_ONLY",),
+    )
+    blocked_candidate = _entry_input(candidate_state="BLOCKED_OBSERVATION")
+
+    risk_eval = engine.evaluate(risk_item)
+    discovery_eval = engine.evaluate(discovery_item)
+    blocked_eval = engine.evaluate(blocked_candidate)
+
+    assert risk_eval.status is OrderPlanStatus.BLOCKED_RISK
+    assert discovery_eval.status is OrderPlanStatus.NO_PLAN
+    assert blocked_eval.status is OrderPlanStatus.NO_PLAN
+    assert builder.build(risk_item, risk_eval) is None
+    assert builder.build(discovery_item, discovery_eval) is None
+    assert builder.build(blocked_candidate, blocked_eval) is None
+
+
+def test_condition_fusion_priority_alone_does_not_make_plan_ready() -> None:
+    settings = _settings()
+    item = _entry_input(
+        theme_id=None,
+        theme_name=None,
+        theme_state=None,
+        stock_role=None,
+        theme_priority_score=None,
+        condition_fusion_priority_score=999.0,
+        active_condition_roles=("LEADER", "PULLBACK"),
+        condition_fusion_reason_codes=("CONDITION_FUSION_PRIORITY_READY",),
+    )
+    evaluation = EntryTimingEngine(settings=settings).evaluate(item)
+    draft = OrderPlanDraftBuilder(settings=settings).build(item, evaluation)
+
+    assert evaluation.status is not OrderPlanStatus.PLAN_READY
+    assert draft is not None
+    assert draft.status is OrderPlanStatus.DATA_WAIT
+    assert draft.priority_score is None
+    assert "CONDITION_FUSION_PRIORITY_USED" not in draft.reason_codes
+
+
 def test_strategy_missing_and_low_liquidity_wait_retry_not_hard_fail() -> None:
     settings = _settings(entry_timing_min_turnover_krw=500_000_000)
     item = _entry_input(strategy_observation_status=None, turnover_krw=10_000_000)
@@ -229,6 +299,63 @@ def test_service_persists_latest_draft_without_order_side_effects(tmp_path) -> N
     assert live_sim_count == 0
     assert risk.overall_status is RiskObservationStatus.OBSERVE_PASS
     assert strategy.overall_status is StrategyObservationStatus.MATCHED_OBSERVATION
+
+
+def test_service_orders_candidates_by_condition_fusion_priority(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "entry_timing_condition_priority.sqlite3")
+    settings = _settings()
+    low_id = _insert_strategy_fixture(connection, candidate_id="CAND-2026-06-27-005930-1")
+    high_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-000660-1",
+        code="000660",
+        name="SK하이닉스",
+    )
+    _insert_condition_fusion(connection, code="005930", name="삼성전자", priority_score=20)
+    _insert_condition_fusion(
+        connection,
+        code="000660",
+        name="SK하이닉스",
+        priority_score=995,
+        roles=("LEADER", "BREAKOUT"),
+    )
+    _insert_theme_source_metadata(
+        connection,
+        candidate_id=low_id,
+        code="005930",
+        name="삼성전자",
+        priority_score=80.0,
+    )
+    _insert_theme_source_metadata(
+        connection,
+        candidate_id=high_id,
+        code="000660",
+        name="SK하이닉스",
+        priority_score=80.0,
+    )
+    for candidate_id in (low_id, high_id):
+        strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+        save_strategy_observation(connection, strategy)
+        risk = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+        save_risk_observation(connection, risk)
+
+    result = evaluate_entry_timing(
+        connection,
+        trade_date="2026-06-27",
+        limit=1,
+        settings=settings,
+    )
+    gateway_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert result.candidate_count == 1
+    assert result.evaluations[0].candidate_instance_id == high_id
+    assert result.evaluations[0].candidate_instance_id != low_id
+    assert result.order_plan_drafts[0].priority_score > 80.0
+    assert "CONDITION_FUSION_PRIORITY_USED" in result.order_plan_drafts[0].reason_codes
+    assert gateway_count == 0
 
 
 def test_service_upserts_duplicate_draft_by_stable_key(tmp_path) -> None:
@@ -405,5 +532,54 @@ def _raise_fixture_turnover(connection) -> None:
             execution_strength = 130.0
         WHERE code = '005930'
         """
+    )
+    connection.commit()
+
+
+def _insert_theme_source_metadata(
+    connection,
+    *,
+    candidate_id: str,
+    code: str,
+    name: str,
+    priority_score: float,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    payload = {
+        "theme_id": f"theme-{code}",
+        "theme_name": "반도체",
+        "theme_state": "LEADING",
+        "stock_role": "LEADER",
+        "priority_score": priority_score,
+        "reason_codes": ["WATCHSET_SELECTED"],
+    }
+    connection.execute(
+        """
+        INSERT INTO candidate_sources_latest (
+            trade_date,
+            code,
+            source_type,
+            source_id,
+            candidate_instance_id,
+            name,
+            active,
+            first_seen_at,
+            last_seen_at,
+            last_event_id,
+            payload_json
+        )
+        VALUES (?, ?, 'THEME_LEADER', ?, ?, ?, 1, ?, ?, ?, ?)
+        """,
+        (
+            "2026-06-27",
+            code,
+            f"theme-{code}",
+            candidate_id,
+            name,
+            now,
+            now,
+            f"source-{code}",
+            json.dumps(payload),
+        ),
     )
     connection.commit()

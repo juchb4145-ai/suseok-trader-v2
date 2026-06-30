@@ -131,22 +131,30 @@ const renderRealtimeSubscription = (snapshot) => {
 const renderConditionFusion = (snapshot) => {
   const fusion = snapshot.condition_fusion || {};
   const status = fusion.status || {};
+  const summary = fusion.summary || {};
   const profiles = fusion.profiles || [];
   const codes = fusion.codes || [];
+  const topPriority = fusion.top_priority_codes || codes.filter((row) => !row.risk_blocked).slice(0, 8);
+  const riskBlocked = fusion.risk_blocked_codes || codes.filter((row) => row.risk_blocked);
+  const discoveryOnly = fusion.discovery_only_codes || codes.filter((row) => (row.active_roles || []).join(",") === "DISCOVERY");
   document.getElementById("condition-fusion-badges").innerHTML = [
     badge("OBSERVE", "sensor evidence"),
-    badge("OBSERVE", "not buy signal"),
+    badge("OBSERVE", summary.notice || "not buy signal"),
     badge(status.risk_blocked_count ? "BLOCKED" : "OBSERVE", `risk ${status.risk_blocked_count || 0}`),
   ].join("");
   document.getElementById("condition-fusion-status").innerHTML = [
     metric("Profiles", status.profile_count || profiles.length),
     metric("Fused codes", status.fused_code_count || codes.length),
+    metric("Top priority", status.top_priority_count || topPriority.length),
     metric("Subscribed", status.subscribed_count || 0),
     metric("Risk blocked", status.risk_blocked_count || 0),
+    metric("Discovery only", status.discovery_only_count || discoveryOnly.length),
   ].join("");
   document.getElementById("condition-fusion-tables").innerHTML = [
+    conditionCodeTable(summary.top_priority_label || "Top priority codes", topPriority),
+    conditionCodeTable(summary.risk_blocked_label || "Risk blocked codes", riskBlocked),
+    conditionCodeTable(summary.discovery_only_label || "Discovery-only codes", discoveryOnly),
     conditionProfileTable(profiles),
-    conditionCodeTable(codes),
   ].join("");
 };
 
@@ -404,9 +412,9 @@ const conditionProfileTable = (rows) => `
   </article>
 `;
 
-const conditionCodeTable = (rows) => `
+const conditionCodeTable = (title, rows) => `
   <article class="log-card">
-    <h3>Fused codes <span class="muted">(${rows.length})</span></h3>
+    <h3>${escapeHtml(title)} <span class="muted">(${rows.length})</span></h3>
     ${
       rows.length
         ? table(

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from apps.core_api import app
+from domain.broker.utils import utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
-from domain.broker.utils import utc_now
 from services.config import candidate_timezone
 from storage.sqlite import open_connection
 from tools.run_market_open_observe_cycle import write_observe_cycle_report
@@ -41,7 +41,13 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
         )
         condition = client.post(
             "/api/gateway/events",
-            json=make_condition_event(code="005930", name="삼성전자", price=97_000).to_dict(),
+            json=make_condition_event(
+                code="005930",
+                name="삼성전자",
+                condition_name="LeaderCondition",
+                price=97_000,
+                metadata=_condition_profile_metadata("LEADER", "LeaderCondition", 90),
+            ).to_dict(),
         )
         latest_ticks = client.get("/api/market-data/ticks/latest")
         theme_import = client.post("/api/themes/import", json=_theme_payload())
@@ -61,6 +67,9 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     assert stages["RealtimeSubscription"]["counts"]["queue_commands"] is False
     assert stages["RealtimeSubscription"]["counts"]["planned_register_count"] >= 0
     assert stages["Candidate"]["counts"]["active_candidate_count"] >= 1
+    assert stages["ConditionFusion"]["counts"]["profile_count"] >= 1
+    assert stages["ConditionFusion"]["counts"]["fused_code_count"] >= 1
+    assert stages["ConditionFusion"]["counts"]["promoted_condition_source_count"] >= 1
     assert stages["Strategy"]["counts"]["evaluated_count"] >= 0
     assert stages["Risk"]["counts"]["evaluated_count"] >= 0
     assert stages["EntryTiming"]["counts"]["evaluated_count"] >= 1
@@ -155,6 +164,28 @@ def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> 
     assert "CommandSafety" in markdown
     assert "send_order_delta: `0`" in markdown
     assert "queue_commands: `False`" in markdown
+
+
+def _condition_profile_metadata(role: str, condition_name: str, priority: int) -> dict[str, object]:
+    return {
+        "sensor_evidence": True,
+        "not_buy_signal": True,
+        "condition_profile_id": f"profile-{condition_name}",
+        "condition_role": role,
+        "condition_profile": {
+            "profile_id": f"profile-{condition_name}",
+            "condition_name": condition_name,
+            "role": role,
+            "priority": priority,
+            "ttl_sec": 999_999_999,
+            "enabled": True,
+            "price_subscribe_policy": "immediate",
+        },
+        "condition_admission": {
+            "subscribed": True,
+            "reason_codes": ["TEST"],
+        },
+    }
 
 
 def _theme_payload() -> dict[str, object]:

@@ -14,6 +14,7 @@ from services.candidate_service import (
     get_candidate_status,
     rebuild_candidates_from_observations,
 )
+from services.condition_fusion import get_condition_profile_metrics, list_condition_fusion
 from services.config import Settings, load_settings
 from services.entry_timing.service import evaluate_entry_timing, get_entry_timing_status
 from services.live_sim.live_sim_service import get_live_sim_status
@@ -179,6 +180,34 @@ def run_market_open_observe_cycle_once(
         error = _stage_error("Candidate", exc)
         errors.append(error)
         stages["Candidate"] = _blocked_stage("Candidate", "CANDIDATE_REBUILD_NOT_RUN", str(exc))
+
+    try:
+        condition_rows = list_condition_fusion(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+            limit=100,
+        )
+        profile_metrics = get_condition_profile_metrics(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+            limit=100,
+        )
+        promoted_source_count = _condition_fusion_source_count(connection, trade_date=trade_date)
+        stages["ConditionFusion"] = _condition_fusion_stage(
+            rows=condition_rows,
+            profile_metrics=profile_metrics,
+            promoted_source_count=promoted_source_count,
+        )
+    except Exception as exc:
+        error = _stage_error("ConditionFusion", exc)
+        errors.append(error)
+        stages["ConditionFusion"] = _blocked_stage(
+            "ConditionFusion",
+            "CONDITION_FUSION_NOT_BUILT",
+            str(exc),
+        )
 
     try:
         strategy_result = evaluate_candidates(
@@ -453,6 +482,66 @@ def _candidate_stage(
     )
 
 
+def _condition_fusion_stage(
+    *,
+    rows: Sequence[Mapping[str, Any]],
+    profile_metrics: Sequence[Mapping[str, Any]],
+    promoted_source_count: int,
+) -> ObserveCycleStageResult:
+    fused_code_count = len(rows)
+    risk_blocked_count = sum(1 for row in rows if row.get("risk_blocked"))
+    subscribed_count = sum(1 for row in rows if row.get("subscribed"))
+    discovery_only_rows = [
+        row
+        for row in rows
+        if set(str(role).upper() for role in row.get("active_roles", ())) == {"DISCOVERY"}
+    ]
+    top_priority_codes = [
+        _condition_code_summary(row)
+        for row in rows
+        if not row.get("risk_blocked")
+    ][:5]
+    status = STAGE_PASS
+    reason_codes: list[str] = []
+    if profile_metrics and fused_code_count <= 0:
+        status = STAGE_WARN
+        reason_codes.append("CONDITION_FUSION_EMPTY")
+    elif not profile_metrics and fused_code_count <= 0:
+        status = STAGE_WARN
+        reason_codes.append("CONDITION_PROFILE_EMPTY")
+    if risk_blocked_count:
+        reason_codes.append("CONDITION_RISK_BLOCK_PRESENT")
+    return ObserveCycleStageResult(
+        stage="ConditionFusion",
+        status=status,
+        reason_codes=tuple(_dedupe(reason_codes)),
+        summary=(
+            f"profiles={len(profile_metrics)}, fused={fused_code_count}, "
+            f"risk={risk_blocked_count}, promoted={promoted_source_count}"
+        ),
+        counts={
+            "profile_count": len(profile_metrics),
+            "fused_code_count": fused_code_count,
+            "risk_blocked_count": risk_blocked_count,
+            "subscribed_count": subscribed_count,
+            "top_priority_codes": top_priority_codes,
+            "discovery_only_count": len(discovery_only_rows),
+            "promoted_condition_source_count": promoted_source_count,
+        },
+        details={
+            "top_priority_codes": top_priority_codes,
+            "risk_blocked_codes": [
+                _condition_code_summary(row) for row in rows if row.get("risk_blocked")
+            ][:10],
+            "discovery_only_codes": [
+                _condition_code_summary(row) for row in discovery_only_rows
+            ][:10],
+            "not_buy_signal": True,
+            "read_only": True,
+        },
+    )
+
+
 def _realtime_subscription_stage(plan: Mapping[str, Any]) -> ObserveCycleStageResult:
     counts = _dict_or_empty(plan.get("counts"))
     planned_register_count = int(counts.get("planned_register_count") or 0)
@@ -687,6 +776,40 @@ def _send_order_count(connection: sqlite3.Connection) -> int:
         """
     ).fetchone()
     return int(row["count"] if row else 0)
+
+
+def _condition_fusion_source_count(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None,
+) -> int:
+    clauses = ["source_id LIKE 'condition_fusion:%'", "active = 1"]
+    params: list[Any] = []
+    if trade_date is not None:
+        clauses.append("trade_date = ?")
+        params.append(trade_date)
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM candidate_sources_latest
+        WHERE {" AND ".join(clauses)}
+        """,
+        tuple(params),
+    ).fetchone()
+    return int(row["count"] if row else 0)
+
+
+def _condition_code_summary(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "code": row.get("code"),
+        "name": row.get("name"),
+        "priority_score": row.get("priority_score"),
+        "active_roles": list(row.get("active_roles") or []),
+        "condition_names": list(row.get("condition_names") or []),
+        "latest_hit_at": row.get("latest_hit_at"),
+        "risk_blocked": bool(row.get("risk_blocked")),
+        "reason_codes": list(row.get("reason_codes") or []),
+    }
 
 
 def _command_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:

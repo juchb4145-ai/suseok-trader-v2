@@ -4,6 +4,8 @@ param(
     [string]$Token = $(if ($env:TRADING_CORE_TOKEN) { $env:TRADING_CORE_TOKEN } else { $env:GATEWAY_CORE_TOKEN }),
     [string]$TradeDate = "",
     [string]$ConditionName = $env:KIWOOM_CONDITION_NAME,
+    [string]$ConditionProfilesFile = "",
+    [string]$ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES,
     [string]$RealtimeCodes = $env:KIWOOM_REALTIME_CODES,
     [string]$RealtimeExchange = $(if ($env:KIWOOM_REALTIME_EXCHANGE) { $env:KIWOOM_REALTIME_EXCHANGE } else { "krx" }),
     [switch]$RunObserveCycle,
@@ -37,10 +39,51 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $env:GATEWAY_CORE_TOKEN = $Token
 }
 
+$ResolvedConditionProfiles = ""
+$ConditionProfileSource = ""
+$ConditionProfileCount = 0
+if (-not [string]::IsNullOrWhiteSpace($ConditionProfilesFile)) {
+    $ProfilePath = Resolve-Path $ConditionProfilesFile
+    $ResolvedConditionProfiles = Get-Content -LiteralPath $ProfilePath -Raw
+    $ConditionProfileSource = "file:$ProfilePath"
+} elseif (-not [string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
+    $ResolvedConditionProfiles = $ConditionProfilesJson
+    $ConditionProfileSource = "json/env"
+}
+if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfiles)) {
+    $env:KIWOOM_CONDITION_PROFILES = $ResolvedConditionProfiles
+    try {
+        $ParsedProfiles = $ResolvedConditionProfiles | ConvertFrom-Json
+        if ($ParsedProfiles.profiles) {
+            $ConditionProfileCount = @($ParsedProfiles.profiles).Count
+        } elseif ($ParsedProfiles -is [array]) {
+            $ConditionProfileCount = @($ParsedProfiles).Count
+        } else {
+            $ConditionProfileCount = 1
+        }
+    } catch {
+        $ConditionProfileCount = -1
+    }
+}
+$ProfileMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfiles)) {
+    "multi-profile"
+} elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
+    "legacy-condition-name"
+} else {
+    "no-condition"
+}
+
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
 Write-Host "Core URL: $CoreUrl"
 Write-Host "Dashboard URL: $CoreUrl/dashboard"
+Write-Host "Condition profile mode: $ProfileMode"
+if ($ProfileMode -eq "multi-profile") {
+    Write-Host "Condition profile source: $ConditionProfileSource"
+    Write-Host "Condition profile count: $ConditionProfileCount"
+} elseif ($ProfileMode -eq "legacy-condition-name") {
+    Write-Host "Legacy condition name: $ConditionName"
+}
 Write-Host ""
 Write-Host "64-bit Core command:"
 Write-Host "  $Python64 -m uvicorn apps.core_api:app --host 127.0.0.1 --port $CorePort --reload"
@@ -56,7 +99,9 @@ $GatewayCommand = @(
     "--realtime-exchange $RealtimeExchange",
     "--realtime-recover-interval-sec 300"
 )
-if (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
+if ($ProfileMode -eq "multi-profile") {
+    $GatewayCommand += "--condition-profiles `$env:KIWOOM_CONDITION_PROFILES"
+} elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
     $GatewayCommand += "--condition-name `"$ConditionName`""
     $GatewayCommand += "--condition-realtime"
 }

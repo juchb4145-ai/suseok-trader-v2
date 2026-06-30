@@ -41,6 +41,7 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         "Gateway",
         "MarketData",
         "RealtimeSubscription",
+        "ConditionFusion",
         "Theme",
         "Candidate",
         "Strategy",
@@ -60,6 +61,7 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         "gateway",
         "market_data",
         "realtime_subscription",
+        "condition_fusion",
         "themes",
         "candidates",
         "strategy",
@@ -84,6 +86,10 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert snapshot["pipeline_summary"]["candidates"]["candidate_count"] >= 1
     assert snapshot["pipeline_summary"]["strategy"]["latest_observation_count"] >= 1
     assert snapshot["pipeline_summary"]["risk"]["latest_observation_count"] >= 1
+    assert snapshot["pipeline_summary"]["condition_fusion"]["fused_code_count"] >= 1
+    assert snapshot["condition_fusion"]["status"]["fused_code_count"] >= 1
+    assert snapshot["condition_fusion"]["top_priority_codes"]
+    assert "조건식 hit는 매수 신호가 아님" in snapshot["condition_fusion"]["summary"]["notice"]
     assert snapshot["themes"]["latest_snapshots"]
     assert snapshot["candidates"]["candidates"]
     assert "sources" in snapshot["candidates"]["candidates"][0]
@@ -188,7 +194,14 @@ def _build_observe_pipeline_fixture(connection, settings: Settings) -> None:
         trade_value=70_000_000,
         execution_strength=118.0,
     )
-    condition = make_condition_event(code="005930", name="삼성전자", action="ENTER", price=70000)
+    condition = make_condition_event(
+        code="005930",
+        name="삼성전자",
+        action="ENTER",
+        condition_name="LeaderCondition",
+        price=70000,
+        metadata=_condition_profile_metadata("LEADER", "LeaderCondition", 90),
+    )
     append_gateway_event(connection, heartbeat)
     _append_and_project(connection, tick, settings)
     _append_and_project(connection, condition, settings)
@@ -326,6 +339,28 @@ def _append_and_project(connection, event, settings: Settings) -> None:
     assert append_result.status == "ACCEPTED"
     result = process_gateway_event(connection, event, settings=settings)
     assert result.status == "APPLIED"
+
+
+def _condition_profile_metadata(role: str, condition_name: str, priority: int) -> dict[str, object]:
+    return {
+        "sensor_evidence": True,
+        "not_buy_signal": True,
+        "condition_profile_id": f"profile-{condition_name}",
+        "condition_role": role,
+        "condition_profile": {
+            "profile_id": f"profile-{condition_name}",
+            "condition_name": condition_name,
+            "role": role,
+            "priority": priority,
+            "ttl_sec": 999_999_999,
+            "enabled": True,
+            "price_subscribe_policy": "immediate",
+        },
+        "condition_admission": {
+            "subscribed": True,
+            "reason_codes": ["TEST"],
+        },
+    }
 
 
 def _fresh_settings() -> Settings:

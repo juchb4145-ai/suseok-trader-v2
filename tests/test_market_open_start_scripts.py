@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
@@ -17,4 +16,9 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "Dashboard URL:" in script
     assert "/api/gateway/events/recent?limit=20" in script
     assert "--realtime-exchange $RealtimeExchange" in script
+    assert "ConditionProfilesFile" in script
+    assert "ConditionProfilesJson" in script
+    assert "$env:KIWOOM_CONDITION_PROFILES = $ResolvedConditionProfiles" in script
+    assert "--condition-profiles `$env:KIWOOM_CONDITION_PROFILES" in script
+    assert "Condition profile mode: $ProfileMode" in script
     assert 'queue_commands = "true"' not in script.lower()

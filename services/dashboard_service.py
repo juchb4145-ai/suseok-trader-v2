@@ -162,6 +162,7 @@ STAGE_ENDPOINTS = {
     "Gateway": "/api/gateway/status",
     "MarketData": "/api/market-data/status",
     "RealtimeSubscription": "/api/operator/realtime-subscriptions/plan",
+    "ConditionFusion": "/api/dashboard/snapshot?sections=condition_fusion",
     "Theme": "/api/themes/status",
     "Candidate": "/api/candidates/status",
     "Strategy": "/api/strategy/status",
@@ -215,6 +216,11 @@ def build_dashboard_snapshot(
         connection,
         settings=settings,
         limit=bounded_limit,
+    )
+    condition_fusion_section = _condition_fusion_section(
+        condition_fusion_rows,
+        condition_profile_metrics,
+        fallback_profiles=gateway_status.get("condition_profile_metrics", []),
     )
     theme_status = get_theme_status(connection, settings=settings)
     candidate_status = get_candidate_status(connection, settings=settings)
@@ -352,6 +358,7 @@ def build_dashboard_snapshot(
         ai_advisory_status=ai_advisory_status,
         no_buy_sentinel=no_buy_sentinel,
         latest_observe_cycle=latest_observe_cycle,
+        condition_fusion_status=condition_fusion_section["status"],
         settings=settings,
     )
 
@@ -362,23 +369,7 @@ def build_dashboard_snapshot(
         "safety": build_safety_section(settings),
         "system": _system_section(settings, generated_at),
         "gateway": gateway_status,
-        "condition_fusion": {
-            "status": {
-                "profile_count": len(condition_profile_metrics),
-                "fused_code_count": len(condition_fusion_rows),
-                "risk_blocked_count": sum(
-                    1 for row in condition_fusion_rows if row.get("risk_blocked")
-                ),
-                "subscribed_count": sum(
-                    1 for row in condition_fusion_rows if row.get("subscribed")
-                ),
-                "read_only": True,
-                "not_buy_signal": True,
-            },
-            "profiles": condition_profile_metrics
-            or gateway_status.get("condition_profile_metrics", []),
-            "codes": condition_fusion_rows,
-        },
+        "condition_fusion": condition_fusion_section,
         "market_data": {
             "status": market_data_status,
             "latest_ticks": latest_ticks,
@@ -856,6 +847,7 @@ def _pipeline_summary(
     ai_advisory_status: dict[str, Any],
     no_buy_sentinel: dict[str, Any],
     latest_observe_cycle: dict[str, Any] | None,
+    condition_fusion_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -863,6 +855,7 @@ def _pipeline_summary(
             gateway_status=gateway_status,
             market_data_status=market_data_status,
             realtime_subscription=realtime_subscription,
+            condition_fusion_status=condition_fusion_status,
             theme_status=theme_status,
             candidate_status=candidate_status,
             strategy_status=strategy_status,
@@ -895,6 +888,15 @@ def _pipeline_summary(
                 "already_registered_count", 0
             ),
             "queue_commands": False,
+            "read_only": True,
+        },
+        "condition_fusion": {
+            "profile_count": condition_fusion_status.get("profile_count", 0),
+            "fused_code_count": condition_fusion_status.get("fused_code_count", 0),
+            "risk_blocked_count": condition_fusion_status.get("risk_blocked_count", 0),
+            "discovery_only_count": condition_fusion_status.get("discovery_only_count", 0),
+            "subscribed_count": condition_fusion_status.get("subscribed_count", 0),
+            "not_buy_signal": True,
             "read_only": True,
         },
         "themes": {
@@ -1074,11 +1076,57 @@ def _pipeline_summary(
     }
 
 
+def _condition_fusion_section(
+    rows: list[dict[str, Any]],
+    profiles: list[dict[str, Any]],
+    *,
+    fallback_profiles: list[dict[str, Any]],
+) -> dict[str, Any]:
+    risk_blocked_codes = [row for row in rows if row.get("risk_blocked")]
+    discovery_only_codes = [
+        row
+        for row in rows
+        if set(str(role).upper() for role in row.get("active_roles", ())) == {"DISCOVERY"}
+    ]
+    top_priority_codes = [
+        row
+        for row in rows
+        if not row.get("risk_blocked") and row not in discovery_only_codes
+    ][:10]
+    profile_rows = profiles or fallback_profiles
+    return {
+        "status": {
+            "profile_count": len(profile_rows),
+            "fused_code_count": len(rows),
+            "risk_blocked_count": len(risk_blocked_codes),
+            "discovery_only_count": len(discovery_only_codes),
+            "subscribed_count": sum(1 for row in rows if row.get("subscribed")),
+            "top_priority_count": len(top_priority_codes),
+            "read_only": True,
+            "not_buy_signal": True,
+            "notice": "조건식 hit는 매수 신호가 아님",
+        },
+        "summary": {
+            "label": "조건검색 센서",
+            "top_priority_label": "우선 관찰",
+            "risk_blocked_label": "위험 차단",
+            "discovery_only_label": "넓은 후보",
+            "notice": "조건식 hit는 매수 신호가 아님",
+        },
+        "profiles": profile_rows,
+        "codes": rows,
+        "top_priority_codes": top_priority_codes,
+        "risk_blocked_codes": risk_blocked_codes,
+        "discovery_only_codes": discovery_only_codes,
+    }
+
+
 def _pipeline_stage_statuses(
     *,
     gateway_status: dict[str, Any],
     market_data_status: dict[str, Any],
     realtime_subscription: dict[str, Any],
+    condition_fusion_status: dict[str, Any],
     theme_status: dict[str, Any],
     candidate_status: dict[str, Any],
     strategy_status: dict[str, Any],
@@ -1101,6 +1149,7 @@ def _pipeline_stage_statuses(
         _gateway_stage_status(gateway_status),
         _market_data_stage_status(market_data_status),
         _realtime_subscription_stage_status(realtime_subscription),
+        _condition_fusion_stage_status(condition_fusion_status),
         _stage_status(
             "Theme",
             "BLOCK"
@@ -1204,6 +1253,29 @@ def _pipeline_stage_statuses(
             reason_codes=["CANDIDATE_REBUILD_NOT_RUN"] if latest_observe_cycle is None else [],
         ),
     ]
+
+
+def _condition_fusion_stage_status(status: dict[str, Any]) -> dict[str, Any]:
+    fused_count = int(status.get("fused_code_count") or 0)
+    profile_count = int(status.get("profile_count") or 0)
+    risk_count = int(status.get("risk_blocked_count") or 0)
+    reason_codes: list[str] = []
+    stage_status = "PASS"
+    if fused_count <= 0:
+        stage_status = "WARN"
+        reason_codes.append(
+            "CONDITION_PROFILE_EMPTY" if profile_count <= 0 else "CONDITION_FUSION_EMPTY"
+        )
+    if risk_count:
+        reason_codes.append("CONDITION_RISK_BLOCK_PRESENT")
+    return _stage_status(
+        "ConditionFusion",
+        stage_status,
+        f"profiles={profile_count}, fused={fused_count}, risk={risk_count}",
+        count=fused_count,
+        updated_at=None,
+        reason_codes=reason_codes,
+    )
 
 
 def _stage_status(

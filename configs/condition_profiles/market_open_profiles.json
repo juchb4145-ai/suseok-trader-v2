@@ -1,0 +1,59 @@
+{
+  "profiles": [
+    {
+      "profile_id": "01_DISCOVERY_넓은후보",
+      "condition_name": "REPLACE_WITH_KIWOOM_DISCOVERY_CONDITION",
+      "role": "DISCOVERY",
+      "price_subscribe_policy": "batch",
+      "priority": 20,
+      "ttl_sec": 300,
+      "max_initial": 200,
+      "max_realtime_per_min": 30,
+      "enabled": true
+    },
+    {
+      "profile_id": "02_LEADER_거래대금주도",
+      "condition_name": "REPLACE_WITH_KIWOOM_LEADER_CONDITION",
+      "role": "LEADER",
+      "price_subscribe_policy": "immediate",
+      "priority": 90,
+      "ttl_sec": 900,
+      "max_initial": 100,
+      "max_realtime_per_min": 20,
+      "enabled": true
+    },
+    {
+      "profile_id": "03_PULLBACK_첫눌림",
+      "condition_name": "REPLACE_WITH_KIWOOM_PULLBACK_CONDITION",
+      "role": "PULLBACK",
+      "price_subscribe_policy": "immediate",
+      "priority": 95,
+      "ttl_sec": 600,
+      "max_initial": 80,
+      "max_realtime_per_min": 20,
+      "enabled": true
+    },
+    {
+      "profile_id": "04_BREAKOUT_재돌파",
+      "condition_name": "REPLACE_WITH_KIWOOM_BREAKOUT_CONDITION",
+      "role": "BREAKOUT",
+      "price_subscribe_policy": "immediate",
+      "priority": 100,
+      "ttl_sec": 600,
+      "max_initial": 80,
+      "max_realtime_per_min": 20,
+      "enabled": true
+    },
+    {
+      "profile_id": "05_RISK_과열위험",
+      "condition_name": "REPLACE_WITH_KIWOOM_RISK_BLOCK_CONDITION",
+      "role": "RISK_BLOCK",
+      "price_subscribe_policy": "none",
+      "priority": -100,
+      "ttl_sec": 1800,
+      "max_initial": 0,
+      "max_realtime_per_min": 0,
+      "enabled": true
+    }
+  ]
+}

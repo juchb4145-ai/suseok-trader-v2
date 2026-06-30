@@ -121,6 +121,12 @@ class EntryTimingInput:
     strategy_confidence: float | None = None
     risk_observation_status: str | None = None
     risk_reason_codes: Sequence[str] = field(default_factory=tuple)
+    condition_fusion_priority_score: float | None = None
+    active_condition_roles: Sequence[str] = field(default_factory=tuple)
+    condition_risk_blocked: bool = False
+    condition_fusion_reason_codes: Sequence[str] = field(default_factory=tuple)
+    condition_names: Sequence[str] = field(default_factory=tuple)
+    condition_latest_hit_at: str | None = None
     observed_at: datetime | str = field(default_factory=datetime.utcnow)
     best_bid: float | None = None
     best_ask: float | None = None
@@ -180,6 +186,7 @@ class EntryTimingInput:
             "pullback_from_high_pct",
             "strategy_score",
             "strategy_confidence",
+            "condition_fusion_priority_score",
             "best_bid",
             "best_ask",
             "tick_age_sec",
@@ -214,6 +221,35 @@ class EntryTimingInput:
             "risk_reason_codes",
             tuple(_normalize_reasons(self.risk_reason_codes)),
         )
+        object.__setattr__(
+            self,
+            "active_condition_roles",
+            tuple(_normalize_reasons(self.active_condition_roles)),
+        )
+        object.__setattr__(
+            self,
+            "condition_fusion_reason_codes",
+            tuple(_normalize_reasons(self.condition_fusion_reason_codes)),
+        )
+        object.__setattr__(
+            self,
+            "condition_names",
+            tuple(str(value) for value in self.condition_names if str(value).strip()),
+        )
+        object.__setattr__(
+            self,
+            "condition_risk_blocked",
+            parse_bool(self.condition_risk_blocked, "condition_risk_blocked"),
+        )
+        if self.condition_latest_hit_at is not None:
+            object.__setattr__(
+                self,
+                "condition_latest_hit_at",
+                require_non_empty_str(
+                    self.condition_latest_hit_at,
+                    "condition_latest_hit_at",
+                ),
+            )
         object.__setattr__(self, "observed_at", parse_timestamp(self.observed_at, "observed_at"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -253,6 +289,12 @@ class EntryTimingInput:
             "strategy_confidence": self.strategy_confidence,
             "risk_observation_status": self.risk_observation_status,
             "risk_reason_codes": list(self.risk_reason_codes),
+            "condition_fusion_priority_score": self.condition_fusion_priority_score,
+            "active_condition_roles": list(self.active_condition_roles),
+            "condition_risk_blocked": self.condition_risk_blocked,
+            "condition_fusion_reason_codes": list(self.condition_fusion_reason_codes),
+            "condition_names": list(self.condition_names),
+            "condition_latest_hit_at": self.condition_latest_hit_at,
             "observed_at": datetime_to_wire(self.observed_at),
             "best_bid": self.best_bid,
             "best_ask": self.best_ask,

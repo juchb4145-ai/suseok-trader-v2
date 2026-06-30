@@ -171,6 +171,23 @@ def _hard_context_state(
     theme_state = _normalize(item.theme_state)
     role = _normalize_role(item.stock_role)
     tick_age = item.tick_age_sec
+    condition_reasons = {_normalize(reason) for reason in item.condition_fusion_reason_codes}
+    theme_reasons = {_normalize(reason) for reason in item.theme_reason_codes}
+    sensor_reasons = condition_reasons | theme_reasons
+    if item.condition_risk_blocked or "CONDITION_RISK_BLOCKED" in sensor_reasons:
+        return (
+            EntryTimingState.BLOCKED_CONTEXT,
+            SetupType.NO_SETUP,
+            OrderPlanStatus.BLOCKED_RISK,
+            ["CONDITION_RISK_BLOCKED", "CONDITION_SENSOR_NOT_BUY_SIGNAL"],
+        )
+    if "DISCOVERY_OBSERVATION_ONLY" in sensor_reasons:
+        return (
+            EntryTimingState.BLOCKED_CONTEXT,
+            SetupType.NO_SETUP,
+            OrderPlanStatus.NO_PLAN,
+            ["DISCOVERY_OBSERVATION_ONLY", "CONDITION_SENSOR_NOT_BUY_SIGNAL"],
+        )
     if item.stale or (tick_age is not None and tick_age > settings.entry_timing_stale_max_seconds):
         return (
             EntryTimingState.STALE,
@@ -184,6 +201,13 @@ def _hard_context_state(
             SetupType.NO_SETUP,
             OrderPlanStatus.BLOCKED_STALE,
             [f"CANDIDATE_{candidate_state}"],
+        )
+    if candidate_state == "BLOCKED_OBSERVATION":
+        return (
+            EntryTimingState.BLOCKED_CONTEXT,
+            SetupType.NO_SETUP,
+            OrderPlanStatus.NO_PLAN,
+            ["CANDIDATE_BLOCKED_OBSERVATION"],
         )
     if item.vi_active:
         return (

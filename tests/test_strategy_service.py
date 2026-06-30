@@ -118,6 +118,40 @@ def test_batch_evaluation_records_run_counts_and_candidate_errors(tmp_path) -> N
     assert run["matched_observation_count"] == 1
 
 
+def test_batch_evaluation_orders_candidates_by_condition_fusion_priority(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "strategy_condition_priority.sqlite3")
+    settings = _settings()
+    low_id = _insert_strategy_fixture(connection, candidate_id="CAND-2026-06-27-005930-1")
+    high_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-000660-1",
+        code="000660",
+        name="SK하이닉스",
+    )
+    _insert_condition_fusion(connection, code="005930", name="삼성전자", priority_score=20)
+    _insert_condition_fusion(
+        connection,
+        code="000660",
+        name="SK하이닉스",
+        priority_score=995,
+        roles=("LEADER", "PULLBACK"),
+    )
+
+    result = evaluate_candidates(
+        connection,
+        trade_date="2026-06-27",
+        limit=1,
+        settings=settings,
+    )
+    latest = connection.execute("SELECT * FROM strategy_observations_latest").fetchall()
+    connection.close()
+
+    assert result.candidate_count == 1
+    assert len(latest) == 1
+    assert latest[0]["candidate_instance_id"] == high_id
+    assert latest[0]["candidate_instance_id"] != low_id
+
+
 def _settings(**overrides) -> Settings:
     values = {
         "market_data_tick_stale_sec": 999_999_999,
@@ -347,3 +381,52 @@ def _insert_strategy_fixture(
     )
     connection.commit()
     return candidate_id
+
+
+def _insert_condition_fusion(
+    connection,
+    *,
+    code: str,
+    name: str,
+    priority_score: float,
+    roles=("LEADER",),
+    risk_blocked: bool = False,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO candidate_condition_fusion (
+            trade_date,
+            code,
+            name,
+            active_roles_json,
+            hit_count,
+            latest_hit_at,
+            condition_names_json,
+            positive_score,
+            risk_blocked,
+            priority_score,
+            reason_codes_json,
+            subscribed,
+            market_readiness_status,
+            latest_event_id,
+            metadata_json,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?, ?, 1.0, ?, ?, ?, 1, 'FRESH', ?, '{}', ?)
+        """,
+        (
+            "2026-06-27",
+            code,
+            name,
+            json.dumps(list(roles)),
+            now,
+            json.dumps([f"{role}_COND" for role in roles]),
+            1 if risk_blocked else 0,
+            priority_score,
+            json.dumps(["CONDITION_FUSION_PRIORITY_READY"]),
+            f"evt-{code}",
+            now,
+        ),
+    )
+    connection.commit()
