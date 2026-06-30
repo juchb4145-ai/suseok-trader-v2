@@ -20,5 +20,7 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "ConditionProfilesJson" in script
     assert "$env:KIWOOM_CONDITION_PROFILES = $ResolvedConditionProfiles" in script
     assert "--condition-profiles `$env:KIWOOM_CONDITION_PROFILES" in script
-    assert "Condition profile mode: $ProfileMode" in script
+    assert "Condition mode: $ConditionMode" in script
+    assert "MULTI_PROFILE" in script
+    assert "LEGACY_SINGLE" in script
     assert 'queue_commands = "true"' not in script.lower()

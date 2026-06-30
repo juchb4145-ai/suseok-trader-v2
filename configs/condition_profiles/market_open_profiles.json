@@ -1,59 +1,82 @@
 {
   "profiles": [
     {
-      "profile_id": "01_DISCOVERY_넓은후보",
-      "condition_name": "REPLACE_WITH_KIWOOM_DISCOVERY_CONDITION",
+      "profile_id": "discovery_broad_theme",
+      "condition_name": "주도테마_넓은후보",
       "role": "DISCOVERY",
+      "realtime_search": true,
       "price_subscribe_policy": "batch",
       "priority": 20,
       "ttl_sec": 300,
-      "max_initial": 200,
-      "max_realtime_per_min": 30,
-      "enabled": true
+      "max_initial": 80,
+      "max_realtime_per_min": 25,
+      "enabled": true,
+      "screen_no": "7600"
     },
     {
-      "profile_id": "02_LEADER_거래대금주도",
-      "condition_name": "REPLACE_WITH_KIWOOM_LEADER_CONDITION",
+      "profile_id": "leader_turnover_theme",
+      "condition_name": "주도테마_거래대금주도",
       "role": "LEADER",
-      "price_subscribe_policy": "immediate",
+      "realtime_search": true,
+      "price_subscribe_policy": "batch",
       "priority": 90,
       "ttl_sec": 900,
-      "max_initial": 100,
+      "max_initial": 80,
       "max_realtime_per_min": 20,
-      "enabled": true
+      "enabled": true,
+      "screen_no": "7601"
     },
     {
-      "profile_id": "03_PULLBACK_첫눌림",
-      "condition_name": "REPLACE_WITH_KIWOOM_PULLBACK_CONDITION",
+      "profile_id": "pullback_first_theme",
+      "condition_name": "주도테마_첫눌림",
       "role": "PULLBACK",
-      "price_subscribe_policy": "immediate",
+      "realtime_search": true,
+      "price_subscribe_policy": "batch",
       "priority": 95,
       "ttl_sec": 600,
-      "max_initial": 80,
+      "max_initial": 60,
       "max_realtime_per_min": 20,
-      "enabled": true
+      "enabled": true,
+      "screen_no": "7602"
     },
     {
-      "profile_id": "04_BREAKOUT_재돌파",
-      "condition_name": "REPLACE_WITH_KIWOOM_BREAKOUT_CONDITION",
+      "profile_id": "breakout_reclaim_theme",
+      "condition_name": "주도테마_재돌파",
       "role": "BREAKOUT",
-      "price_subscribe_policy": "immediate",
+      "realtime_search": true,
+      "price_subscribe_policy": "batch",
       "priority": 100,
       "ttl_sec": 600,
-      "max_initial": 80,
+      "max_initial": 60,
       "max_realtime_per_min": 20,
-      "enabled": true
+      "enabled": true,
+      "screen_no": "7603"
     },
     {
-      "profile_id": "05_RISK_과열위험",
-      "condition_name": "REPLACE_WITH_KIWOOM_RISK_BLOCK_CONDITION",
+      "profile_id": "risk_overheat_block",
+      "condition_name": "리스크_과열위험",
       "role": "RISK_BLOCK",
+      "realtime_search": true,
       "price_subscribe_policy": "none",
       "priority": -100,
       "ttl_sec": 1800,
       "max_initial": 0,
       "max_realtime_per_min": 0,
-      "enabled": true
+      "enabled": true,
+      "screen_no": "7604"
+    },
+    {
+      "profile_id": "theme_spread_follower",
+      "condition_name": "주도테마_테마확산",
+      "role": "THEME_SPREAD",
+      "realtime_search": true,
+      "price_subscribe_policy": "real_only",
+      "priority": 60,
+      "ttl_sec": 600,
+      "max_initial": 40,
+      "max_realtime_per_min": 15,
+      "enabled": false,
+      "screen_no": "7605"
     }
   ]
 }

@@ -573,6 +573,30 @@ def test_runtime_nxt_realtime_exchange_registers_suffixed_kiwoom_codes() -> None
     assert payload["realtime_registered_kiwoom_codes"] == ["000660_NX", "005930_NX"]
 
 
+def test_runtime_realtime_registration_dedupes_already_registered() -> None:
+    class TrackingClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_calls: list[list[str]] = []
+
+        def register_realtime(self, codes, screen_no=None) -> None:  # type: ignore[no-untyped-def]
+            self.register_calls.append(list(codes))
+            super().register_realtime(codes, screen_no=screen_no)
+
+    client = TrackingClient()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=object())
+
+    runtime.register_realtime_codes(["005930", "000660"])
+    runtime.register_realtime_codes(["A005930", "000660"])
+    payload = runtime.heartbeat_payload()
+
+    assert client.register_calls == [["005930", "000660"]]
+    assert runtime._registered_realtime_codes == {"005930", "000660"}
+    assert payload["realtime_registration_dedupe_count"] == 2
+    assert runtime._event_queue[-1].event_type == "gateway_log"
+    assert runtime._event_queue[-1].payload["skipped_already_registered_count"] == 2
+
+
 def test_runtime_heartbeat_allows_market_data_login_fallback_without_account() -> None:
     class ConnectedWithoutAccounts(MockKiwoomClient):
         def __init__(self) -> None:
@@ -872,7 +896,107 @@ def test_condition_tr_initial_results_batch_register_with_role_metadata(monkeypa
     assert client.registered_codes == {"005930", "000660"}
 
 
-def test_real_condition_enter_immediate_and_risk_block_no_subscribe(monkeypatch) -> None:
+def test_condition_tr_initial_results_batch_once_and_ignores_realtime_rate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+
+    class TrackingClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_calls: list[list[str]] = []
+
+        def register_realtime(self, codes, screen_no=None) -> None:  # type: ignore[no-untyped-def]
+            self.register_calls.append(list(codes))
+            super().register_realtime(codes, screen_no=screen_no)
+
+    client = TrackingClient()
+    client.set_conditions([(1, "Discovery")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                    max_initial=100,
+                    max_realtime_per_min=1,
+                ),
+            ),
+        ),
+    )
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    codes = [f"{index:06d}" for index in range(1000, 1100)]
+    runtime.on_condition_tr_received(
+        screen_no="7600",
+        code_list=";".join(codes) + ";",
+        condition_name="Discovery",
+        condition_index=1,
+    )
+
+    assert len(client.register_calls) == 1
+    assert len(client.register_calls[0]) == 80
+    assert len(client.registered_codes) == 80
+
+
+def test_condition_tr_initial_batch_respects_existing_registered_adaptive_cap(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+
+    class TrackingClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.register_calls: list[list[str]] = []
+
+        def register_realtime(self, codes, screen_no=None) -> None:  # type: ignore[no-untyped-def]
+            self.register_calls.append(list(codes))
+            super().register_realtime(codes, screen_no=screen_no)
+
+    existing_codes = {f"{index:06d}" for index in range(1000, 1070)}
+    client = TrackingClient()
+    client.set_conditions([(1, "Discovery")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                    max_initial=100,
+                ),
+            ),
+        ),
+    )
+    runtime._registered_realtime_codes.update(existing_codes)
+    runtime._parsed_price_tick_count = 1
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    codes = [f"{index:06d}" for index in range(2000, 2100)]
+    runtime.on_condition_tr_received(
+        screen_no="7600",
+        code_list=";".join(codes) + ";",
+        condition_name="Discovery",
+        condition_index=1,
+    )
+
+    assert len(client.register_calls) == 1
+    assert len(client.register_calls[0]) == 10
+    assert len(runtime._registered_realtime_codes) == 80
+
+
+def test_real_condition_batch_policy_immediate_and_risk_block_no_subscribe(monkeypatch) -> None:
     monkeypatch.setattr(
         "gateway.kiwoom_runtime.current_condition_session_profile",
         lambda: ConditionSessionProfile.MORNING_TREND,
@@ -888,7 +1012,7 @@ def test_real_condition_enter_immediate_and_risk_block_no_subscribe(monkeypatch)
                 ConditionProfile(
                     condition_name="Leader",
                     role=ConditionRole.LEADER,
-                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
                 ),
                 ConditionProfile(
                     condition_name="RiskBlock",
@@ -917,10 +1041,16 @@ def test_real_condition_enter_immediate_and_risk_block_no_subscribe(monkeypatch)
 
     assert leader_decision is not None
     assert leader_decision.register_immediate is True
+    assert "PRICE_SUBSCRIBE_BATCH_REALTIME_IMMEDIATE" in leader_decision.reason_codes
     assert risk_decision is not None
     assert risk_decision.subscribed is False
     assert "RISK_BLOCK_NO_PRICE_SUBSCRIBE" in risk_decision.reason_codes
     assert client.registered_codes == {"005930"}
+    assert client.orders == []
+    assert not any(
+        event.event_type in {"command_started", "command_ack", "order_result"}
+        for event in runtime._event_queue
+    )
 
 
 def test_runtime_recovers_realtime_registration_when_price_ticks_stall() -> None:

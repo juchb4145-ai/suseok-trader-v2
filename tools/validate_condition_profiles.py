@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from domain.broker.condition_profiles import ConditionProfile, parse_condition_profiles
+from domain.broker.condition_profiles import (
+    ConditionProfile,
+    ConditionRole,
+    PriceSubscribePolicy,
+    parse_condition_profiles,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -50,6 +55,7 @@ def validate_condition_profiles_file(path: str | Path) -> ConditionProfileValida
 
     profile_ids: set[str] = set()
     condition_names: set[str] = set()
+    screen_numbers: set[str] = set()
     normalized_profiles: list[dict[str, Any]] = []
     for profile in profiles:
         normalized_profiles.append(profile.to_dict())
@@ -59,6 +65,10 @@ def validate_condition_profiles_file(path: str | Path) -> ConditionProfileValida
         if profile.condition_name in condition_names:
             warnings.append(f"duplicate condition_name: {profile.condition_name}")
         condition_names.add(profile.condition_name)
+        if profile.screen_no:
+            if profile.screen_no in screen_numbers:
+                errors.append(f"duplicate screen_no: {profile.screen_no}")
+            screen_numbers.add(profile.screen_no)
         _add_operational_warnings(profile, warnings)
 
     if not profiles:
@@ -86,7 +96,22 @@ def _add_operational_warnings(profile: ConditionProfile, warnings: list[str]) ->
         warnings.append(
             f"{profile.profile_id}: max_initial is ignored when price_subscribe_policy=none"
         )
-    if profile.role.value == "RISK_BLOCK" and profile.priority > 0:
+    if (
+        profile.enabled
+        and profile.role is not ConditionRole.RISK_BLOCK
+        and profile.price_subscribe_policy is PriceSubscribePolicy.IMMEDIATE
+        and profile.max_initial > 0
+    ):
+        warnings.append(
+            f"{profile.profile_id}: enabled positive profile uses immediate with "
+            "max_initial > 0; use only for manual/special profiles"
+        )
+    if (
+        profile.role is ConditionRole.RISK_BLOCK
+        and profile.price_subscribe_policy is not PriceSubscribePolicy.NONE
+    ):
+        warnings.append(f"{profile.profile_id}: RISK_BLOCK should use price_subscribe_policy=none")
+    if profile.role is ConditionRole.RISK_BLOCK and profile.priority > 0:
         warnings.append(f"{profile.profile_id}: RISK_BLOCK priority is usually <= 0")
 
 

@@ -95,14 +95,19 @@ class GatewayConditionAdmissionController:
         runtime_metrics: Mapping[str, Any],
         session_profile: ConditionSessionProfile,
         batch_allowed: bool = False,
+        planned_batch_count: int = 0,
         now: datetime | None = None,
     ) -> ConditionAdmissionDecision:
         observed_at = now or utc_now()
         normalized_action = str(action or "").upper()
         normalized_source = str(source or "").strip().lower()
+        effective_registered_count = registered_realtime_count + max(
+            int(planned_batch_count),
+            0,
+        )
         budget = self._adaptive_budget(
             profile=profile,
-            registered_realtime_count=registered_realtime_count,
+            registered_realtime_count=effective_registered_count,
             runtime_metrics=runtime_metrics,
             session_profile=session_profile,
         )
@@ -116,15 +121,18 @@ class GatewayConditionAdmissionController:
             reasons.append("RISK_BLOCK_NO_PRICE_SUBSCRIBE")
         elif profile.price_subscribe_policy is PriceSubscribePolicy.NONE:
             reasons.append("PRICE_SUBSCRIBE_POLICY_NONE")
-        elif not self._within_realtime_rate(profile, observed_at):
-            reasons.append("PROFILE_REALTIME_RATE_LIMIT")
         elif (
             normalized_source == "tr_condition"
             and self._initial_enter_counts[profile.profile_id] >= profile.max_initial
         ):
             reasons.append("PROFILE_MAX_INITIAL_REACHED")
-        elif registered_realtime_count >= int(budget["cap"]):
+        elif effective_registered_count >= int(budget["cap"]):
             reasons.append("ADAPTIVE_REALTIME_BUDGET_EXHAUSTED")
+        elif normalized_source == "real_condition" and not self._within_realtime_rate(
+            profile,
+            observed_at,
+        ):
+            reasons.append("PROFILE_REALTIME_RATE_LIMIT")
         elif (
             session_profile
             in {
@@ -135,7 +143,7 @@ class GatewayConditionAdmissionController:
             and profile.role is ConditionRole.DISCOVERY
         ):
             reasons.append("SESSION_DISCOVERY_LIMITED")
-            if registered_realtime_count < int(budget["cap"]):
+            if effective_registered_count < int(budget["cap"]):
                 register_batch = normalized_source == "tr_condition" and batch_allowed
         elif profile.price_subscribe_policy is PriceSubscribePolicy.IMMEDIATE:
             register_immediate = True

@@ -241,6 +241,7 @@ class KiwoomGatewayRuntime:
         self._last_realtime_registration_result: dict[str, Any] = {}
         self._realtime_registration_requested_count = 0
         self._realtime_registration_success_count = 0
+        self._realtime_registration_dedupe_count = 0
         self._raw_callback_counts: dict[str, int] = {}
         self._latest_callback_at_by_method: dict[str, str] = {}
         self._active_x_thread_audit: deque[dict[str, Any]] = deque(maxlen=50)
@@ -441,9 +442,7 @@ class KiwoomGatewayRuntime:
             "login_finished_at": self._login_finished_at,
             "login_threaded": self._login_threaded,
             "comm_connect_state": self._comm_connect_state(),
-            "latest_comm_connect_call_at": _datetime_or_empty(
-                self._latest_comm_connect_call_at
-            ),
+            "latest_comm_connect_call_at": _datetime_or_empty(self._latest_comm_connect_call_at),
             "latest_comm_connect_result_at": _datetime_or_empty(
                 self._latest_comm_connect_result_at
             ),
@@ -453,16 +452,13 @@ class KiwoomGatewayRuntime:
             ),
             "login_block_reason_codes": self._login_block_reason_codes(),
             "condition_load_state": self._condition_load_state,
-            "condition_load_requested_at": _datetime_or_empty(
-                self._condition_load_requested_at
-            ),
+            "condition_load_requested_at": _datetime_or_empty(self._condition_load_requested_at),
             "condition_load_retry_count": self._condition_load_retry_count,
             "condition_load_timeout_count": self._condition_load_timeout_count,
             "condition_reason_codes": list(self._condition_reason_codes),
             "condition_session_profile": self._condition_session_profile().value,
             "condition_profiles": [
-                normalize_condition_profile_payload(profile)
-                for profile in self._condition_profiles
+                normalize_condition_profile_payload(profile) for profile in self._condition_profiles
             ],
             "condition_profile_screen_map": {
                 screen_no: profile.profile_id
@@ -485,9 +481,7 @@ class KiwoomGatewayRuntime:
             ],
             "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
             "latest_quote_at": _datetime_or_empty(self._last_quote_at),
-            "latest_realtime_callback_at": _datetime_or_empty(
-                self._last_realtime_callback_at
-            ),
+            "latest_realtime_callback_at": _datetime_or_empty(self._last_realtime_callback_at),
             "quote_event_count": self._quote_event_count,
             "raw_realtime_callback_count": self._realtime_callback_count,
             "realtime_callback_count": self._realtime_callback_count,
@@ -501,13 +495,10 @@ class KiwoomGatewayRuntime:
             "latest_realtime_registration_at": _datetime_or_empty(
                 self._last_realtime_registration_at
             ),
-            "latest_realtime_registration_result": dict(
-                self._last_realtime_registration_result
-            ),
-            "realtime_registration_requested_count": (
-                self._realtime_registration_requested_count
-            ),
+            "latest_realtime_registration_result": dict(self._last_realtime_registration_result),
+            "realtime_registration_requested_count": (self._realtime_registration_requested_count),
             "realtime_registration_success_count": self._realtime_registration_success_count,
+            "realtime_registration_dedupe_count": self._realtime_registration_dedupe_count,
             "realtime_subscription_health": self._realtime_subscription_health(),
             "realtime_recover_count": self._realtime_recover_count,
             "realtime_recover_error": self._realtime_recover_error,
@@ -547,9 +538,7 @@ class KiwoomGatewayRuntime:
                 "OnReceiveConditionVer",
                 0,
             ),
-            "realtime_registration_success_count": payload[
-                "realtime_registration_success_count"
-            ],
+            "realtime_registration_success_count": payload["realtime_registration_success_count"],
             "raw_realtime_callback_count": payload["raw_realtime_callback_count"],
             "parsed_price_tick_count": payload["parsed_price_tick_count"],
             "realtime_parse_error_count": payload["realtime_parse_error_count"],
@@ -634,6 +623,7 @@ class KiwoomGatewayRuntime:
         source: str,
         screen_no: str | None = None,
         batch_allowed: bool = False,
+        planned_batch_count: int = 0,
     ) -> ConditionAdmissionDecision | None:
         normalized_code = normalize_code(code)
         profile = self._profile_for_condition_event(
@@ -664,6 +654,7 @@ class KiwoomGatewayRuntime:
                 runtime_metrics=self._runtime_realtime_metrics(),
                 session_profile=self._condition_session_profile(),
                 batch_allowed=batch_allowed,
+                planned_batch_count=planned_batch_count,
             )
             payload["metadata"]["condition_admission"] = decision.to_dict()
         self.emit("condition_event", payload)
@@ -694,6 +685,7 @@ class KiwoomGatewayRuntime:
                 source="tr_condition",
                 screen_no=str(screen_no or ""),
                 batch_allowed=True,
+                planned_batch_count=len(batch_codes),
             )
             if decision is not None and decision.register_batch:
                 batch_codes.append(normalized_code)
@@ -799,15 +791,46 @@ class KiwoomGatewayRuntime:
                 },
             )
 
-    def register_realtime_codes(self, codes: Iterable[str]) -> None:
-        normalized_codes = [normalize_code(code) for code in codes if str(code or "").strip()]
+    def register_realtime_codes(self, codes: Iterable[str], *, force: bool = False) -> None:
+        normalized_codes = _ordered_unique_codes(codes)
         if not normalized_codes:
+            return
+        skipped_already_registered_count = 0
+        if not force:
+            fresh_codes: list[str] = []
+            for code in normalized_codes:
+                if code in self._registered_realtime_codes:
+                    skipped_already_registered_count += 1
+                    continue
+                fresh_codes.append(code)
+            normalized_codes = fresh_codes
+        if skipped_already_registered_count:
+            self._realtime_registration_dedupe_count += skipped_already_registered_count
+        if not normalized_codes:
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "realtime registration skipped already registered",
+                    "skipped_already_registered_count": skipped_already_registered_count,
+                    "registered_realtime_code_count": len(self._registered_realtime_codes),
+                },
+            )
             return
         exchange = self._realtime_exchange()
         kiwoom_codes = [realtime_code_for_exchange(code, exchange) for code in normalized_codes]
         self.client.register_realtime(kiwoom_codes)
         self._registered_realtime_codes.update(normalized_codes)
         self._last_realtime_registration_at = utc_now()
+        if skipped_already_registered_count:
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "realtime registration deduped already registered",
+                    "registered_code_count": len(normalized_codes),
+                    "skipped_already_registered_count": skipped_already_registered_count,
+                    "registered_realtime_code_count": len(self._registered_realtime_codes),
+                },
+            )
 
     def _track_realtime_command(
         self,
@@ -851,10 +874,7 @@ class KiwoomGatewayRuntime:
             remove_all = getattr(self.client, "remove_all_realtime", None)
             if callable(remove_all):
                 remove_all()
-            exchange = self._realtime_exchange()
-            self.client.register_realtime(
-                [realtime_code_for_exchange(code, exchange) for code in codes]
-            )
+            self.register_realtime_codes(codes, force=True)
         except Exception as exc:
             self._last_error = str(exc)
             self._realtime_recover_error = str(exc)
@@ -877,9 +897,7 @@ class KiwoomGatewayRuntime:
                 "registered_realtime_code_count": len(codes),
                 "latest_price_tick_at": _datetime_or_empty(self._last_price_tick_at),
                 "latest_quote_at": _datetime_or_empty(self._last_quote_at),
-                "latest_realtime_callback_at": _datetime_or_empty(
-                    self._last_realtime_callback_at
-                ),
+                "latest_realtime_callback_at": _datetime_or_empty(self._last_realtime_callback_at),
                 "quote_event_count": self._quote_event_count,
                 "realtime_callback_count": self._realtime_callback_count,
                 "realtime_real_type_counts": dict(sorted(self._real_type_counts.items())),
@@ -1217,9 +1235,7 @@ class KiwoomGatewayRuntime:
                 "condition_priority": profile.priority,
                 "condition_ttl_sec": profile.ttl_sec,
                 "condition_session_profile": session.value,
-                "regular_session_seed_only": (
-                    session is ConditionSessionProfile.PREOPEN_NXT
-                ),
+                "regular_session_seed_only": (session is ConditionSessionProfile.PREOPEN_NXT),
                 "condition_profile": normalize_condition_profile_payload(profile),
             }
         )
@@ -1441,6 +1457,7 @@ def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
             source="real_condition",
         )
     )
+
     def handle_condition_tr(
         screen_no: str,
         code_list: str,
@@ -1476,6 +1493,19 @@ def _command_codes(payload: Mapping[str, Any]) -> list[str]:
     else:
         candidates = []
     return [normalize_code(code) for code in candidates if str(code).strip()]
+
+
+def _ordered_unique_codes(codes: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if not str(code or "").strip():
+            continue
+        normalized = normalize_code(code)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:

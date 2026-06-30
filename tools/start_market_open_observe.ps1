@@ -65,23 +65,23 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfiles)) {
         $ConditionProfileCount = -1
     }
 }
-$ProfileMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfiles)) {
-    "multi-profile"
+$ConditionMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfiles)) {
+    "MULTI_PROFILE"
 } elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
-    "legacy-condition-name"
+    "LEGACY_SINGLE"
 } else {
-    "no-condition"
+    "NONE"
 }
 
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
 Write-Host "Core URL: $CoreUrl"
 Write-Host "Dashboard URL: $CoreUrl/dashboard"
-Write-Host "Condition profile mode: $ProfileMode"
-if ($ProfileMode -eq "multi-profile") {
+Write-Host "Condition mode: $ConditionMode"
+if ($ConditionMode -eq "MULTI_PROFILE") {
     Write-Host "Condition profile source: $ConditionProfileSource"
     Write-Host "Condition profile count: $ConditionProfileCount"
-} elseif ($ProfileMode -eq "legacy-condition-name") {
+} elseif ($ConditionMode -eq "LEGACY_SINGLE") {
     Write-Host "Legacy condition name: $ConditionName"
 }
 Write-Host ""
@@ -99,7 +99,7 @@ $GatewayCommand = @(
     "--realtime-exchange $RealtimeExchange",
     "--realtime-recover-interval-sec 300"
 )
-if ($ProfileMode -eq "multi-profile") {
+if ($ConditionMode -eq "MULTI_PROFILE") {
     $GatewayCommand += "--condition-profiles `$env:KIWOOM_CONDITION_PROFILES"
 } elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
     $GatewayCommand += "--condition-name `"$ConditionName`""
