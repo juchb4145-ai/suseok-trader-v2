@@ -268,7 +268,7 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
         execution_id="exec-buy-for-exit",
     )
     handle_live_sim_gateway_event(connection, buy_fill, settings=settings)
-    connection.execute("UPDATE market_ticks_latest SET price = 96_000 WHERE code = '005930'")
+    connection.execute("UPDATE market_ticks_latest SET price = 96000 WHERE code = '005930'")
     connection.commit()
 
     result = run_live_sim_exit_once(connection, settings=settings, queue_commands=True)

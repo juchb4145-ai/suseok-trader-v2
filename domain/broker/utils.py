@@ -4,11 +4,12 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, is_dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from enum import Enum, StrEnum
 from typing import Any, TypeVar
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 class BrokerValidationError(ValueError):
@@ -25,6 +26,37 @@ def utc_now() -> datetime:
     """Return an aware UTC timestamp for contract objects."""
 
     return datetime.now(UTC)
+
+
+def _market_timezone() -> tzinfo:
+    try:
+        return ZoneInfo("Asia/Seoul")
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=9), name="Asia/Seoul")
+
+
+MARKET_TIMEZONE = _market_timezone()
+
+
+def market_now() -> datetime:
+    """Return the current aware timestamp in the KRX market timezone (KST).
+
+    Stored/wire timestamps stay UTC; this is only for calendar-date and
+    session-clock decisions (trade_date, EOD cutoffs)."""
+
+    return utc_now().astimezone(MARKET_TIMEZONE)
+
+
+def market_today() -> str:
+    """Return today's trade date (YYYY-MM-DD) in the KRX market timezone."""
+
+    return market_now().date().isoformat()
+
+
+def market_time_str() -> str:
+    """Return the current market-local time of day as HH:MM:SS."""
+
+    return market_now().strftime("%H:%M:%S")
 
 
 def timestamp() -> str:
