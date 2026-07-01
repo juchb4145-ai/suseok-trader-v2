@@ -1033,6 +1033,86 @@ def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -
     assert worker._core_client.events[0].event_id == "evt_heartbeat_new"
 
 
+def test_core_io_worker_bounds_buffer_and_preserves_order_events() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> None:
+            raise RuntimeError("core unreachable")
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=1000,
+        max_buffer_size=5,
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_ack",
+            event_type="command_ack",
+            source="kiwoom_gateway",
+            payload={"command_id": "cmd_1"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_exec",
+            event_type="execution_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "quantity": 1},
+        )
+    )
+    for index in range(10):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_tick_{index}",
+                event_type="price_tick",
+                source="kiwoom_gateway",
+                # Distinct codes so coalescing cannot absorb the overflow.
+                payload={"code": f"{index:06d}", "price": 1000 + index},
+            )
+        )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 5
+    assert snapshot.dropped_count == 7
+    assert snapshot.max_buffer_size == 5
+    with worker._condition:
+        queued_ids = [event.event_id for event in worker._events]
+    assert "evt_ack" in queued_ids
+    assert "evt_exec" in queued_ids
+    # Oldest ticks were dropped first; the newest ticks survive.
+    assert queued_ids[-1] == "evt_tick_9"
+
+
+def test_core_io_worker_never_drops_protected_events_even_over_cap() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> None:
+            raise RuntimeError("core unreachable")
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=1000,
+        max_buffer_size=2,
+    )
+    for index in range(4):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_ack_{index}",
+                event_type="command_ack",
+                source="kiwoom_gateway",
+                payload={"command_id": f"cmd_{index}"},
+            )
+        )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 4
+    assert snapshot.dropped_count == 0
+
+
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
     command = GatewayCommand(
         command_id="cmd_boom",

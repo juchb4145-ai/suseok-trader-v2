@@ -19,11 +19,13 @@ class CoreIoWorkerSnapshot:
     posted_count: int
     poll_count: int
     coalesced_count: int
+    dropped_count: int
     last_error: str
     latest_poll_at: float | None
     latest_post_at: float | None
     thread_id: int | None
     coalesce_after_size: int
+    max_buffer_size: int
 
 
 class CoreIoWorker:
@@ -40,6 +42,7 @@ class CoreIoWorker:
         retry_sleep_sec: float = 0.2,
         coalesce_after_size: int = 50,
         command_poll_interval_sec: float = 0.2,
+        max_buffer_size: int = 10_000,
     ) -> None:
         self._core_client = core_client
         self._command_limit = max(int(command_limit), 1)
@@ -49,6 +52,7 @@ class CoreIoWorker:
         self._retry_sleep_sec = max(float(retry_sleep_sec), 0.05)
         self._coalesce_after_size = max(int(coalesce_after_size), 1)
         self._command_poll_interval_sec = max(float(command_poll_interval_sec), 0.05)
+        self._max_buffer_size = max(int(max_buffer_size), 1)
         self._events: deque[GatewayEvent] = deque()
         self._commands: Queue[GatewayCommand] = Queue()
         self._condition = threading.Condition()
@@ -57,6 +61,7 @@ class CoreIoWorker:
         self._posted_count = 0
         self._poll_count = 0
         self._coalesced_count = 0
+        self._dropped_count = 0
         self._last_error = ""
         self._latest_poll_at: float | None = None
         self._latest_post_at: float | None = None
@@ -87,6 +92,7 @@ class CoreIoWorker:
         with self._condition:
             if _is_priority_event(event):
                 self._enqueue_priority_event_locked(event)
+                self._enforce_buffer_limit_locked()
                 self._condition.notify()
                 return
             if len(self._events) >= self._coalesce_after_size:
@@ -94,7 +100,28 @@ class CoreIoWorker:
                     self._condition.notify()
                     return
             self._events.append(event)
+            self._enforce_buffer_limit_locked()
             self._condition.notify()
+
+    def _enforce_buffer_limit_locked(self) -> None:
+        # Bound RAM growth while Core is unreachable (the gateway is a 32-bit
+        # process). Drop oldest low-value events first; order-critical events
+        # are never dropped even if that lets the buffer exceed the cap.
+        while len(self._events) > self._max_buffer_size:
+            drop_index = None
+            for index, queued_event in enumerate(self._events):
+                if _is_droppable_event(queued_event):
+                    drop_index = index
+                    break
+            if drop_index is None:
+                for index, queued_event in enumerate(self._events):
+                    if not _is_drop_protected_event(queued_event):
+                        drop_index = index
+                        break
+            if drop_index is None:
+                return
+            del self._events[drop_index]
+            self._dropped_count += 1
 
     def drain_commands(self, *, limit: int = 100) -> list[GatewayCommand]:
         commands: list[GatewayCommand] = []
@@ -111,6 +138,7 @@ class CoreIoWorker:
             posted_count = self._posted_count
             poll_count = self._poll_count
             coalesced_count = self._coalesced_count
+            dropped_count = self._dropped_count
             last_error = self._last_error
             latest_poll_at = self._latest_poll_at
             latest_post_at = self._latest_post_at
@@ -122,11 +150,13 @@ class CoreIoWorker:
             posted_count=posted_count,
             poll_count=poll_count,
             coalesced_count=coalesced_count,
+            dropped_count=dropped_count,
             last_error=last_error,
             latest_poll_at=latest_poll_at,
             latest_post_at=latest_post_at,
             thread_id=thread_id,
             coalesce_after_size=self._coalesce_after_size,
+            max_buffer_size=self._max_buffer_size,
         )
 
     def _coalesce_event_locked(self, event: GatewayEvent) -> bool:
@@ -234,3 +264,26 @@ def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:
 
 def _is_priority_event(event: GatewayEvent) -> bool:
     return str(event.event_type or "").strip().lower() == "heartbeat"
+
+
+_DROPPABLE_EVENT_TYPES = {
+    "heartbeat",
+    "price_tick",
+    "quote_tick",
+    "market_index_tick",
+    "gateway_log",
+}
+
+_DROP_PROTECTED_EVENT_TYPES = {
+    "command_ack",
+    "command_failed",
+    "execution_event",
+}
+
+
+def _is_droppable_event(event: GatewayEvent) -> bool:
+    return str(event.event_type or "").strip().lower() in _DROPPABLE_EVENT_TYPES
+
+
+def _is_drop_protected_event(event: GatewayEvent) -> bool:
+    return str(event.event_type or "").strip().lower() in _DROP_PROTECTED_EVENT_TYPES

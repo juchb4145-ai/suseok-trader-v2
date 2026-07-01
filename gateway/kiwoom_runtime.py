@@ -419,6 +419,10 @@ class KiwoomGatewayRuntime:
         worker_coalesce_after_size = (
             worker_snapshot.coalesce_after_size if worker_snapshot is not None else 0
         )
+        worker_dropped_count = worker_snapshot.dropped_count if worker_snapshot is not None else 0
+        worker_max_buffer_size = (
+            worker_snapshot.max_buffer_size if worker_snapshot is not None else 0
+        )
         logged_in = self.kiwoom_logged_in()
         accounts = self._accounts() if logged_in else []
         account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
@@ -459,6 +463,8 @@ class KiwoomGatewayRuntime:
             "core_io_worker_last_error": worker_last_error,
             "core_io_worker_coalesced_event_count": worker_coalesced_count,
             "core_io_worker_coalesce_after_size": worker_coalesce_after_size,
+            "core_io_worker_dropped_event_count": worker_dropped_count,
+            "core_io_worker_max_buffer_size": worker_max_buffer_size,
             "local_event_count": self._local_event_count,
             "latest_local_event": dict(self._latest_local_event),
             "login_in_progress": self._login_in_progress,
