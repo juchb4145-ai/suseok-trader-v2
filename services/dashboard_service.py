@@ -390,6 +390,8 @@ def build_dashboard_snapshot(
         "market_indexes": {
             "status": market_index_status,
             "latest_ticks": latest_market_index_ticks,
+            "latest_by_code": _market_index_latest_by_code(latest_market_index_ticks),
+            "gateway_adapter": _market_index_gateway_adapter_section(gateway_status),
         },
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
@@ -747,6 +749,39 @@ def _system_section(settings: Settings, generated_at: str) -> dict[str, Any]:
     }
 
 
+def _market_index_latest_by_code(latest_ticks: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for tick in latest_ticks:
+        index_code = str(tick.get("index_code") or "").strip().upper()
+        if index_code and index_code not in result:
+            result[index_code] = dict(tick)
+    return result
+
+
+def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "enabled": bool(gateway_status.get("market_index_enabled")),
+        "realtime_enabled": bool(gateway_status.get("market_index_realtime_enabled")),
+        "tr_bootstrap_enabled": bool(
+            gateway_status.get("market_index_tr_bootstrap_enabled")
+        ),
+        "configured_codes": gateway_status.get("market_index_codes") or [],
+        "registered_codes": gateway_status.get("market_index_registered_codes") or [],
+        "screen_no": gateway_status.get("market_index_screen_no") or "",
+        "poll_sec": gateway_status.get("market_index_poll_sec"),
+        "callback_count": gateway_status.get("market_index_callback_count") or 0,
+        "parsed_tick_count": gateway_status.get("parsed_market_index_tick_count") or 0,
+        "parse_error_count": gateway_status.get("market_index_parse_error_count") or 0,
+        "latest_tick_at": gateway_status.get("latest_market_index_tick_at") or "",
+        "latest_parse_error": gateway_status.get("latest_market_index_parse_error") or {},
+        "latest_registration_result": gateway_status.get(
+            "latest_market_index_registration_result"
+        )
+        or {},
+        "health": gateway_status.get("market_index_adapter_health") or "DISABLED",
+    }
+
+
 def _gateway_status_section(
     settings: Settings,
     status_values: dict[str, str],
@@ -806,6 +841,40 @@ def _gateway_status_section(
         "realtime_registration_success_count": heartbeat_payload.get(
             "realtime_registration_success_count"
         ),
+        "market_index_enabled": heartbeat_payload.get("market_index_enabled"),
+        "market_index_realtime_enabled": heartbeat_payload.get(
+            "market_index_realtime_enabled"
+        ),
+        "market_index_tr_bootstrap_enabled": heartbeat_payload.get(
+            "market_index_tr_bootstrap_enabled"
+        ),
+        "market_index_codes": heartbeat_payload.get("market_index_codes") or [],
+        "market_index_screen_no": heartbeat_payload.get("market_index_screen_no") or "",
+        "market_index_poll_sec": heartbeat_payload.get("market_index_poll_sec"),
+        "market_index_registered_codes": heartbeat_payload.get(
+            "market_index_registered_codes"
+        )
+        or [],
+        "market_index_callback_count": heartbeat_payload.get("market_index_callback_count"),
+        "parsed_market_index_tick_count": heartbeat_payload.get(
+            "parsed_market_index_tick_count"
+        ),
+        "market_index_parse_error_count": heartbeat_payload.get(
+            "market_index_parse_error_count"
+        ),
+        "latest_market_index_tick_at": heartbeat_payload.get("latest_market_index_tick_at"),
+        "latest_market_index_parse_error": heartbeat_payload.get(
+            "latest_market_index_parse_error"
+        )
+        or {},
+        "latest_market_index_registration_result": heartbeat_payload.get(
+            "latest_market_index_registration_result"
+        )
+        or {},
+        "market_index_adapter_health": heartbeat_payload.get(
+            "market_index_adapter_health"
+        )
+        or "DISABLED",
         "latest_realtime_registration_at": heartbeat_payload.get(
             "latest_realtime_registration_at"
         ),

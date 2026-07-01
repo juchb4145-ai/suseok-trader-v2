@@ -7,6 +7,7 @@ from domain.broker.commands import GatewayCommand
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
+from domain.broker.market_index import BrokerMarketIndexTick
 from domain.broker.tr import BrokerTrResponse
 from domain.broker.utils import normalize_payload, utc_now
 
@@ -55,6 +56,32 @@ def make_price_tick_event(
         trade_time=utc_now(),
     )
     return GatewayEvent(event_type="price_tick", source=source, payload=tick.to_dict())
+
+
+def make_market_index_tick_event(
+    *,
+    source: str = "mock_gateway",
+    index_code: str = "KOSPI",
+    index_name: str | None = None,
+    price: float = 2800.0,
+    change_rate: float = 0.0,
+    change_value: float = 0.0,
+    metadata: Mapping[str, Any] | None = None,
+) -> GatewayEvent:
+    tick = BrokerMarketIndexTick(
+        index_code=index_code,
+        index_name=index_name or index_code,
+        price=price,
+        change_rate=change_rate,
+        change_value=change_value,
+        trade_time=utc_now(),
+        metadata=metadata or {"mock": True},
+    )
+    return GatewayEvent(
+        event_type="market_index_tick",
+        source=source,
+        payload=tick.to_dict(),
+    )
 
 
 def make_condition_event(
@@ -184,4 +211,3 @@ def _command_payload(command: GatewayCommand, *, status: str) -> dict[str, Any]:
         "command_type": command.command_type,
         "status": status,
     }
-

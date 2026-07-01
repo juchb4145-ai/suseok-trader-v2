@@ -19,12 +19,14 @@ from domain.broker.condition_profiles import (
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
+from domain.broker.market_index import BrokerMarketIndexTick
 from domain.broker.tr import BrokerTrResponse
 from gateway.kiwoom_client import (
     FID_ACC_TRADE_VALUE,
     FID_ACC_VOLUME,
     FID_BEST_ASK,
     FID_BEST_BID,
+    FID_CHANGE_VALUE,
     FID_CHANGE_RATE,
     FID_CURRENT_PRICE,
     FID_EXECUTION_STRENGTH,
@@ -37,14 +39,23 @@ from gateway.kiwoom_client import (
     Signal,
     broker_env_from_server_gubun,
     condition_event_payload,
+    is_market_index_real_type,
     is_price_tick_real_type,
     is_quote_real_type,
+    market_index_realtime_fid_string,
+    normalize_market_index_code,
+    parse_market_index_tick_from_fids,
     parse_price_tick_from_fids,
     parse_quote_from_fids,
     realtime_code_for_exchange,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
-from gateway.kiwoom_runtime import KiwoomGatewayRuntime, KiwoomGatewayRuntimeConfig
+from gateway.kiwoom_runtime import (
+    KiwoomGatewayRuntime,
+    KiwoomGatewayRuntimeConfig,
+    wire_kiwoom_signals,
+)
+from services.market_index_service import get_latest_market_index_tick, process_market_index_event
 from storage.event_store import append_gateway_event
 from storage.sqlite import initialize_database
 
@@ -97,6 +108,32 @@ def test_kiwoom_gateway_core_io_isolation_options() -> None:
     assert args.disable_core_io is True
     assert args.disable_command_polling is True
     assert args.disable_event_posting is True
+
+
+def test_kiwoom_gateway_market_index_options_default_to_pilot_off(monkeypatch) -> None:
+    monkeypatch.delenv("KIWOOM_MARKET_INDEX_ENABLED", raising=False)
+    monkeypatch.delenv("KIWOOM_MARKET_INDEX_REALTIME_ENABLED", raising=False)
+    monkeypatch.delenv("KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED", raising=False)
+
+    args = parse_args([])
+
+    assert args.market_index_enabled is False
+    assert args.market_index_realtime_enabled is False
+    assert args.market_index_tr_bootstrap_enabled is False
+    assert args.market_index_codes == "KOSPI,KOSDAQ"
+    assert args.market_index_screen_no == "5700"
+
+
+def test_kiwoom_gateway_market_index_options_accept_env(monkeypatch) -> None:
+    monkeypatch.setenv("KIWOOM_MARKET_INDEX_ENABLED", "true")
+    monkeypatch.setenv("KIWOOM_MARKET_INDEX_REALTIME_ENABLED", "true")
+    monkeypatch.setenv("KIWOOM_MARKET_INDEX_CODES", "KOSPI")
+
+    args = parse_args([])
+
+    assert args.market_index_enabled is True
+    assert args.market_index_realtime_enabled is True
+    assert args.market_index_codes == "KOSPI"
 
 
 def test_kiwoom_gateway_app_drains_worker_commands_instead_of_sync_polling() -> None:
@@ -192,6 +229,37 @@ def test_quote_parser_preserves_bid_ask_without_price_tick_fields() -> None:
     assert payload["metadata"]["real_type"] == "주식우선호가"
 
 
+def test_market_index_parser_maps_realtime_fids_with_pilot_evidence() -> None:
+    payload = parse_market_index_tick_from_fids(
+        index_code="KOSPI",
+        index_name="KOSPI",
+        kiwoom_code="001",
+        real_type="업종지수",
+        raw_fids={
+            FID_CURRENT_PRICE: "2,812.34",
+            FID_CHANGE_VALUE: "-12.30",
+            FID_CHANGE_RATE: "-0.44",
+            FID_TRADE_TIME: "091502",
+        },
+    )
+
+    tick = BrokerMarketIndexTick.from_dict(payload)
+
+    assert tick.index_code == "KOSPI"
+    assert tick.price == 2812.34
+    assert tick.change_value == -12.30
+    assert payload["metadata"]["parser_status"] == "PILOT_UNVERIFIED_FID_MAP"
+    assert payload["metadata"]["parser_evidence"]["requires_koa_studio_confirmation"] is True
+    assert FID_CURRENT_PRICE in payload["metadata"]["raw_fids_present"]
+
+
+def test_market_index_code_normalizer_does_not_require_stock_code() -> None:
+    assert normalize_market_index_code("KOSPI") == "KOSPI"
+    assert normalize_market_index_code("001") == "KOSPI"
+    assert is_market_index_real_type("업종지수") is True
+    assert market_index_realtime_fid_string()
+
+
 def test_realtime_exchange_code_suffix_helpers() -> None:
     assert realtime_code_for_exchange("005930", "KRX") == "005930"
     assert realtime_code_for_exchange("A005930", "nxt") == "005930_NX"
@@ -251,6 +319,40 @@ def test_kiwoom_quote_real_data_emits_quote_without_price_tick() -> None:
     assert raw_callbacks == [("005930", "주식우선호가", False)]
     assert quotes[0]["code"] == "005930"
     assert quotes[0]["quote_only"] is True
+
+
+def test_kiwoom_market_index_real_data_emits_index_tick_not_price_tick() -> None:
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    raw_values = {
+        FID_CURRENT_PRICE: "2812.34",
+        FID_CHANGE_VALUE: "+5.12",
+        FID_CHANGE_RATE: "+0.18",
+        FID_TRADE_TIME: "091501",
+    }
+    client._market_index_real_raw = lambda code, fid: raw_values.get(fid, "")
+    price_ticks: list[dict[str, object]] = []
+    index_ticks: list[dict[str, object]] = []
+    raw_callbacks: list[tuple[str, str, bool]] = []
+    client.price_tick_received.connect(price_ticks.append)
+    client.market_index_tick_received.connect(index_ticks.append)
+    client.realtime_data_received.connect(
+        lambda code, real_type, present: raw_callbacks.append((code, real_type, present))
+    )
+
+    client._on_receive_real_data("001", "업종지수", "")
+
+    assert price_ticks == []
+    assert raw_callbacks == [("KOSPI", "업종지수", False)]
+    assert index_ticks[0]["index_code"] == "KOSPI"
+    assert index_ticks[0]["price"] == 2812.34
 
 
 def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
@@ -500,6 +602,83 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def test_runtime_does_not_register_market_index_when_feature_flag_off() -> None:
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            market_index_enabled=False,
+            market_index_realtime_enabled=True,
+            market_index_codes=("KOSPI", "KOSDAQ"),
+        ),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+
+    assert client.registered_market_index_codes == set()
+    assert runtime.heartbeat_payload()["market_index_registered_codes"] == []
+
+
+def test_runtime_registers_market_index_realtime_when_feature_flags_on() -> None:
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            market_index_enabled=True,
+            market_index_realtime_enabled=True,
+            market_index_codes=("KOSPI", "KOSDAQ"),
+            market_index_screen_no="5700",
+        ),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+    payload = runtime.heartbeat_payload()
+
+    assert client.registered_market_index_codes == {"KOSPI", "KOSDAQ"}
+    assert client.registered_market_index_kiwoom_codes == {"001", "101"}
+    assert payload["market_index_registered_codes"] == ["KOSDAQ", "KOSPI"]
+    assert payload["realtime_registration_requested_count"] == 0
+    assert payload["market_index_adapter_health"] == "REGISTERED_WAITING_CALLBACK"
+
+
+def test_mock_kiwoom_market_index_tick_flows_to_core_projection(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "mock_index_flow.sqlite3")
+
+    class ProjectingCoreClient:
+        def post_event(self, event: GatewayEvent) -> dict[str, object]:
+            result = append_gateway_event(connection, event)
+            if result.status == "ACCEPTED" and not result.duplicate:
+                process_market_index_event(connection, event)
+            return {"accepted": result.accepted, "event_id": event.event_id}
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=ProjectingCoreClient(),
+        config=KiwoomGatewayRuntimeConfig(command_polling_enabled=False),
+    )
+    wire_kiwoom_signals(client, runtime)
+
+    client.emit_market_index_tick(index_code="KOSPI", price=2810.5, change_rate=0.2)
+    client.emit_market_index_tick(index_code="KOSDAQ", price=860.25, change_rate=-0.1)
+    runtime.flush_events()
+
+    kospi = get_latest_market_index_tick(connection, "KOSPI")
+    kosdaq = get_latest_market_index_tick(connection, "KOSDAQ")
+    stock_latest_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_ticks_latest"
+    ).fetchone()["count"]
+
+    assert kospi is not None
+    assert kospi["price"] == 2810.5
+    assert kosdaq is not None
+    assert kosdaq["price"] == 860.25
+    assert stock_latest_count == 0
+    assert runtime.heartbeat_payload()["parsed_market_index_tick_count"] == 2
 
 
 def test_runtime_heartbeat_skips_connect_state_fallback_for_event_loop_client() -> None:
@@ -1189,6 +1368,47 @@ def test_kiwoom_price_tick_parse_error_keeps_raw_callback_counter_separate() -> 
     assert payload["parsed_price_tick_count"] == 0
     assert payload["realtime_parse_error_count"] == 1
     assert payload["realtime_subscription_health"] == "PARSE_ERROR"
+
+
+def test_kiwoom_market_index_parse_error_is_separate_from_price_tick_errors() -> None:
+    from gateway.kiwoom_client import KiwoomClient
+
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    client._market_index_real_raw = lambda code, fid: ""
+    runtime = KiwoomGatewayRuntime(client=MockKiwoomClient(), core_client=object())
+    client.active_x_thread_audit.connect(
+        lambda payload: runtime.on_active_x_thread_audit(dict(payload))
+    )
+    client.realtime_data_received.connect(
+        lambda code, real_type, present: runtime.on_realtime_data(
+            code=str(code),
+            real_type=str(real_type),
+            real_data_present=bool(present),
+        )
+    )
+    client.realtime_parse_error.connect(
+        lambda payload: runtime.on_realtime_parse_error(dict(payload))
+    )
+
+    client._on_receive_real_data("001", "업종지수", "")
+    payload = runtime.heartbeat_payload()
+
+    assert payload["raw_callback_counts"]["OnReceiveRealData"] == 1
+    assert payload["raw_realtime_callback_count"] == 1
+    assert payload["parsed_price_tick_count"] == 0
+    assert payload["realtime_parse_error_count"] == 0
+    assert payload["market_index_callback_count"] == 1
+    assert payload["market_index_parse_error_count"] == 1
+    assert payload["latest_market_index_parse_error"]["reason"] == "INDEX_PARSE_ERROR"
+    assert payload["realtime_subscription_health"] == "NOT_REQUESTED"
 
 
 def test_runtime_records_realtime_registration_result_in_heartbeat() -> None:

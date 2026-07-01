@@ -9,11 +9,16 @@ from enum import StrEnum
 from typing import Any
 
 from domain.broker.market import BrokerPriceTick
+from domain.broker.market_index import (
+    DEFAULT_ALLOWED_INDEX_CODES,
+    BrokerMarketIndexTick,
+)
 from domain.broker.utils import datetime_to_wire, utc_now, validate_stock_code
 
 # Adapted from suseok_ai Kiwoom gateway assets; legacy strategy/runtime code intentionally excluded.
 
 FID_CURRENT_PRICE = 10
+FID_CHANGE_VALUE = 11
 FID_CHANGE_RATE = 12
 FID_ACC_VOLUME = 13
 FID_ACC_TRADE_VALUE = 14
@@ -41,6 +46,22 @@ REALTIME_STOCK_FIDS = [
 
 PRICE_TICK_REAL_TYPES = frozenset({"주식체결", "주식시세"})
 QUOTE_REAL_TYPES = frozenset({"주식우선호가"})
+MARKET_INDEX_REAL_TYPES = frozenset({"업종지수"})
+MARKET_INDEX_KIWOOM_CODE_BY_INDEX = {
+    "KOSPI": "001",
+    "KOSDAQ": "101",
+}
+MARKET_INDEX_NAME_BY_CODE = {
+    "KOSPI": "KOSPI",
+    "KOSDAQ": "KOSDAQ",
+}
+MARKET_INDEX_REALTIME_FIDS = (
+    FID_CURRENT_PRICE,
+    FID_CHANGE_VALUE,
+    FID_CHANGE_RATE,
+    FID_TRADE_TIME,
+)
+MARKET_INDEX_PARSER_STATUS = "PILOT_UNVERIFIED_FID_MAP"
 REALTIME_EXCHANGE_SUFFIXES = {
     "KRX": "",
     "NXT": "_NX",
@@ -311,6 +332,7 @@ class KiwoomClient:
         self.price_received = Signal()
         self.price_tick_received = Signal()
         self.quote_received = Signal()
+        self.market_index_tick_received = Signal()
         self.realtime_data_received = Signal()
         self.realtime_parse_error = Signal()
         self.realtime_registration_result = Signal()
@@ -334,6 +356,8 @@ class KiwoomClient:
         self._condition_event_loop: Any | None = None
         self._condition_callback_result: tuple[bool, str] | None = None
         self.chejan_parser = KiwoomChejanParser()
+        self._market_index_realtime_codes: dict[str, str] = {}
+        self._market_index_realtime_screen_codes: dict[str, set[str]] = {}
 
         self.ocx = self._create_ocx_widget(QAxWidget)
 
@@ -481,6 +505,103 @@ class KiwoomClient:
                 )
             screen_codes.update(chunk)
 
+    def register_market_index_realtime(
+        self,
+        codes: Iterable[str],
+        *,
+        screen_no: str = "5700",
+    ) -> None:
+        index_codes = _ordered_unique_market_index_codes(codes)
+        if not index_codes:
+            return
+        kiwoom_codes = [kiwoom_market_index_code(code) for code in index_codes]
+        screen_map = self._market_index_screen_code_map()
+        screen_codes = screen_map.setdefault(str(screen_no), set())
+        opt_type = "1" if screen_codes else "0"
+        fid_string = market_index_realtime_fid_string()
+        self._record_thread_audit(
+            "SetRealReg",
+            phase="CALL",
+            registration_type="market_index",
+            screen_no=str(screen_no),
+            code_count=len(kiwoom_codes),
+            index_codes=list(index_codes),
+            kiwoom_codes=list(kiwoom_codes),
+            fid_count=len(MARKET_INDEX_REALTIME_FIDS),
+            parser_status=MARKET_INDEX_PARSER_STATUS,
+            opt_type=opt_type,
+        )
+        result = self.ocx.dynamicCall(
+            "SetRealReg(QString, QString, QString, QString)",
+            str(screen_no),
+            ";".join(kiwoom_codes),
+            fid_string,
+            opt_type,
+        )
+        result_code = int(result or 0)
+        success = result_code >= 0
+        self._record_thread_audit(
+            "SetRealReg",
+            phase="RESULT",
+            registration_type="market_index",
+            screen_no=str(screen_no),
+            index_codes=list(index_codes),
+            kiwoom_codes=list(kiwoom_codes),
+            result_code=result_code,
+            success=success,
+            parser_status=MARKET_INDEX_PARSER_STATUS,
+        )
+        self.realtime_registration_result.emit(
+            {
+                "registration_type": "market_index",
+                "screen_no": str(screen_no),
+                "codes": list(index_codes),
+                "index_codes": list(index_codes),
+                "kiwoom_codes": list(kiwoom_codes),
+                "index_code_by_kiwoom_code": {
+                    kiwoom_code: index_code
+                    for index_code, kiwoom_code in zip(index_codes, kiwoom_codes)
+                },
+                "fid_string": fid_string,
+                "fid_count": len(MARKET_INDEX_REALTIME_FIDS),
+                "opt_type": opt_type,
+                "result_code": result_code,
+                "success": success,
+                "parser_status": MARKET_INDEX_PARSER_STATUS,
+                "parser_evidence": market_index_parser_evidence(),
+            }
+        )
+        if result_code < 0:
+            raise RuntimeError(
+                f"지수 실시간 등록 실패: {ERROR_MESSAGES.get(result_code, str(result_code))}"
+            )
+        screen_codes.update(kiwoom_codes)
+        for index_code, kiwoom_code in zip(index_codes, kiwoom_codes):
+            self._market_index_realtime_codes[kiwoom_code] = index_code
+
+    def remove_market_index_realtime(
+        self,
+        codes: Iterable[str],
+        *,
+        screen_no: str | None = None,
+    ) -> None:
+        target_screen = screen_no or "ALL"
+        screen_map = self._market_index_screen_code_map()
+        for raw_code in codes:
+            index_code = normalize_market_index_code(raw_code)
+            kiwoom_code = kiwoom_market_index_code(index_code)
+            self.ocx.dynamicCall("SetRealRemove(QString, QString)", target_screen, kiwoom_code)
+            self._market_index_realtime_codes.pop(kiwoom_code, None)
+            if target_screen == "ALL":
+                for screen_codes in screen_map.values():
+                    screen_codes.discard(kiwoom_code)
+            else:
+                screen_codes = screen_map.get(target_screen)
+                if screen_codes is not None:
+                    screen_codes.discard(kiwoom_code)
+                    if not screen_codes:
+                        screen_map.pop(target_screen, None)
+
     def remove_realtime(self, codes: Iterable[str], screen_no: str | None = None) -> None:
         target_screen = screen_no or "ALL"
         screen_map = self._realtime_screen_code_map()
@@ -500,6 +621,8 @@ class KiwoomClient:
     def remove_all_realtime(self) -> None:
         self.ocx.dynamicCall("SetRealRemove(QString, QString)", "ALL", "ALL")
         self._realtime_screen_code_map().clear()
+        self._market_index_screen_code_map().clear()
+        self._market_index_realtime_codes.clear()
 
     def load_conditions(self, timeout_ms: int | None = None) -> int:
         from PyQt5.QtCore import QTimer
@@ -783,14 +906,89 @@ class KiwoomClient:
     def _on_receive_real_data(self, code: str, real_type: str, real_data: str) -> None:
         raw_code = str(code or "")
         real_type_text = str(real_type or "").strip()
+        market_index_code = self._market_index_code_for_callback(raw_code, real_type_text)
+        is_market_index_callback = bool(market_index_code) or is_market_index_real_type(
+            real_type_text
+        )
+        if is_market_index_callback:
+            audit_code = market_index_code or str(raw_code or "").strip()
+        else:
+            audit_code = normalize_code(raw_code)
         self._record_thread_audit(
             "OnReceiveRealData",
             phase="CALLBACK",
-            code=normalize_code(raw_code),
+            code=audit_code,
             kiwoom_code=raw_code,
             real_type=real_type_text,
             real_data_present=bool(str(real_data or "")),
+            callback_asset_type="market_index" if is_market_index_callback else "stock",
         )
+        if is_market_index_callback:
+            if not market_index_code:
+                self.realtime_data_received.emit(
+                    str(raw_code or "").strip(),
+                    real_type_text,
+                    bool(str(real_data or "")),
+                )
+                self.realtime_parse_error.emit(
+                    {
+                        "reason": "INDEX_PARSE_ERROR",
+                        "reason_codes": ["INDEX_PARSE_ERROR", "INDEX_CODE_UNMAPPED"],
+                        "asset_type": "market_index",
+                        "market_index": True,
+                        "index_code": "",
+                        "code": str(raw_code or "").strip(),
+                        "kiwoom_code": raw_code,
+                        "real_type": real_type_text,
+                        "error": "INDEX_CODE_UNMAPPED",
+                        "parser_status": "ERROR",
+                        "parser_evidence": market_index_parser_evidence(),
+                        "raw_fids_present": [],
+                    }
+                )
+                return
+            self.realtime_data_received.emit(
+                market_index_code,
+                real_type_text,
+                bool(str(real_data or "")),
+            )
+            raw_values = {
+                fid: self._market_index_real_raw(raw_code, fid)
+                for fid in MARKET_INDEX_REALTIME_FIDS
+            }
+            try:
+                payload = parse_market_index_tick_from_fids(
+                    index_code=market_index_code,
+                    index_name=market_index_name(market_index_code),
+                    kiwoom_code=raw_code,
+                    raw_fids=raw_values,
+                    real_type=real_type_text,
+                    real_data=str(real_data or ""),
+                )
+            except Exception as exc:
+                self.realtime_parse_error.emit(
+                    {
+                        "reason": "INDEX_PARSE_ERROR",
+                        "reason_codes": ["INDEX_PARSE_ERROR"],
+                        "asset_type": "market_index",
+                        "market_index": True,
+                        "index_code": market_index_code,
+                        "code": market_index_code,
+                        "kiwoom_code": raw_code,
+                        "real_type": real_type_text,
+                        "error": str(exc),
+                        "parser_status": "ERROR",
+                        "parser_evidence": market_index_parser_evidence(),
+                        "raw_fids_present": sorted(
+                            fid
+                            for fid, value in raw_values.items()
+                            if str(value or "").strip()
+                        ),
+                    }
+                )
+                return
+            self.market_index_tick_received.emit(payload)
+            return
         parsed_code = parse_kiwoom_realtime_code(code)
         normalized_code = parsed_code.base_code
         self.realtime_data_received.emit(
@@ -874,6 +1072,25 @@ class KiwoomClient:
             or ""
         ).strip()
 
+    def _market_index_real_raw(self, code: str, fid: int) -> str:
+        return str(
+            self.ocx.dynamicCall(
+                "GetCommRealData(QString, int)",
+                str(code or "").strip(),
+                int(fid),
+            )
+            or ""
+        ).strip()
+
+    def _market_index_code_for_callback(self, raw_code: str, real_type: str) -> str:
+        kiwoom_code = str(raw_code or "").strip()
+        registered = getattr(self, "_market_index_realtime_codes", {})
+        if isinstance(registered, dict) and kiwoom_code in registered:
+            return str(registered[kiwoom_code])
+        if is_market_index_real_type(real_type):
+            return market_index_code_from_kiwoom_code(kiwoom_code)
+        return ""
+
     def _chejan(self, fid: int) -> str:
         return str(self.ocx.dynamicCall("GetChejanData(int)", int(fid)) or "").strip()
 
@@ -944,6 +1161,13 @@ class KiwoomClient:
             self._realtime_screen_codes = screen_map
         return screen_map
 
+    def _market_index_screen_code_map(self) -> dict[str, set[str]]:
+        screen_map = getattr(self, "_market_index_realtime_screen_codes", None)
+        if not isinstance(screen_map, dict):
+            screen_map = {}
+            self._market_index_realtime_screen_codes = screen_map
+        return screen_map
+
     def _create_ocx_widget(self, qax_widget_type: Any) -> Any:
         control_names = ("KHOPENAPI.KHOpenAPICtrl.1", "KHOpenAPI.KHOpenAPICtrl.1")
         last_widget = None
@@ -1004,6 +1228,7 @@ class MockKiwoomClient:
         self.price_received = Signal()
         self.price_tick_received = Signal()
         self.quote_received = Signal()
+        self.market_index_tick_received = Signal()
         self.realtime_data_received = Signal()
         self.realtime_parse_error = Signal()
         self.realtime_registration_result = Signal()
@@ -1020,14 +1245,23 @@ class MockKiwoomClient:
         self.tr_data_received = Signal()
         self.condition_load_state = ConditionLoadState.IDLE
         self.registered_codes: set[str] = set()
+        self.registered_market_index_codes: set[str] = set()
+        self.registered_market_index_kiwoom_codes: set[str] = set()
         self.removed_codes: list[str] = []
+        self.removed_market_index_codes: list[str] = []
         self.orders: list[KiwoomOrderRequest] = []
         self.send_condition_calls: list[dict[str, Any]] = []
         self.stop_condition_calls: list[dict[str, Any]] = []
         self._conditions: list[ConditionInfo] = []
         self._tr_inputs: dict[str, str] = {}
         self._tr_rows: list[dict[str, str]] = []
-        self._names = {"005930": "삼성전자", "000660": "SK하이닉스", "035420": "NAVER"}
+        self._names = {
+            "005930": "삼성전자",
+            "000660": "SK하이닉스",
+            "035420": "NAVER",
+            "KOSPI": "KOSPI",
+            "KOSDAQ": "KOSDAQ",
+        }
         self.server_gubun = "1"
         self._pending_thread_audit_events: list[dict[str, Any]] = []
 
@@ -1081,6 +1315,52 @@ class MockKiwoomClient:
                 }
             )
 
+    def register_market_index_realtime(
+        self,
+        codes: Iterable[str],
+        *,
+        screen_no: str = "5700",
+    ) -> None:
+        index_codes = _ordered_unique_market_index_codes(codes)
+        kiwoom_codes = [kiwoom_market_index_code(code) for code in index_codes]
+        self.registered_market_index_codes.update(index_codes)
+        self.registered_market_index_kiwoom_codes.update(kiwoom_codes)
+        if kiwoom_codes:
+            self.realtime_registration_result.emit(
+                {
+                    "registration_type": "market_index",
+                    "screen_no": str(screen_no),
+                    "codes": list(index_codes),
+                    "index_codes": list(index_codes),
+                    "kiwoom_codes": kiwoom_codes,
+                    "index_code_by_kiwoom_code": {
+                        kiwoom_code: index_code
+                        for index_code, kiwoom_code in zip(index_codes, kiwoom_codes)
+                    },
+                    "fid_string": market_index_realtime_fid_string(),
+                    "fid_count": len(MARKET_INDEX_REALTIME_FIDS),
+                    "opt_type": "0",
+                    "result_code": 0,
+                    "success": True,
+                    "parser_status": MARKET_INDEX_PARSER_STATUS,
+                    "parser_evidence": market_index_parser_evidence(),
+                }
+            )
+
+    def remove_market_index_realtime(
+        self,
+        codes: Iterable[str],
+        *,
+        screen_no: str | None = None,
+    ) -> None:
+        del screen_no
+        for code in codes:
+            normalized = normalize_market_index_code(code)
+            kiwoom_code = kiwoom_market_index_code(normalized)
+            self.registered_market_index_codes.discard(normalized)
+            self.registered_market_index_kiwoom_codes.discard(kiwoom_code)
+            self.removed_market_index_codes.append(normalized)
+
     def remove_realtime(self, codes: Iterable[str], screen_no: str | None = None) -> None:
         for code in codes:
             normalized = normalize_code(code)
@@ -1089,6 +1369,8 @@ class MockKiwoomClient:
 
     def remove_all_realtime(self) -> None:
         self.registered_codes.clear()
+        self.registered_market_index_codes.clear()
+        self.registered_market_index_kiwoom_codes.clear()
 
     def drain_thread_audit_events(self) -> list[dict[str, Any]]:
         events = list(self._pending_thread_audit_events)
@@ -1185,6 +1467,34 @@ class MockKiwoomClient:
         self.order_result.emit(result)
         return result
 
+    def emit_market_index_tick(
+        self,
+        *,
+        index_code: str = "KOSPI",
+        price: float = 2800.0,
+        change_rate: float = 0.0,
+        change_value: float = 0.0,
+        trade_time: datetime | None = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = normalize_market_index_code(index_code)
+        payload = BrokerMarketIndexTick(
+            index_code=normalized,
+            index_name=market_index_name(normalized),
+            price=float(price),
+            change_rate=float(change_rate),
+            change_value=float(change_value),
+            trade_time=trade_time or utc_now(),
+            metadata={
+                "source": "MOCK_KIWOOM_MARKET_INDEX",
+                "parser_status": "MOCK",
+                **dict(metadata or {}),
+            },
+        ).to_dict()
+        self.realtime_data_received.emit(normalized, "MOCK_MARKET_INDEX", True)
+        self.market_index_tick_received.emit(payload)
+        return payload
+
 
 def normalize_code(value: object) -> str:
     text = str(value or "").strip().upper()
@@ -1194,6 +1504,54 @@ def normalize_code(value: object) -> str:
     if digits:
         return digits[-6:].zfill(6)
     return validate_stock_code(text)
+
+
+def normalize_market_index_code(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if text in MARKET_INDEX_KIWOOM_CODE_BY_INDEX.values():
+        return market_index_code_from_kiwoom_code(text)
+    allowed = {code.upper() for code in DEFAULT_ALLOWED_INDEX_CODES}
+    if text not in allowed:
+        allowed_text = ", ".join(sorted(allowed))
+        raise ValueError(f"index_code must be one of: {allowed_text}")
+    return text
+
+
+def _ordered_unique_market_index_codes(codes: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if not str(code or "").strip():
+            continue
+        normalized = normalize_market_index_code(code)
+        if normalized not in MARKET_INDEX_KIWOOM_CODE_BY_INDEX:
+            raise ValueError(f"Kiwoom market index code mapping is not configured: {normalized}")
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def market_index_code_from_kiwoom_code(value: object) -> str:
+    text = str(value or "").strip()
+    reverse = {
+        kiwoom_code: index_code
+        for index_code, kiwoom_code in MARKET_INDEX_KIWOOM_CODE_BY_INDEX.items()
+    }
+    return reverse.get(text, "")
+
+
+def kiwoom_market_index_code(index_code: object) -> str:
+    normalized = normalize_market_index_code(index_code)
+    kiwoom_code = MARKET_INDEX_KIWOOM_CODE_BY_INDEX.get(normalized)
+    if not kiwoom_code:
+        raise ValueError(f"Kiwoom market index code mapping is not configured: {normalized}")
+    return kiwoom_code
+
+
+def market_index_name(index_code: object) -> str:
+    normalized = normalize_market_index_code(index_code)
+    return MARKET_INDEX_NAME_BY_CODE.get(normalized, normalized)
 
 
 def normalize_realtime_exchange(value: object) -> str:
@@ -1263,12 +1621,36 @@ def realtime_stock_fid_string() -> str:
     return ";".join(str(fid) for fid in REALTIME_STOCK_FIDS)
 
 
+def market_index_realtime_fid_string() -> str:
+    return ";".join(str(fid) for fid in MARKET_INDEX_REALTIME_FIDS)
+
+
+def market_index_parser_evidence() -> dict[str, Any]:
+    return {
+        "mapping_status": "UNVERIFIED_PILOT",
+        "requires_koa_studio_confirmation": True,
+        "source": "adapter_pilot_candidate_fids",
+        "index_code_map": dict(MARKET_INDEX_KIWOOM_CODE_BY_INDEX),
+        "field_fids": {
+            "price": FID_CURRENT_PRICE,
+            "change_value": FID_CHANGE_VALUE,
+            "change_rate": FID_CHANGE_RATE,
+            "trade_time": FID_TRADE_TIME,
+        },
+        "real_types": sorted(MARKET_INDEX_REAL_TYPES),
+    }
+
+
 def is_price_tick_real_type(real_type: str) -> bool:
     return str(real_type or "").strip() in PRICE_TICK_REAL_TYPES
 
 
 def is_quote_real_type(real_type: str) -> bool:
     return str(real_type or "").strip() in QUOTE_REAL_TYPES
+
+
+def is_market_index_real_type(real_type: str) -> bool:
+    return str(real_type or "").strip() in MARKET_INDEX_REAL_TYPES
 
 
 def parse_quote_from_fids(
@@ -1319,6 +1701,70 @@ def parse_quote_from_fids(
         "quote_only": True,
         "not_price_tick": True,
     }
+
+
+def parse_market_index_tick_from_fids(
+    *,
+    index_code: str,
+    index_name: str = "",
+    kiwoom_code: str = "",
+    raw_fids: Mapping[int | str, Any],
+    real_type: str = "",
+    real_data: str = "",
+) -> dict[str, Any]:
+    normalized_index_code = normalize_market_index_code(index_code)
+    raw_values = {int(fid): str(value or "").strip() for fid, value in dict(raw_fids).items()}
+    reason_codes: list[str] = []
+    parse_fallback = False
+
+    price, ok = _parse_real_float(raw_values.get(FID_CURRENT_PRICE), abs_value=True)
+    parse_fallback = parse_fallback or not ok
+    change_value, ok = _parse_real_float(raw_values.get(FID_CHANGE_VALUE), abs_value=False)
+    parse_fallback = parse_fallback or not ok
+    change_rate, ok = _parse_real_float(raw_values.get(FID_CHANGE_RATE), abs_value=False)
+    parse_fallback = parse_fallback or not ok
+
+    if price <= 0:
+        reason_codes.append("INDEX_PRICE_MISSING")
+    if FID_CHANGE_VALUE not in raw_values or not _has_real_value(raw_values.get(FID_CHANGE_VALUE)):
+        reason_codes.append("INDEX_CHANGE_VALUE_MISSING")
+    if FID_CHANGE_RATE not in raw_values or not _has_real_value(raw_values.get(FID_CHANGE_RATE)):
+        reason_codes.append("INDEX_CHANGE_RATE_MISSING")
+    if parse_fallback:
+        reason_codes.append("INDEX_REAL_PARSE_FALLBACK")
+
+    trade_time_raw = raw_values.get(FID_TRADE_TIME, "")
+    if not _has_real_value(trade_time_raw):
+        reason_codes.append("INDEX_TRADE_TIME_MISSING")
+
+    metadata: dict[str, Any] = {
+        "source": "KIWOOM_REALTIME_MARKET_INDEX",
+        "real_type": str(real_type or ""),
+        "kiwoom_code": str(kiwoom_code or "").strip(),
+        "trade_time": str(trade_time_raw or "").strip(),
+        "raw_fids_present": [
+            fid for fid, value in sorted(raw_values.items()) if _has_real_value(value)
+        ],
+        "reason_codes": sorted(set(reason_codes)),
+        "parser_status": MARKET_INDEX_PARSER_STATUS,
+        "parser_evidence": market_index_parser_evidence(),
+    }
+    if real_data:
+        metadata["real_data_present"] = True
+
+    if price <= 0:
+        raise ValueError("INDEX_PRICE_MISSING")
+
+    tick = BrokerMarketIndexTick(
+        index_code=normalized_index_code,
+        index_name=str(index_name or "").strip() or market_index_name(normalized_index_code),
+        price=price,
+        change_rate=change_rate,
+        change_value=change_value,
+        trade_time=parse_kiwoom_trade_time(trade_time_raw),
+        metadata=metadata,
+    )
+    return tick.to_dict()
 
 
 def parse_price_tick_from_fids(

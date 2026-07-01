@@ -106,6 +106,34 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=float,
         default=float(os.environ.get("KIWOOM_REALTIME_RECOVER_INTERVAL_SEC", "300")),
     )
+    parser.add_argument(
+        "--market-index-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("KIWOOM_MARKET_INDEX_ENABLED", False),
+    )
+    parser.add_argument(
+        "--market-index-realtime-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("KIWOOM_MARKET_INDEX_REALTIME_ENABLED", False),
+    )
+    parser.add_argument(
+        "--market-index-tr-bootstrap-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED", False),
+    )
+    parser.add_argument(
+        "--market-index-codes",
+        default=os.environ.get("KIWOOM_MARKET_INDEX_CODES", "KOSPI,KOSDAQ"),
+    )
+    parser.add_argument(
+        "--market-index-screen-no",
+        default=os.environ.get("KIWOOM_MARKET_INDEX_SCREEN_NO", "5700"),
+    )
+    parser.add_argument(
+        "--market-index-poll-sec",
+        type=float,
+        default=float(os.environ.get("KIWOOM_MARKET_INDEX_POLL_SEC", "60.0")),
+    )
     parser.add_argument("--observe-only", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--auto-login", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
@@ -215,6 +243,12 @@ def run_gateway(args: argparse.Namespace) -> int:
             realtime_exchange=str(args.realtime_exchange or "krx").upper(),
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
             realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
+            market_index_enabled=bool(args.market_index_enabled),
+            market_index_realtime_enabled=bool(args.market_index_realtime_enabled),
+            market_index_tr_bootstrap_enabled=bool(args.market_index_tr_bootstrap_enabled),
+            market_index_codes=tuple(_parse_codes(args.market_index_codes)),
+            market_index_screen_no=str(args.market_index_screen_no or "5700"),
+            market_index_poll_sec=max(float(args.market_index_poll_sec), 1.0),
             observe_only=bool(args.observe_only),
             core_io_enabled=core_io_enabled,
             command_polling_enabled=command_polling_enabled,
@@ -357,6 +391,13 @@ def _optional_int_env(name: str) -> int | None:
     if raw is None or not raw.strip():
         return None
     return int(raw)
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "t", "yes", "y", "on"}
 
 
 def _python_bitness() -> int:

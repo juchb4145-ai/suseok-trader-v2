@@ -68,6 +68,47 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         "risk",
         "ai_sidecar",
     }.issubset(snapshot["pipeline_summary"])
+    assert snapshot["market_indexes"]["status"]["enabled"] is True
+    assert snapshot["market_indexes"]["gateway_adapter"]["enabled"] is False
+    assert snapshot["market_indexes"]["gateway_adapter"]["health"] == "DISABLED"
+
+
+def test_dashboard_snapshot_separates_market_index_projection_and_gateway_adapter(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "dashboard-index-adapter.sqlite3")
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={
+                "status": "ok",
+                "market_index_enabled": True,
+                "market_index_realtime_enabled": True,
+                "market_index_registered_codes": ["KOSPI", "KOSDAQ"],
+                "market_index_callback_count": 1,
+                "parsed_market_index_tick_count": 0,
+                "market_index_parse_error_count": 1,
+                "latest_market_index_parse_error": {"reason": "INDEX_PARSE_ERROR"},
+                "market_index_adapter_health": "PARSE_ERROR",
+            },
+        ),
+    )
+
+    snapshot = build_dashboard_snapshot(connection, Settings())
+
+    connection.close()
+    assert snapshot["market_indexes"]["status"]["projection_error_count"] == 0
+    assert snapshot["market_indexes"]["gateway_adapter"]["enabled"] is True
+    assert snapshot["market_indexes"]["gateway_adapter"]["registered_codes"] == [
+        "KOSPI",
+        "KOSDAQ",
+    ]
+    assert snapshot["market_indexes"]["gateway_adapter"]["parse_error_count"] == 1
+    assert snapshot["market_indexes"]["gateway_adapter"]["latest_parse_error"]["reason"] == (
+        "INDEX_PARSE_ERROR"
+    )
 
 
 def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) -> None:

@@ -188,6 +188,36 @@ def get_gateway_status() -> dict[str, Any]:
         "realtime_registration_success_count": _json_value(
             status_values.get("realtime_registration_success_count")
         ),
+        "market_index_enabled": _json_value(status_values.get("market_index_enabled")),
+        "market_index_realtime_enabled": _json_value(
+            status_values.get("market_index_realtime_enabled")
+        ),
+        "market_index_tr_bootstrap_enabled": _json_value(
+            status_values.get("market_index_tr_bootstrap_enabled")
+        ),
+        "market_index_codes": _json_value(status_values.get("market_index_codes")),
+        "market_index_screen_no": status_values.get("market_index_screen_no"),
+        "market_index_poll_sec": _json_value(status_values.get("market_index_poll_sec")),
+        "market_index_registered_codes": _json_value(
+            status_values.get("market_index_registered_codes")
+        ),
+        "market_index_callback_count": _json_value(
+            status_values.get("market_index_callback_count")
+        ),
+        "parsed_market_index_tick_count": _json_value(
+            status_values.get("parsed_market_index_tick_count")
+        ),
+        "market_index_parse_error_count": _json_value(
+            status_values.get("market_index_parse_error_count")
+        ),
+        "latest_market_index_tick_at": status_values.get("latest_market_index_tick_at"),
+        "latest_market_index_parse_error": _json_value(
+            status_values.get("latest_market_index_parse_error")
+        ),
+        "latest_market_index_registration_result": _json_value(
+            status_values.get("latest_market_index_registration_result")
+        ),
+        "market_index_adapter_health": status_values.get("market_index_adapter_health"),
         "latest_realtime_registration_at": status_values.get(
             "latest_realtime_registration_at"
         ),

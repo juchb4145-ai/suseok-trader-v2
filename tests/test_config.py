@@ -4,6 +4,7 @@ from services.config import TradingMode, TradingProfile, load_settings
 
 def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     settings = load_settings({})
+    gateway_settings = load_gateway_settings({})
 
     assert settings.trading_profile is TradingProfile.OBSERVE
     assert settings.trading_mode is TradingMode.OBSERVE
@@ -59,6 +60,12 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
+    assert gateway_settings.kiwoom_market_index_enabled is False
+    assert gateway_settings.kiwoom_market_index_realtime_enabled is False
+    assert gateway_settings.kiwoom_market_index_tr_bootstrap_enabled is False
+    assert gateway_settings.kiwoom_market_index_codes == ("KOSPI", "KOSDAQ")
+    assert gateway_settings.kiwoom_market_index_screen_no == "5700"
+    assert gateway_settings.kiwoom_market_index_poll_sec == 60.0
     assert settings.realtime_subscription_enabled is True
     assert settings.realtime_subscription_queue_commands is False
     assert settings.realtime_subscription_max_total == 50

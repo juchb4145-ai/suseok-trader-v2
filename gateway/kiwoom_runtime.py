@@ -33,7 +33,9 @@ from gateway.kiwoom_client import (
     KiwoomOrderResult,
     broker_env_from_server_gubun,
     condition_event_payload,
+    is_market_index_real_type,
     normalize_code,
+    normalize_market_index_code,
     normalize_realtime_exchange,
     realtime_code_for_exchange,
 )
@@ -58,6 +60,12 @@ class KiwoomGatewayRuntimeConfig:
     realtime_recover_stale_sec: float = 45.0
     realtime_recover_interval_sec: float = 300.0
     realtime_callback_timeout_sec: float = 15.0
+    market_index_enabled: bool = False
+    market_index_realtime_enabled: bool = False
+    market_index_tr_bootstrap_enabled: bool = False
+    market_index_codes: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+    market_index_screen_no: str = "5700"
+    market_index_poll_sec: float = 60.0
     condition_load_timeout_sec: float = 10.0
     condition_load_max_retry: int = 1
     core_io_enabled: bool = True
@@ -242,6 +250,13 @@ class KiwoomGatewayRuntime:
         self._realtime_registration_requested_count = 0
         self._realtime_registration_success_count = 0
         self._realtime_registration_dedupe_count = 0
+        self._market_index_registered_codes: set[str] = set()
+        self._market_index_callback_count = 0
+        self._parsed_market_index_tick_count = 0
+        self._market_index_parse_error_count = 0
+        self._latest_market_index_tick_at: datetime | None = None
+        self._latest_market_index_parse_error: dict[str, Any] = {}
+        self._latest_market_index_registration_result: dict[str, Any] = {}
         self._raw_callback_counts: dict[str, int] = {}
         self._latest_callback_at_by_method: dict[str, str] = {}
         self._active_x_thread_audit: deque[dict[str, Any]] = deque(maxlen=50)
@@ -499,6 +514,28 @@ class KiwoomGatewayRuntime:
             "realtime_registration_requested_count": (self._realtime_registration_requested_count),
             "realtime_registration_success_count": self._realtime_registration_success_count,
             "realtime_registration_dedupe_count": self._realtime_registration_dedupe_count,
+            "market_index_enabled": bool(self.config.market_index_enabled),
+            "market_index_realtime_enabled": bool(self.config.market_index_realtime_enabled),
+            "market_index_tr_bootstrap_enabled": bool(
+                self.config.market_index_tr_bootstrap_enabled
+            ),
+            "market_index_codes": [
+                normalize_market_index_code(code) for code in self.config.market_index_codes
+            ],
+            "market_index_screen_no": str(self.config.market_index_screen_no or "5700"),
+            "market_index_poll_sec": float(self.config.market_index_poll_sec),
+            "market_index_registered_codes": sorted(self._market_index_registered_codes),
+            "market_index_callback_count": self._market_index_callback_count,
+            "parsed_market_index_tick_count": self._parsed_market_index_tick_count,
+            "market_index_parse_error_count": self._market_index_parse_error_count,
+            "latest_market_index_tick_at": _datetime_or_empty(
+                self._latest_market_index_tick_at
+            ),
+            "latest_market_index_parse_error": dict(self._latest_market_index_parse_error),
+            "latest_market_index_registration_result": dict(
+                self._latest_market_index_registration_result
+            ),
+            "market_index_adapter_health": self._market_index_adapter_health(),
             "realtime_subscription_health": self._realtime_subscription_health(),
             "realtime_recover_count": self._realtime_recover_count,
             "realtime_recover_error": self._realtime_recover_error,
@@ -542,6 +579,13 @@ class KiwoomGatewayRuntime:
             "raw_realtime_callback_count": payload["raw_realtime_callback_count"],
             "parsed_price_tick_count": payload["parsed_price_tick_count"],
             "realtime_parse_error_count": payload["realtime_parse_error_count"],
+            "market_index_enabled": payload["market_index_enabled"],
+            "market_index_registered_codes": payload["market_index_registered_codes"],
+            "market_index_callback_count": payload["market_index_callback_count"],
+            "parsed_market_index_tick_count": payload["parsed_market_index_tick_count"],
+            "market_index_parse_error_count": payload["market_index_parse_error_count"],
+            "latest_market_index_tick_at": payload["latest_market_index_tick_at"],
+            "latest_market_index_parse_error": payload["latest_market_index_parse_error"],
             "latest_condition_ver_callback_at": payload["latest_condition_ver_callback_at"],
             "latest_realtime_callback_at": payload["latest_realtime_callback_at"],
             "latest_price_tick_at": payload["latest_price_tick_at"],
@@ -588,6 +632,7 @@ class KiwoomGatewayRuntime:
         self.emit("orderability", self.heartbeat_payload())
         if ok:
             self._register_initial_realtime()
+            self._register_initial_market_index_realtime()
             self._load_conditions()
             self._emit_market_symbols()
 
@@ -698,6 +743,18 @@ class KiwoomGatewayRuntime:
         self._observe_real_type(payload)
         self.emit("price_tick", dict(payload))
 
+    def on_market_index_tick(self, payload: Mapping[str, Any]) -> None:
+        self._latest_market_index_tick_at = utc_now()
+        self._parsed_market_index_tick_count += 1
+        index_code = str(payload.get("index_code") or "").strip().upper()
+        if index_code:
+            try:
+                self._market_index_registered_codes.add(normalize_market_index_code(index_code))
+            except ValueError:
+                pass
+        self._observe_real_type(payload)
+        self.emit("market_index_tick", dict(payload))
+
     def on_quote(self, payload: Mapping[str, Any]) -> None:
         self._last_quote_at = utc_now()
         self._quote_event_count += 1
@@ -717,9 +774,26 @@ class KiwoomGatewayRuntime:
         self._realtime_callback_real_type_counts[normalized_real_type] = (
             self._realtime_callback_real_type_counts.get(normalized_real_type, 0) + 1
         )
+        if _is_market_index_runtime_callback(code=code, real_type=real_type):
+            self._market_index_callback_count += 1
 
     def on_realtime_registration_result(self, payload: Mapping[str, Any]) -> None:
         normalized = dict(payload)
+        if str(normalized.get("registration_type") or "") == "market_index":
+            self._latest_market_index_registration_result = normalized
+            if normalized.get("success") is True:
+                for index_code in normalized.get("index_codes") or normalized.get("codes") or []:
+                    self._market_index_registered_codes.add(
+                        normalize_market_index_code(index_code)
+                    )
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "market index realtime registration result",
+                    **normalized,
+                },
+            )
+            return
         self._last_realtime_registration_result = normalized
         self._realtime_registration_requested_count += 1
         if normalized.get("success") is True:
@@ -733,6 +807,17 @@ class KiwoomGatewayRuntime:
         )
 
     def on_realtime_parse_error(self, payload: Mapping[str, Any]) -> None:
+        if _is_market_index_parse_error(payload):
+            self._market_index_parse_error_count += 1
+            self._latest_market_index_parse_error = dict(payload)
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "INDEX_PARSE_ERROR",
+                    **dict(payload),
+                },
+            )
+            return
         self._realtime_parse_error_count += 1
         self._latest_realtime_parse_error = dict(payload)
         self.emit(
@@ -1274,6 +1359,56 @@ class KiwoomGatewayRuntime:
         if self.config.realtime_codes:
             self.register_realtime_codes(self.config.realtime_codes)
 
+    def _register_initial_market_index_realtime(self) -> None:
+        if not self.config.market_index_enabled:
+            return
+        if not self.config.market_index_realtime_enabled:
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "market index realtime disabled",
+                    "market_index_enabled": True,
+                    "market_index_realtime_enabled": False,
+                    "market_index_tr_bootstrap_enabled": bool(
+                        self.config.market_index_tr_bootstrap_enabled
+                    ),
+                },
+            )
+            return
+        codes = _ordered_unique_market_index_runtime_codes(self.config.market_index_codes)
+        if not codes:
+            return
+        register = getattr(self.client, "register_market_index_realtime", None)
+        if not callable(register):
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "MARKET_INDEX_REALTIME_REGISTER_UNSUPPORTED",
+                    "reason_codes": ["MARKET_INDEX_CLIENT_METHOD_MISSING"],
+                },
+            )
+            return
+        try:
+            register(codes, screen_no=str(self.config.market_index_screen_no or "5700"))
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._latest_market_index_registration_result = {
+                "success": False,
+                "reason_codes": ["INDEX_REGISTER_ERROR"],
+                "error": str(exc),
+                "index_codes": list(codes),
+            }
+            self.emit(
+                "gateway_error",
+                {
+                    "message": f"MARKET_INDEX_REALTIME_REGISTER_FAILED:{exc}",
+                    "reason_codes": ["INDEX_REGISTER_ERROR"],
+                    "index_codes": list(codes),
+                },
+            )
+            return
+        self._market_index_registered_codes.update(codes)
+
     def _emit_market_symbols(self) -> None:
         markets = []
         for market_code, market_name in (("0", "KOSPI"), ("10", "KOSDAQ")):
@@ -1374,10 +1509,10 @@ class KiwoomGatewayRuntime:
     def _realtime_subscription_health(self) -> str:
         if self._realtime_parse_error_count and not self._parsed_price_tick_count:
             return "PARSE_ERROR"
-        if self._realtime_callback_count > 0:
-            return "CALLBACK_ACTIVE"
         if not self._registered_realtime_codes and self._realtime_registration_requested_count <= 0:
             return "NOT_REQUESTED"
+        if self._realtime_callback_count > 0:
+            return "CALLBACK_ACTIVE"
         if self._last_realtime_registration_at is None:
             return "REGISTERED_WAITING_CALLBACK"
         age_sec = (utc_now() - self._last_realtime_registration_at).total_seconds()
@@ -1389,6 +1524,23 @@ class KiwoomGatewayRuntime:
                 return "CORE_IO_BLOCKING_SUSPECTED"
             return "CALLBACK_TIMEOUT"
         return "REGISTERED_WAITING_CALLBACK"
+
+    def _market_index_adapter_health(self) -> str:
+        if not self.config.market_index_enabled:
+            return "DISABLED"
+        if self.config.market_index_tr_bootstrap_enabled and not self.config.market_index_realtime_enabled:
+            return "TR_BOOTSTRAP_NOT_IMPLEMENTED"
+        if not self.config.market_index_realtime_enabled:
+            return "REALTIME_DISABLED"
+        if self._market_index_parse_error_count and not self._parsed_market_index_tick_count:
+            return "PARSE_ERROR"
+        if self._parsed_market_index_tick_count > 0:
+            return "CALLBACK_ACTIVE"
+        if self._market_index_callback_count > 0:
+            return "CALLBACK_ACTIVE_WAITING_VALID_TICK"
+        if self._market_index_registered_codes:
+            return "REGISTERED_WAITING_CALLBACK"
+        return "ENABLED_NOT_REGISTERED"
 
     def _realtime_exchange(self) -> str:
         return normalize_realtime_exchange(self.config.realtime_exchange)
@@ -1425,6 +1577,9 @@ def wire_kiwoom_signals(client: Any, runtime: KiwoomGatewayRuntime) -> None:
         lambda ok, code, message: runtime.on_connected(bool(ok), int(code), str(message or ""))
     )
     client.price_tick_received.connect(lambda payload: runtime.on_price_tick(dict(payload)))
+    client.market_index_tick_received.connect(
+        lambda payload: runtime.on_market_index_tick(dict(payload))
+    )
     client.quote_received.connect(lambda payload: runtime.on_quote(dict(payload)))
     client.realtime_data_received.connect(
         lambda code, real_type, real_data_present=False: runtime.on_realtime_data(
@@ -1506,6 +1661,41 @@ def _ordered_unique_codes(codes: Iterable[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _ordered_unique_market_index_runtime_codes(codes: Iterable[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for code in codes:
+        if not str(code or "").strip():
+            continue
+        normalized = normalize_market_index_code(code)
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def _is_market_index_runtime_callback(*, code: str, real_type: str) -> bool:
+    try:
+        normalize_market_index_code(code)
+        return True
+    except ValueError:
+        return is_market_index_real_type(real_type)
+
+
+def _is_market_index_parse_error(payload: Mapping[str, Any]) -> bool:
+    if payload.get("market_index") is True:
+        return True
+    if str(payload.get("asset_type") or "") == "market_index":
+        return True
+    reason = str(payload.get("reason") or "").upper()
+    if reason == "INDEX_PARSE_ERROR":
+        return True
+    reason_codes = payload.get("reason_codes")
+    if isinstance(reason_codes, Iterable) and not isinstance(reason_codes, (str, bytes)):
+        return "INDEX_PARSE_ERROR" in {str(item).upper() for item in reason_codes}
+    return False
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:

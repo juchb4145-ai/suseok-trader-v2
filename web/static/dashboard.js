@@ -63,6 +63,17 @@ const number = (value) => {
   return Number.isFinite(parsed) ? parsed.toLocaleString("ko-KR") : "-";
 };
 
+const indexTickText = (tick) => {
+  if (!tick) {
+    return "-";
+  }
+  const price = Number(tick.price);
+  const rate = Number(tick.change_rate);
+  const priceText = Number.isFinite(price) ? price.toLocaleString("ko-KR") : "-";
+  const rateText = Number.isFinite(rate) ? `${rate.toFixed(2)}%` : "-";
+  return `${priceText} / ${rateText}`;
+};
+
 const renderSafety = (snapshot) => {
   const safety = snapshot.safety || {};
   document.getElementById("safety-badges").innerHTML = [
@@ -160,20 +171,32 @@ const renderConditionFusion = (snapshot) => {
 
 const renderMarketTheme = (snapshot) => {
   const themes = snapshot.themes || {};
+  const marketIndexes = snapshot.market_indexes || {};
+  const indexStatus = marketIndexes.status || {};
+  const indexAdapter = marketIndexes.gateway_adapter || {};
+  const latestIndexes = marketIndexes.latest_by_code || {};
   const noBuy = snapshot.no_buy_sentinel || {};
   const themeStage = ((noBuy.stage_summary || {}).theme || {});
   const rows = [
     ...(themes.top_leading_themes || []),
     ...(themes.top_spreading_themes || []),
   ].slice(0, 6);
+  const projectionReady = Number(indexStatus.latest_tick_count || 0) > 0;
   document.getElementById("market-theme-badges").innerHTML = [
     badge("OBSERVE", `watchset ${themeStage.watchset_count || 0}`),
     badge(themeStage.data_wait_count ? "DATA_WAIT" : "OBSERVE", `DATA_WAIT ${themeStage.data_wait_count || 0}`),
+    badge(projectionReady ? "PASS" : "DATA_WAIT", `index core ${projectionReady ? "ready" : "waiting"}`),
+    badge(indexAdapter.enabled ? "ENABLED" : "OBSERVE", `index adapter ${text(indexAdapter.enabled)}`),
   ].join("");
   document.getElementById("market-theme-status").innerHTML = [
     metric("Theme snapshots", themeStage.snapshot_count || 0),
     metric("Watchset", themeStage.watchset_count || 0),
     metric("DATA_WAIT", themeStage.data_wait_count || 0),
+    metric("Core index projection", projectionReady ? "ready" : "waiting"),
+    metric("Gateway index adapter", `${text(indexAdapter.enabled)} / ${text(indexAdapter.health)}`),
+    metric("Latest KOSPI tick", indexTickText(latestIndexes.KOSPI)),
+    metric("Latest KOSDAQ tick", indexTickText(latestIndexes.KOSDAQ)),
+    metric("Index parser errors", indexAdapter.parse_error_count || 0),
   ].join("");
   document.getElementById("market-theme-table").innerHTML = rows.length
     ? table(

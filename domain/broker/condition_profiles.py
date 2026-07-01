@@ -121,7 +121,8 @@ class ConditionProfile:
 
 
 def parse_condition_role(value: object) -> ConditionRole:
-    text = str(value or ConditionRole.DISCOVERY.value).strip().upper()
+    raw_value = getattr(value, "value", value)
+    text = str(raw_value or ConditionRole.DISCOVERY.value).strip().upper()
     aliases = {
         "DISCOVER": "DISCOVERY",
         "THEME_SPREADING": "THEME_SPREAD",
@@ -133,7 +134,8 @@ def parse_condition_role(value: object) -> ConditionRole:
 
 
 def parse_price_subscribe_policy(value: object) -> PriceSubscribePolicy:
-    text = str(value or PriceSubscribePolicy.NONE.value).strip().lower()
+    raw_value = getattr(value, "value", value)
+    text = str(raw_value or PriceSubscribePolicy.NONE.value).strip().lower()
     aliases = {
         "no": "none",
         "off": "none",

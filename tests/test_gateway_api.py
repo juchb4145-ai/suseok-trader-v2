@@ -97,3 +97,49 @@ def test_gateway_event_api_requires_token_when_configured(tmp_path, monkeypatch)
     assert accepted.status_code == 200
     assert read_only_status.status_code == 200
     assert read_only_status.json()["token_required"] is True
+
+
+def test_gateway_status_exposes_market_index_adapter_separate_from_projection_errors(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api_index_status.sqlite3"))
+
+    heartbeat = heartbeat_event("evt_index_adapter_heartbeat")
+    heartbeat["payload"] = {
+        "status": "ok",
+        "market_index_enabled": True,
+        "market_index_registered_codes": ["KOSPI", "KOSDAQ"],
+        "market_index_callback_count": 1,
+        "parsed_market_index_tick_count": 0,
+        "market_index_parse_error_count": 1,
+        "latest_market_index_tick_at": "",
+        "latest_market_index_parse_error": {
+            "reason": "INDEX_PARSE_ERROR",
+            "index_code": "KOSPI",
+        },
+        "market_index_adapter_health": "PARSE_ERROR",
+    }
+    invalid_index_event = {
+        "event_id": "evt_invalid_index_projection",
+        "event_type": "market_index_tick",
+        "source": "test-gateway",
+        "ts": TS,
+        "payload": {"index_code": "KOSPI", "index_name": "KOSPI"},
+    }
+
+    with TestClient(app) as client:
+        heartbeat_response = client.post("/api/gateway/events", json=heartbeat)
+        projection_response = client.post("/api/gateway/events", json=invalid_index_event)
+        gateway_status = client.get("/api/gateway/status")
+        market_index_status = client.get("/api/market-indexes/status")
+
+    assert heartbeat_response.status_code == 200
+    assert projection_response.status_code == 200
+    assert projection_response.json()["projection_statuses"]["market_index"] == "ERROR"
+    assert gateway_status.json()["market_index_parse_error_count"] == 1
+    assert gateway_status.json()["latest_market_index_parse_error"]["reason"] == (
+        "INDEX_PARSE_ERROR"
+    )
+    assert market_index_status.json()["projection_error_count"] == 1
