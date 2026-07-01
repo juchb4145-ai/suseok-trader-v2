@@ -1153,6 +1153,83 @@ def test_multi_condition_profiles_send_sequential_with_distinct_screens(monkeypa
     }
 
 
+def test_condition_send_pacing_never_sleeps_on_main_thread(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+
+    def _forbidden_sleep(_seconds: float) -> None:
+        raise AssertionError("time.sleep must not run on the Qt main thread")
+
+    monkeypatch.setattr("gateway.kiwoom_runtime.time.sleep", _forbidden_sleep)
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr("gateway.kiwoom_runtime.time.monotonic", lambda: clock["now"])
+
+    scheduled: list[tuple[float, Callable[[], None]]] = []
+    client = MockKiwoomClient()
+    client.set_conditions([(1, "Discovery"), (2, "Leader"), (3, "Pullback")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        schedule_delayed=lambda delay, callback: scheduled.append((delay, callback)),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0.25,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                ),
+                ConditionProfile(
+                    condition_name="Leader",
+                    role=ConditionRole.LEADER,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=900,
+                ),
+                ConditionProfile(
+                    condition_name="Pullback",
+                    role=ConditionRole.PULLBACK,
+                    realtime_search=False,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=800,
+                ),
+            ),
+        ),
+    )
+
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    # Only the first profile is sent inline; the rest wait for the scheduler.
+    assert [call["condition_name"] for call in client.send_condition_calls] == ["Discovery"]
+    assert len(scheduled) == 1
+    assert scheduled[0][0] > 0
+
+    # Firing the scheduled callback after the interval sends the next profile.
+    clock["now"] += 0.25
+    scheduled[0][1]()
+    assert [call["condition_name"] for call in client.send_condition_calls] == [
+        "Discovery",
+        "Leader",
+    ]
+    assert len(scheduled) == 2
+
+    clock["now"] += 0.25
+    scheduled[1][1]()
+    assert [call["condition_name"] for call in client.send_condition_calls] == [
+        "Discovery",
+        "Leader",
+        "Pullback",
+    ]
+    assert [call["screen_no"] for call in client.send_condition_calls] == [
+        "7600",
+        "7601",
+        "7602",
+    ]
+    assert len(scheduled) == 2
+
+
 def test_condition_tr_initial_results_batch_register_with_role_metadata(monkeypatch) -> None:
     monkeypatch.setattr(
         "gateway.kiwoom_runtime.current_condition_session_profile",

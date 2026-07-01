@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -185,9 +185,11 @@ class KiwoomGatewayRuntime:
         client: Any,
         core_client: CoreClient,
         config: KiwoomGatewayRuntimeConfig | None = None,
+        schedule_delayed: Callable[[float, Callable[[], None]], None] | None = None,
     ) -> None:
         self.client = client
         self.core_client = core_client
+        self.schedule_delayed = schedule_delayed
         self.config = config or KiwoomGatewayRuntimeConfig()
         self.pending_orders = PendingOrderRegistry()
         self.command_handler = KiwoomGatewayCommandHandler(
@@ -230,6 +232,8 @@ class KiwoomGatewayRuntime:
         self._condition_profile_by_key: dict[tuple[str, int], ConditionProfile] = {}
         self._condition_send_results: list[dict[str, Any]] = []
         self._condition_reason_codes: list[str] = []
+        self._condition_send_queue: deque[ConditionProfile] = deque()
+        self._last_condition_send_at = 0.0
         self._condition_admission = GatewayConditionAdmissionController()
         self._registered_realtime_codes: set[str] = set()
         self._last_price_tick_at: datetime | None = None
@@ -1173,9 +1177,18 @@ class KiwoomGatewayRuntime:
         self._condition_profiles = tuple(profile for profile in profiles if profile.enabled)
         if not self._condition_profiles:
             return
-        last_send_at = 0.0
-        for offset, profile in enumerate(self._condition_profiles):
+        self._condition_send_queue.clear()
+        self._condition_send_queue.extend(self._condition_profiles)
+        self._process_condition_send_queue()
+
+    def _process_condition_send_queue(self) -> None:
+        # Runs on the Qt main thread; pacing between sends must never block the
+        # event loop, so a wait is rescheduled through schedule_delayed instead
+        # of time.sleep (which starves ActiveX callbacks).
+        while self._condition_send_queue:
+            profile = self._condition_send_queue[0]
             if profile.condition_index is None:
+                self._condition_send_queue.popleft()
                 self._add_condition_reason("CONDITION_PROFILE_INDEX_UNRESOLVED")
                 self._record_condition_send_result(
                     profile,
@@ -1184,65 +1197,83 @@ class KiwoomGatewayRuntime:
                     reason_codes=["CONDITION_PROFILE_INDEX_UNRESOLVED"],
                 )
                 continue
-            screen_no = profile.screen_no or f"{7600 + offset:04d}"
-            resolved = profile.with_resolution(screen_no=screen_no)
-            self._register_condition_profile_mapping(resolved)
             interval = max(float(self.config.condition_send_interval_sec), 0.0)
-            elapsed = time.monotonic() - last_send_at
-            if last_send_at and elapsed < interval:
-                time.sleep(interval - elapsed)
-            try:
-                result = int(
-                    self.client.send_condition(
-                        screen_no,
-                        resolved.condition_name,
-                        int(resolved.condition_index),
-                        realtime=resolved.realtime_search,
-                    )
-                    or 0
+            elapsed = time.monotonic() - self._last_condition_send_at
+            if self._last_condition_send_at and elapsed < interval:
+                self._schedule_delayed(interval - elapsed, self._process_condition_send_queue)
+                return
+            self._condition_send_queue.popleft()
+            self._send_condition_profile(profile)
+
+    def _send_condition_profile(self, profile: ConditionProfile) -> None:
+        screen_no = profile.screen_no or "7600"
+        resolved = profile.with_resolution(screen_no=screen_no)
+        self._register_condition_profile_mapping(resolved)
+        try:
+            result = int(
+                self.client.send_condition(
+                    screen_no,
+                    resolved.condition_name,
+                    int(resolved.condition_index),
+                    realtime=resolved.realtime_search,
                 )
-            except Exception as exc:
-                self._add_condition_reason("CONDITION_SEND_EXCEPTION")
-                self._record_condition_send_result(
-                    resolved,
-                    result_code=-1,
-                    success=False,
-                    reason_codes=["CONDITION_SEND_EXCEPTION"],
-                    error=str(exc),
-                )
-                self.emit(
-                    "gateway_error",
-                    {
-                        "message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}",
-                        "condition_profile": resolved.to_dict(),
-                        "reason_codes": ["CONDITION_SEND_EXCEPTION"],
-                    },
-                )
-                continue
-            last_send_at = time.monotonic()
-            success = result == 1
-            reason_codes = [] if success else ["CONDITION_SEND_FAILED"]
-            if not success:
-                self._add_condition_reason("CONDITION_SEND_FAILED")
+                or 0
+            )
+        except Exception as exc:
+            self._add_condition_reason("CONDITION_SEND_EXCEPTION")
             self._record_condition_send_result(
                 resolved,
-                result_code=result,
-                success=success,
-                reason_codes=reason_codes,
+                result_code=-1,
+                success=False,
+                reason_codes=["CONDITION_SEND_EXCEPTION"],
+                error=str(exc),
             )
             self.emit(
-                "gateway_log",
+                "gateway_error",
                 {
-                    "message": "configured condition profile send requested",
+                    "message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}",
                     "condition_profile": resolved.to_dict(),
-                    "condition_name": resolved.condition_name,
-                    "condition_index": resolved.condition_index,
-                    "screen_no": screen_no,
-                    "result_code": result,
-                    "success": success,
-                    "reason_codes": reason_codes,
+                    "reason_codes": ["CONDITION_SEND_EXCEPTION"],
                 },
             )
+            return
+        self._last_condition_send_at = time.monotonic()
+        success = result == 1
+        reason_codes = [] if success else ["CONDITION_SEND_FAILED"]
+        if not success:
+            self._add_condition_reason("CONDITION_SEND_FAILED")
+        self._record_condition_send_result(
+            resolved,
+            result_code=result,
+            success=success,
+            reason_codes=reason_codes,
+        )
+        self.emit(
+            "gateway_log",
+            {
+                "message": "configured condition profile send requested",
+                "condition_profile": resolved.to_dict(),
+                "condition_name": resolved.condition_name,
+                "condition_index": resolved.condition_index,
+                "screen_no": screen_no,
+                "result_code": result,
+                "success": success,
+                "reason_codes": reason_codes,
+            },
+        )
+
+    def _schedule_delayed(self, delay_sec: float, callback: Callable[[], None]) -> None:
+        if self.schedule_delayed is not None:
+            self.schedule_delayed(delay_sec, callback)
+            return
+        try:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(max(int(delay_sec * 1000), 0), callback)
+        except Exception:
+            # No Qt available (mock/test runtime without an injected scheduler):
+            # run inline rather than blocking or dropping the queued sends.
+            callback()
 
     def _resolve_condition_profiles(
         self,
