@@ -1,0 +1,3886 @@
+{
+  "command_counts_after": {
+    "ACKED": 3,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 2,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "command_counts_before": {
+    "ACKED": 3,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 2,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "created_at": "2026-07-01T02:28:26.348896Z",
+  "errors": [],
+  "gateway_command_delta": {
+    "ACKED": 0,
+    "CANCELLED": 0,
+    "DISPATCHED": 0,
+    "EXPIRED": 0,
+    "FAILED": 0,
+    "QUEUED": 0,
+    "REJECTED": 0
+  },
+  "live_real_allowed": false,
+  "no_order_side_effects": true,
+  "not_order_intent": true,
+  "observe_only": true,
+  "order_controls_available": false,
+  "queue_commands": false,
+  "real_order_allowed": false,
+  "run_id": "market_open_observe_cycle_run_fed8eed4a951443ca05b4d0c2f344e84",
+  "send_order_count_after": 0,
+  "send_order_count_before": 0,
+  "send_order_delta": 0,
+  "stage_summary": {
+    "Candidate": {
+      "counts": {
+        "active_candidate_count": 0,
+        "candidate_count": 0,
+        "context_refreshed_count": 0,
+        "error_count": 0,
+        "source_event_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_created_count": 0,
+          "candidate_updated_count": 0,
+          "closed_count": 0,
+          "context_refreshed_count": 0,
+          "error_count": 0,
+          "source_event_count": 0,
+          "stale_count": 0,
+          "transition_count": 0
+        },
+        "status": {
+          "active_candidate_count": 0,
+          "candidate_count": 0,
+          "context_require_1m_bar": true,
+          "context_require_vwap": false,
+          "enabled": true,
+          "episode_ttl_sec": 1800,
+          "projection_error_count": 0,
+          "source_stale_sec": 300,
+          "state_counts": {
+            "BLOCKED_OBSERVATION": 0,
+            "CLOSED": 0,
+            "CONTEXT_READY": 0,
+            "COOLDOWN": 0,
+            "DATA_WAIT": 0,
+            "DETECTED": 0,
+            "HYDRATING": 0,
+            "STALE": 0,
+            "WATCHING": 0
+          },
+          "tick_stale_sec": 30,
+          "trade_date": "2026-07-01"
+        }
+      },
+      "reason_codes": [
+        "CANDIDATE_DATA_WAIT"
+      ],
+      "stage": "Candidate",
+      "status": "WARN",
+      "summary": "active=0, source_events=0"
+    },
+    "CommandSafety": {
+      "counts": {
+        "send_order_delta": 0
+      },
+      "details": {},
+      "reason_codes": [
+        "ORDER_COMMAND_ZERO_EXPECTED"
+      ],
+      "stage": "CommandSafety",
+      "status": "PASS",
+      "summary": "No send_order GatewayCommand was created."
+    },
+    "ConditionFusion": {
+      "counts": {
+        "discovery_only_count": 0,
+        "fused_code_count": 100,
+        "profile_count": 1,
+        "promoted_condition_source_count": 0,
+        "risk_blocked_count": 0,
+        "subscribed_count": 0,
+        "top_priority_codes": [
+          {
+            "active_roles": [],
+            "code": "476830",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.430962Z",
+            "name": "알지노믹스",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "489790",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.430962Z",
+            "name": "한화비전",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "475430",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.429390Z",
+            "name": "키스트론",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "475150",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.428099Z",
+            "name": "SK이터닉스",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "417200",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.426659Z",
+            "name": "LS머트리얼즈",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          }
+        ]
+      },
+      "details": {
+        "discovery_only_codes": [],
+        "not_buy_signal": true,
+        "read_only": true,
+        "risk_blocked_codes": [],
+        "top_priority_codes": [
+          {
+            "active_roles": [],
+            "code": "476830",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.430962Z",
+            "name": "알지노믹스",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "489790",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.430962Z",
+            "name": "한화비전",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "475430",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.429390Z",
+            "name": "키스트론",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "475150",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.428099Z",
+            "name": "SK이터닉스",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          },
+          {
+            "active_roles": [],
+            "code": "417200",
+            "condition_names": [
+              "주도테마_넓은후보"
+            ],
+            "latest_hit_at": "2026-07-01T02:07:19.426659Z",
+            "name": "LS머트리얼즈",
+            "priority_score": 0.0,
+            "reason_codes": [
+              "CONDITION_SENSOR_EVIDENCE",
+              "MARKET_SENSOR_NOT_BUY_SIGNAL",
+              "CONDITION_FUSION_NO_ACTIVE_ROLE"
+            ],
+            "risk_blocked": false
+          }
+        ]
+      },
+      "reason_codes": [],
+      "stage": "ConditionFusion",
+      "status": "PASS",
+      "summary": "profiles=1, fused=100, risk=0, promoted=0"
+    },
+    "EntryTiming": {
+      "counts": {
+        "candidate_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_plan_count": 0,
+        "order_plan_draft_count": 0,
+        "plan_ready_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_count": 0,
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "evaluations": [],
+          "no_plan_count": 0,
+          "not_order_intent": true,
+          "observe_only": true,
+          "order_plan_drafts": [],
+          "plan_ready_count": 0,
+          "status": "COMPLETED",
+          "trade_date": "2026-07-01",
+          "wait_retry_count": 0
+        },
+        "status": {
+          "allow_market_order": false,
+          "config_version": "entry_timing_v1",
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "evaluation_count": 0,
+          "latest_plan_count": 0,
+          "max_plans_per_run": 20,
+          "no_plan_count": 0,
+          "not_order_intent": true,
+          "observe_only": true,
+          "plan_ready_count": 0,
+          "wait_retry_count": 0,
+          "write_order_plan_drafts": true
+        }
+      },
+      "reason_codes": [
+        "ENTRY_TIMING_NO_INPUT"
+      ],
+      "stage": "EntryTiming",
+      "status": "WARN",
+      "summary": "evaluated=0, drafts=0, ready=0"
+    },
+    "LiveSim": {
+      "counts": {
+        "intent_count": 0,
+        "open_order_count": 0,
+        "open_position_count": 0,
+        "order_count": 0,
+        "preflight_status": "WARN"
+      },
+      "details": {
+        "preflight": {
+          "ai_summary": {
+            "advisory_only": true,
+            "included": false,
+            "no_order_side_effects": true
+          },
+          "blocking_reasons": [],
+          "broker_order_path": "LIVE_SIM_ONLY",
+          "checks": [
+            {
+              "details": {},
+              "message": "Core DB is accessible.",
+              "name": "core_db",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "heartbeat_age_sec": 2.27772,
+                "last_heartbeat_at": "2026-07-01T02:28:27.831123Z"
+              },
+              "message": "Gateway heartbeat is fresh.",
+              "name": "gateway_heartbeat",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "gateway_orderable": true
+              },
+              "message": "Gateway is orderable.",
+              "name": "gateway_orderable",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "trading_allow_live_real": false,
+                "trading_mode": "OBSERVE"
+              },
+              "message": "LIVE_REAL is disabled.",
+              "name": "live_real_disabled",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "account_configured": false
+              },
+              "message": "LIVE_SIM account is not configured.",
+              "name": "live_sim_account_configured",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_mode": "SIMULATION",
+                "broker_env": "SIMULATION",
+                "configured_account_mode": "SIMULATION",
+                "configured_broker_env": "SIMULATION",
+                "configured_server_mode": "SIMULATION",
+                "server_mode": "SIMULATION"
+              },
+              "message": "Account/server/broker modes are simulation-like.",
+              "name": "simulation_like_modes",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "live_sim_kill_switch": true,
+                "queue_commands": false
+              },
+              "message": "LIVE_SIM kill switch is on; command queueing is blocked.",
+              "name": "live_sim_kill_switch",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "live_sim_enabled": false,
+                "live_sim_gateway_command_enabled": false,
+                "live_sim_order_routing_enabled": false,
+                "operating_cycle_enabled": true,
+                "order_plan_routing_enabled": false,
+                "pilot_pipeline_enabled": false,
+                "trading_allow_live_sim": false
+              },
+              "message": "One or more LIVE_SIM operating flags are disabled.",
+              "name": "live_sim_enabled_flags",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "active_member_count": 6441
+              },
+              "message": "Theme membership exists.",
+              "name": "theme_membership",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "data_wait_count": 5,
+                "snapshot_count": 5,
+                "status": "OK",
+                "watchset_count": 0
+              },
+              "message": "ThemeLeadership has DATA_WAIT themes.",
+              "name": "theme_leadership",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "allow_market_order": false,
+                "config_version": "entry_timing_v1",
+                "data_wait_count": 0,
+                "enabled": true,
+                "error_count": 0,
+                "evaluation_count": 0,
+                "latest_plan_count": 0,
+                "max_plans_per_run": 20,
+                "no_plan_count": 0,
+                "not_order_intent": true,
+                "observe_only": true,
+                "plan_ready_count": 0,
+                "wait_retry_count": 0,
+                "write_order_plan_drafts": true
+              },
+              "message": "EntryTiming has zero PLAN_READY order plans.",
+              "name": "entry_timing",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_mode": "SIMULATION",
+                "broker_env": "SIMULATION",
+                "daily_limit_remaining": 1,
+                "dashboard_order_controls_unavailable": true,
+                "dry_run_prerequisite_confirmed": true,
+                "gateway_command_queue_healthy": true,
+                "gateway_heartbeat_ok": true,
+                "gateway_orderable": true,
+                "kill_switch_active": true,
+                "live_real_allowed": false,
+                "live_real_disabled": true,
+                "live_sim_enabled": false,
+                "max_notional": 100000.0,
+                "no_trading_side_effects": false,
+                "openai_tools_disabled": true,
+                "order_tools_disabled": true,
+                "passed": false,
+                "reason_codes": [
+                  "LIVE_SIM_DISABLED",
+                  "ORDER_ROUTING_DISABLED",
+                  "GATEWAY_COMMAND_DISABLED",
+                  "LIVE_SIM_KILL_SWITCH_ACTIVE",
+                  "ACCOUNT_NOT_SIMULATION"
+                ],
+                "risk_prerequisite_confirmed": true,
+                "server_mode": "SIMULATION",
+                "simulation_account_confirmed": false,
+                "simulation_server_confirmed": true,
+                "status": "BLOCKED",
+                "trading_mode": "OBSERVE",
+                "warnings": [
+                  "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+                ]
+              },
+              "message": "LIVE_SIM safety gate preview did not pass.",
+              "name": "live_sim_safety_gate_preview",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "account_id": "SIMULATION_ACCOUNT_REQUIRED",
+                "allow_exit": true,
+                "blocking_new_buy": false,
+                "broker_open_order_count": 0,
+                "broker_position_count": 0,
+                "code": null,
+                "created_at": "2026-06-29T00:57:48.007098Z",
+                "live_real_allowed": false,
+                "live_sim_only": true,
+                "local_open_order_count": 0,
+                "local_position_count": 0,
+                "mismatch_count": 0,
+                "reconcile_id": "live_sim_reconcile_c129d170036e489e938c987591fd6dee",
+                "snapshot_json": {
+                  "allow_exit": true,
+                  "blocking_new_buy": false,
+                  "broker_order_path": "LIVE_SIM_ONLY",
+                  "broker_snapshot_available": false,
+                  "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+                  "live_real_allowed": false,
+                  "live_sim_only": true,
+                  "mismatches": [],
+                  "open_orders": [],
+                  "positions": []
+                },
+                "status": "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT",
+                "trade_date": "2026-06-29"
+              },
+              "message": "Broker snapshot is unavailable; latest reconcile is local-only.",
+              "name": "reconcile_latest_status",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "limit": 1,
+                "open_order_count": 0
+              },
+              "message": "Open order count is within limit.",
+              "name": "open_order_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "limit": 1,
+                "open_position_count": 0
+              },
+              "message": "Open position count is within limit.",
+              "name": "open_position_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "active_cancel_count": 0
+              },
+              "message": "Active cancel count inspected.",
+              "name": "active_cancel_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "active_exit_count": 0
+              },
+              "message": "Active exit count inspected.",
+              "name": "active_exit_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "lifecycle_error_count": 0
+              },
+              "message": "No unresolved lifecycle errors were found.",
+              "name": "lifecycle_error_count",
+              "status": "PASS"
+            },
+            {
+              "details": {
+                "age_sec": 182175.488888,
+                "imported_at": "2026-06-28 23:52:15",
+                "member_count": 6441,
+                "status": "SUCCESS",
+                "theme_count": 265
+              },
+              "message": "Naver theme importer has not run recently or did not succeed.",
+              "name": "naver_import_recent",
+              "status": "WARN"
+            },
+            {
+              "details": {
+                "fee_rate": 0.0,
+                "tax_rate": 0.0
+              },
+              "message": "LIVE_SIM fee/tax uses a zero default.",
+              "name": "fee_tax_config",
+              "status": "WARN"
+            },
+            {
+              "details": {},
+              "message": "AI advisory preflight is skipped.",
+              "name": "ai_advisory",
+              "status": "PASS"
+            },
+            {
+              "details": {},
+              "message": "No-Buy Sentinel preflight is skipped.",
+              "name": "no_buy_sentinel",
+              "status": "PASS"
+            }
+          ],
+          "counts": {
+            "active_cancel_count": 0,
+            "active_exit_count": 0,
+            "lifecycle_error_count": 0,
+            "open_order_count": 0,
+            "open_position_count": 0
+          },
+          "gateway": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "command_queue_healthy": true,
+            "gateway_orderable": true,
+            "heartbeat_age_sec": 2.27772,
+            "last_heartbeat_at": "2026-07-01T02:28:27.831123Z",
+            "server_mode": "SIMULATION"
+          },
+          "latest_reconcile": {
+            "account_id": "SIMULATION_ACCOUNT_REQUIRED",
+            "allow_exit": true,
+            "blocking_new_buy": false,
+            "broker_open_order_count": 0,
+            "broker_position_count": 0,
+            "code": null,
+            "created_at": "2026-06-29T00:57:48.007098Z",
+            "live_real_allowed": false,
+            "live_sim_only": true,
+            "local_open_order_count": 0,
+            "local_position_count": 0,
+            "mismatch_count": 0,
+            "reconcile_id": "live_sim_reconcile_c129d170036e489e938c987591fd6dee",
+            "snapshot_json": {
+              "allow_exit": true,
+              "blocking_new_buy": false,
+              "broker_order_path": "LIVE_SIM_ONLY",
+              "broker_snapshot_available": false,
+              "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+              "live_real_allowed": false,
+              "live_sim_only": true,
+              "mismatches": [],
+              "open_orders": [],
+              "positions": []
+            },
+            "status": "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT",
+            "trade_date": "2026-06-29"
+          },
+          "live_real_allowed": false,
+          "live_sim_only": true,
+          "mode": "OBSERVE_CYCLE",
+          "no_buy_summary": {
+            "included": false,
+            "no_order_side_effects": true,
+            "read_only": true
+          },
+          "no_order_side_effects": true,
+          "queue_commands": false,
+          "real_order_allowed": false,
+          "safety_gate": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "daily_limit_remaining": 1,
+            "dashboard_order_controls_unavailable": true,
+            "dry_run_prerequisite_confirmed": true,
+            "gateway_command_queue_healthy": true,
+            "gateway_heartbeat_ok": true,
+            "gateway_orderable": true,
+            "kill_switch_active": true,
+            "live_real_allowed": false,
+            "live_real_disabled": true,
+            "live_sim_enabled": false,
+            "max_notional": 100000.0,
+            "no_trading_side_effects": false,
+            "openai_tools_disabled": true,
+            "order_tools_disabled": true,
+            "passed": false,
+            "reason_codes": [
+              "LIVE_SIM_DISABLED",
+              "ORDER_ROUTING_DISABLED",
+              "GATEWAY_COMMAND_DISABLED",
+              "LIVE_SIM_KILL_SWITCH_ACTIVE",
+              "ACCOUNT_NOT_SIMULATION"
+            ],
+            "risk_prerequisite_confirmed": true,
+            "server_mode": "SIMULATION",
+            "simulation_account_confirmed": false,
+            "simulation_server_confirmed": true,
+            "status": "BLOCKED",
+            "trading_mode": "OBSERVE",
+            "warnings": [
+              "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+            ]
+          },
+          "status": "WARN",
+          "warnings": [
+            "LIVE_SIM account is not configured.",
+            "LIVE_SIM kill switch is on; command queueing is blocked.",
+            "One or more LIVE_SIM operating flags are disabled.",
+            "ThemeLeadership has DATA_WAIT themes.",
+            "EntryTiming has zero PLAN_READY order plans.",
+            "LIVE_SIM safety gate preview did not pass.",
+            "Broker snapshot is unavailable; latest reconcile is local-only.",
+            "Naver theme importer has not run recently or did not succeed.",
+            "LIVE_SIM fee/tax uses a zero default."
+          ]
+        },
+        "queue_commands": false,
+        "read_only": true,
+        "status": {
+          "account_id_configured": false,
+          "account_mode": "SIMULATION",
+          "active_exit_signal_count": 0,
+          "allow_buy": true,
+          "allow_exit_sell_close_only": true,
+          "allow_limit_order": true,
+          "allow_market_order": false,
+          "allow_sell": false,
+          "broker_env": "SIMULATION",
+          "broker_order_path": "LIVE_SIM_ONLY",
+          "cancel_enabled": false,
+          "cancel_pending_count": 0,
+          "enabled": false,
+          "execution_count": 0,
+          "exit_engine_enabled": false,
+          "gateway_command_enabled": false,
+          "intent_count": 0,
+          "kill_switch": true,
+          "live_real_allowed": false,
+          "max_daily_notional": 100000.0,
+          "max_daily_order_count": 1,
+          "max_order_notional": 100000.0,
+          "open_order_count": 0,
+          "open_position_count": 0,
+          "order_count": 0,
+          "order_routing_enabled": false,
+          "position_count": 0,
+          "real_order_allowed": false,
+          "reconcile_enabled": true,
+          "rejection_count": 0,
+          "safety_gate": {
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "daily_limit_remaining": 1,
+            "dashboard_order_controls_unavailable": true,
+            "dry_run_prerequisite_confirmed": true,
+            "gateway_command_queue_healthy": true,
+            "gateway_heartbeat_ok": true,
+            "gateway_orderable": true,
+            "kill_switch_active": true,
+            "live_real_allowed": false,
+            "live_real_disabled": true,
+            "live_sim_enabled": false,
+            "max_notional": 100000.0,
+            "no_trading_side_effects": false,
+            "openai_tools_disabled": true,
+            "order_tools_disabled": true,
+            "passed": false,
+            "reason_codes": [
+              "LIVE_SIM_DISABLED",
+              "ORDER_ROUTING_DISABLED",
+              "GATEWAY_COMMAND_DISABLED",
+              "LIVE_SIM_KILL_SWITCH_ACTIVE",
+              "ACCOUNT_NOT_SIMULATION"
+            ],
+            "risk_prerequisite_confirmed": true,
+            "server_mode": "SIMULATION",
+            "simulation_account_confirmed": false,
+            "simulation_server_confirmed": true,
+            "status": "BLOCKED",
+            "trading_mode": "OBSERVE",
+            "warnings": [
+              "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
+            ]
+          },
+          "server_mode": "SIMULATION",
+          "warnings": [
+            "LIVE_SIM is simulation-account only.",
+            "LIVE_REAL remains disabled.",
+            "Dashboard order buttons are not available."
+          ]
+        }
+      },
+      "reason_codes": [
+        "ORDER_COMMAND_ZERO_EXPECTED",
+        "LIVE_SIM_DISABLED_EXPECTED",
+        "LIVE_SIM_KILL_SWITCH_ON_EXPECTED"
+      ],
+      "stage": "LiveSim",
+      "status": "PASS",
+      "summary": "read-only preflight=WARN, enabled=False, kill=True"
+    },
+    "RealtimeSubscription": {
+      "counts": {
+        "already_registered_count": 12,
+        "anchor_count": 2,
+        "candidate_count": 0,
+        "condition_count": 0,
+        "planned_register_count": 17,
+        "planned_remove_count": 0,
+        "queue_commands": false,
+        "theme_watchset_count": 20
+      },
+      "details": {
+        "no_order_side_effects": true,
+        "observe_only": true,
+        "plan": {
+          "anchor_codes": [
+            "005930",
+            "000660"
+          ],
+          "command_count": 0,
+          "command_results": [],
+          "counts": {
+            "already_registered_count": 12,
+            "anchor_count": 2,
+            "candidate_count": 0,
+            "condition_count": 0,
+            "manual_seed_count": 0,
+            "max_per_theme": 5,
+            "max_total": 50,
+            "missing_candidate_subscription_count": 0,
+            "planned_register_count": 17,
+            "planned_remove_count": 0,
+            "registered_count": 12,
+            "stale_registered_count": 0,
+            "theme_watchset_count": 20
+          },
+          "exchange": "KRX",
+          "excluded": [],
+          "keep_targets": [
+            {
+              "action": "keep",
+              "code": "000150",
+              "name": "000150",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "000660",
+              "name": "SK하이닉스",
+              "priority": 10000.0,
+              "reason_codes": [
+                "ANCHOR_CODE",
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_FRESH",
+                "THEME_DATA_WAIT",
+                "THEME_DATA_COVERAGE",
+                "ALREADY_REGISTERED"
+              ],
+              "source_types": [
+                "ANCHOR",
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "000720",
+              "name": "000720",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "000880",
+              "name": "000880",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "001440",
+              "name": "001440",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "001510",
+              "name": "001510",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "001820",
+              "name": "001820",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "003160",
+              "name": "003160",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "003230",
+              "name": "삼양식품",
+              "priority": 5553.23,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_STALE",
+                "THEME_DATA_COVERAGE",
+                "ALREADY_REGISTERED"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "005690",
+              "name": "005690",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "005930",
+              "name": "삼성전자",
+              "priority": 10000.0,
+              "reason_codes": [
+                "ANCHOR_CODE",
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_FRESH",
+                "THEME_LEADING_CODE",
+                "THEME_DATA_WAIT",
+                "THEME_DATA_COVERAGE",
+                "ALREADY_REGISTERED"
+              ],
+              "source_types": [
+                "ANCHOR",
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "keep",
+              "code": "006260",
+              "name": "006260",
+              "priority": 0,
+              "reason_codes": [
+                "REGISTERED_NOT_SELECTED"
+              ],
+              "source_types": [
+                "CURRENT_REGISTRATION"
+              ]
+            }
+          ],
+          "metadata": {
+            "exchange": "KRX",
+            "market_data_projection_key": "code",
+            "market_data_schema_warning": "market_ticks_latest is keyed by code only. Do not mix KRX/NXT in one MarketData projection until exchange/session-aware schema support is added.",
+            "todo": "Make MarketData exchange/session-aware before mixed KRX/NXT realtime subscriptions are allowed in one projection."
+          },
+          "missing_candidate_subscriptions": [],
+          "near_miss": [
+            {
+              "code": "012330",
+              "member_role": "STALE",
+              "name": "현대모비스",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "013570",
+              "member_role": "UNKNOWN",
+              "name": "디와이",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "017670",
+              "member_role": "UNKNOWN",
+              "name": "SK텔레콤",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "025440",
+              "member_role": "UNKNOWN",
+              "name": "DH오토웨어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "025540",
+              "member_role": "UNKNOWN",
+              "name": "한국단자",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "030200",
+              "member_role": "UNKNOWN",
+              "name": "KT",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "035420",
+              "member_role": "STALE",
+              "name": "NAVER",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "038880",
+              "member_role": "UNKNOWN",
+              "name": "아이에이",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "038950",
+              "member_role": "UNKNOWN",
+              "name": "파인디지털",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "039290",
+              "member_role": "UNKNOWN",
+              "name": "인포뱅크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "050110",
+              "member_role": "UNKNOWN",
+              "name": "캠시스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "053450",
+              "member_role": "UNKNOWN",
+              "name": "세코닉스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "053700",
+              "member_role": "UNKNOWN",
+              "name": "삼보모터스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "054450",
+              "member_role": "UNKNOWN",
+              "name": "텔레칩스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "056080",
+              "member_role": "UNKNOWN",
+              "name": "유진로봇",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "064800",
+              "member_role": "UNKNOWN",
+              "name": "포니링크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "066570",
+              "member_role": "UNKNOWN",
+              "name": "LG전자",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "071670",
+              "member_role": "UNKNOWN",
+              "name": "에이테크솔루션",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "077500",
+              "member_role": "UNKNOWN",
+              "name": "유니퀘스트",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "082210",
+              "member_role": "UNKNOWN",
+              "name": "옵트론텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "084730",
+              "member_role": "UNKNOWN",
+              "name": "팅크웨어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "086960",
+              "member_role": "UNKNOWN",
+              "name": "MDS테크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "087260",
+              "member_role": "UNKNOWN",
+              "name": "모바일어플라이언스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "088800",
+              "member_role": "UNKNOWN",
+              "name": "에이스테크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "089010",
+              "member_role": "UNKNOWN",
+              "name": "켐트로닉스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "092600",
+              "member_role": "UNKNOWN",
+              "name": "앤씨앤",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "094360",
+              "member_role": "UNKNOWN",
+              "name": "칩스앤미디어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "097520",
+              "member_role": "UNKNOWN",
+              "name": "엠씨넥스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "105550",
+              "member_role": "UNKNOWN",
+              "name": "엣지파운드리",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "118990",
+              "member_role": "UNKNOWN",
+              "name": "모트렉스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "123410",
+              "member_role": "UNKNOWN",
+              "name": "코리아에프티",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "125490",
+              "member_role": "UNKNOWN",
+              "name": "한라캐스트",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "126700",
+              "member_role": "UNKNOWN",
+              "name": "하이비젼시스템",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "142210",
+              "member_role": "UNKNOWN",
+              "name": "유니트론텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "192650",
+              "member_role": "UNKNOWN",
+              "name": "드림텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "204320",
+              "member_role": "UNKNOWN",
+              "name": "HL만도",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "208860",
+              "member_role": "UNKNOWN",
+              "name": "다산디엠씨",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "214430",
+              "member_role": "UNKNOWN",
+              "name": "아이쓰리시스템",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "271830",
+              "member_role": "UNKNOWN",
+              "name": "팸텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "298830",
+              "member_role": "UNKNOWN",
+              "name": "슈어소프트테크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "307950",
+              "member_role": "UNKNOWN",
+              "name": "현대오토에버",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "317120",
+              "member_role": "UNKNOWN",
+              "name": "라닉스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "331740",
+              "member_role": "UNKNOWN",
+              "name": "아우토크립트",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "352910",
+              "member_role": "UNKNOWN",
+              "name": "오비고",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "370090",
+              "member_role": "UNKNOWN",
+              "name": "퓨런티어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "388790",
+              "member_role": "UNKNOWN",
+              "name": "라이콤",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "396270",
+              "member_role": "UNKNOWN",
+              "name": "넥스트칩",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "403550",
+              "member_role": "UNKNOWN",
+              "name": "쏘카",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "424960",
+              "member_role": "UNKNOWN",
+              "name": "스마트레이더시스템",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "432720",
+              "member_role": "UNKNOWN",
+              "name": "퀄리타스반도체",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "437730",
+              "member_role": "UNKNOWN",
+              "name": "삼현",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "464080",
+              "member_role": "UNKNOWN",
+              "name": "에스오에스랩",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_362",
+              "theme_name": "자율주행차",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "080220",
+              "member_role": "UNKNOWN",
+              "name": "제주반도체",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "094360",
+              "member_role": "UNKNOWN",
+              "name": "칩스앤미디어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "102120",
+              "member_role": "UNKNOWN",
+              "name": "어보브반도체",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "200470",
+              "member_role": "UNKNOWN",
+              "name": "에이팩트",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "200710",
+              "member_role": "UNKNOWN",
+              "name": "에이디테크놀로지",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "222800",
+              "member_role": "STALE",
+              "name": "심텍",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "323280",
+              "member_role": "UNKNOWN",
+              "name": "태성",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "330860",
+              "member_role": "UNKNOWN",
+              "name": "네패스아크",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "353200",
+              "member_role": "UNKNOWN",
+              "name": "대덕전자",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "377480",
+              "member_role": "UNKNOWN",
+              "name": "마음AI",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "394280",
+              "member_role": "UNKNOWN",
+              "name": "오픈엣지테크놀로지",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "399720",
+              "member_role": "UNKNOWN",
+              "name": "가온칩스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "403870",
+              "member_role": "STALE",
+              "name": "HPSP",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "405100",
+              "member_role": "UNKNOWN",
+              "name": "큐알티",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "432720",
+              "member_role": "UNKNOWN",
+              "name": "퀄리타스반도체",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "464500",
+              "member_role": "UNKNOWN",
+              "name": "아이언디바이스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "486990",
+              "member_role": "UNKNOWN",
+              "name": "노타",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_545",
+              "theme_name": "온디바이스 AI",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "003490",
+              "member_role": "STALE",
+              "name": "대한항공",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "005180",
+              "member_role": "UNKNOWN",
+              "name": "빙그레",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "005290",
+              "member_role": "UNKNOWN",
+              "name": "동진쎄미켐",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "005300",
+              "member_role": "UNKNOWN",
+              "name": "롯데칠성",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "005380",
+              "member_role": "STALE",
+              "name": "현대차",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "005830",
+              "member_role": "UNKNOWN",
+              "name": "DB손해보험",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "006800",
+              "member_role": "UNKNOWN",
+              "name": "미래에셋증권",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "008930",
+              "member_role": "UNKNOWN",
+              "name": "한미사이언스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "009240",
+              "member_role": "UNKNOWN",
+              "name": "한샘",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "009450",
+              "member_role": "UNKNOWN",
+              "name": "경동나비엔",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "009900",
+              "member_role": "UNKNOWN",
+              "name": "명신산업",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "010120",
+              "member_role": "STALE",
+              "name": "LS ELECTRIC",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "011070",
+              "member_role": "UNKNOWN",
+              "name": "LG이노텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "011200",
+              "member_role": "UNKNOWN",
+              "name": "HMM",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "011780",
+              "member_role": "UNKNOWN",
+              "name": "금호석유화학",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "012330",
+              "member_role": "STALE",
+              "name": "현대모비스",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "012450",
+              "member_role": "UNKNOWN",
+              "name": "한화에어로스페이스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "012750",
+              "member_role": "UNKNOWN",
+              "name": "에스원",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "014680",
+              "member_role": "UNKNOWN",
+              "name": "한솔케미칼",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "014820",
+              "member_role": "UNKNOWN",
+              "name": "동원시스템즈",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "016360",
+              "member_role": "UNKNOWN",
+              "name": "삼성증권",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "017670",
+              "member_role": "UNKNOWN",
+              "name": "SK텔레콤",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "017800",
+              "member_role": "UNKNOWN",
+              "name": "현대엘리베이터",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "018670",
+              "member_role": "UNKNOWN",
+              "name": "SK가스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "021240",
+              "member_role": "UNKNOWN",
+              "name": "코웨이",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "022100",
+              "member_role": "UNKNOWN",
+              "name": "포스코DX",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "026960",
+              "member_role": "UNKNOWN",
+              "name": "동서",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "030000",
+              "member_role": "UNKNOWN",
+              "name": "제일기획",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "030190",
+              "member_role": "UNKNOWN",
+              "name": "NICE평가정보",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "030200",
+              "member_role": "UNKNOWN",
+              "name": "KT",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "031980",
+              "member_role": "UNKNOWN",
+              "name": "피에스케이홀딩스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "033100",
+              "member_role": "UNKNOWN",
+              "name": "제룡전기",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "033780",
+              "member_role": "UNKNOWN",
+              "name": "KT&G",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "035250",
+              "member_role": "UNKNOWN",
+              "name": "강원랜드",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "035900",
+              "member_role": "UNKNOWN",
+              "name": "JYP Ent.",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "036930",
+              "member_role": "STALE",
+              "name": "주성엔지니어링",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "039130",
+              "member_role": "UNKNOWN",
+              "name": "하나투어",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "039490",
+              "member_role": "UNKNOWN",
+              "name": "키움증권",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "042700",
+              "member_role": "UNKNOWN",
+              "name": "한미반도체",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "047050",
+              "member_role": "UNKNOWN",
+              "name": "포스코인터내셔널",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "047810",
+              "member_role": "UNKNOWN",
+              "name": "한국항공우주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "051600",
+              "member_role": "UNKNOWN",
+              "name": "한전KPS",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "052690",
+              "member_role": "UNKNOWN",
+              "name": "한전기술",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "055550",
+              "member_role": "STALE",
+              "name": "신한지주",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "058470",
+              "member_role": "UNKNOWN",
+              "name": "리노공업",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "064350",
+              "member_role": "STALE",
+              "name": "현대로템",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "064760",
+              "member_role": "UNKNOWN",
+              "name": "티씨케이",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "067160",
+              "member_role": "UNKNOWN",
+              "name": "SOOP",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "071050",
+              "member_role": "UNKNOWN",
+              "name": "한국금융지주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "079550",
+              "member_role": "UNKNOWN",
+              "name": "LIG디펜스앤에어로스페이스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "086280",
+              "member_role": "UNKNOWN",
+              "name": "현대글로비스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "086790",
+              "member_role": "UNKNOWN",
+              "name": "하나금융지주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "089860",
+              "member_role": "UNKNOWN",
+              "name": "롯데렌탈",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "090430",
+              "member_role": "UNKNOWN",
+              "name": "아모레퍼시픽",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "103140",
+              "member_role": "UNKNOWN",
+              "name": "풍산",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "105560",
+              "member_role": "STALE",
+              "name": "KB금융",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "128940",
+              "member_role": "UNKNOWN",
+              "name": "한미약품",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "138040",
+              "member_role": "UNKNOWN",
+              "name": "메리츠금융지주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "140860",
+              "member_role": "UNKNOWN",
+              "name": "파크시스템스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "145720",
+              "member_role": "UNKNOWN",
+              "name": "덴티움",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "175330",
+              "member_role": "UNKNOWN",
+              "name": "JB금융지주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "180640",
+              "member_role": "UNKNOWN",
+              "name": "한진칼",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "183300",
+              "member_role": "UNKNOWN",
+              "name": "코미코",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "185750",
+              "member_role": "UNKNOWN",
+              "name": "종근당",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "192080",
+              "member_role": "UNKNOWN",
+              "name": "더블유게임즈",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "192650",
+              "member_role": "UNKNOWN",
+              "name": "드림텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "192820",
+              "member_role": "UNKNOWN",
+              "name": "코스맥스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "214150",
+              "member_role": "UNKNOWN",
+              "name": "클래시스",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "214450",
+              "member_role": "UNKNOWN",
+              "name": "파마리서치",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "215200",
+              "member_role": "UNKNOWN",
+              "name": "메가스터디교육",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "241560",
+              "member_role": "UNKNOWN",
+              "name": "두산밥캣",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "259960",
+              "member_role": "UNKNOWN",
+              "name": "크래프톤",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "267250",
+              "member_role": "UNKNOWN",
+              "name": "HD현대",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "267260",
+              "member_role": "UNKNOWN",
+              "name": "HD현대일렉트릭",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "271560",
+              "member_role": "UNKNOWN",
+              "name": "오리온",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "272210",
+              "member_role": "UNKNOWN",
+              "name": "한화시스템",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "272290",
+              "member_role": "UNKNOWN",
+              "name": "이녹스첨단소재",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "282330",
+              "member_role": "UNKNOWN",
+              "name": "BGF리테일",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "290650",
+              "member_role": "UNKNOWN",
+              "name": "엘앤씨바이오",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "298020",
+              "member_role": "UNKNOWN",
+              "name": "효성티앤씨",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "298040",
+              "member_role": "UNKNOWN",
+              "name": "효성중공업",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "316140",
+              "member_role": "UNKNOWN",
+              "name": "우리금융지주",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "319660",
+              "member_role": "UNKNOWN",
+              "name": "피에스케이",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "336370",
+              "member_role": "UNKNOWN",
+              "name": "솔루스첨단소재",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "336570",
+              "member_role": "UNKNOWN",
+              "name": "원텍",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "348210",
+              "member_role": "UNKNOWN",
+              "name": "넥스틴",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "357780",
+              "member_role": "UNKNOWN",
+              "name": "솔브레인",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "381970",
+              "member_role": "UNKNOWN",
+              "name": "케이카",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "383220",
+              "member_role": "UNKNOWN",
+              "name": "F&F",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "383310",
+              "member_role": "UNKNOWN",
+              "name": "에코프로에이치엔",
+              "readiness_status": "MISSING",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            },
+            {
+              "code": "403870",
+              "member_role": "STALE",
+              "name": "HPSP",
+              "readiness_status": "DEGRADED",
+              "reason_codes": [
+                "MAX_PER_THEME_REACHED"
+              ],
+              "theme_id": "naver_theme_568",
+              "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+              "theme_state": "DATA_WAIT"
+            }
+          ],
+          "no_order_controls": true,
+          "no_order_side_effects": true,
+          "not_order_intent": true,
+          "observe_only": true,
+          "order_controls_available": false,
+          "queue_commands": false,
+          "read_only": true,
+          "real_order_allowed": false,
+          "reason_summary": {
+            "ALREADY_REGISTERED": 3,
+            "ANCHOR_CODE": 2,
+            "MAX_PER_THEME_REACHED": 160,
+            "THEME_DATA_COVERAGE": 22,
+            "THEME_DATA_WAIT": 22,
+            "THEME_LEADING_CODE": 5,
+            "THEME_MEMBER_DEGRADED": 3,
+            "THEME_MEMBER_FRESH": 10,
+            "THEME_MEMBER_MISSING": 17,
+            "THEME_MEMBER_STALE": 1,
+            "THEME_WATCH": 9,
+            "THEME_WATCHSET": 31
+          },
+          "register_targets": [
+            {
+              "action": "register",
+              "code": "000990",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.687603Z",
+                  "code": "000990",
+                  "fresh_coverage_ratio": 0.6666666666666666,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 2,
+                  "name": "DB하이텍",
+                  "priority": 5675.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_WATCH",
+                    "THEME_MEMBER_MISSING"
+                  ],
+                  "rising_ratio": 0.0,
+                  "theme_id": "naver_theme_155",
+                  "theme_name": "반도체 대표주(생산)",
+                  "theme_state": "WATCH",
+                  "total_trade_value": 9893337000000.0
+                },
+                {
+                  "calculated_at": "2026-07-01T02:28:27.121623Z",
+                  "code": "000990",
+                  "fresh_coverage_ratio": 0.020202020202020204,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 73,
+                  "name": "DB하이텍",
+                  "priority": 5571.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_568",
+                  "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10158475000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "DB하이텍",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5675.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_WAIT",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "006400",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.449456Z",
+                  "code": "006400",
+                  "fresh_coverage_ratio": 0.3333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 3,
+                  "name": "삼성SDI",
+                  "priority": 5674.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_WATCH",
+                    "THEME_MEMBER_MISSING"
+                  ],
+                  "rising_ratio": 0.0,
+                  "theme_id": "naver_theme_173",
+                  "theme_name": "IT 대표주",
+                  "theme_state": "WATCH",
+                  "total_trade_value": 9893320000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "삼성SDI",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5674.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_MISSING"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "018260",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.449456Z",
+                  "code": "018260",
+                  "fresh_coverage_ratio": 0.3333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 4,
+                  "name": "삼성에스디에스",
+                  "priority": 5674.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_WATCH",
+                    "THEME_MEMBER_MISSING"
+                  ],
+                  "rising_ratio": 0.0,
+                  "theme_id": "naver_theme_173",
+                  "theme_name": "IT 대표주",
+                  "theme_state": "WATCH",
+                  "total_trade_value": 9893320000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "삼성에스디에스",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5674.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_MISSING"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "034220",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.449456Z",
+                  "code": "034220",
+                  "fresh_coverage_ratio": 0.3333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 5,
+                  "name": "LG디스플레이",
+                  "priority": 5674.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_WATCH",
+                    "THEME_MEMBER_MISSING"
+                  ],
+                  "rising_ratio": 0.0,
+                  "theme_id": "naver_theme_173",
+                  "theme_name": "IT 대표주",
+                  "theme_state": "WATCH",
+                  "total_trade_value": 9893320000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "LG디스플레이",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5674.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_MISSING"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "066570",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.449456Z",
+                  "code": "066570",
+                  "fresh_coverage_ratio": 0.3333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 6,
+                  "name": "LG전자",
+                  "priority": 5674.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_WATCH",
+                    "THEME_MEMBER_MISSING"
+                  ],
+                  "rising_ratio": 0.0,
+                  "theme_id": "naver_theme_173",
+                  "theme_name": "IT 대표주",
+                  "theme_state": "WATCH",
+                  "total_trade_value": 9893320000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "LG전자",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5674.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_WATCH",
+                "THEME_MEMBER_MISSING"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "000270",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.953365Z",
+                  "code": "000270",
+                  "fresh_coverage_ratio": 0.03389830508474576,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 46,
+                  "name": "기아",
+                  "priority": 5573.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_362",
+                  "theme_name": "자율주행차",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10190551000000.0
+                },
+                {
+                  "calculated_at": "2026-07-01T02:28:27.121623Z",
+                  "code": "000270",
+                  "fresh_coverage_ratio": 0.020202020202020204,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 88,
+                  "name": "기아",
+                  "priority": 5571.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_568",
+                  "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10158475000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "기아",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5573.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "003620",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.953365Z",
+                  "code": "003620",
+                  "fresh_coverage_ratio": 0.03389830508474576,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 33,
+                  "name": "KG모빌리티",
+                  "priority": 5573.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_362",
+                  "theme_name": "자율주행차",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10190551000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "KG모빌리티",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5573.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "011070",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.953365Z",
+                  "code": "011070",
+                  "fresh_coverage_ratio": 0.03389830508474576,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 37,
+                  "name": "LG이노텍",
+                  "priority": 5573.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_362",
+                  "theme_name": "자율주행차",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10190551000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "LG이노텍",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5573.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "033640",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.862403Z",
+                  "code": "033640",
+                  "fresh_coverage_ratio": 0.08333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 22,
+                  "name": "네패스",
+                  "priority": 5572.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.2,
+                  "theme_id": "naver_theme_545",
+                  "theme_name": "온디바이스 AI",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10168234000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "네패스",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5572.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "054450",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.862403Z",
+                  "code": "054450",
+                  "fresh_coverage_ratio": 0.08333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 21,
+                  "name": "텔레칩스",
+                  "priority": 5572.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.2,
+                  "theme_id": "naver_theme_545",
+                  "theme_name": "온디바이스 AI",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10168234000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "텔레칩스",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5572.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "058470",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.862403Z",
+                  "code": "058470",
+                  "fresh_coverage_ratio": 0.08333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 20,
+                  "name": "리노공업",
+                  "priority": 5572.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.2,
+                  "theme_id": "naver_theme_545",
+                  "theme_name": "온디바이스 AI",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10168234000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "리노공업",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5572.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "077500",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.862403Z",
+                  "code": "077500",
+                  "fresh_coverage_ratio": 0.08333333333333333,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 19,
+                  "name": "유니퀘스트",
+                  "priority": 5572.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.2,
+                  "theme_id": "naver_theme_545",
+                  "theme_name": "온디바이스 AI",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10168234000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "유니퀘스트",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5572.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "000810",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:27.121623Z",
+                  "code": "000810",
+                  "fresh_coverage_ratio": 0.020202020202020204,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 74,
+                  "name": "삼성화재",
+                  "priority": 5571.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_568",
+                  "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10158475000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "삼성화재",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5571.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "001060",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:27.121623Z",
+                  "code": "001060",
+                  "fresh_coverage_ratio": 0.020202020202020204,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 72,
+                  "name": "JW중외제약",
+                  "priority": 5571.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_568",
+                  "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10158475000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "JW중외제약",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5571.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "002840",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:27.121623Z",
+                  "code": "002840",
+                  "fresh_coverage_ratio": 0.020202020202020204,
+                  "member_role": "UNKNOWN",
+                  "membership_rank": 71,
+                  "name": "미원상사",
+                  "priority": 5571.0,
+                  "readiness_status": "MISSING",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_MISSING",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_568",
+                  "theme_name": "코리아 밸류업 지수(Korea Value-up Index)",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10158475000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "미원상사",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5571.0,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_MISSING",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "009150",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.953365Z",
+                  "code": "009150",
+                  "fresh_coverage_ratio": 0.03389830508474576,
+                  "member_role": "STALE",
+                  "membership_rank": 36,
+                  "name": "삼성전기",
+                  "priority": 5556.02,
+                  "readiness_status": "DEGRADED",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_DEGRADED",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_362",
+                  "theme_name": "자율주행차",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10190551000000.0
+                },
+                {
+                  "calculated_at": "2026-07-01T02:28:26.862403Z",
+                  "code": "009150",
+                  "fresh_coverage_ratio": 0.08333333333333333,
+                  "member_role": "STALE",
+                  "membership_rank": 23,
+                  "name": "삼성전기",
+                  "priority": 5555.02,
+                  "readiness_status": "DEGRADED",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_DEGRADED",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.2,
+                  "theme_id": "naver_theme_545",
+                  "theme_name": "온디바이스 AI",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10168234000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "삼성전기",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5556.02,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_DEGRADED",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            },
+            {
+              "action": "register",
+              "code": "005380",
+              "details": [
+                {
+                  "calculated_at": "2026-07-01T02:28:26.953365Z",
+                  "code": "005380",
+                  "fresh_coverage_ratio": 0.03389830508474576,
+                  "member_role": "STALE",
+                  "membership_rank": 34,
+                  "name": "현대차",
+                  "priority": 5555.42,
+                  "readiness_status": "DEGRADED",
+                  "reason_codes": [
+                    "THEME_WATCHSET",
+                    "THEME_DATA_WAIT",
+                    "THEME_MEMBER_DEGRADED",
+                    "THEME_DATA_COVERAGE"
+                  ],
+                  "rising_ratio": 0.6666666666666666,
+                  "theme_id": "naver_theme_362",
+                  "theme_name": "자율주행차",
+                  "theme_state": "DATA_WAIT",
+                  "total_trade_value": 10190551000000.0
+                }
+              ],
+              "exchange": "KRX",
+              "name": "현대차",
+              "not_order_signal": true,
+              "observe_only": true,
+              "priority": 5555.42,
+              "reason_codes": [
+                "THEME_WATCHSET",
+                "THEME_DATA_WAIT",
+                "THEME_MEMBER_DEGRADED",
+                "THEME_DATA_COVERAGE"
+              ],
+              "source_types": [
+                "THEME_WATCHSET"
+              ]
+            }
+          ],
+          "registered_realtime_codes": [
+            "000150",
+            "000660",
+            "000720",
+            "000880",
+            "001440",
+            "001510",
+            "001820",
+            "003160",
+            "003230",
+            "005690",
+            "005930",
+            "006260"
+          ],
+          "remove_targets": [],
+          "stale_registered_codes": [],
+          "status": "PLAN_ONLY",
+          "trade_date": "2026-07-01",
+          "warnings": [
+            "MARKET_TICKS_LATEST IS KEYED BY CODE ONLY. DO NOT MIX KRX/NXT IN ONE MARKETDATA PROJECTION UNTIL EXCHANGE/SESSION-AWARE SCHEMA SUPPORT IS ADDED."
+          ]
+        },
+        "queue_commands": false,
+        "read_only": true
+      },
+      "reason_codes": [],
+      "stage": "RealtimeSubscription",
+      "status": "PASS",
+      "summary": "register=17, remove=0, registered=12"
+    },
+    "Risk": {
+      "counts": {
+        "block_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_observation_count": 0,
+        "observe_pass_count": 0,
+        "strategy_observation_count": 0
+      },
+      "details": {
+        "result": {
+          "block_count": 0,
+          "caution_count": 0,
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "observe_only": true,
+          "observe_pass_count": 0,
+          "order_routing_enabled": false,
+          "run_id": "risk_run_d98d410e5b8843cb9869f041aeb5bf87",
+          "status": "COMPLETED",
+          "strategy_observation_count": 0,
+          "trade_date": "2026-07-01"
+        },
+        "status": {
+          "block_count": 0,
+          "caution_count": 0,
+          "config_version": "observe_v1",
+          "configured_observe_only": true,
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "latest_observation_count": 0,
+          "observe_only": true,
+          "observe_pass_count": 0,
+          "order_routing_enabled": false,
+          "stale_tick_sec": 30,
+          "strategy_stale_sec": 300
+        }
+      },
+      "reason_codes": [
+        "RISK_EMPTY"
+      ],
+      "stage": "Risk",
+      "status": "WARN",
+      "summary": "evaluated=0, pass=0"
+    },
+    "Strategy": {
+      "counts": {
+        "candidate_count": 0,
+        "error_count": 0,
+        "evaluated_count": 0,
+        "latest_observation_count": 0,
+        "matched_observation_count": 0
+      },
+      "details": {
+        "result": {
+          "candidate_count": 0,
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "error_count": 0,
+          "evaluated_count": 0,
+          "matched_observation_count": 0,
+          "observe_only": true,
+          "run_id": "strategy_run_2c384b8e0ef8453ab15b83d246bc4229",
+          "status": "COMPLETED",
+          "trade_date": "2026-07-01"
+        },
+        "status": {
+          "allowed_candidate_states": [
+            "CONTEXT_READY",
+            "WATCHING"
+          ],
+          "config_version": "observe_v1",
+          "data_wait_count": 0,
+          "enabled": true,
+          "error_count": 0,
+          "forming_count": 0,
+          "latest_observation_count": 0,
+          "matched_observation_count": 0,
+          "observe_only": true,
+          "require_context_ready": true,
+          "stale_tick_sec": 30
+        }
+      },
+      "reason_codes": [
+        "STRATEGY_EMPTY"
+      ],
+      "stage": "Strategy",
+      "status": "WARN",
+      "summary": "evaluated=0, matched=0"
+    },
+    "Theme": {
+      "counts": {
+        "active_theme_count": 265,
+        "error_count": 0,
+        "member_count": 6441,
+        "snapshot_count": 265,
+        "theme_count_after": 265,
+        "theme_count_before": 265,
+        "watchset_count": 0
+      },
+      "details": {
+        "leadership_result": {
+          "candidate_apply_result": {
+            "candidate_created_count": 0,
+            "candidate_updated_count": 0,
+            "closed_count": 0,
+            "duplicate_source_count": 0,
+            "error_count": 0,
+            "source_event_count": 0,
+            "transition_count": 0
+          },
+          "status": "OK",
+          "watchset_count": 0
+        },
+        "snapshot_result": {
+          "error_count": 0,
+          "processed_theme_count": 265,
+          "snapshot_count": 265
+        }
+      },
+      "reason_codes": [],
+      "stage": "Theme",
+      "status": "PASS",
+      "summary": "members=6441, snapshots=265, watchset=0"
+    }
+  },
+  "status": "COMPLETED_WITH_WARNINGS",
+  "trade_date": "2026-07-01",
+  "warnings": [
+    "Candidate: CANDIDATE_DATA_WAIT",
+    "Strategy: STRATEGY_EMPTY",
+    "Risk: RISK_EMPTY",
+    "EntryTiming: ENTRY_TIMING_NO_INPUT"
+  ]
+}

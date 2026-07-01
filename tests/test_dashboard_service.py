@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import utc_now
+from domain.broker.utils import datetime_to_wire, utc_now
 from gateway.event_factory import make_condition_event, make_heartbeat_event, make_price_tick_event
 from services.candidate_service import rebuild_candidates_from_observations
 from services.config import Settings
@@ -73,6 +74,28 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["market_indexes"]["gateway_adapter"]["health"] == "DISABLED"
 
 
+def test_dashboard_gateway_stage_warns_on_stale_heartbeat(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-stale-gateway.sqlite3")
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={"status": "ok"},
+            ts=utc_now() - timedelta(seconds=180),
+        ),
+    )
+
+    snapshot = build_dashboard_snapshot(connection, Settings())
+
+    connection.close()
+    stage_statuses = {
+        row["stage"]: row for row in snapshot["pipeline_summary"]["stage_statuses"]
+    }
+    assert stage_statuses["Gateway"]["status"] == "WARN"
+    assert "GATEWAY_HEARTBEAT_STALE" in stage_statuses["Gateway"]["reason_codes"]
+
+
 def test_dashboard_snapshot_separates_market_index_projection_and_gateway_adapter(
     tmp_path,
 ) -> None:
@@ -95,8 +118,24 @@ def test_dashboard_snapshot_separates_market_index_projection_and_gateway_adapte
             },
         ),
     )
+    received_at = utc_now()
+    for index in range(6):
+        event = GatewayEvent(
+            event_type="gateway_log",
+            source="kiwoom_gateway",
+            payload={"message": f"noise-{index}"},
+        )
+        append_gateway_event(connection, event)
+        connection.execute(
+            "UPDATE gateway_events SET received_at = ? WHERE event_id = ?",
+            (
+                datetime_to_wire(received_at + timedelta(seconds=index + 1)),
+                event.event_id,
+            ),
+        )
+        connection.commit()
 
-    snapshot = build_dashboard_snapshot(connection, Settings())
+    snapshot = build_dashboard_snapshot(connection, Settings(), limit=5)
 
     connection.close()
     assert snapshot["market_indexes"]["status"]["projection_error_count"] == 0

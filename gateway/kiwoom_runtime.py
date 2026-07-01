@@ -409,6 +409,12 @@ class KiwoomGatewayRuntime:
             worker_snapshot.command_queue_size if worker_snapshot is not None else 0
         )
         worker_last_error = worker_snapshot.last_error if worker_snapshot is not None else ""
+        worker_coalesced_count = (
+            worker_snapshot.coalesced_count if worker_snapshot is not None else 0
+        )
+        worker_coalesce_after_size = (
+            worker_snapshot.coalesce_after_size if worker_snapshot is not None else 0
+        )
         logged_in = self.kiwoom_logged_in()
         accounts = self._accounts() if logged_in else []
         account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
@@ -447,6 +453,8 @@ class KiwoomGatewayRuntime:
             "core_io_worker_event_queue_size": worker_event_queue_size,
             "core_io_worker_command_queue_size": worker_command_queue_size,
             "core_io_worker_last_error": worker_last_error,
+            "core_io_worker_coalesced_event_count": worker_coalesced_count,
+            "core_io_worker_coalesce_after_size": worker_coalesce_after_size,
             "local_event_count": self._local_event_count,
             "latest_local_event": dict(self._latest_local_event),
             "login_in_progress": self._login_in_progress,
@@ -1528,7 +1536,10 @@ class KiwoomGatewayRuntime:
     def _market_index_adapter_health(self) -> str:
         if not self.config.market_index_enabled:
             return "DISABLED"
-        if self.config.market_index_tr_bootstrap_enabled and not self.config.market_index_realtime_enabled:
+        if (
+            self.config.market_index_tr_bootstrap_enabled
+            and not self.config.market_index_realtime_enabled
+        ):
             return "TR_BOOTSTRAP_NOT_IMPLEMENTED"
         if not self.config.market_index_realtime_enabled:
             return "REALTIME_DISABLED"

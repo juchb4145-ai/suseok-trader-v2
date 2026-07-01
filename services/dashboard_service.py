@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from domain.ai_sidecar.policy import get_allowed_tasks, get_forbidden_actions
 from domain.ai_sidecar.schemas import insight_row_to_dict
-from domain.broker.utils import datetime_to_wire, utc_now
+from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
 from domain.candidate.state import CandidateState
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
@@ -153,6 +153,8 @@ DASHBOARD_SECTIONS = [
     "errors",
     "pipeline_summary",
 ]
+
+GATEWAY_HEARTBEAT_STALE_SEC = 120.0
 
 COMMAND_STATUSES = (
     "QUEUED",
@@ -782,6 +784,77 @@ def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dic
     }
 
 
+_GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
+    "kiwoom_logged_in",
+    "login_threaded",
+    "server_mode",
+    "condition_load_state",
+    "condition_load_requested_at",
+    "condition_load_retry_count",
+    "condition_load_timeout_count",
+    "condition_reason_codes",
+    "condition_session_profile",
+    "condition_profiles",
+    "condition_profile_screen_map",
+    "condition_send_results",
+    "condition_profile_metrics",
+    "adaptive_realtime_budget",
+    "latest_condition_ver_callback_at",
+    "latest_condition_ver_result",
+    "registered_realtime_code_count",
+    "realtime_registered_codes",
+    "realtime_exchange",
+    "realtime_registered_kiwoom_codes",
+    "realtime_registration_requested_count",
+    "realtime_registration_success_count",
+    "market_index_enabled",
+    "market_index_realtime_enabled",
+    "market_index_tr_bootstrap_enabled",
+    "market_index_codes",
+    "market_index_screen_no",
+    "market_index_poll_sec",
+    "market_index_registered_codes",
+    "market_index_callback_count",
+    "parsed_market_index_tick_count",
+    "market_index_parse_error_count",
+    "latest_market_index_tick_at",
+    "latest_market_index_parse_error",
+    "latest_market_index_registration_result",
+    "market_index_adapter_health",
+    "latest_realtime_registration_at",
+    "latest_realtime_registration_result",
+    "latest_realtime_callback_at",
+    "raw_realtime_callback_count",
+    "realtime_callback_count",
+    "parsed_price_tick_count",
+    "realtime_parse_error_count",
+    "latest_realtime_parse_error",
+    "realtime_subscription_health",
+    "realtime_callback_real_type_counts",
+    "realtime_recover_count",
+    "raw_callback_counts",
+    "latest_callback_at_by_method",
+    "latest_active_x_thread_audit",
+)
+
+
+def _decode_gateway_status_value(value: str) -> Any:
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
+def _gateway_heartbeat_payload_from_status_values(
+    status_values: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        key: _decode_gateway_status_value(status_values[key])
+        for key in _GATEWAY_HEARTBEAT_STATUS_KEYS
+        if key in status_values
+    }
+
+
 def _gateway_status_section(
     settings: Settings,
     status_values: dict[str, str],
@@ -790,7 +863,8 @@ def _gateway_status_section(
     recent_event_count: int,
     latest_heartbeat_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    heartbeat_payload = dict(latest_heartbeat_payload or {})
+    heartbeat_payload = _gateway_heartbeat_payload_from_status_values(status_values)
+    heartbeat_payload.update(latest_heartbeat_payload or {})
     return {
         "last_event_received_at": status_values.get("last_event_received_at"),
         "last_heartbeat_at": status_values.get("last_heartbeat_at"),
@@ -1410,7 +1484,8 @@ def _realtime_subscription_stage_status(payload: dict[str, Any]) -> dict[str, An
 
 
 def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
-    if not gateway_status.get("last_heartbeat_at"):
+    heartbeat_at = gateway_status.get("last_heartbeat_at")
+    if not heartbeat_at:
         return _stage_status(
             "Gateway",
             "BLOCK",
@@ -1418,6 +1493,19 @@ def _gateway_stage_status(gateway_status: dict[str, Any]) -> dict[str, Any]:
             count=gateway_status.get("recent_event_count"),
             updated_at=None,
             reason_codes=["GATEWAY_HEARTBEAT_MISSING"],
+        )
+    heartbeat_age_sec = _age_seconds(heartbeat_at)
+    if heartbeat_age_sec is None or heartbeat_age_sec > GATEWAY_HEARTBEAT_STALE_SEC:
+        reason_codes = ["GATEWAY_HEARTBEAT_STALE"]
+        if heartbeat_age_sec is None:
+            reason_codes.append("GATEWAY_HEARTBEAT_INVALID")
+        return _stage_status(
+            "Gateway",
+            "WARN",
+            "Gateway heartbeat is stale.",
+            count=gateway_status.get("recent_event_count"),
+            updated_at=heartbeat_at,
+            reason_codes=reason_codes,
         )
     registered_count = int(gateway_status.get("registered_realtime_code_count") or 0)
     callback_count = int(gateway_status.get("realtime_callback_count") or 0)
@@ -1729,3 +1817,10 @@ def _bounded_limit(limit: int | None, settings: Settings) -> int:
 
 def _now() -> str:
     return datetime_to_wire(utc_now())
+
+
+def _age_seconds(value: object) -> float | None:
+    try:
+        return max((utc_now() - parse_timestamp(value, "timestamp")).total_seconds(), 0.0)
+    except Exception:
+        return None

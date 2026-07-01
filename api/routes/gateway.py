@@ -155,6 +155,12 @@ def get_gateway_status() -> dict[str, Any]:
             status_values.get("core_io_worker_command_queue_size")
         ),
         "core_io_worker_last_error": status_values.get("core_io_worker_last_error"),
+        "core_io_worker_coalesced_event_count": _json_value(
+            status_values.get("core_io_worker_coalesced_event_count")
+        ),
+        "core_io_worker_coalesce_after_size": _json_value(
+            status_values.get("core_io_worker_coalesce_after_size")
+        ),
         "local_event_count": _json_value(status_values.get("local_event_count")),
         "condition_load_state": status_values.get("condition_load_state"),
         "condition_load_requested_at": status_values.get("condition_load_requested_at"),

@@ -21,19 +21,21 @@ from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
 from domain.broker.market_index import BrokerMarketIndexTick
 from domain.broker.tr import BrokerTrResponse
+from gateway.core_io_worker import CoreIoWorker
 from gateway.kiwoom_client import (
     FID_ACC_TRADE_VALUE,
     FID_ACC_VOLUME,
     FID_BEST_ASK,
     FID_BEST_BID,
-    FID_CHANGE_VALUE,
     FID_CHANGE_RATE,
+    FID_CHANGE_VALUE,
     FID_CURRENT_PRICE,
     FID_EXECUTION_STRENGTH,
     FID_HIGH_PRICE,
     FID_LOW_PRICE,
     FID_OPEN_PRICE,
     FID_TRADE_TIME,
+    MAX_PENDING_THREAD_AUDIT_EVENTS,
     KiwoomClient,
     MockKiwoomClient,
     Signal,
@@ -392,6 +394,24 @@ def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
     assert price_ticks[0]["code"] == "005930"
     assert price_ticks[0]["metadata"]["exchange"] == "NXT"
     assert price_ticks[0]["metadata"]["kiwoom_code"] == "005930_NX"
+
+
+def test_kiwoom_thread_audit_pending_buffer_is_bounded() -> None:
+    client = object.__new__(KiwoomClient)
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    audits: list[dict[str, object]] = []
+    client.active_x_thread_audit.connect(audits.append)
+
+    for sequence in range(MAX_PENDING_THREAD_AUDIT_EVENTS + 5):
+        client._record_thread_audit("OnReceiveRealData", phase="CALLBACK", sequence=sequence)
+
+    assert len(audits) == MAX_PENDING_THREAD_AUDIT_EVENTS + 5
+    assert len(client._pending_thread_audit_events) == MAX_PENDING_THREAD_AUDIT_EVENTS
+    assert client._pending_thread_audit_events[0]["sequence"] == 5
+    assert client._pending_thread_audit_events[-1]["sequence"] == (
+        MAX_PENDING_THREAD_AUDIT_EVENTS + 4
+    )
 
 
 def test_login_request_finishes_when_kiwoom_is_already_connected() -> None:
@@ -911,6 +931,51 @@ def test_core_io_worker_keeps_http_off_main_thread_and_commands_on_main_thread()
         "command_started",
         "command_ack",
     ]
+
+
+def test_core_io_worker_coalesces_price_ticks_when_queue_is_backed_up() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+    )
+    first = GatewayEvent(
+        event_id="evt_price_old",
+        event_type="price_tick",
+        source="kiwoom_gateway",
+        payload={"code": "005930", "price": 70000},
+    )
+    other = GatewayEvent(
+        event_id="evt_price_other",
+        event_type="price_tick",
+        source="kiwoom_gateway",
+        payload={"code": "000660", "price": 120000},
+    )
+    latest = GatewayEvent(
+        event_id="evt_price_latest",
+        event_type="price_tick",
+        source="kiwoom_gateway",
+        payload={"code": "005930", "price": 70100},
+    )
+
+    worker.enqueue_event(first)
+    worker.enqueue_event(other)
+    worker.enqueue_event(latest)
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 2
+    assert snapshot.coalesced_count == 1
+    assert worker._post_next_event() is True
+    assert worker._core_client.events[0].event_id == "evt_price_latest"
 
 
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:

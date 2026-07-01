@@ -18,10 +18,12 @@ class CoreIoWorkerSnapshot:
     command_queue_size: int
     posted_count: int
     poll_count: int
+    coalesced_count: int
     last_error: str
     latest_poll_at: float | None
     latest_post_at: float | None
     thread_id: int | None
+    coalesce_after_size: int
 
 
 class CoreIoWorker:
@@ -36,6 +38,7 @@ class CoreIoWorker:
         command_polling_enabled: bool = True,
         event_posting_enabled: bool = True,
         retry_sleep_sec: float = 0.2,
+        coalesce_after_size: int = 200,
     ) -> None:
         self._core_client = core_client
         self._command_limit = max(int(command_limit), 1)
@@ -43,6 +46,7 @@ class CoreIoWorker:
         self._command_polling_enabled = bool(command_polling_enabled)
         self._event_posting_enabled = bool(event_posting_enabled)
         self._retry_sleep_sec = max(float(retry_sleep_sec), 0.05)
+        self._coalesce_after_size = max(int(coalesce_after_size), 1)
         self._events: deque[GatewayEvent] = deque()
         self._commands: Queue[GatewayCommand] = Queue()
         self._condition = threading.Condition()
@@ -50,6 +54,7 @@ class CoreIoWorker:
         self._thread: threading.Thread | None = None
         self._posted_count = 0
         self._poll_count = 0
+        self._coalesced_count = 0
         self._last_error = ""
         self._latest_poll_at: float | None = None
         self._latest_post_at: float | None = None
@@ -78,6 +83,10 @@ class CoreIoWorker:
         if not self._event_posting_enabled:
             return
         with self._condition:
+            if len(self._events) >= self._coalesce_after_size:
+                if self._coalesce_event_locked(event):
+                    self._condition.notify()
+                    return
             self._events.append(event)
             self._condition.notify()
 
@@ -95,6 +104,7 @@ class CoreIoWorker:
             event_queue_size = len(self._events)
             posted_count = self._posted_count
             poll_count = self._poll_count
+            coalesced_count = self._coalesced_count
             last_error = self._last_error
             latest_poll_at = self._latest_poll_at
             latest_post_at = self._latest_post_at
@@ -105,11 +115,24 @@ class CoreIoWorker:
             command_queue_size=self._commands.qsize(),
             posted_count=posted_count,
             poll_count=poll_count,
+            coalesced_count=coalesced_count,
             last_error=last_error,
             latest_poll_at=latest_poll_at,
             latest_post_at=latest_post_at,
             thread_id=thread_id,
+            coalesce_after_size=self._coalesce_after_size,
         )
+
+    def _coalesce_event_locked(self, event: GatewayEvent) -> bool:
+        key = _coalescing_key(event)
+        if key is None:
+            return False
+        for index, queued_event in enumerate(self._events):
+            if _coalescing_key(queued_event) == key:
+                self._events[index] = event
+                self._coalesced_count += 1
+                return True
+        return False
 
     def _run(self) -> None:
         with self._condition:
@@ -176,3 +199,17 @@ class CoreIoWorker:
             if self._events:
                 return
             self._condition.wait(timeout=max(float(timeout_sec), 0.01))
+
+
+def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:
+    event_type = str(event.event_type or "").strip().lower()
+    payload = event.payload
+    if event_type == "heartbeat":
+        return (event_type, str(event.source or ""))
+    if event_type in {"price_tick", "quote_tick"}:
+        code = str(payload.get("code") or "").strip()
+        return (event_type, code) if code else None
+    if event_type == "market_index_tick":
+        index_code = str(payload.get("index_code") or payload.get("code") or "").strip()
+        return (event_type, index_code) if index_code else None
+    return None

@@ -112,6 +112,10 @@ DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS = int(
 DEFAULT_CONDITION_EVENT_LOOP_TIMEOUT_MS = int(
     os.environ.get("KIWOOM_CONDITION_EVENT_LOOP_TIMEOUT_MS", "10000")
 )
+MAX_PENDING_THREAD_AUDIT_EVENTS = max(
+    int(os.environ.get("KIWOOM_PENDING_THREAD_AUDIT_MAX_EVENTS", "200")),
+    1,
+)
 
 ORDER_CHEJAN_FIDS = (
     9201,
@@ -559,8 +563,8 @@ class KiwoomClient:
                 "index_codes": list(index_codes),
                 "kiwoom_codes": list(kiwoom_codes),
                 "index_code_by_kiwoom_code": {
-                    kiwoom_code: index_code
-                    for index_code, kiwoom_code in zip(index_codes, kiwoom_codes)
+                    kiwoom_codes[index]: index_code
+                    for index, index_code in enumerate(index_codes)
                 },
                 "fid_string": fid_string,
                 "fid_count": len(MARKET_INDEX_REALTIME_FIDS),
@@ -576,8 +580,8 @@ class KiwoomClient:
                 f"지수 실시간 등록 실패: {ERROR_MESSAGES.get(result_code, str(result_code))}"
             )
         screen_codes.update(kiwoom_codes)
-        for index_code, kiwoom_code in zip(index_codes, kiwoom_codes):
-            self._market_index_realtime_codes[kiwoom_code] = index_code
+        for index, index_code in enumerate(index_codes):
+            self._market_index_realtime_codes[kiwoom_codes[index]] = index_code
 
     def remove_market_index_realtime(
         self,
@@ -1101,6 +1105,9 @@ class KiwoomClient:
         if not hasattr(self, "active_x_thread_audit"):
             self.active_x_thread_audit = Signal()
         self._pending_thread_audit_events.append(payload)
+        overflow = len(self._pending_thread_audit_events) - MAX_PENDING_THREAD_AUDIT_EVENTS
+        if overflow > 0:
+            del self._pending_thread_audit_events[:overflow]
         self.active_x_thread_audit.emit(payload)
 
     def drain_thread_audit_events(self) -> list[dict[str, Any]]:
@@ -1334,8 +1341,8 @@ class MockKiwoomClient:
                     "index_codes": list(index_codes),
                     "kiwoom_codes": kiwoom_codes,
                     "index_code_by_kiwoom_code": {
-                        kiwoom_code: index_code
-                        for index_code, kiwoom_code in zip(index_codes, kiwoom_codes)
+                        kiwoom_codes[index]: index_code
+                        for index, index_code in enumerate(index_codes)
                     },
                     "fid_string": market_index_realtime_fid_string(),
                     "fid_count": len(MARKET_INDEX_REALTIME_FIDS),

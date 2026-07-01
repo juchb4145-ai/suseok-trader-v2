@@ -4,21 +4,49 @@ param(
     [string]$Token = $(if ($env:TRADING_CORE_TOKEN) { $env:TRADING_CORE_TOKEN } else { $env:GATEWAY_CORE_TOKEN }),
     [string]$TradeDate = "",
     [string]$ConditionName = $env:KIWOOM_CONDITION_NAME,
-    [string]$ConditionProfilesFile = "",
+    [string]$ConditionProfilesFile = $(if ($env:KIWOOM_CONDITION_PROFILES_FILE) { $env:KIWOOM_CONDITION_PROFILES_FILE } else { "configs\condition_profiles\market_open_profiles.json" }),
     [string]$ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES,
     [string]$RealtimeCodes = $env:KIWOOM_REALTIME_CODES,
     [string]$RealtimeExchange = $(if ($env:KIWOOM_REALTIME_EXCHANGE) { $env:KIWOOM_REALTIME_EXCHANGE } else { "krx" }),
+    [string]$MarketIndexEnabled = $(if ($env:KIWOOM_MARKET_INDEX_ENABLED) { $env:KIWOOM_MARKET_INDEX_ENABLED } else { "true" }),
+    [string]$MarketIndexRealtimeEnabled = $(if ($env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED) { $env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED } else { "true" }),
+    [string]$MarketIndexTrBootstrapEnabled = $(if ($env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED) { $env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED } else { "false" }),
+    [string]$MarketIndexCodes = $(if ($env:KIWOOM_MARKET_INDEX_CODES) { $env:KIWOOM_MARKET_INDEX_CODES } else { "KOSPI,KOSDAQ" }),
+    [string]$MarketIndexScreenNo = $(if ($env:KIWOOM_MARKET_INDEX_SCREEN_NO) { $env:KIWOOM_MARKET_INDEX_SCREEN_NO } else { "5700" }),
+    [string]$MarketIndexPollSec = $(if ($env:KIWOOM_MARKET_INDEX_POLL_SEC) { $env:KIWOOM_MARKET_INDEX_POLL_SEC } else { "60.0" }),
     [switch]$RunObserveCycle,
     [switch]$RunCore
 )
 
 $ErrorActionPreference = "Stop"
 
-$Root = Resolve-Path (Join-Path $PSScriptRoot "..")
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $Python64 = Join-Path $Root "venv_64\Scripts\python.exe"
 $Python32 = Join-Path $Root "venv_32\Scripts\python.exe"
 if (-not (Test-Path $Python64)) { $Python64 = "python" }
 if (-not (Test-Path $Python32)) { $Python32 = "python" }
+
+function Resolve-BoolSetting {
+    param(
+        [string]$Name,
+        [string]$Value,
+        [bool]$Default
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $Default
+    }
+
+    $Normalized = $Value.Trim().ToLowerInvariant()
+    if (@("1", "true", "yes", "y", "on") -contains $Normalized) {
+        return $true
+    }
+    if (@("0", "false", "no", "n", "off") -contains $Normalized) {
+        return $false
+    }
+
+    throw "$Name must be true or false. Got: $Value"
+}
 
 $env:TRADING_PROFILE = "OBSERVE"
 $env:TRADING_MODE = "OBSERVE"
@@ -39,13 +67,28 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $env:GATEWAY_CORE_TOKEN = $Token
 }
 
+$MarketIndexEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_ENABLED" -Value $MarketIndexEnabled -Default $true
+$MarketIndexRealtimeEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_REALTIME_ENABLED" -Value $MarketIndexRealtimeEnabled -Default $true
+$MarketIndexTrBootstrapEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED" -Value $MarketIndexTrBootstrapEnabled -Default $false
+$env:KIWOOM_MARKET_INDEX_ENABLED = if ($MarketIndexEnabledValue) { "true" } else { "false" }
+$env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED = if ($MarketIndexRealtimeEnabledValue) { "true" } else { "false" }
+$env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED = if ($MarketIndexTrBootstrapEnabledValue) { "true" } else { "false" }
+$env:KIWOOM_MARKET_INDEX_CODES = $MarketIndexCodes
+$env:KIWOOM_MARKET_INDEX_SCREEN_NO = $MarketIndexScreenNo
+$env:KIWOOM_MARKET_INDEX_POLL_SEC = $MarketIndexPollSec
+
 $ResolvedConditionProfiles = ""
 $ConditionProfileSource = ""
 $ConditionProfileCount = 0
 if (-not [string]::IsNullOrWhiteSpace($ConditionProfilesFile)) {
-    $ProfilePath = Resolve-Path $ConditionProfilesFile
-    $ResolvedConditionProfiles = Get-Content -LiteralPath $ProfilePath -Raw
+    $ProfileCandidate = $ConditionProfilesFile
+    if (-not [System.IO.Path]::IsPathRooted($ProfileCandidate)) {
+        $ProfileCandidate = Join-Path $Root $ProfileCandidate
+    }
+    $ProfilePath = (Resolve-Path -LiteralPath $ProfileCandidate).Path
+    $ResolvedConditionProfiles = Get-Content -LiteralPath $ProfilePath -Raw -Encoding UTF8
     $ConditionProfileSource = "file:$ProfilePath"
+    $env:KIWOOM_CONDITION_PROFILES_FILE = $ProfilePath
 } elseif (-not [string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
     $ResolvedConditionProfiles = $ConditionProfilesJson
     $ConditionProfileSource = "json/env"
@@ -84,6 +127,7 @@ if ($ConditionMode -eq "MULTI_PROFILE") {
 } elseif ($ConditionMode -eq "LEGACY_SINGLE") {
     Write-Host "Legacy condition name: $ConditionName"
 }
+Write-Host "Market index adapter: enabled=$MarketIndexEnabledValue realtime=$MarketIndexRealtimeEnabledValue tr_bootstrap=$MarketIndexTrBootstrapEnabledValue codes=$MarketIndexCodes"
 Write-Host ""
 Write-Host "64-bit Core command:"
 Write-Host "  $Python64 -m uvicorn apps.core_api:app --host 127.0.0.1 --port $CorePort --reload"
@@ -108,6 +152,24 @@ if ($ConditionMode -eq "MULTI_PROFILE") {
 if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $GatewayCommand += "--realtime-codes `"$RealtimeCodes`""
 }
+if ($MarketIndexEnabledValue) {
+    $GatewayCommand += "--market-index-enabled"
+} else {
+    $GatewayCommand += "--no-market-index-enabled"
+}
+if ($MarketIndexRealtimeEnabledValue) {
+    $GatewayCommand += "--market-index-realtime-enabled"
+} else {
+    $GatewayCommand += "--no-market-index-realtime-enabled"
+}
+if ($MarketIndexTrBootstrapEnabledValue) {
+    $GatewayCommand += "--market-index-tr-bootstrap-enabled"
+} else {
+    $GatewayCommand += "--no-market-index-tr-bootstrap-enabled"
+}
+$GatewayCommand += "--market-index-codes `"$MarketIndexCodes`""
+$GatewayCommand += "--market-index-screen-no $MarketIndexScreenNo"
+$GatewayCommand += "--market-index-poll-sec $MarketIndexPollSec"
 Write-Host "  $($GatewayCommand -join ' ')"
 Write-Host ""
 Write-Host "RCA command:"
