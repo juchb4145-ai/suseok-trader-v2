@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
@@ -622,6 +622,87 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def _disconnectable_mock_client() -> MockKiwoomClient:
+    client = MockKiwoomClient()
+    client.connect_state = True
+    client.get_accounts = lambda: ["1234567890"] if client.connect_state else []
+    return client
+
+
+def test_runtime_reconnects_with_backoff_after_session_drop(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = _disconnectable_mock_client()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            realtime_codes=("005930",),
+            login_reconnect_base_delay_sec=5.0,
+            login_reconnect_max_delay_sec=300.0,
+        ),
+    )
+    reconnect_calls: list[datetime] = []
+    runtime.reconnect_login = lambda: reconnect_calls.append(clock["now"])
+
+    runtime.on_connected(True, 0, "ok")
+    assert client.registered_codes == {"005930"}
+    assert runtime.heartbeat_payload()["reconnect_count"] == 0
+
+    # Session drops: Kiwoom also loses the realtime registrations.
+    client.connect_state = False
+    client.registered_codes.clear()
+
+    runtime.emit_heartbeat()
+    payload = runtime.heartbeat_payload()
+    assert payload["reconnect_pending"] is True
+    assert reconnect_calls == []  # first heartbeat only schedules the retry
+
+    def advance(seconds: float) -> None:
+        clock["now"] = clock["now"] + timedelta(seconds=seconds)
+
+    advance(5)
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 1
+
+    advance(5)  # next retry is 10s of backoff away, so nothing fires yet
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 1
+
+    advance(5)
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 2
+
+    # Login succeeds again: counters reset and realtime is re-registered.
+    client.connect_state = True
+    runtime.request_login_started(threaded=False)
+    runtime.on_connected(True, 0, "ok")
+    payload = runtime.heartbeat_payload()
+    assert payload["reconnect_count"] == 1
+    assert payload["reconnect_pending"] is False
+    assert payload["reconnect_attempt_count"] == 0
+    assert client.registered_codes == {"005930"}
+
+
+def test_runtime_reconnect_loop_ignores_never_connected_sessions(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = _disconnectable_mock_client()
+    client.connect_state = False
+    runtime = KiwoomGatewayRuntime(client=client, core_client=object())
+    reconnect_calls: list[datetime] = []
+    runtime.reconnect_login = lambda: reconnect_calls.append(clock["now"])
+
+    for _ in range(3):
+        clock["now"] = clock["now"] + timedelta(seconds=10)
+        runtime.emit_heartbeat()
+
+    assert reconnect_calls == []
+    assert runtime.heartbeat_payload()["reconnect_pending"] is False
 
 
 def test_runtime_does_not_register_market_index_when_feature_flag_off() -> None:

@@ -308,6 +308,7 @@ def run_gateway(args: argparse.Namespace) -> int:
         QTimer.singleShot(1000, report_isolation_status)
 
     QTimer.singleShot(100, lambda: _heartbeat_tick(runtime))
+    runtime.reconnect_login = lambda: request_kiwoom_login(client, runtime, threaded=False)
     if bool(args.auto_login):
         QTimer.singleShot(
             1500,
