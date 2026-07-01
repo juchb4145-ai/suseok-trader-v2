@@ -11,16 +11,16 @@ from typing import Any
 from domain.broker.commands import GatewayCommand
 from domain.broker.utils import (
     BrokerValidationError,
-    datetime_to_wire,
     normalize_value,
     parse_timestamp,
     utc_now,
     validate_stock_code,
 )
 from domain.candidate.state import CandidateState
-from services.config import Settings, candidate_timezone, load_settings
 from storage.event_store import get_gateway_status_values
 from storage.gateway_command_store import EnqueueCommandResult, enqueue_command
+
+from services.config import Settings, candidate_timezone, load_settings
 
 REALTIME_SUBSCRIPTION_SOURCE = "realtime_subscription_planner"
 _REGISTER_ACTION = "register"
@@ -716,7 +716,11 @@ def _stale_registered_codes(
         reference_ts = row["event_ts"] if row is not None else None
         age = _age_seconds(reference_ts)
         missing = row is None
-        stale = missing or age is None or age > settings.realtime_subscription_remove_stale_after_sec
+        stale = (
+            missing
+            or age is None
+            or age > settings.realtime_subscription_remove_stale_after_sec
+        )
         if not stale:
             continue
         reasons = ["REGISTERED_TICK_MISSING" if missing else "REGISTERED_TICK_STALE"]
@@ -858,7 +862,8 @@ def _metadata(exchange: str) -> dict[str, Any]:
 
 
 def _trade_date(settings: Settings) -> str:
-    return utc_now().astimezone(candidate_timezone(settings.candidate_trade_date_timezone)).date().isoformat()
+    market_tz = candidate_timezone(settings.candidate_trade_date_timezone)
+    return utc_now().astimezone(market_tz).date().isoformat()
 
 
 def _age_seconds(value: object) -> float | None:

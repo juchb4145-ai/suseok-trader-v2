@@ -12,9 +12,9 @@ from typing import Any
 
 from domain.broker.commands import GatewayCommand
 from domain.broker.utils import utc_now, validate_stock_code
-from services.config import Settings, candidate_timezone, load_settings
 from storage.gateway_command_store import EnqueueCommandResult, enqueue_command
 
+from services.config import Settings, candidate_timezone, load_settings
 
 DEFAULT_BOOTSTRAP_SOURCE = "live_sim_theme_bootstrap"
 
@@ -156,7 +156,10 @@ def select_bootstrap_realtime_codes(
             member_count,
             max(required_count, len(theme_anchors) + min_additional),
         )
-        missing_count = max(target_count - len(theme_anchors), min_additional if theme_anchors else 0)
+        missing_count = max(
+            target_count - len(theme_anchors),
+            min_additional if theme_anchors else 0,
+        )
         if missing_count <= 0:
             skipped += 1
             continue
@@ -386,4 +389,5 @@ def _bounded_count(value: int, *, minimum: int, maximum: int) -> int:
 
 
 def _trade_date(settings: Settings) -> str:
-    return datetime.now(candidate_timezone(settings.candidate_trade_date_timezone)).date().isoformat()
+    market_tz = candidate_timezone(settings.candidate_trade_date_timezone)
+    return datetime.now(market_tz).date().isoformat()
