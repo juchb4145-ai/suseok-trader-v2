@@ -1258,8 +1258,11 @@ def _build_theme_context(
     theme_ids = [row["source_id"] for row in theme_source_rows]
     if not theme_ids and candidate["theme_id"] is not None:
         theme_ids = [candidate["theme_id"]]
-    if not theme_ids:
-        return {"present": False, "sources": []}
+    theme_filter_sql = ""
+    params: list[Any] = []
+    if theme_ids:
+        theme_filter_sql = f"l.theme_id IN ({','.join('?' for _ in theme_ids)}) AND"
+        params.extend(theme_ids)
     rows = connection.execute(
         f"""
         SELECT
@@ -1269,6 +1272,10 @@ def _build_theme_context(
             l.calculated_at,
             l.state AS theme_state,
             l.quality_status,
+            l.leading_code,
+            l.leading_name,
+            l.fresh_coverage_ratio,
+            l.rising_ratio,
             m.code,
             m.name,
             m.member_role AS theme_role,
@@ -1278,11 +1285,20 @@ def _build_theme_context(
             m.metadata_json
         FROM theme_latest_snapshots AS l
         JOIN theme_snapshot_members AS m ON m.snapshot_id = l.snapshot_id
-        WHERE l.theme_id IN ({",".join("?" for _ in theme_ids)})
-            AND m.code = ?
-        ORDER BY l.calculated_at DESC, l.theme_id ASC
+        WHERE {theme_filter_sql} m.code = ?
+        ORDER BY
+            CASE WHEN l.state IN ('LEADING', 'SPREADING') THEN 0 ELSE 1 END,
+            CASE WHEN m.member_role IN (
+                'LEADER_CANDIDATE',
+                'CO_LEADER_CANDIDATE',
+                'FOLLOWER_CANDIDATE'
+            ) THEN 0 ELSE 1 END,
+            CASE WHEN m.readiness_status = 'FRESH' THEN 0 ELSE 1 END,
+            CASE WHEN l.quality_status = 'FRESH' THEN 0 ELSE 1 END,
+            l.calculated_at DESC,
+            l.theme_id ASC
         """,
-        (*theme_ids, candidate["code"]),
+        (*params, candidate["code"]),
     ).fetchall()
     sources = []
     for row in rows:
@@ -1296,6 +1312,10 @@ def _build_theme_context(
         "theme_name": primary.get("theme_name"),
         "theme_state": primary.get("theme_state"),
         "theme_role": primary.get("theme_role"),
+        "leading_code": primary.get("leading_code"),
+        "leading_name": primary.get("leading_name"),
+        "fresh_coverage_ratio": primary.get("fresh_coverage_ratio"),
+        "rising_ratio": primary.get("rising_ratio"),
         "sources": sources,
     }
 

@@ -237,6 +237,72 @@ def test_candidate_context_refresh_transitions_through_data_wait_watching_and_re
     ]
 
 
+def test_condition_candidate_context_uses_latest_theme_snapshot_fallback(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "candidate_condition_theme_fallback.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": "005930", "name": "삼성전자"},
+                {"code": "000660", "name": "SK하이닉스"},
+                {"code": "035420", "name": "NAVER"},
+            ]
+        ),
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(
+            code="005930",
+            name="삼성전자",
+            change_rate=1.5,
+            trade_value=100_000_000,
+        ),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(
+            code="000660",
+            name="SK하이닉스",
+            price=120000,
+            change_rate=1.1,
+            volume=900,
+            trade_value=108_000_000,
+        ),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        make_price_tick_event(
+            code="035420",
+            name="NAVER",
+            price=220000,
+            change_rate=0.2,
+            volume=100,
+            trade_value=22_000_000,
+        ),
+        settings,
+    )
+    calculate_theme_snapshot(connection, "semiconductor", settings=settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate_id = list_candidates(connection, trade_date=trade_date)[0]["candidate_instance_id"]
+
+    refresh_candidate_context(connection, candidate_id, settings=settings)
+    refreshed = get_candidate(connection, candidate_id, include_context=True)
+    connection.close()
+
+    assert refreshed is not None
+    assert refreshed["theme_id"] == "semiconductor"
+    assert refreshed["theme_name"] == "반도체"
+    assert refreshed["theme_state"] == "LEADING"
+    assert refreshed["theme_role"] == "LEADER_CANDIDATE"
+    assert refreshed["context"]["theme_context"]["present"] is True
+    assert refreshed["context"]["theme_context"]["theme_id"] == "semiconductor"
+
+
 def test_candidate_refresh_marks_stale_tick_without_order_like_side_effects(tmp_path) -> None:
     connection = initialize_database(tmp_path / "candidate_stale.sqlite3")
     settings = _candidate_settings(candidate_tick_stale_sec=1)

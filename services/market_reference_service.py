@@ -158,6 +158,17 @@ def _extract_memberships(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     if isinstance(markets_payload, Mapping):
         for market, symbols in markets_payload.items():
             items.extend(_symbols_for_market(market, symbols))
+    elif isinstance(markets_payload, Sequence) and not isinstance(
+        markets_payload, (str, bytes)
+    ):
+        for market_item in markets_payload:
+            if not isinstance(market_item, Mapping):
+                continue
+            market = market_item.get("market") or market_item.get("market_code")
+            symbols = market_item.get("symbols")
+            if market is None or symbols is None:
+                continue
+            items.extend(_symbols_for_market(market, symbols))
     for market in SUPPORTED_MARKETS:
         if market in payload:
             items.extend(_symbols_for_market(market, payload[market]))
@@ -218,6 +229,10 @@ def _normalize_symbol(market: object, item: object) -> dict[str, Any]:
 
 def _normalize_market(value: object) -> str:
     market = str(value).strip().upper()
+    if market == "0":
+        market = "KOSPI"
+    elif market == "10":
+        market = "KOSDAQ"
     if market not in SUPPORTED_MARKETS:
         allowed = ", ".join(sorted(SUPPORTED_MARKETS))
         raise ValueError(f"market must be one of: {allowed}")

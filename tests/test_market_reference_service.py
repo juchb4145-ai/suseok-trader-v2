@@ -49,3 +49,42 @@ def test_market_symbols_projection_stores_membership_and_ignores_duplicate(tmp_p
     assert samsung["market"] == "KOSPI"
     assert navers[0]["code"] == "035420"
     assert navers[0]["market"] == "KOSDAQ"
+
+
+def test_market_symbols_projection_accepts_gateway_market_list_payload(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market_reference_gateway.sqlite3")
+    event = GatewayEvent(
+        event_id="evt_market_symbols_gateway_shape",
+        event_type="market_symbols",
+        source="kiwoom_gateway",
+        ts=TS,
+        payload={
+            "source": "kiwoom_code_list",
+            "markets": [
+                {
+                    "market_code": "0",
+                    "market": "KOSPI",
+                    "symbols": ["005930", "000660", "005930"],
+                },
+                {
+                    "market_code": "10",
+                    "market": "KOSDAQ",
+                    "symbols": ["035420"],
+                },
+            ],
+        },
+    )
+    append_gateway_event(connection, event)
+
+    result = process_market_symbols_event(connection, event)
+    samsung = get_market_for_code(connection, "005930")
+    kosdaq = list_market_symbol_memberships(connection, market="KOSDAQ")
+    rows = connection.execute("SELECT * FROM market_symbol_memberships").fetchall()
+    connection.close()
+
+    assert result.status == "APPLIED"
+    assert result.applied_count == 3
+    assert len(rows) == 3
+    assert samsung is not None
+    assert samsung["market"] == "KOSPI"
+    assert kosdaq[0]["code"] == "035420"
