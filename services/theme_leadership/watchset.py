@@ -21,8 +21,17 @@ class WatchsetSelector:
     def __init__(self, *, settings: Any | None = None) -> None:
         self.settings = settings
 
-    def select(self, snapshots: Sequence[ThemeLeadershipSnapshot]) -> WatchsetResult:
-        top_theme_count = self._setting("theme_leadership_top_theme_count", 5)
+    def select(
+        self,
+        snapshots: Sequence[ThemeLeadershipSnapshot],
+        *,
+        theme_limit: int | None = None,
+    ) -> WatchsetResult:
+        top_theme_count = (
+            self._setting("theme_leadership_top_theme_count", 5)
+            if theme_limit is None
+            else max(int(theme_limit), 1)
+        )
         max_per_theme = self._setting("theme_leadership_max_stocks_per_theme", 3)
         max_total = self._setting("theme_leadership_max_total_watchset", 20)
         ttl_sec = self._setting("candidate_source_stale_sec", 300)

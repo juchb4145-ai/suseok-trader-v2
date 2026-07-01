@@ -229,6 +229,8 @@ def get_market_index_status(
         "latest_projection_error_at": _latest_projection_error_at(connection),
         "freshness_counts": freshness_counts,
         "readiness": readiness,
+        "core_status": _market_index_core_status(readiness),
+        "sanity_warnings": _market_index_sanity_warnings(connection),
         "stale_sec": resolved_settings.market_index_stale_sec,
         "bar_intervals_sec": list(resolved_settings.market_data_bar_intervals_sec),
     }
@@ -535,6 +537,63 @@ def _latest_projection_error_at(connection: sqlite3.Connection) -> str | None:
     return None if row is None else str(row["created_at"])
 
 
+def _market_index_core_status(readiness: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    required_codes = ("KOSPI", "KOSDAQ")
+    quality_by_code: dict[str, str] = {}
+    reason_codes: list[str] = []
+    for code in required_codes:
+        item = readiness.get(code) or {}
+        quality = str(item.get("quality_status") or "MISSING").upper()
+        quality_by_code[code] = quality
+        for reason in item.get("reason_codes") or []:
+            reason_codes.append(str(reason).upper())
+        if quality == "MISSING" and "INDEX_TICK_MISSING" not in reason_codes:
+            reason_codes.append("INDEX_TICK_MISSING")
+
+    qualities = set(quality_by_code.values())
+    if qualities == {"FRESH"}:
+        status = "READY"
+        badge_status = "PASS"
+        label = "index core ready"
+    elif qualities & {"MISSING", "STALE", "INVALID"}:
+        status = "DATA_WAIT"
+        badge_status = "DATA_WAIT"
+        label = "index core waiting"
+    elif "DEGRADED" in qualities:
+        status = "DEGRADED"
+        badge_status = "DEGRADED"
+        label = "index core degraded"
+    else:
+        status = "DATA_WAIT"
+        badge_status = "DATA_WAIT"
+        label = "index core waiting"
+
+    return {
+        "status": status,
+        "badge_status": badge_status,
+        "label": label,
+        "required_index_codes": list(required_codes),
+        "quality_statuses": quality_by_code,
+        "reason_codes": _dedupe(reason_codes),
+    }
+
+
+def _market_index_sanity_warnings(connection: sqlite3.Connection) -> list[str]:
+    rows = connection.execute(
+        """
+        SELECT index_code, price, change_rate
+        FROM market_index_ticks_latest
+        """
+    ).fetchall()
+    warnings: list[str] = []
+    for row in rows:
+        if float(row["price"]) <= 0:
+            warnings.append("MARKET_INDEX_VALUE_INVALID")
+        if abs(float(row["change_rate"])) > 50:
+            warnings.append("MARKET_INDEX_CHANGE_RATE_SUSPECT")
+    return _dedupe(warnings)
+
+
 def _latest_tick_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = json.loads(data.pop("metadata_json"))
@@ -557,3 +616,14 @@ def _bounded_limit(limit: int) -> int:
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return {key: row[key] for key in row.keys()}
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result

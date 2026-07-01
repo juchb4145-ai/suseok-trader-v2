@@ -74,6 +74,50 @@ const indexTickText = (tick) => {
   return `${priceText} / ${rateText}`;
 };
 
+const indexCoreStatus = (indexStatus) => {
+  const provided = indexStatus.core_status || {};
+  if (provided.status) {
+    return {
+      badgeStatus: provided.badge_status || provided.status,
+      label: provided.label || `index core ${provided.status}`,
+      value: provided.status,
+      reasons: provided.reason_codes || [],
+    };
+  }
+  const readiness = indexStatus.readiness || {};
+  const requiredCodes = ["KOSPI", "KOSDAQ"];
+  const qualities = requiredCodes.map((code) =>
+    text((readiness[code] || {}).quality_status || "MISSING").toUpperCase(),
+  );
+  const reasons = requiredCodes.flatMap((code) => (readiness[code] || {}).reason_codes || []);
+  if (qualities.every((quality) => quality === "FRESH")) {
+    return { badgeStatus: "PASS", label: "index core ready", value: "READY", reasons };
+  }
+  if (qualities.some((quality) => ["MISSING", "STALE", "INVALID"].includes(quality))) {
+    return { badgeStatus: "DATA_WAIT", label: "index core waiting", value: "DATA_WAIT", reasons };
+  }
+  if (qualities.some((quality) => quality === "DEGRADED")) {
+    return { badgeStatus: "DEGRADED", label: "index core degraded", value: "DEGRADED", reasons };
+  }
+  return { badgeStatus: "DATA_WAIT", label: "index core waiting", value: "DATA_WAIT", reasons };
+};
+
+const topThemeEmptyMessage = ({ snapshotCount, tradableCount, warnings, leadershipWatchset }) => {
+  if (snapshotCount <= 0) {
+    return "DB theme snapshot 자체가 없습니다.";
+  }
+  if (tradableCount <= 0) {
+    return "DB에는 LEADING/SPREADING 테마가 없습니다.";
+  }
+  if ((warnings || []).includes("DASHBOARD_TOP_THEME_QUERY_MISMATCH")) {
+    return "DB에는 LEADING/SPREADING이 있으나 top query mismatch가 발생했습니다.";
+  }
+  if (leadershipWatchset <= 0) {
+    return "Leadership watchset만 0입니다. DB top theme는 존재합니다.";
+  }
+  return "표시할 top theme가 없습니다.";
+};
+
 const renderSafety = (snapshot) => {
   const safety = snapshot.safety || {};
   document.getElementById("safety-badges").innerHTML = [
@@ -171,28 +215,43 @@ const renderConditionFusion = (snapshot) => {
 
 const renderMarketTheme = (snapshot) => {
   const themes = snapshot.themes || {};
+  const themeStatus = themes.status || {};
+  const stateCounts = themes.state_counts || {};
   const marketIndexes = snapshot.market_indexes || {};
   const indexStatus = marketIndexes.status || {};
   const indexAdapter = marketIndexes.gateway_adapter || {};
   const latestIndexes = marketIndexes.latest_by_code || {};
   const noBuy = snapshot.no_buy_sentinel || {};
   const themeStage = ((noBuy.stage_summary || {}).theme || {});
-  const rows = [
+  const topTradable = themes.top_tradable_themes || [];
+  const fallbackRows = [
     ...(themes.top_leading_themes || []),
     ...(themes.top_spreading_themes || []),
-  ].slice(0, 6);
-  const projectionReady = Number(indexStatus.latest_tick_count || 0) > 0;
+  ];
+  const rows = (topTradable.length ? topTradable : fallbackRows).slice(0, 6);
+  const dbSnapshotCount = Number(themeStatus.latest_snapshot_count || 0);
+  const dbLeadingCount = Number(stateCounts.LEADING || 0);
+  const dbSpreadingCount = Number(stateCounts.SPREADING || 0);
+  const dbTradableCount = dbLeadingCount + dbSpreadingCount;
+  const dbDataWaitCount = Number(stateCounts.DATA_WAIT || 0);
+  const leadershipWatchsetCount = Number(themeStage.watchset_count || 0);
+  const coreStatus = indexCoreStatus(indexStatus);
+  const indexReasons = [...(coreStatus.reasons || []), ...(indexStatus.sanity_warnings || [])];
   document.getElementById("market-theme-badges").innerHTML = [
-    badge("OBSERVE", `watchset ${themeStage.watchset_count || 0}`),
-    badge(themeStage.data_wait_count ? "DATA_WAIT" : "OBSERVE", `DATA_WAIT ${themeStage.data_wait_count || 0}`),
-    badge(projectionReady ? "PASS" : "DATA_WAIT", `index core ${projectionReady ? "ready" : "waiting"}`),
+    badge(dbTradableCount ? "OBSERVE" : "DATA_WAIT", `DB tradable ${dbTradableCount}`),
+    badge("OBSERVE", `watchset ${leadershipWatchsetCount}`),
+    badge(coreStatus.badgeStatus, coreStatus.label),
     badge(indexAdapter.enabled ? "ENABLED" : "OBSERVE", `index adapter ${text(indexAdapter.enabled)}`),
   ].join("");
   document.getElementById("market-theme-status").innerHTML = [
-    metric("Theme snapshots", themeStage.snapshot_count || 0),
-    metric("Watchset", themeStage.watchset_count || 0),
-    metric("DATA_WAIT", themeStage.data_wait_count || 0),
-    metric("Core index projection", projectionReady ? "ready" : "waiting"),
+    metric("DB Theme snapshots", dbSnapshotCount),
+    metric("DB LEADING/SPREADING", `${dbLeadingCount} / ${dbSpreadingCount}`),
+    metric("DB DATA_WAIT", dbDataWaitCount),
+    metric("Leadership watchset", leadershipWatchsetCount),
+    metric("Leadership top DATA_WAIT", themeStage.data_wait_count || 0),
+    metric("Leadership top snapshots", themeStage.snapshot_count || 0),
+    metric("Core index readiness", coreStatus.value),
+    metric("Index reason codes", indexReasons.length ? indexReasons.join(", ") : "-"),
     metric("Gateway index adapter", `${text(indexAdapter.enabled)} / ${text(indexAdapter.health)}`),
     metric("Latest KOSPI tick", indexTickText(latestIndexes.KOSPI)),
     metric("Latest KOSDAQ tick", indexTickText(latestIndexes.KOSDAQ)),
@@ -208,7 +267,14 @@ const renderMarketTheme = (snapshot) => {
           `${pct(row.fresh_coverage_ratio)} / ${pct(row.rising_ratio)}`,
         ]),
       )
-    : emptyState("표시할 top theme가 없습니다.");
+    : emptyState(
+        topThemeEmptyMessage({
+          snapshotCount: dbSnapshotCount,
+          tradableCount: dbTradableCount,
+          warnings: themes.dashboard_warnings || [],
+          leadershipWatchset: leadershipWatchsetCount,
+        }),
+      );
 };
 
 const renderCandidatePlan = (snapshot) => {

@@ -12,6 +12,8 @@ from services.market_data_service import process_gateway_event
 from services.theme_leadership import (
     StockRole,
     ThemeLeadershipService,
+    ThemeLeadershipSnapshot,
+    ThemeMemberLeadership,
     ThemeState,
     build_candidate_source_events,
     rebuild_theme_leadership,
@@ -221,6 +223,57 @@ def test_data_wait_is_retained_and_condition_only_does_not_become_leading(tmp_pa
     assert "INSUFFICIENT_VALID_MEMBERS" in result.snapshots[0].reason_codes
     assert len(result.watchset.items) == 0
     assert len(result.candidate_source_events) == 0
+
+
+def test_rebuild_watchset_selection_pool_uses_eligible_themes_beyond_data_wait_top_n(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "watchset-eligible-pool.sqlite3")
+    settings = _settings(theme_leadership_top_theme_count=5)
+    snapshots = [
+        _leadership_snapshot(rank=index, state=ThemeState.DATA_WAIT)
+        for index in range(1, 6)
+    ]
+    snapshots.extend(
+        [
+            _leadership_snapshot(rank=6, state=ThemeState.LEADING),
+            _leadership_snapshot(rank=7, state=ThemeState.SPREADING),
+            _leadership_snapshot(rank=8, state=ThemeState.LEADER_ONLY),
+        ]
+    )
+    service = ThemeLeadershipService(settings=settings)
+    _install_fake_rebuild_inputs(service, snapshots)
+
+    result = service.rebuild(connection)
+    connection.close()
+
+    assert result.diagnostic_top_theme_count == 5
+    assert result.eligible_theme_count == 3
+    assert result.watchset_selection_source == "eligible_ranked"
+    assert result.watchset_selection_theme_count == 3
+    assert result.warning == "DATA_WAIT_TOP_THEMES_SKIPPED_FOR_WATCHSET"
+    assert result.watchset.items
+    assert result.watchset.reason_summary["DATA_WAIT_TOP_THEMES_SKIPPED_FOR_WATCHSET"] == 1
+
+
+def test_rebuild_watchset_selection_pool_reports_no_eligible_theme(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "watchset-no-eligible.sqlite3")
+    settings = _settings(theme_leadership_top_theme_count=5)
+    snapshots = [
+        _leadership_snapshot(rank=1, state=ThemeState.DATA_WAIT),
+        _leadership_snapshot(rank=2, state=ThemeState.WEAK),
+    ]
+    service = ThemeLeadershipService(settings=settings)
+    _install_fake_rebuild_inputs(service, snapshots)
+
+    result = service.rebuild(connection)
+    connection.close()
+
+    assert result.eligible_theme_count == 0
+    assert result.watchset_selection_source == "diagnostic_top"
+    assert result.watchset.items == []
+    assert result.warning == "THEME_LEADERSHIP_NO_ELIGIBLE_THEME"
+    assert result.watchset.reason_summary["THEME_LEADERSHIP_NO_ELIGIBLE_THEME"] == 1
 
 
 def test_watchset_excludes_overheated_late_laggard_and_stale_members(tmp_path) -> None:
@@ -484,6 +537,70 @@ def _old_price_tick_event() -> GatewayEvent:
         payload=tick.to_dict(),
         ts=old_ts,
     )
+
+
+def _leadership_snapshot(*, rank: int, state: ThemeState) -> ThemeLeadershipSnapshot:
+    code = f"{100000 + rank:06d}"
+    member = ThemeMemberLeadership(
+        code=code,
+        name=f"종목{rank}",
+        role=StockRole.LEADER,
+        member_score=100.0 - rank,
+        change_rate_pct=2.0,
+        turnover_krw=100_000_000.0,
+        execution_strength=110.0,
+        momentum_1m=1.0,
+        momentum_3m=2.0,
+        momentum_5m=3.0,
+        vwap=10_000.0,
+        pullback_from_high_pct=1.0,
+        stale=False,
+        reason_codes=[],
+    )
+    return ThemeLeadershipSnapshot(
+        theme_id=f"theme-{rank}",
+        theme_name=f"테마{rank}",
+        state=state,
+        score=1000.0 - rank,
+        rank=rank,
+        observable_member_count=1,
+        valid_member_count=1,
+        fresh_member_count=1,
+        fresh_coverage_ratio=1.0,
+        rising_count=1,
+        rising_ratio=1.0,
+        leader_count=1,
+        co_leader_count=0,
+        follower_count=0,
+        total_turnover_krw=100_000_000.0,
+        turnover_share=0.1,
+        weighted_return_pct=2.0,
+        leader_code=code,
+        leader_name=f"종목{rank}",
+        members=[member],
+        reason_codes=[],
+    )
+
+
+def _install_fake_rebuild_inputs(
+    service: ThemeLeadershipService,
+    snapshots: list[ThemeLeadershipSnapshot],
+) -> None:
+    class FakeUniverseBuilder:
+        def build(self, connection):
+            return []
+
+    class FakeSnapshotBuilder:
+        def build_for_universe(self, connection, universe):
+            return {}
+
+    class FakeRanker:
+        def rank(self, universe, stock_snapshots, *, created_at=None):
+            return snapshots
+
+    service.universe_builder = FakeUniverseBuilder()
+    service.snapshot_builder = FakeSnapshotBuilder()
+    service.ranker = FakeRanker()
 
 
 def _append_and_project(

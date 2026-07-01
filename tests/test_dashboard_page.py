@@ -49,3 +49,15 @@ def test_dashboard_static_sources_have_no_execution_controls() -> None:
     assert "cancel_order" not in js
     assert "modify_order" not in js
     assert "gateway_commands enqueue" not in js
+
+
+def test_dashboard_static_market_theme_uses_theme_and_index_readiness_sources() -> None:
+    js = (ROOT / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
+
+    assert "top_tradable_themes" in js
+    assert "DB Theme snapshots" in js
+    assert "Leadership watchset" in js
+    assert "quality_status" in js
+    assert "index core ready" in js
+    assert "index core degraded" in js
+    assert "Number(indexStatus.latest_tick_count" not in js

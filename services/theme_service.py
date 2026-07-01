@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -676,6 +676,46 @@ def list_latest_theme_snapshots(
         LIMIT ?
         """,
         tuple(params),
+    ).fetchall()
+    return [_snapshot_row_to_dict(row) for row in rows]
+
+
+def list_top_theme_snapshots_for_dashboard(
+    connection: sqlite3.Connection,
+    *,
+    states: Sequence[ThemeState | str] = (ThemeState.LEADING, ThemeState.SPREADING),
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    bounded_limit = _bounded_limit(limit)
+    normalized_states = _dedupe_state_values(
+        parse_str_enum(state, ThemeState, "state").value for state in states
+    )
+    if not normalized_states:
+        return []
+
+    placeholders = ", ".join("?" for _ in normalized_states)
+    rows = connection.execute(
+        f"""
+        SELECT s.*
+        FROM theme_latest_snapshots AS l
+        JOIN theme_snapshots AS s ON s.snapshot_id = l.snapshot_id
+        WHERE l.state IN ({placeholders})
+        ORDER BY
+            CASE l.state
+                WHEN 'LEADING' THEN 0
+                WHEN 'SPREADING' THEN 1
+                ELSE 9
+            END,
+            l.total_trade_value DESC,
+            l.trade_value_delta_3m DESC,
+            l.trade_value_delta_1m DESC,
+            l.rising_ratio DESC,
+            l.fresh_coverage_ratio DESC,
+            l.calculated_at DESC,
+            l.theme_name ASC
+        LIMIT ?
+        """,
+        (*normalized_states, bounded_limit),
     ).fetchall()
     return [_snapshot_row_to_dict(row) for row in rows]
 
@@ -1478,6 +1518,17 @@ def _count_rows(
 
 def _bounded_limit(limit: int) -> int:
     return min(max(int(limit), 1), 500)
+
+
+def _dedupe_state_values(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _json_dumps(value: object) -> str:

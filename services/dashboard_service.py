@@ -126,6 +126,7 @@ from services.theme_service import (
     get_theme_status,
     list_latest_theme_snapshots,
     list_theme_projection_errors,
+    list_top_theme_snapshots_for_dashboard,
 )
 
 DashboardDetail = Literal["summary", "full"]
@@ -347,6 +348,23 @@ def build_dashboard_snapshot(
         "state",
         ThemeState,
     )
+    latest_sample_state_counts = _state_counts_from_theme_rows(latest_theme_snapshots)
+    top_tradable_themes = list_top_theme_snapshots_for_dashboard(connection, limit=10)
+    top_leading_themes = list_top_theme_snapshots_for_dashboard(
+        connection,
+        states=(ThemeState.LEADING,),
+        limit=10,
+    )
+    top_spreading_themes = list_top_theme_snapshots_for_dashboard(
+        connection,
+        states=(ThemeState.SPREADING,),
+        limit=10,
+    )
+    theme_dashboard_warnings = _theme_dashboard_warnings(
+        full_state_counts=theme_state_counts,
+        latest_sample_state_counts=latest_sample_state_counts,
+        top_tradable_themes=top_tradable_themes,
+    )
 
     errors = build_dashboard_errors(connection, settings=settings, limit=bounded_limit)
     pipeline_summary = _pipeline_summary(
@@ -401,8 +419,12 @@ def build_dashboard_snapshot(
             "status": theme_status,
             "latest_snapshots": latest_theme_snapshots,
             "state_counts": theme_state_counts,
-            "top_leading_themes": _filter_theme_state(latest_theme_snapshots, "LEADING"),
-            "top_spreading_themes": _filter_theme_state(latest_theme_snapshots, "SPREADING"),
+            "top_tradable_themes": top_tradable_themes,
+            "top_leading_themes": top_leading_themes,
+            "top_spreading_themes": top_spreading_themes,
+            "latest_sample_state_counts": latest_sample_state_counts,
+            "dashboard_warnings": theme_dashboard_warnings,
+            "top_list_source": "state_filtered_strength_query",
         },
         "candidates": {
             "status": candidate_status,
@@ -1699,6 +1721,35 @@ def _risk_rows(
 
 def _filter_theme_state(rows: list[dict[str, Any]], state: str) -> list[dict[str, Any]]:
     return [row for row in rows if row.get("state") == state]
+
+
+def _state_counts_from_theme_rows(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {state.value: 0 for state in ThemeState}
+    for row in rows:
+        state = str(row.get("state") or "UNKNOWN")
+        counts[state] = counts.get(state, 0) + 1
+    return counts
+
+
+def _theme_dashboard_warnings(
+    *,
+    full_state_counts: dict[str, int],
+    latest_sample_state_counts: dict[str, int],
+    top_tradable_themes: list[dict[str, Any]],
+) -> list[str]:
+    warnings: list[str] = []
+    full_tradable_count = int(full_state_counts.get("LEADING") or 0) + int(
+        full_state_counts.get("SPREADING") or 0
+    )
+    if full_tradable_count > 0 and not top_tradable_themes:
+        warnings.append("DASHBOARD_TOP_THEME_QUERY_MISMATCH")
+
+    sample_nonzero_states = {
+        state for state, count in latest_sample_state_counts.items() if int(count or 0) > 0
+    }
+    if full_tradable_count > 0 and sample_nonzero_states == {"DATA_WAIT"}:
+        warnings.append("DASHBOARD_SAMPLE_LIMIT_HIDES_TRADABLE_THEME")
+    return warnings
 
 
 def _filter_status(rows: list[dict[str, Any]], status: str) -> list[dict[str, Any]]:

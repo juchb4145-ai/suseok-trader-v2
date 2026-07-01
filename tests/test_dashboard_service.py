@@ -150,6 +150,131 @@ def test_dashboard_snapshot_separates_market_index_projection_and_gateway_adapte
     )
 
 
+def test_dashboard_top_theme_query_does_not_hide_tradable_themes_behind_latest_sample(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "dashboard-theme-false-empty.sqlite3")
+    base = utc_now()
+    for index in range(50):
+        _insert_theme_snapshot(
+            connection,
+            theme_id=f"data-wait-{index:03d}",
+            theme_name=f"DATA_WAIT {index:03d}",
+            state="DATA_WAIT",
+            calculated_at=datetime_to_wire(base - timedelta(seconds=index)),
+        )
+    for index in range(3):
+        _insert_theme_snapshot(
+            connection,
+            theme_id=f"leading-{index}",
+            theme_name=f"LEADING {index}",
+            state="LEADING",
+            calculated_at=datetime_to_wire(base - timedelta(minutes=10 + index)),
+            total_trade_value=300_000_000 - index,
+            trade_value_delta_3m=90_000_000 - index,
+            trade_value_delta_1m=30_000_000 - index,
+        )
+    _insert_theme_snapshot(
+        connection,
+        theme_id="spreading-0",
+        theme_name="SPREADING 0",
+        state="SPREADING",
+        calculated_at=datetime_to_wire(base - timedelta(minutes=14)),
+        total_trade_value=500_000_000,
+    )
+    for index in range(26):
+        _insert_theme_snapshot(
+            connection,
+            theme_id=f"watch-{index:03d}",
+            theme_name=f"WATCH {index:03d}",
+            state="WATCH",
+            calculated_at=datetime_to_wire(base - timedelta(minutes=20 + index)),
+        )
+
+    snapshot = build_dashboard_snapshot(connection, Settings(), limit=50)
+    connection.close()
+
+    themes = snapshot["themes"]
+    assert themes["state_counts"]["LEADING"] == 3
+    assert themes["state_counts"]["SPREADING"] == 1
+    assert themes["latest_sample_state_counts"]["DATA_WAIT"] == 50
+    assert themes["top_tradable_themes"]
+    assert [row["state"] for row in themes["top_tradable_themes"]] == [
+        "LEADING",
+        "LEADING",
+        "LEADING",
+        "SPREADING",
+    ]
+    assert "DASHBOARD_SAMPLE_LIMIT_HIDES_TRADABLE_THEME" in themes["dashboard_warnings"]
+    assert themes["top_list_source"] == "state_filtered_strength_query"
+
+
+def test_dashboard_top_leading_and_spreading_use_state_filtered_queries(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-theme-direct-top.sqlite3")
+    base = utc_now()
+    for index in range(5):
+        _insert_theme_snapshot(
+            connection,
+            theme_id=f"latest-data-wait-{index}",
+            theme_name=f"LATEST DATA_WAIT {index}",
+            state="DATA_WAIT",
+            calculated_at=datetime_to_wire(base - timedelta(seconds=index)),
+        )
+    _insert_theme_snapshot(
+        connection,
+        theme_id="older-leading",
+        theme_name="오래된 주도 테마",
+        state="LEADING",
+        calculated_at=datetime_to_wire(base - timedelta(minutes=30)),
+        total_trade_value=900_000_000,
+    )
+    _insert_theme_snapshot(
+        connection,
+        theme_id="older-spreading",
+        theme_name="오래된 확산 테마",
+        state="SPREADING",
+        calculated_at=datetime_to_wire(base - timedelta(minutes=31)),
+        total_trade_value=800_000_000,
+    )
+
+    snapshot = build_dashboard_snapshot(connection, Settings(), limit=3)
+    connection.close()
+
+    themes = snapshot["themes"]
+    assert themes["latest_sample_state_counts"]["DATA_WAIT"] == 3
+    assert themes["top_leading_themes"][0]["theme_id"] == "older-leading"
+    assert themes["top_spreading_themes"][0]["theme_id"] == "older-spreading"
+    assert {row["theme_id"] for row in themes["top_tradable_themes"]} == {
+        "older-leading",
+        "older-spreading",
+    }
+
+
+def test_dashboard_market_index_core_status_requires_fresh_kospi_and_kosdaq(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-index-readiness.sqlite3")
+    old_ts = datetime_to_wire(utc_now() - timedelta(seconds=120))
+    _insert_market_index_latest(connection, "KOSPI", old_ts)
+    _insert_market_index_latest(connection, "KOSDAQ", old_ts)
+
+    stale_snapshot = build_dashboard_snapshot(
+        connection,
+        Settings(market_index_stale_sec=1),
+    )
+    fresh_snapshot = build_dashboard_snapshot(
+        connection,
+        Settings(market_index_stale_sec=999_999_999),
+    )
+    connection.close()
+
+    stale_status = stale_snapshot["market_indexes"]["status"]
+    fresh_status = fresh_snapshot["market_indexes"]["status"]
+    assert stale_status["latest_tick_count"] == 2
+    assert stale_status["core_status"]["status"] != "READY"
+    assert stale_status["core_status"]["status"] in {"DATA_WAIT", "DEGRADED"}
+    assert fresh_status["core_status"]["status"] == "READY"
+    assert set(fresh_status["core_status"]["quality_statuses"].values()) == {"FRESH"}
+
+
 def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) -> None:
     connection = initialize_database(tmp_path / "dashboard-sample.sqlite3")
     settings = _fresh_settings()
@@ -410,6 +535,128 @@ def _insert_dashboard_error_and_ai_rows(connection) -> None:
         )
         """,
         (payload, now),
+    )
+    connection.commit()
+
+
+def _insert_theme_snapshot(
+    connection,
+    *,
+    theme_id: str,
+    theme_name: str,
+    state: str,
+    calculated_at: str,
+    total_trade_value: float = 0.0,
+    trade_value_delta_3m: float = 0.0,
+    trade_value_delta_1m: float = 0.0,
+) -> None:
+    snapshot_id = f"snapshot-{theme_id}"
+    connection.execute(
+        """
+        INSERT INTO theme_snapshots (
+            snapshot_id,
+            theme_id,
+            theme_name,
+            calculated_at,
+            member_count,
+            active_member_count,
+            observed_member_count,
+            fresh_member_count,
+            fresh_coverage_ratio,
+            rising_member_count,
+            rising_ratio,
+            avg_change_rate,
+            max_change_rate,
+            total_trade_value,
+            trade_value_delta_1m,
+            trade_value_delta_3m,
+            trade_value_delta_5m,
+            leading_code,
+            leading_name,
+            co_leader_codes_json,
+            follower_codes_json,
+            state,
+            quality_status,
+            reason_codes_json,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, 3, 3, 3, 3, 1.0, 3, 1.0, 1.0, 1.0, ?, ?, ?, 0.0,
+            '005930', '삼성전자', '[]', '[]', ?, 'FRESH', '[]', '{}')
+        """,
+        (
+            snapshot_id,
+            theme_id,
+            theme_name,
+            calculated_at,
+            total_trade_value,
+            trade_value_delta_1m,
+            trade_value_delta_3m,
+            state,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO theme_latest_snapshots (
+            theme_id,
+            snapshot_id,
+            theme_name,
+            calculated_at,
+            state,
+            quality_status,
+            leading_code,
+            leading_name,
+            fresh_coverage_ratio,
+            rising_ratio,
+            total_trade_value,
+            trade_value_delta_1m,
+            trade_value_delta_3m,
+            trade_value_delta_5m
+        )
+        VALUES (?, ?, ?, ?, ?, 'FRESH', '005930', '삼성전자', 1.0, 1.0, ?, ?, ?, 0.0)
+        """,
+        (
+            theme_id,
+            snapshot_id,
+            theme_name,
+            calculated_at,
+            state,
+            total_trade_value,
+            trade_value_delta_1m,
+            trade_value_delta_3m,
+        ),
+    )
+    connection.commit()
+
+
+def _insert_market_index_latest(connection, index_code: str, event_ts: str) -> None:
+    connection.execute(
+        """
+        INSERT INTO market_index_ticks_latest (
+            index_code,
+            index_name,
+            price,
+            change_rate,
+            change_value,
+            trade_time,
+            event_ts,
+            received_at,
+            source,
+            event_id,
+            quality_status,
+            metadata_json,
+            updated_at
+        )
+        VALUES (?, ?, 2800.0, 0.1, 2.8, ?, ?, ?, 'test', ?, 'FRESH', '{}', ?)
+        """,
+        (
+            index_code,
+            index_code,
+            event_ts,
+            event_ts,
+            event_ts,
+            f"evt-{index_code}",
+            event_ts,
+        ),
     )
     connection.commit()
 

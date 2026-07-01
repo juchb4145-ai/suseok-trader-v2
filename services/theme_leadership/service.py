@@ -5,6 +5,7 @@ import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
+from math import ceil
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, normalize_payload, parse_timestamp, utc_now
@@ -18,6 +19,7 @@ from services.candidate_service import (
 from services.config import Settings, candidate_timezone, load_settings
 from services.theme_leadership.models import (
     ThemeLeadershipSnapshot,
+    ThemeState,
     WatchsetItem,
     WatchsetResult,
     to_legacy_member_role,
@@ -40,12 +42,22 @@ class ThemeLeadershipRebuildResult:
     )
     observe_only: bool = True
     no_trading_side_effects: bool = True
+    diagnostic_top_theme_count: int = 0
+    eligible_theme_count: int = 0
+    watchset_selection_theme_count: int = 0
+    watchset_selection_source: str | None = None
+    warning: str | None = None
 
     def to_dict(self, *, include_members: bool = True) -> dict[str, Any]:
         return {
             "status": self.status,
             "observe_only": self.observe_only,
             "no_trading_side_effects": self.no_trading_side_effects,
+            "diagnostic_top_theme_count": self.diagnostic_top_theme_count,
+            "eligible_theme_count": self.eligible_theme_count,
+            "watchset_selection_theme_count": self.watchset_selection_theme_count,
+            "watchset_selection_source": self.watchset_selection_source,
+            "warning": self.warning,
             "top_themes": [
                 snapshot.to_dict(include_members=include_members) for snapshot in self.snapshots
             ],
@@ -86,7 +98,23 @@ class ThemeLeadershipService:
         snapshots = self.ranker.rank(universe, stock_snapshots, created_at=utc_now())
         top_count = self.settings.theme_leadership_top_theme_count
         top_snapshots = snapshots[:top_count]
-        watchset = self.watchset_selector.select(top_snapshots)
+        (
+            watchset_source,
+            eligible_theme_count,
+            watchset_selection_source,
+            warning,
+        ) = _watchset_selection_source(
+            snapshots,
+            top_snapshots=top_snapshots,
+            top_count=top_count,
+            settings=self.settings,
+        )
+        watchset = self.watchset_selector.select(
+            watchset_source,
+            theme_limit=len(watchset_source) or top_count,
+        )
+        if warning:
+            watchset = _with_watchset_warning(watchset, warning)
         candidate_events = build_candidate_source_events(
             watchset.items,
             trade_date=_resolve_trade_date(trade_date, self.settings),
@@ -110,7 +138,65 @@ class ThemeLeadershipService:
             watchset=watchset,
             candidate_source_events=candidate_events,
             candidate_apply_result=apply_result,
+            diagnostic_top_theme_count=len(top_snapshots),
+            eligible_theme_count=eligible_theme_count,
+            watchset_selection_theme_count=len(watchset_source),
+            watchset_selection_source=watchset_selection_source,
+            warning=warning,
         )
+
+
+ELIGIBLE_WATCHSET_THEME_STATES = {
+    ThemeState.LEADING,
+    ThemeState.SPREADING,
+    ThemeState.LEADER_ONLY,
+}
+
+
+def _watchset_selection_source(
+    snapshots: Sequence[ThemeLeadershipSnapshot],
+    *,
+    top_snapshots: Sequence[ThemeLeadershipSnapshot],
+    top_count: int,
+    settings: Settings,
+) -> tuple[list[ThemeLeadershipSnapshot], int, str, str | None]:
+    eligible_snapshots = [
+        snapshot for snapshot in snapshots if snapshot.state in ELIGIBLE_WATCHSET_THEME_STATES
+    ]
+    if not eligible_snapshots:
+        return (
+            list(top_snapshots),
+            0,
+            "diagnostic_top",
+            "THEME_LEADERSHIP_NO_ELIGIBLE_THEME",
+        )
+
+    max_per_theme = max(int(settings.theme_leadership_max_stocks_per_theme), 1)
+    max_total = max(int(settings.theme_leadership_max_total_watchset), 0)
+    min_theme_needed = 0 if max_total <= 0 else ceil(max_total / max_per_theme)
+    selection_theme_limit = max(int(top_count), min_theme_needed + 2)
+    warning = (
+        "DATA_WAIT_TOP_THEMES_SKIPPED_FOR_WATCHSET"
+        if any(snapshot.state is ThemeState.DATA_WAIT for snapshot in top_snapshots)
+        else None
+    )
+    return (
+        eligible_snapshots[:selection_theme_limit],
+        len(eligible_snapshots),
+        "eligible_ranked",
+        warning,
+    )
+
+
+def _with_watchset_warning(watchset: WatchsetResult, warning: str) -> WatchsetResult:
+    reason_summary = dict(watchset.reason_summary)
+    reason_summary[warning] = int(reason_summary.get(warning, 0)) + 1
+    return WatchsetResult(
+        items=watchset.items,
+        excluded=watchset.excluded,
+        near_miss=watchset.near_miss,
+        reason_summary=reason_summary,
+    )
 
 
 def rebuild_theme_leadership(
