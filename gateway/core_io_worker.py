@@ -38,7 +38,8 @@ class CoreIoWorker:
         command_polling_enabled: bool = True,
         event_posting_enabled: bool = True,
         retry_sleep_sec: float = 0.2,
-        coalesce_after_size: int = 200,
+        coalesce_after_size: int = 50,
+        command_poll_interval_sec: float = 0.2,
     ) -> None:
         self._core_client = core_client
         self._command_limit = max(int(command_limit), 1)
@@ -47,6 +48,7 @@ class CoreIoWorker:
         self._event_posting_enabled = bool(event_posting_enabled)
         self._retry_sleep_sec = max(float(retry_sleep_sec), 0.05)
         self._coalesce_after_size = max(int(coalesce_after_size), 1)
+        self._command_poll_interval_sec = max(float(command_poll_interval_sec), 0.05)
         self._events: deque[GatewayEvent] = deque()
         self._commands: Queue[GatewayCommand] = Queue()
         self._condition = threading.Condition()
@@ -83,6 +85,10 @@ class CoreIoWorker:
         if not self._event_posting_enabled:
             return
         with self._condition:
+            if _is_priority_event(event):
+                self._enqueue_priority_event_locked(event)
+                self._condition.notify()
+                return
             if len(self._events) >= self._coalesce_after_size:
                 if self._coalesce_event_locked(event):
                     self._condition.notify()
@@ -143,6 +149,7 @@ class CoreIoWorker:
                 continue
             if self._command_polling_enabled:
                 self._poll_commands()
+                self._wait_for_work(timeout_sec=self._command_poll_interval_sec)
                 continue
             self._wait_for_work(timeout_sec=0.1)
 
@@ -175,6 +182,16 @@ class CoreIoWorker:
             self._latest_post_at = time.monotonic()
             self._last_error = ""
         return True
+
+    def _enqueue_priority_event_locked(self, event: GatewayEvent) -> None:
+        key = _coalescing_key(event)
+        if key is not None:
+            for index, queued_event in enumerate(self._events):
+                if _coalescing_key(queued_event) == key:
+                    del self._events[index]
+                    self._coalesced_count += 1
+                    break
+        self._events.appendleft(event)
 
     def _poll_commands(self) -> None:
         try:
@@ -213,3 +230,7 @@ def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:
         index_code = str(payload.get("index_code") or payload.get("code") or "").strip()
         return (event_type, index_code) if index_code else None
     return None
+
+
+def _is_priority_event(event: GatewayEvent) -> bool:
+    return str(event.event_type or "").strip().lower() == "heartbeat"

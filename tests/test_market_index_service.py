@@ -94,6 +94,42 @@ def test_market_index_tick_projection_updates_latest_samples_and_bars(tmp_path) 
     assert stock_tick_count == 0
 
 
+def test_older_market_index_tick_is_ignored_without_rewinding_projection(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market_index.sqlite3")
+    settings = Settings(market_index_stale_sec=999_999_999)
+    newer = index_tick_event(
+        "evt_kospi_newer",
+        index_code="KOSPI",
+        price=2805.0,
+        ts=TS + timedelta(seconds=10),
+    )
+    older = index_tick_event(
+        "evt_kospi_older",
+        index_code="KOSPI",
+        price=2795.0,
+        ts=TS + timedelta(seconds=5),
+    )
+
+    append_and_project(connection, newer, settings)
+    append_gateway_event(connection, older)
+    result = process_market_index_event(connection, older, settings=settings)
+
+    latest = get_latest_market_index_tick(connection, "KOSPI")
+    samples = connection.execute(
+        "SELECT event_id FROM market_index_tick_samples ORDER BY event_ts"
+    ).fetchall()
+    bars_60 = list_market_index_bars(connection, "KOSPI", interval_sec=60)
+    connection.close()
+
+    assert result.status == "IGNORED"
+    assert latest is not None
+    assert latest["event_id"] == "evt_kospi_newer"
+    assert latest["price"] == 2805.0
+    assert [row["event_id"] for row in samples] == ["evt_kospi_newer"]
+    assert bars_60[0]["close"] == 2805.0
+    assert bars_60[0]["tick_count"] == 1
+
+
 def test_market_index_readiness_reports_stale_without_hard_failure(tmp_path) -> None:
     connection = initialize_database(tmp_path / "market_index_stale.sqlite3")
     stale_settings = Settings(market_index_stale_sec=1)

@@ -108,6 +108,13 @@ def load_strategy_candidate_context(
     )
     theme_member = theme.get("member", {})
     latest_snapshot = theme.get("latest_snapshot", {})
+    rt_tls_context = _rt_tls_theme_context(candidate_context)
+    resolved_theme_context, theme_resolution_reasons = _resolve_theme_context(
+        latest_snapshot=latest_snapshot,
+        theme_member=theme_member,
+        rt_tls_context=rt_tls_context,
+        candidate=candidate,
+    )
     latest_1m = _row_to_dict(bars[60]) if bars[60] is not None else {}
     latest_3m = _row_to_dict(bars[180]) if bars[180] is not None else {}
     latest_5m = _row_to_dict(bars[300]) if bars[300] is not None else {}
@@ -126,6 +133,7 @@ def load_strategy_candidate_context(
         readiness=readiness,
         market_regime=market_regime,
     )
+    reason_codes = _merge_reasons([*reason_codes, *theme_resolution_reasons])
     raw_context = {
         "candidate": _candidate_row_to_dict(candidate),
         "candidate_context": candidate_context,
@@ -138,6 +146,8 @@ def load_strategy_candidate_context(
         },
         "theme_latest_snapshot": latest_snapshot,
         "theme_snapshot_member": theme_member,
+        "theme_context_resolved": resolved_theme_context,
+        "rt_tls_theme_context": rt_tls_context,
         "settings": {
             "config_version": settings.strategy_config_version,
             "observe_only": True,
@@ -151,10 +161,19 @@ def load_strategy_candidate_context(
         code=candidate["code"],
         name=candidate["name"],
         candidate_state=candidate["state"],
-        theme_id=_first_text(latest_snapshot.get("theme_id"), candidate["theme_id"]),
-        theme_name=_first_text(latest_snapshot.get("theme_name"), candidate["theme_name"]),
-        theme_state=_first_text(latest_snapshot.get("state"), candidate["theme_state"]),
-        theme_role=_first_text(theme_member.get("member_role"), candidate["theme_role"]),
+        theme_id=_first_text(resolved_theme_context.get("theme_id"), candidate["theme_id"]),
+        theme_name=_first_text(
+            resolved_theme_context.get("theme_name"),
+            candidate["theme_name"],
+        ),
+        theme_state=_first_text(
+            resolved_theme_context.get("theme_state"),
+            candidate["theme_state"],
+        ),
+        theme_role=_first_text(
+            resolved_theme_context.get("theme_role"),
+            candidate["theme_role"],
+        ),
         market_readiness_status=_first_text(
             candidate["market_readiness_status"],
             readiness.get("quality_status"),
@@ -803,6 +822,156 @@ def _theme_context_row(
     if "above_vwap" in member and member["above_vwap"] is not None:
         member["above_vwap"] = bool(member["above_vwap"])
     return {"latest_snapshot": latest_snapshot, "member": member}
+
+
+def _rt_tls_theme_context(candidate_context: Mapping[str, Any]) -> dict[str, Any]:
+    theme_context = _dict_or_empty(candidate_context.get("theme_context"))
+    source_contexts = theme_context.get("theme_leadership_source_contexts")
+    if isinstance(source_contexts, list) and source_contexts:
+        first = _dict_or_empty(source_contexts[0])
+        if first:
+            return first
+    source_context = _dict_or_empty(candidate_context.get("source_context"))
+    active_sources = source_context.get("active_sources")
+    if not isinstance(active_sources, list):
+        return {}
+    candidates = []
+    for row in active_sources:
+        source = _dict_or_empty(row)
+        payload = _dict_or_empty(source.get("payload"))
+        source_type = str(source.get("source_type") or "").upper()
+        if not source_type.startswith("THEME_"):
+            continue
+        theme_state = _legacy_theme_state(
+            _first_text(payload.get("state"), payload.get("theme_state"))
+        )
+        theme_role = _legacy_theme_role(
+            _first_text(payload.get("member_role"), payload.get("stock_role"))
+        )
+        if theme_state is None and theme_role is None:
+            continue
+        detail = _dict_or_empty(payload.get("source_detail"))
+        candidates.append(
+            {
+                "source": "theme_leadership_source_context",
+                "source_type": source_type,
+                "source_id": source.get("source_id"),
+                "last_seen_at": source.get("last_seen_at"),
+                "theme_id": payload.get("theme_id") or source.get("source_id"),
+                "theme_name": payload.get("theme_name"),
+                "theme_state": theme_state,
+                "theme_role": theme_role,
+                "raw_theme_state": payload.get("theme_state"),
+                "raw_stock_role": payload.get("stock_role"),
+                "theme_rank": payload.get("theme_rank"),
+                "priority_score": payload.get("priority_score"),
+                "member_score": detail.get("member_score"),
+                "theme_score": detail.get("theme_score"),
+                "fresh_coverage_ratio": detail.get("fresh_coverage_ratio"),
+                "rising_ratio": detail.get("rising_ratio"),
+                "full_fresh_coverage_ratio": detail.get("full_fresh_coverage_ratio"),
+                "observe_only": bool(payload.get("observe_only", True)),
+                "not_order_signal": bool(payload.get("not_order_signal", True)),
+            }
+        )
+    candidates.sort(
+        key=lambda item: (
+            -float(item.get("priority_score") or 0.0),
+            str(item.get("last_seen_at") or ""),
+        )
+    )
+    return candidates[0] if candidates else {}
+
+
+def _resolve_theme_context(
+    *,
+    latest_snapshot: Mapping[str, Any],
+    theme_member: Mapping[str, Any],
+    rt_tls_context: Mapping[str, Any],
+    candidate: sqlite3.Row,
+) -> tuple[dict[str, Any], list[str]]:
+    legacy_state = _first_text(latest_snapshot.get("state"))
+    legacy_role = _first_text(theme_member.get("member_role"))
+    source_state = _legacy_theme_state(_first_text(rt_tls_context.get("theme_state")))
+    source_role = _legacy_theme_role(_first_text(rt_tls_context.get("theme_role")))
+    reasons: list[str] = []
+    legacy_missing = not latest_snapshot
+    legacy_data_wait = str(legacy_state or "").upper() == "DATA_WAIT"
+    legacy_role_missing = legacy_role is None
+
+    if rt_tls_context and (legacy_missing or legacy_data_wait or legacy_role_missing):
+        reasons.append("RT_TLS_THEME_CONTEXT_FALLBACK_USED")
+        return (
+            {
+                "context_source": "theme_leadership_source_context",
+                "theme_id": _first_text(rt_tls_context.get("theme_id"), candidate["theme_id"]),
+                "theme_name": _first_text(
+                    rt_tls_context.get("theme_name"),
+                    candidate["theme_name"],
+                ),
+                "theme_state": source_state,
+                "theme_role": source_role,
+                "fresh_coverage_ratio": rt_tls_context.get("fresh_coverage_ratio"),
+                "rising_ratio": rt_tls_context.get("rising_ratio"),
+                "theme_score": rt_tls_context.get("theme_score"),
+                "member_score": rt_tls_context.get("member_score"),
+                "priority_score": rt_tls_context.get("priority_score"),
+                "legacy_state": legacy_state,
+                "legacy_role": legacy_role,
+            },
+            reasons,
+        )
+
+    if rt_tls_context and latest_snapshot:
+        if source_state and legacy_state and source_state != legacy_state:
+            reasons.append("RT_TLS_LEGACY_THEME_STATE_CONFLICT")
+        if source_role and legacy_role and source_role != legacy_role:
+            reasons.append("RT_TLS_LEGACY_THEME_ROLE_CONFLICT")
+
+    return (
+        {
+            "context_source": "legacy_theme_snapshot",
+            "theme_id": _first_text(latest_snapshot.get("theme_id"), candidate["theme_id"]),
+            "theme_name": _first_text(latest_snapshot.get("theme_name"), candidate["theme_name"]),
+            "theme_state": _first_text(legacy_state, candidate["theme_state"]),
+            "theme_role": _first_text(legacy_role, candidate["theme_role"]),
+            "fresh_coverage_ratio": latest_snapshot.get("fresh_coverage_ratio"),
+            "rising_ratio": latest_snapshot.get("rising_ratio"),
+            "total_trade_value": latest_snapshot.get("total_trade_value"),
+        },
+        reasons,
+    )
+
+
+def _legacy_theme_state(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.upper()
+    if normalized in {"LEADING", "SPREADING", "DATA_WAIT", "FADING"}:
+        return normalized
+    return "WATCH"
+
+
+def _legacy_theme_role(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.upper()
+    if normalized in {
+        "LEADER_CANDIDATE",
+        "CO_LEADER_CANDIDATE",
+        "FOLLOWER_CANDIDATE",
+        "LAGGARD",
+        "STALE",
+        "UNKNOWN",
+    }:
+        return normalized
+    if normalized == "LEADER":
+        return "LEADER_CANDIDATE"
+    if normalized == "CO_LEADER":
+        return "CO_LEADER_CANDIDATE"
+    if normalized == "FOLLOWER":
+        return "FOLLOWER_CANDIDATE"
+    return "LAGGARD"
 
 
 def _candidate_context_row_to_dict(row: sqlite3.Row | None) -> dict[str, Any]:

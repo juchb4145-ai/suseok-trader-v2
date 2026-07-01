@@ -291,6 +291,7 @@ class ThemeLeadershipSnapshot:
     state: ThemeState
     score: float
     rank: int
+    observable_member_count: int
     valid_member_count: int
     fresh_member_count: int
     fresh_coverage_ratio: float
@@ -310,6 +311,10 @@ class ThemeLeadershipSnapshot:
     avg_change_rate_pct: float = 0.0
     max_change_rate_pct: float = 0.0
     leader_concentration: float = 0.0
+    full_member_count: int = 0
+    full_observed_count: int = 0
+    full_fresh_member_count: int = 0
+    full_fresh_coverage_ratio: float = 0.0
     score_components: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -318,12 +323,16 @@ class ThemeLeadershipSnapshot:
         object.__setattr__(self, "state", ThemeState(str(self.state).upper()))
         for field_name in (
             "rank",
+            "observable_member_count",
             "valid_member_count",
             "fresh_member_count",
             "rising_count",
             "leader_count",
             "co_leader_count",
             "follower_count",
+            "full_member_count",
+            "full_observed_count",
+            "full_fresh_member_count",
         ):
             object.__setattr__(
                 self, field_name, parse_int(getattr(self, field_name), field_name, min_value=0)
@@ -338,6 +347,7 @@ class ThemeLeadershipSnapshot:
             "avg_change_rate_pct",
             "max_change_rate_pct",
             "leader_concentration",
+            "full_fresh_coverage_ratio",
         ):
             min_value = (
                 0.0
@@ -374,6 +384,7 @@ class ThemeLeadershipSnapshot:
             "legacy_state": to_legacy_theme_state(self.state).value,
             "score": self.score,
             "rank": self.rank,
+            "observable_member_count": self.observable_member_count,
             "valid_member_count": self.valid_member_count,
             "fresh_member_count": self.fresh_member_count,
             "fresh_coverage_ratio": self.fresh_coverage_ratio,
@@ -388,6 +399,10 @@ class ThemeLeadershipSnapshot:
             "avg_change_rate_pct": self.avg_change_rate_pct,
             "max_change_rate_pct": self.max_change_rate_pct,
             "leader_concentration": self.leader_concentration,
+            "full_member_count": self.full_member_count,
+            "full_observed_count": self.full_observed_count,
+            "full_fresh_member_count": self.full_fresh_member_count,
+            "full_fresh_coverage_ratio": self.full_fresh_coverage_ratio,
             "leader_code": self.leader_code,
             "leader_name": self.leader_name,
             "reason_codes": list(self.reason_codes),

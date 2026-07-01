@@ -22,7 +22,9 @@ from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
 )
+from services.realtime_subscription import build_realtime_subscription_plan
 from services.runtime.live_sim_pilot_pipeline import list_live_sim_pilot_runs
+from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
 
 
@@ -47,6 +49,18 @@ def build_operator_status(
             manual=True,
             write_snapshot=False,
         ).to_dict()
+
+    realtime_plan = build_realtime_subscription_plan(
+        connection,
+        settings=resolved_settings,
+        trade_date=trade_date,
+        queue_commands=False,
+    ).to_dict()
+    theme_diagnostics = build_theme_data_wait_diagnostics(
+        connection,
+        settings=resolved_settings,
+        limit=20,
+    )
 
     return {
         "generated_at": generated_at,
@@ -92,6 +106,33 @@ def build_operator_status(
         },
         "market_data": get_market_data_status(connection, settings=resolved_settings),
         "theme_leadership": get_theme_status(connection, settings=resolved_settings),
+        "theme_data_wait_diagnostics": {
+            "state_quality_distribution": theme_diagnostics["state_quality_distribution"],
+            "data_wait_reason_counts": theme_diagnostics["data_wait_reason_counts"],
+            "root_cause_summary": theme_diagnostics["root_cause_summary"],
+            "subscription_capacity": theme_diagnostics["subscription_capacity"],
+            "top_data_wait_themes": theme_diagnostics["top_data_wait_themes"],
+        },
+        "realtime_subscription_warmup": {
+            "status": realtime_plan.get("status"),
+            "counts": realtime_plan.get("counts", {}),
+            "pending_register_count": int(
+                (realtime_plan.get("counts") or {}).get("planned_register_count") or 0
+            ),
+            "registered_count": int(
+                (realtime_plan.get("counts") or {}).get("registered_count") or 0
+            ),
+            "missing_subscription_count": int(
+                (realtime_plan.get("counts") or {}).get(
+                    "missing_candidate_subscription_count",
+                    0,
+                )
+                or 0
+            ),
+            "queue_commands": False,
+            "read_only": True,
+            "observe_only": True,
+        },
         "candidates": get_candidate_status(connection, settings=resolved_settings),
         "entry_timing": get_entry_timing_status(connection, settings=resolved_settings),
         "ai_advisory": build_ai_advisory_status(connection, settings=resolved_settings),

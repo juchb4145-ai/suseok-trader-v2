@@ -96,6 +96,13 @@ def process_gateway_event(
             status="DUPLICATE",
             ignored_count=1,
         )
+    if event_type == "price_tick" and _is_older_than_latest_price_tick(connection, event):
+        return MarketDataProcessResult(
+            event_id=event.event_id,
+            event_type=event_type,
+            status="IGNORED",
+            ignored_count=1,
+        )
 
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -777,6 +784,40 @@ def _event_store_times(
     if row is not None:
         return row["event_ts"], row["received_at"]
     return datetime_to_wire(event.ts), datetime_to_wire(utc_now())
+
+
+def _is_older_than_latest_price_tick(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+) -> bool:
+    if _price_tick_payload_real_type(event.payload) in QUOTE_ONLY_REAL_TYPES:
+        return False
+    try:
+        code = validate_stock_code(event.payload.get("code"))
+    except ValueError:
+        return False
+    row = connection.execute(
+        """
+        SELECT event_ts
+        FROM market_ticks_latest
+        WHERE code = ?
+        """,
+        (code,),
+    ).fetchone()
+    if row is None:
+        return False
+    incoming_event_ts, _ = _event_store_times(connection, event)
+    return _timestamp_is_before(incoming_event_ts, row["event_ts"])
+
+
+def _timestamp_is_before(incoming: str, current: str) -> bool:
+    try:
+        return parse_timestamp(incoming, "incoming_event_ts") < parse_timestamp(
+            current,
+            "current_event_ts",
+        )
+    except ValueError:
+        return str(incoming) < str(current)
 
 
 def _record_projection_error(

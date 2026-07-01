@@ -126,6 +126,24 @@ def get_latest_market_regime(connection: sqlite3.Connection) -> dict[str, Any] |
     return None if row is None else _snapshot_row_to_dict(row)
 
 
+def should_rebuild_market_regime_snapshot(
+    connection: sqlite3.Connection,
+    *,
+    min_interval_sec: float = 5.0,
+) -> bool:
+    latest = get_latest_market_regime(connection)
+    if latest is None:
+        return True
+    snapshot_at = latest.get("snapshot_at")
+    if not snapshot_at:
+        return True
+    try:
+        latest_at = parse_timestamp(str(snapshot_at), "market_regime_snapshot_at")
+    except ValueError:
+        return True
+    return utc_now() - latest_at >= timedelta(seconds=max(float(min_interval_sec), 0.0))
+
+
 def get_market_regime_for_code(
     connection: sqlite3.Connection,
     code: str,

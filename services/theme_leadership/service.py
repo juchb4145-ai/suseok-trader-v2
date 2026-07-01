@@ -16,7 +16,13 @@ from services.candidate_service import (
     create_or_merge_candidate_from_source,
 )
 from services.config import Settings, candidate_timezone, load_settings
-from services.theme_leadership.models import ThemeLeadershipSnapshot, WatchsetItem, WatchsetResult
+from services.theme_leadership.models import (
+    ThemeLeadershipSnapshot,
+    WatchsetItem,
+    WatchsetResult,
+    to_legacy_member_role,
+    to_legacy_theme_state,
+)
 from services.theme_leadership.ranker import ThemeLeadershipRanker
 from services.theme_leadership.snapshot import RealtimeSnapshotBuilder
 from services.theme_leadership.universe import ThemeUniverseBuilder
@@ -60,7 +66,7 @@ class ThemeLeadershipRebuildResult:
 class ThemeLeadershipService:
     def __init__(self, *, settings: Settings | None = None) -> None:
         self.settings = settings or load_settings()
-        self.universe_builder = ThemeUniverseBuilder()
+        self.universe_builder = ThemeUniverseBuilder(settings=self.settings)
         self.snapshot_builder = RealtimeSnapshotBuilder(settings=self.settings)
         self.ranker = ThemeLeadershipRanker(settings=self.settings)
         self.watchset_selector = WatchsetSelector(settings=self.settings)
@@ -137,6 +143,8 @@ def build_candidate_source_events(
                 "not_order_signal": True,
                 "theme_id": item.theme_id,
                 "theme_name": item.theme_name,
+                "state": to_legacy_theme_state(item.theme_state).value,
+                "member_role": to_legacy_member_role(item.stock_role).value,
                 "theme_state": item.theme_state.value,
                 "theme_rank": item.theme_rank,
                 "stock_role": item.stock_role.value,

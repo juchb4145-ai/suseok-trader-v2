@@ -10,7 +10,7 @@ from domain.broker.market_index import (
     DEFAULT_ALLOWED_INDEX_CODES,
     BrokerMarketIndexTick,
 )
-from domain.broker.utils import datetime_to_wire, utc_now
+from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
 from domain.market.bars import bucket_start_for
 from domain.market.models import MarketDataQualityStatus
 from domain.market.quality import freshness_status, tick_age_seconds
@@ -58,6 +58,13 @@ def process_market_index_event(
             event_id=event.event_id,
             event_type=event_type,
             status="DUPLICATE",
+            ignored_count=1,
+        )
+    if _is_older_than_latest_index_tick(connection, event):
+        return MarketIndexProcessResult(
+            event_id=event.event_id,
+            event_type=event_type,
+            status="IGNORED",
             ignored_count=1,
         )
 
@@ -430,6 +437,38 @@ def _event_store_times(
     if row is not None:
         return row["event_ts"], row["received_at"]
     return datetime_to_wire(event.ts), datetime_to_wire(utc_now())
+
+
+def _is_older_than_latest_index_tick(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+) -> bool:
+    try:
+        index_code = normalize_index_code(event.payload.get("index_code"))
+    except ValueError:
+        return False
+    row = connection.execute(
+        """
+        SELECT event_ts
+        FROM market_index_ticks_latest
+        WHERE index_code = ?
+        """,
+        (index_code,),
+    ).fetchone()
+    if row is None:
+        return False
+    incoming_event_ts, _ = _event_store_times(connection, event)
+    return _timestamp_is_before(incoming_event_ts, row["event_ts"])
+
+
+def _timestamp_is_before(incoming: str, current: str) -> bool:
+    try:
+        return parse_timestamp(incoming, "incoming_event_ts") < parse_timestamp(
+            current,
+            "current_event_ts",
+        )
+    except ValueError:
+        return str(incoming) < str(current)
 
 
 def _record_projection_error(

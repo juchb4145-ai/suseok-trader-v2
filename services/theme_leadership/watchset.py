@@ -85,6 +85,13 @@ class WatchsetSelector:
                     source_detail={
                         "theme_score": theme.score,
                         "member_score": member.member_score,
+                        "fresh_coverage_ratio": theme.fresh_coverage_ratio,
+                        "rising_ratio": theme.rising_ratio,
+                        "observable_member_count": theme.observable_member_count,
+                        "valid_member_count": theme.valid_member_count,
+                        "full_member_count": theme.full_member_count,
+                        "full_observed_count": theme.full_observed_count,
+                        "full_fresh_coverage_ratio": theme.full_fresh_coverage_ratio,
                         "observe_only": True,
                         "not_order_signal": True,
                     },

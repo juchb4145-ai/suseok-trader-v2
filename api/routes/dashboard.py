@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+from threading import Lock
 from typing import Any, Literal
 
 from fastapi import APIRouter, Query
@@ -17,6 +19,8 @@ from services.dashboard_service import (
 from storage.sqlite import open_connection
 
 router = APIRouter(prefix="/api/dashboard")
+_SUMMARY_CACHE_LOCK = Lock()
+_SUMMARY_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
 
 
 @router.get("/snapshot")
@@ -25,6 +29,29 @@ def dashboard_snapshot(
     limit: int | None = Query(default=None, ge=1, le=200),
 ) -> dict[str, Any]:
     settings = load_settings()
+    if detail == "summary":
+        cache_limit = _dashboard_cache_limit(settings, limit)
+        cache_key = (str(settings.trading_db_path), cache_limit)
+        now = time.monotonic()
+        with _SUMMARY_CACHE_LOCK:
+            cached = _SUMMARY_CACHE.get(cache_key)
+            if cached is not None and now - cached[0] <= _dashboard_summary_cache_ttl(
+                settings
+            ):
+                return cached[1]
+            connection = open_connection(settings.trading_db_path)
+            try:
+                snapshot = build_dashboard_snapshot(
+                    connection,
+                    settings,
+                    detail=detail,
+                    limit=limit,
+                )
+            finally:
+                connection.close()
+            _SUMMARY_CACHE[cache_key] = (time.monotonic(), snapshot)
+            return snapshot
+
     connection = open_connection(settings.trading_db_path)
     try:
         return build_dashboard_snapshot(
@@ -35,6 +62,15 @@ def dashboard_snapshot(
         )
     finally:
         connection.close()
+
+
+def _dashboard_cache_limit(settings, limit: int | None) -> int:
+    value = settings.dashboard_snapshot_default_limit if limit is None else int(limit)
+    return min(max(value, 1), settings.dashboard_max_limit)
+
+
+def _dashboard_summary_cache_ttl(settings) -> float:
+    return min(max(float(settings.dashboard_refresh_sec) - 1.0, 1.0), 5.0)
 
 
 @router.get("/status")

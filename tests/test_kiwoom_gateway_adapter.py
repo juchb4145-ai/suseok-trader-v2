@@ -978,6 +978,61 @@ def test_core_io_worker_coalesces_price_ticks_when_queue_is_backed_up() -> None:
     assert worker._core_client.events[0].event_id == "evt_price_latest"
 
 
+def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_condition",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "condition_name": "A", "action": "ENTER"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_price",
+            event_type="price_tick",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "price": 70000},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_heartbeat_old",
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={"sequence": 1},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_heartbeat_new",
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={"sequence": 2},
+        )
+    )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 3
+    assert snapshot.coalesced_count == 1
+    assert worker._post_next_event() is True
+    assert worker._core_client.events[0].event_id == "evt_heartbeat_new"
+
+
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
     command = GatewayCommand(
         command_id="cmd_boom",

@@ -76,3 +76,25 @@ def test_market_index_api_reads_projection_after_gateway_post(tmp_path, monkeypa
     assert bars.json()["bars"][0]["tick_count"] == 1
     assert regime.status_code == 200
     assert regime.json()["latest"]["primary_index_code"] == "KOSPI"
+
+
+def test_gateway_index_event_throttles_recent_market_regime_rebuild(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "index_api_throttle.sqlite3"))
+    monkeypatch.setenv("MARKET_INDEX_STALE_SEC", "999999999")
+
+    first = index_tick_event("evt_api_kospi_index_first", index_code="KOSPI", price=2800.0)
+    second = index_tick_event("evt_api_kospi_index_second", index_code="KOSPI", price=2801.0)
+
+    with TestClient(app) as client:
+        first_response = client.post("/api/gateway/events", json=first.to_dict())
+        second_response = client.post("/api/gateway/events", json=second.to_dict())
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert first_response.json()["projection_statuses"]["market_regime"] != "SKIPPED_RECENT"
+    assert second_response.json()["projection_statuses"]["market_index"] == "APPLIED"
+    assert second_response.json()["projection_statuses"]["market_regime"] == "SKIPPED_RECENT"

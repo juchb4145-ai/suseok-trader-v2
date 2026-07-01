@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from domain.broker.events import GatewayEvent
 from storage.event_store import append_gateway_event
@@ -71,6 +71,35 @@ def test_duplicate_event_with_same_payload_increments_duplicate_count(tmp_path) 
     assert row["duplicate_count"] == 1
 
 
+def test_older_heartbeat_does_not_overwrite_latest_gateway_status(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "events.sqlite3")
+    latest = GatewayEvent(
+        event_id="evt_heartbeat_latest",
+        event_type="heartbeat",
+        source="test-gateway",
+        payload={"registered_realtime_code_count": 87, "condition_load_state": "LOADED"},
+        ts=TS + timedelta(seconds=10),
+    )
+    older = GatewayEvent(
+        event_id="evt_heartbeat_older",
+        event_type="heartbeat",
+        source="test-gateway",
+        payload={"registered_realtime_code_count": 0, "condition_load_state": "IDLE"},
+        ts=TS,
+    )
+
+    append_gateway_event(connection, latest)
+    append_gateway_event(connection, older)
+
+    status_rows = connection.execute("SELECT key, value FROM gateway_status").fetchall()
+    connection.close()
+
+    status_values = {row["key"]: row["value"] for row in status_rows}
+    assert status_values["last_heartbeat_at"] == latest.to_dict()["ts"]
+    assert status_values["registered_realtime_code_count"] == "87"
+    assert status_values["condition_load_state"] == "LOADED"
+
+
 def test_duplicate_event_with_different_payload_is_conflict(tmp_path) -> None:
     connection = initialize_database(tmp_path / "events.sqlite3")
     event = GatewayEvent(
@@ -131,3 +160,27 @@ def test_unknown_event_type_is_stored_with_warning_status(tmp_path) -> None:
     assert result.status == "UNKNOWN_EVENT_TYPE"
     assert row["status"] == "UNKNOWN_EVENT_TYPE"
     assert "future_event" in row["error_message"]
+
+
+def test_quote_tick_is_supported_without_price_projection_validation(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "events.sqlite3")
+    event = GatewayEvent(
+        event_id="evt_quote_tick",
+        event_type="quote_tick",
+        source="test-gateway",
+        payload={"code": "005930", "best_bid": 70000, "best_ask": 70100},
+        ts=TS,
+    )
+
+    result = append_gateway_event(connection, event)
+
+    row = connection.execute(
+        "SELECT status, error_message FROM gateway_events WHERE event_id = ?",
+        (event.event_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result.accepted is True
+    assert result.status == "ACCEPTED"
+    assert row["status"] == "ACCEPTED"
+    assert row["error_message"] is None

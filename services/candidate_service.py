@@ -876,8 +876,8 @@ def _insert_candidate(
             source_event.source_id,
             source_event.theme_id,
             source_event.theme_name,
-            source_event.payload.get("state"),
-            source_event.payload.get("member_role"),
+            _source_theme_state(source_event),
+            _source_member_role(source_event),
             _json_dumps(
                 merge_reason_codes(
                     source_event.reason_codes,
@@ -1039,8 +1039,8 @@ def _update_candidate_from_source(
             datetime_to_wire(source_event.observed_at),
             source_event.theme_id,
             source_event.theme_name,
-            source_event.payload.get("state"),
-            source_event.payload.get("member_role"),
+            _source_theme_state(source_event),
+            _source_member_role(source_event),
             _json_dumps(source_event.reason_codes),
             candidate_instance_id,
         ),
@@ -1305,9 +1305,31 @@ def _build_theme_context(
         item = _row_to_dict(row)
         item["metadata"] = json.loads(item.pop("metadata_json"))
         sources.append(item)
-    primary = sources[0] if sources else {}
+    source_contexts = _theme_source_contexts(theme_source_rows)
+    legacy_primary = sources[0] if sources else {}
+    source_primary = source_contexts[0] if source_contexts else {}
+    reason_codes: list[str] = []
+    use_source_context = bool(source_primary) and (
+        not legacy_primary
+        or str(legacy_primary.get("theme_state") or "").upper() == "DATA_WAIT"
+        or not legacy_primary.get("theme_role")
+    )
+    if use_source_context:
+        primary = source_primary
+        reason_codes.append("RT_TLS_SOURCE_CONTEXT_FALLBACK_USED")
+    else:
+        primary = legacy_primary
+        if source_primary and legacy_primary:
+            source_state = str(source_primary.get("theme_state") or "").upper()
+            legacy_state = str(legacy_primary.get("theme_state") or "").upper()
+            source_role = str(source_primary.get("theme_role") or "").upper()
+            legacy_role = str(legacy_primary.get("theme_role") or "").upper()
+            if source_state and legacy_state and source_state != legacy_state:
+                reason_codes.append("RT_TLS_LEGACY_THEME_STATE_CONFLICT")
+            if source_role and legacy_role and source_role != legacy_role:
+                reason_codes.append("RT_TLS_LEGACY_THEME_ROLE_CONFLICT")
     return {
-        "present": bool(sources),
+        "present": bool(primary),
         "theme_id": primary.get("theme_id"),
         "theme_name": primary.get("theme_name"),
         "theme_state": primary.get("theme_state"),
@@ -1317,7 +1339,62 @@ def _build_theme_context(
         "fresh_coverage_ratio": primary.get("fresh_coverage_ratio"),
         "rising_ratio": primary.get("rising_ratio"),
         "sources": sources,
+        "theme_leadership_source_contexts": source_contexts,
+        "context_source": (
+            "theme_leadership_source_context" if use_source_context else "legacy_theme_snapshot"
+        ),
+        "reason_codes": reason_codes,
     }
+
+
+def _theme_source_contexts(rows: Sequence[sqlite3.Row]) -> list[dict[str, Any]]:
+    contexts: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _source_payload(row)
+        theme_state = _source_theme_state(row)
+        theme_role = _source_member_role(row)
+        if theme_state is None and theme_role is None:
+            continue
+        source_detail = payload.get("source_detail")
+        if not isinstance(source_detail, Mapping):
+            source_detail = {}
+        contexts.append(
+            {
+                "source": "theme_leadership_source_context",
+                "source_type": row["source_type"],
+                "source_id": row["source_id"],
+                "last_seen_at": row["last_seen_at"],
+                "theme_id": payload.get("theme_id") or row["source_id"],
+                "theme_name": payload.get("theme_name"),
+                "theme_state": theme_state,
+                "theme_role": theme_role,
+                "raw_theme_state": payload.get("theme_state"),
+                "raw_stock_role": payload.get("stock_role"),
+                "theme_rank": payload.get("theme_rank"),
+                "priority_score": payload.get("priority_score"),
+                "member_score": source_detail.get("member_score"),
+                "theme_score": source_detail.get("theme_score"),
+                "fresh_coverage_ratio": source_detail.get("fresh_coverage_ratio"),
+                "rising_ratio": source_detail.get("rising_ratio"),
+                "full_fresh_coverage_ratio": source_detail.get("full_fresh_coverage_ratio"),
+                "observe_only": bool(payload.get("observe_only", True)),
+                "not_order_signal": bool(payload.get("not_order_signal", True)),
+                "reason_codes": merge_reason_codes(
+                    [
+                        *[str(reason) for reason in payload.get("reason_codes", [])],
+                        "RT_TLS_SOURCE_CONTEXT_PRESENT",
+                    ]
+                ),
+            }
+        )
+    contexts.sort(
+        key=lambda item: (
+            -float(item.get("priority_score") or 0.0),
+            str(item.get("last_seen_at") or ""),
+            str(item.get("source_type") or ""),
+        )
+    )
+    return contexts
 
 
 def _build_source_context(
@@ -1458,7 +1535,9 @@ def _readiness_reason_codes(readiness: Mapping[str, Any]) -> list[str]:
 
 
 def _theme_reason_codes(theme_context: Mapping[str, Any]) -> list[str]:
-    if not theme_context.get("sources"):
+    if not theme_context.get("sources") and not theme_context.get(
+        "theme_leadership_source_contexts"
+    ):
         return []
     reasons: list[str] = []
     state = str(theme_context.get("theme_state") or "").upper()
@@ -1642,6 +1721,60 @@ def _latest_source_seen_at(active_sources: list[sqlite3.Row]) -> str | None:
 
 def _theme_source_values() -> set[str]:
     return {source_type.value for source_type in THEME_SOURCE_TYPES}
+
+
+def _source_theme_state(source_event: CandidateSourceEvent | sqlite3.Row) -> str | None:
+    payload = (
+        source_event.payload
+        if isinstance(source_event, CandidateSourceEvent)
+        else _source_payload(source_event)
+    )
+    value = _first_text(payload.get("state"), payload.get("theme_state"))
+    if value is None:
+        return None
+    normalized = value.upper()
+    if normalized in {"LEADING", "SPREADING", "FADING", "DATA_WAIT"}:
+        return normalized
+    return "WATCH"
+
+
+def _source_member_role(source_event: CandidateSourceEvent | sqlite3.Row) -> str | None:
+    payload = (
+        source_event.payload
+        if isinstance(source_event, CandidateSourceEvent)
+        else _source_payload(source_event)
+    )
+    value = _first_text(payload.get("member_role"), payload.get("stock_role"))
+    if value is None:
+        return None
+    normalized = value.upper()
+    if normalized in {
+        "LEADER_CANDIDATE",
+        "CO_LEADER_CANDIDATE",
+        "FOLLOWER_CANDIDATE",
+        "LAGGARD",
+        "STALE",
+        "UNKNOWN",
+    }:
+        return normalized
+    if normalized == "LEADER":
+        return "LEADER_CANDIDATE"
+    if normalized == "CO_LEADER":
+        return "CO_LEADER_CANDIDATE"
+    if normalized == "FOLLOWER":
+        return "FOLLOWER_CANDIDATE"
+    if normalized == "STALE":
+        return "STALE"
+    if normalized == "UNKNOWN":
+        return "UNKNOWN"
+    return "LAGGARD"
+
+
+def _first_text(*values: object) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _condition_source_values() -> set[str]:

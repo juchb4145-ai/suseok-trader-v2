@@ -68,7 +68,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--token",
         default=os.environ.get("GATEWAY_CORE_TOKEN") or os.environ.get("TRADING_CORE_TOKEN", ""),
     )
-    parser.add_argument("--poll-wait-sec", type=float, default=1.0)
+    parser.add_argument(
+        "--poll-wait-sec",
+        type=float,
+        default=float(os.environ.get("GATEWAY_COMMAND_WAIT_SEC", "0.0")),
+    )
     parser.add_argument("--heartbeat-interval-sec", type=float, default=2.0)
     parser.add_argument("--command-limit", type=int, default=20)
     parser.add_argument("--condition-name", default=os.environ.get("KIWOOM_CONDITION_NAME"))

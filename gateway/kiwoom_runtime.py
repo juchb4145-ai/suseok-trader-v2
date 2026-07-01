@@ -47,7 +47,7 @@ from gateway.transport import GatewayTransportError
 class KiwoomGatewayRuntimeConfig:
     source: str = "kiwoom_gateway"
     command_limit: int = 20
-    command_wait_sec: float = 1.0
+    command_wait_sec: float = 0.0
     condition_name: str | None = None
     condition_index: int | None = None
     condition_realtime: bool = True

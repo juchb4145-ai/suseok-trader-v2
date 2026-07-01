@@ -403,6 +403,9 @@ def _flow_reason(flow_observed: bool) -> str:
 
 
 def _theme_rising_ratio(context: StrategyCandidateContext) -> float | None:
+    resolved = context.raw_context.get("theme_context_resolved")
+    if isinstance(resolved, dict) and resolved.get("rising_ratio") is not None:
+        return float(resolved["rising_ratio"])
     theme_snapshot = context.raw_context.get("theme_latest_snapshot")
     if isinstance(theme_snapshot, dict) and theme_snapshot.get("rising_ratio") is not None:
         return float(theme_snapshot["rising_ratio"])

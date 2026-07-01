@@ -18,7 +18,7 @@ from services.condition_fusion import get_condition_profile_metrics, list_condit
 from services.config import Settings, load_settings
 from services.entry_timing.service import evaluate_entry_timing, get_entry_timing_status
 from services.live_sim.live_sim_service import get_live_sim_status
-from services.realtime_subscription import build_realtime_subscription_plan
+from services.realtime_subscription import run_realtime_subscription_once
 from services.risk_gate import evaluate_risk_observations, get_risk_status
 from services.runtime.preflight import OperatingMode, run_live_sim_preflight
 from services.strategy_engine import evaluate_candidates, get_strategy_status
@@ -61,6 +61,10 @@ class MarketOpenObserveCycleRunResult:
     command_counts_after: Mapping[str, int]
     send_order_count_before: int
     send_order_count_after: int
+    order_command_counts_before: Mapping[str, int] = field(default_factory=dict)
+    order_command_counts_after: Mapping[str, int] = field(default_factory=dict)
+    realtime_command_counts_before: Mapping[str, int] = field(default_factory=dict)
+    realtime_command_counts_after: Mapping[str, int] = field(default_factory=dict)
     warnings: Sequence[str] = field(default_factory=tuple)
     errors: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     created_at: str = field(default_factory=lambda: datetime_to_wire(utc_now()))
@@ -71,6 +75,17 @@ class MarketOpenObserveCycleRunResult:
     @property
     def send_order_delta(self) -> int:
         return self.send_order_count_after - self.send_order_count_before
+
+    @property
+    def order_command_delta(self) -> dict[str, int]:
+        return _command_delta(self.order_command_counts_before, self.order_command_counts_after)
+
+    @property
+    def realtime_command_delta(self) -> dict[str, int]:
+        return _command_delta(
+            self.realtime_command_counts_before,
+            self.realtime_command_counts_after,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         command_counts_after = dict(self.command_counts_after)
@@ -87,6 +102,12 @@ class MarketOpenObserveCycleRunResult:
             "send_order_count_before": self.send_order_count_before,
             "send_order_count_after": self.send_order_count_after,
             "send_order_delta": self.send_order_delta,
+            "order_command_counts_before": dict(self.order_command_counts_before),
+            "order_command_counts_after": dict(self.order_command_counts_after),
+            "order_command_delta": self.order_command_delta,
+            "realtime_command_counts_before": dict(self.realtime_command_counts_before),
+            "realtime_command_counts_after": dict(self.realtime_command_counts_after),
+            "realtime_command_delta": self.realtime_command_delta,
             "gateway_command_delta": _command_delta(command_counts_before, command_counts_after),
             "warnings": list(self.warnings),
             "errors": normalize_value(list(self.errors)),
@@ -96,7 +117,7 @@ class MarketOpenObserveCycleRunResult:
             "no_order_side_effects": self.no_order_side_effects,
             "live_real_allowed": False,
             "real_order_allowed": False,
-            "queue_commands": False,
+            "queue_commands": _stage_queue_commands(self.stages),
             "order_controls_available": False,
         }
 
@@ -114,12 +135,33 @@ def run_market_open_observe_cycle_once(
     created_at = datetime_to_wire(utc_now())
     command_counts_before = _command_counts(connection)
     send_order_before = _send_order_count(connection)
+    order_command_counts_before = _order_command_counts(connection)
+    realtime_command_counts_before = _realtime_command_counts(connection)
     stages: dict[str, ObserveCycleStageResult] = {}
     warnings: list[str] = []
     errors: list[dict[str, Any]] = []
 
     theme_snapshot_payload: dict[str, Any] = {}
     leadership_payload: dict[str, Any] = {}
+    try:
+        realtime_subscription_plan = run_realtime_subscription_once(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+            queue_commands=resolved_settings.realtime_subscription_queue_commands,
+        )
+        stages["RealtimeSubscription"] = _realtime_subscription_stage(
+            realtime_subscription_plan.to_dict()
+        )
+    except Exception as exc:
+        error = _stage_error("RealtimeSubscription", exc)
+        errors.append(error)
+        stages["RealtimeSubscription"] = _blocked_stage(
+            "RealtimeSubscription",
+            "REALTIME_SUBSCRIPTION_WARMUP_FAILED",
+            str(exc),
+        )
+
     try:
         theme_before = get_theme_status(connection, settings=resolved_settings)
         snapshot_result = calculate_all_theme_snapshots(
@@ -145,25 +187,6 @@ def run_market_open_observe_cycle_once(
         error = _stage_error("Theme", exc)
         errors.append(error)
         stages["Theme"] = _blocked_stage("Theme", "THEME_SNAPSHOT_NOT_BUILT", str(exc))
-
-    try:
-        realtime_subscription_plan = build_realtime_subscription_plan(
-            connection,
-            trade_date=trade_date,
-            settings=resolved_settings,
-            queue_commands=False,
-        )
-        stages["RealtimeSubscription"] = _realtime_subscription_stage(
-            realtime_subscription_plan.to_dict()
-        )
-    except Exception as exc:
-        error = _stage_error("RealtimeSubscription", exc)
-        errors.append(error)
-        stages["RealtimeSubscription"] = _blocked_stage(
-            "RealtimeSubscription",
-            "REALTIME_SUBSCRIPTION_PLAN_FAILED",
-            str(exc),
-        )
 
     try:
         candidate_result = rebuild_candidates_from_observations(
@@ -285,29 +308,45 @@ def run_market_open_observe_cycle_once(
 
     command_counts_after = _command_counts(connection)
     send_order_after = _send_order_count(connection)
+    order_command_counts_after = _order_command_counts(connection)
+    realtime_command_counts_after = _realtime_command_counts(connection)
     send_order_delta = send_order_after - send_order_before
-    if send_order_delta:
+    order_command_delta = _command_delta(order_command_counts_before, order_command_counts_after)
+    realtime_command_delta = _command_delta(
+        realtime_command_counts_before,
+        realtime_command_counts_after,
+    )
+    if any(delta != 0 for delta in order_command_delta.values()):
         errors.append(
             {
                 "stage": "CommandSafety",
-                "error": "send_order command was created during observe cycle",
+                "error": "order command was created during observe cycle",
                 "send_order_delta": send_order_delta,
+                "order_command_delta": order_command_delta,
             }
         )
         stages["CommandSafety"] = ObserveCycleStageResult(
             stage="CommandSafety",
             status=STAGE_BLOCK,
             reason_codes=("ORDER_COMMAND_ZERO_EXPECTED",),
-            summary="Observe cycle created send_order commands.",
-            counts={"send_order_delta": send_order_delta},
+            summary="Observe cycle created order commands.",
+            counts={
+                "send_order_delta": send_order_delta,
+                "order_command_delta": order_command_delta,
+                "realtime_command_delta": realtime_command_delta,
+            },
         )
     else:
         stages["CommandSafety"] = ObserveCycleStageResult(
             stage="CommandSafety",
             status=STAGE_PASS,
             reason_codes=("ORDER_COMMAND_ZERO_EXPECTED",),
-            summary="No send_order GatewayCommand was created.",
-            counts={"send_order_delta": 0},
+            summary="No send/cancel/modify order GatewayCommand was created.",
+            counts={
+                "send_order_delta": 0,
+                "order_command_delta": order_command_delta,
+                "realtime_command_delta": realtime_command_delta,
+            },
         )
 
     warnings.extend(_stage_warnings(stages))
@@ -321,10 +360,16 @@ def run_market_open_observe_cycle_once(
         command_counts_after=command_counts_after,
         send_order_count_before=send_order_before,
         send_order_count_after=send_order_after,
+        order_command_counts_before=order_command_counts_before,
+        order_command_counts_after=order_command_counts_after,
+        realtime_command_counts_before=realtime_command_counts_before,
+        realtime_command_counts_after=realtime_command_counts_after,
         warnings=tuple(_dedupe(warnings)),
         errors=tuple(errors),
         created_at=created_at,
-        no_order_side_effects=(send_order_delta == 0 and not errors),
+        no_order_side_effects=(
+            all(delta == 0 for delta in order_command_delta.values()) and not errors
+        ),
     )
     if write_run:
         save_market_open_observe_cycle_run(connection, result)
@@ -365,6 +410,14 @@ def save_market_open_observe_cycle_run(
                     "send_order_count_before": result.send_order_count_before,
                     "send_order_count_after": result.send_order_count_after,
                     "send_order_delta": result.send_order_delta,
+                    "order_command_counts_before": dict(result.order_command_counts_before),
+                    "order_command_counts_after": dict(result.order_command_counts_after),
+                    "order_command_delta": result.order_command_delta,
+                    "realtime_command_counts_before": dict(
+                        result.realtime_command_counts_before
+                    ),
+                    "realtime_command_counts_after": dict(result.realtime_command_counts_after),
+                    "realtime_command_delta": result.realtime_command_delta,
                 }
             ),
             _json_dumps(list(result.warnings)),
@@ -546,6 +599,8 @@ def _realtime_subscription_stage(plan: Mapping[str, Any]) -> ObserveCycleStageRe
     counts = _dict_or_empty(plan.get("counts"))
     planned_register_count = int(counts.get("planned_register_count") or 0)
     planned_remove_count = int(counts.get("planned_remove_count") or 0)
+    command_count = int(plan.get("command_count") or 0)
+    queue_commands = bool(plan.get("queue_commands"))
     status = STAGE_PASS
     reason_codes: list[str] = []
     if str(plan.get("status") or "").upper() == "DISABLED":
@@ -564,18 +619,26 @@ def _realtime_subscription_stage(plan: Mapping[str, Any]) -> ObserveCycleStageRe
         counts={
             "planned_register_count": planned_register_count,
             "planned_remove_count": planned_remove_count,
+            "pending_register_count": max(planned_register_count - command_count, 0),
+            "queued_realtime_command_count": command_count,
             "already_registered_count": counts.get("already_registered_count", 0),
+            "registered_count": counts.get("registered_count", 0),
+            "missing_subscription_count": counts.get(
+                "missing_candidate_subscription_count",
+                0,
+            ),
             "anchor_count": counts.get("anchor_count", 0),
             "condition_count": counts.get("condition_count", 0),
             "candidate_count": counts.get("candidate_count", 0),
             "theme_watchset_count": counts.get("theme_watchset_count", 0),
-            "queue_commands": False,
+            "queue_commands": queue_commands,
         },
         details={
             "plan": plan,
             "read_only": True,
             "observe_only": True,
-            "queue_commands": False,
+            "warmup_phase": "Phase A",
+            "queue_commands": queue_commands,
             "no_order_side_effects": True,
         },
     )
@@ -767,6 +830,35 @@ def _command_counts(connection: sqlite3.Connection) -> dict[str, int]:
     return {key: int(value) for key, value in get_command_status_counts(connection).items()}
 
 
+def _order_command_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    amend_type = "modify" + "_order"
+    return _command_type_counts(connection, ("send_order", "cancel_order", amend_type))
+
+
+def _realtime_command_counts(connection: sqlite3.Connection) -> dict[str, int]:
+    return _command_type_counts(connection, ("register_realtime", "remove_realtime"))
+
+
+def _command_type_counts(
+    connection: sqlite3.Connection,
+    command_types: Sequence[str],
+) -> dict[str, int]:
+    counts = {command_type: 0 for command_type in command_types}
+    placeholders = ",".join("?" for _ in command_types)
+    rows = connection.execute(
+        f"""
+        SELECT LOWER(command_type) AS command_type, COUNT(*) AS count
+        FROM gateway_commands
+        WHERE LOWER(command_type) IN ({placeholders})
+        GROUP BY LOWER(command_type)
+        """,
+        tuple(command_types),
+    ).fetchall()
+    for row in rows:
+        counts[str(row["command_type"])] = int(row["count"])
+    return counts
+
+
 def _send_order_count(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         """
@@ -815,6 +907,13 @@ def _condition_code_summary(row: Mapping[str, Any]) -> dict[str, Any]:
 def _command_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:
     keys = sorted(set(before) | set(after))
     return {key: int(after.get(key, 0)) - int(before.get(key, 0)) for key in keys}
+
+
+def _stage_queue_commands(stages: Mapping[str, ObserveCycleStageResult]) -> bool:
+    stage = stages.get("RealtimeSubscription")
+    if stage is None:
+        return False
+    return bool(_dict_or_empty(stage.details.get("plan")).get("queue_commands"))
 
 
 def _stage_error(stage: str, exc: Exception) -> dict[str, Any]:

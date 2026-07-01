@@ -113,6 +113,7 @@ $env:LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND = "false"
 $env:LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
 $env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS = "false"
+$env:GATEWAY_COMMAND_WAIT_SEC = "0.0"
 
 if ([string]::IsNullOrWhiteSpace($CoreUrl)) {
     $CoreUrl = if ($env:GATEWAY_CORE_URL) { $env:GATEWAY_CORE_URL } else { "http://127.0.0.1:8000" }
@@ -215,6 +216,7 @@ $GatewayArgs = @(
     "-m", "apps.kiwoom_gateway",
     "--core-url", $CoreUrl,
     "--observe-only",
+    "--poll-wait-sec", $env:GATEWAY_COMMAND_WAIT_SEC,
     "--no-threaded-login",
     "--realtime-exchange", $RealtimeExchange,
     "--realtime-recover-interval-sec", "300"

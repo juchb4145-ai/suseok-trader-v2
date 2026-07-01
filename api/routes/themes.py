@@ -6,6 +6,7 @@ from domain.broker.utils import BrokerValidationError, validate_stock_code
 from domain.theme.state import ThemeState
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
+from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import (
     calculate_all_theme_snapshots,
     calculate_theme_snapshot,
@@ -87,6 +88,22 @@ def theme_projection_errors(
     finally:
         connection.close()
     return {"errors": errors}
+
+
+@router.get("/diagnostics/data-wait")
+def theme_data_wait_diagnostics(
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_theme_data_wait_diagnostics(
+            connection,
+            settings=settings,
+            limit=limit,
+        )
+    finally:
+        connection.close()
 
 
 @router.post("/import", dependencies=[Depends(require_local_token)])

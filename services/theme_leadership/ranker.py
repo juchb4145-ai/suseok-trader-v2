@@ -79,6 +79,7 @@ class ThemeLeadershipRanker:
                     state=state,
                     score=score,
                     rank=0,
+                    observable_member_count=item["observable_member_count"],
                     valid_member_count=item["valid_member_count"],
                     fresh_member_count=item["fresh_member_count"],
                     fresh_coverage_ratio=item["fresh_coverage_ratio"],
@@ -97,6 +98,10 @@ class ThemeLeadershipRanker:
                     avg_change_rate_pct=item["avg_change_rate_pct"],
                     max_change_rate_pct=item["max_change_rate_pct"],
                     leader_concentration=item["leader_concentration"],
+                    full_member_count=item["full_member_count"],
+                    full_observed_count=item["full_observed_count"],
+                    full_fresh_member_count=item["full_fresh_member_count"],
+                    full_fresh_coverage_ratio=item["full_fresh_coverage_ratio"],
                     leader_code=leader.code if leader else item["leader_code"],
                     leader_name=leader.name if leader else item["leader_name"],
                     members=members,
@@ -124,10 +129,17 @@ class ThemeLeadershipRanker:
         stock_snapshots: Mapping[str, RealtimeStockSnapshot],
     ) -> dict[str, Any]:
         first = members[0]
-        active_count = len(members)
+        full_count = len(members)
+        observable_members = [
+            member
+            for member in members
+            if _is_observable_member(member, stock_snapshots.get(member.code))
+        ]
         member_inputs = []
         observed_snapshots: list[RealtimeStockSnapshot] = []
         fresh_snapshots: list[RealtimeStockSnapshot] = []
+        full_observed_snapshots: list[RealtimeStockSnapshot] = []
+        full_fresh_snapshots: list[RealtimeStockSnapshot] = []
         reason_codes: list[str] = []
         weighted_turnover_return = 0.0
         total_weight = 0.0
@@ -139,8 +151,20 @@ class ThemeLeadershipRanker:
 
         for member in members:
             snapshot = stock_snapshots.get(member.code)
+            if snapshot is None or snapshot.current_price is None:
+                continue
+            full_observed_snapshots.append(snapshot)
+            if not snapshot.stale and snapshot.data_quality == "FRESH":
+                full_fresh_snapshots.append(snapshot)
+
+        for member in observable_members:
+            snapshot = stock_snapshots.get(member.code)
             score = member_score(snapshot, weight=member.weight)
             reasons = member_reason_codes(snapshot)
+            observable_reasons = _observable_reasons(member)
+            if observable_reasons:
+                reasons = _dedupe([*reasons, *observable_reasons])
+                reason_codes.extend(observable_reasons)
             if snapshot is None or snapshot.current_price is None:
                 reason_codes.append("MEMBER_SNAPSHOT_MISSING")
             else:
@@ -169,10 +193,15 @@ class ThemeLeadershipRanker:
         return {
             "theme_id": first.theme_id,
             "theme_name": first.theme_name,
-            "active_member_count": active_count,
+            "active_member_count": full_count,
+            "full_member_count": full_count,
+            "full_observed_count": len(full_observed_snapshots),
+            "full_fresh_member_count": len(full_fresh_snapshots),
+            "full_fresh_coverage_ratio": _ratio(len(full_fresh_snapshots), full_count),
+            "observable_member_count": len(observable_members),
             "valid_member_count": len(observed_snapshots),
             "fresh_member_count": len(fresh_snapshots),
-            "fresh_coverage_ratio": _ratio(len(fresh_snapshots), active_count),
+            "fresh_coverage_ratio": _ratio(len(fresh_snapshots), len(observable_members)),
             "rising_count": rising_count,
             "rising_ratio": _ratio(rising_count, max(len(observed_snapshots), 1)),
             "total_turnover_krw": total_turnover,
@@ -266,6 +295,7 @@ def _with_rank(snapshot: ThemeLeadershipSnapshot, *, rank: int) -> ThemeLeadersh
         state=snapshot.state,
         score=snapshot.score,
         rank=rank,
+        observable_member_count=snapshot.observable_member_count,
         valid_member_count=snapshot.valid_member_count,
         fresh_member_count=snapshot.fresh_member_count,
         fresh_coverage_ratio=snapshot.fresh_coverage_ratio,
@@ -285,6 +315,10 @@ def _with_rank(snapshot: ThemeLeadershipSnapshot, *, rank: int) -> ThemeLeadersh
         avg_change_rate_pct=snapshot.avg_change_rate_pct,
         max_change_rate_pct=snapshot.max_change_rate_pct,
         leader_concentration=snapshot.leader_concentration,
+        full_member_count=snapshot.full_member_count,
+        full_observed_count=snapshot.full_observed_count,
+        full_fresh_member_count=snapshot.full_fresh_member_count,
+        full_fresh_coverage_ratio=snapshot.full_fresh_coverage_ratio,
         score_components=snapshot.score_components,
     )
 
@@ -304,3 +338,27 @@ def _dedupe(values: Sequence[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _is_observable_member(
+    member: ThemeUniverseMember,
+    snapshot: RealtimeStockSnapshot | None,
+) -> bool:
+    observable = member.metadata.get("observable_universe")
+    if isinstance(observable, Mapping) and bool(observable.get("observable")):
+        return True
+    if snapshot is not None and snapshot.current_price is not None:
+        return True
+    if snapshot is not None and snapshot.source_flags.get("condition_include"):
+        return True
+    return False
+
+
+def _observable_reasons(member: ThemeUniverseMember) -> list[str]:
+    observable = member.metadata.get("observable_universe")
+    if not isinstance(observable, Mapping):
+        return []
+    reasons = observable.get("reason_codes")
+    if not isinstance(reasons, Sequence) or isinstance(reasons, (str, bytes, bytearray)):
+        return []
+    return [str(reason).upper() for reason in reasons if str(reason).strip()]

@@ -13,7 +13,7 @@ class GatewaySettings:
     poll_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 2.0
     event_timeout_sec: float = 5.0
-    command_wait_sec: float = 1.0
+    command_wait_sec: float = 0.0
     command_limit: int = 20
     mock_once: bool = False
     mock_price_tick_interval_sec: float = 2.0
@@ -54,7 +54,7 @@ def load_gateway_settings(environ: Mapping[str, str] | None = None) -> GatewaySe
             min_value=0.1,
         ),
         command_wait_sec=_parse_float(
-            env.get("GATEWAY_COMMAND_WAIT_SEC", "1.0"),
+            env.get("GATEWAY_COMMAND_WAIT_SEC", "0.0"),
             "GATEWAY_COMMAND_WAIT_SEC",
             min_value=0.0,
         ),

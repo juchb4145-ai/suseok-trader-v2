@@ -239,7 +239,7 @@ def test_default_gateway_settings_are_mock_local_transport() -> None:
     assert settings.poll_interval_sec == 1.0
     assert settings.heartbeat_interval_sec == 2.0
     assert settings.event_timeout_sec == 5.0
-    assert settings.command_wait_sec == 1.0
+    assert settings.command_wait_sec == 0.0
     assert settings.command_limit == 20
     assert settings.mock_once is False
     assert settings.mock_price_tick_interval_sec == 2.0

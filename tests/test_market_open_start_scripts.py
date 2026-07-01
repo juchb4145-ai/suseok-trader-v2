@@ -61,6 +61,7 @@ def test_start_kiwoom_gateway_visible_defaults_to_multi_profile_file() -> None:
     assert '"LEGACY_SINGLE"' in script
     assert '"--condition-profiles"' in script
     assert '"--condition-name"' in script
+    assert '"--poll-wait-sec", $env:GATEWAY_COMMAND_WAIT_SEC' in script
     assert "KIWOOM_MARKET_INDEX_ENABLED" in script
     assert "Market index adapter:" in script
     assert '"--market-index-enabled"' in script

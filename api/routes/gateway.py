@@ -14,7 +14,10 @@ from services.market_reference_service import (
     MARKET_SYMBOL_EVENT_TYPES,
     process_market_symbols_event,
 )
-from services.market_regime_service import rebuild_market_regime_snapshot
+from services.market_regime_service import (
+    rebuild_market_regime_snapshot,
+    should_rebuild_market_regime_snapshot,
+)
 from storage.event_store import (
     append_gateway_event,
     count_recent_gateway_events,
@@ -64,8 +67,11 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                 index_result = process_market_index_event(connection, event, settings=settings)
                 projection_statuses["market_index"] = index_result.status
                 if index_result.status == "APPLIED" and settings.market_regime_enabled:
-                    regime = rebuild_market_regime_snapshot(connection, settings=settings)
-                    projection_statuses["market_regime"] = regime["regime_status"]
+                    if should_rebuild_market_regime_snapshot(connection):
+                        regime = rebuild_market_regime_snapshot(connection, settings=settings)
+                        projection_statuses["market_regime"] = regime["regime_status"]
+                    else:
+                        projection_statuses["market_regime"] = "SKIPPED_RECENT"
         if result.status == "ACCEPTED" and not result.duplicate:
             handle_live_sim_gateway_event(connection, event, settings=settings)
     finally:

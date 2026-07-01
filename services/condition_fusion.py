@@ -5,6 +5,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from domain.broker.condition_profiles import ConditionRole, parse_condition_role
@@ -144,6 +145,29 @@ def get_condition_profile_metrics(
 ) -> list[dict[str, Any]]:
     resolved_settings = settings or load_settings()
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
+    try:
+        return _get_condition_profile_metrics_sql(
+            connection,
+            target_trade_date,
+            settings=resolved_settings,
+            limit=limit,
+        )
+    except sqlite3.OperationalError:
+        return _get_condition_profile_metrics_python(
+            connection,
+            target_trade_date,
+            settings=resolved_settings,
+            limit=limit,
+        )
+
+
+def _get_condition_profile_metrics_python(
+    connection: sqlite3.Connection,
+    target_trade_date: str,
+    *,
+    settings: Settings,
+    limit: int,
+) -> list[dict[str, Any]]:
     metrics: dict[str, dict[str, Any]] = {}
     rows = connection.execute(
         """
@@ -153,7 +177,7 @@ def get_condition_profile_metrics(
         """
     ).fetchall()
     for row in rows:
-        if _trade_date_for_timestamp(row["event_ts"], resolved_settings) != target_trade_date:
+        if _trade_date_for_timestamp(row["event_ts"], settings) != target_trade_date:
             continue
         metadata = _metadata(row)
         if not is_profile_condition_metadata(metadata):
@@ -201,6 +225,181 @@ def get_condition_profile_metrics(
     for item in ordered:
         item["skip_reason_summary"] = dict(item["skip_reason_summary"])
     return ordered
+
+
+def _get_condition_profile_metrics_sql(
+    connection: sqlite3.Connection,
+    target_trade_date: str,
+    *,
+    settings: Settings,
+    limit: int,
+) -> list[dict[str, Any]]:
+    start_at, end_at = _trade_date_bounds(target_trade_date, settings)
+    rows = connection.execute(
+        """
+        WITH profile_signals AS (
+            SELECT
+                COALESCE(
+                    NULLIF(json_extract(metadata_json, '$.condition_profile.profile_id'), ''),
+                    NULLIF(json_extract(metadata_json, '$.condition_profile_id'), ''),
+                    condition_id
+                ) AS profile_id,
+                COALESCE(
+                    NULLIF(json_extract(metadata_json, '$.condition_profile.condition_name'), ''),
+                    condition_name
+                ) AS profile_condition_name,
+                json_extract(metadata_json, '$.condition_profile.condition_index')
+                    AS condition_index,
+                COALESCE(
+                    NULLIF(json_extract(metadata_json, '$.condition_profile.role'), ''),
+                    NULLIF(json_extract(metadata_json, '$.condition_role'), ''),
+                    'DISCOVERY'
+                ) AS role,
+                json_extract(metadata_json, '$.condition_profile.enabled') AS enabled,
+                json_extract(metadata_json, '$.condition_profile.price_subscribe_policy')
+                    AS price_subscribe_policy,
+                json_extract(metadata_json, '$.condition_profile.ttl_sec') AS ttl_sec,
+                json_extract(metadata_json, '$.condition_profile.priority') AS priority,
+                COALESCE(
+                    json_extract(metadata_json, '$.condition_admission.subscribed'),
+                    json_extract(metadata_json, '$.admission.subscribed')
+                ) AS subscribed,
+                CASE
+                    WHEN json_type(metadata_json, '$.condition_admission') IS NOT NULL
+                        OR json_type(metadata_json, '$.admission') IS NOT NULL
+                    THEN 1
+                    ELSE 0
+                END AS admission_present,
+                action,
+                event_ts
+            FROM market_condition_signals
+            WHERE event_ts >= ?
+                AND event_ts < ?
+                AND (
+                    json_extract(metadata_json, '$.sensor_evidence') = 1
+                    OR json_extract(metadata_json, '$.condition_role') IS NOT NULL
+                    OR json_extract(metadata_json, '$.condition_profile_id') IS NOT NULL
+                    OR json_extract(metadata_json, '$.condition_profile.role') IS NOT NULL
+                    OR json_extract(metadata_json, '$.condition_profile.profile_id') IS NOT NULL
+                )
+        )
+        SELECT
+            profile_id,
+            MAX(profile_condition_name) AS condition_name,
+            MAX(condition_index) AS condition_index,
+            UPPER(MAX(role)) AS role,
+            COUNT(*) AS hit_count,
+            SUM(CASE WHEN UPPER(action) = 'ENTER' THEN 1 ELSE 0 END) AS enter_count,
+            SUM(CASE WHEN UPPER(action) = 'EXIT' THEN 1 ELSE 0 END) AS exit_count,
+            SUM(CASE WHEN subscribed = 1 THEN 1 ELSE 0 END) AS subscribed_count,
+            SUM(
+                CASE
+                    WHEN admission_present = 1 AND COALESCE(subscribed, 0) != 1 THEN 1
+                    ELSE 0
+                END
+            ) AS skipped_count,
+            MAX(event_ts) AS latest_event_at,
+            MAX(enabled) AS enabled,
+            MAX(price_subscribe_policy) AS price_subscribe_policy,
+            MAX(ttl_sec) AS ttl_sec,
+            MAX(priority) AS priority
+        FROM profile_signals
+        GROUP BY profile_id
+        ORDER BY hit_count DESC, profile_id ASC
+        LIMIT ?
+        """,
+        (start_at, end_at, _bounded_limit(limit)),
+    ).fetchall()
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        profile_id = str(row["profile_id"])
+        items.append(
+            {
+                "profile_id": profile_id,
+                "condition_name": row["condition_name"],
+                "condition_index": row["condition_index"],
+                "role": str(row["role"] or "DISCOVERY").upper(),
+                "hit_count": int(row["hit_count"] or 0),
+                "enter_count": int(row["enter_count"] or 0),
+                "exit_count": int(row["exit_count"] or 0),
+                "subscribed_count": int(row["subscribed_count"] or 0),
+                "skipped_count": int(row["skipped_count"] or 0),
+                "skip_reason_summary": {},
+                "latest_event_at": row["latest_event_at"],
+                "enabled": True if row["enabled"] is None else bool(row["enabled"]),
+                "price_subscribe_policy": row["price_subscribe_policy"],
+                "ttl_sec": row["ttl_sec"],
+                "priority": row["priority"],
+            }
+        )
+    summaries = _condition_profile_skip_reason_summaries_sql(
+        connection,
+        target_trade_date,
+        settings=settings,
+        profile_ids=[item["profile_id"] for item in items],
+    )
+    for item in items:
+        item["skip_reason_summary"] = summaries.get(item["profile_id"], {})
+    return items
+
+
+def _condition_profile_skip_reason_summaries_sql(
+    connection: sqlite3.Connection,
+    target_trade_date: str,
+    *,
+    settings: Settings,
+    profile_ids: Sequence[str],
+) -> dict[str, dict[str, int]]:
+    if not profile_ids:
+        return {}
+    start_at, end_at = _trade_date_bounds(target_trade_date, settings)
+    placeholders = ",".join("?" for _ in profile_ids)
+    rows = connection.execute(
+        f"""
+        WITH profile_signals AS (
+            SELECT
+                COALESCE(
+                    NULLIF(json_extract(metadata_json, '$.condition_profile.profile_id'), ''),
+                    NULLIF(json_extract(metadata_json, '$.condition_profile_id'), ''),
+                    condition_id
+                ) AS profile_id,
+                metadata_json,
+                COALESCE(
+                    json_extract(metadata_json, '$.condition_admission.subscribed'),
+                    json_extract(metadata_json, '$.admission.subscribed')
+                ) AS subscribed
+            FROM market_condition_signals
+            WHERE event_ts >= ?
+                AND event_ts < ?
+                AND (
+                    json_type(metadata_json, '$.condition_admission') IS NOT NULL
+                    OR json_type(metadata_json, '$.admission') IS NOT NULL
+                )
+        ),
+        reasons AS (
+            SELECT profile_id, UPPER(CAST(value AS TEXT)) AS reason
+            FROM profile_signals, json_each(metadata_json, '$.condition_admission.reason_codes')
+            WHERE profile_id IN ({placeholders})
+                AND COALESCE(subscribed, 0) != 1
+            UNION ALL
+            SELECT profile_id, UPPER(CAST(value AS TEXT)) AS reason
+            FROM profile_signals, json_each(metadata_json, '$.admission.reason_codes')
+            WHERE profile_id IN ({placeholders})
+                AND COALESCE(subscribed, 0) != 1
+        )
+        SELECT profile_id, reason, COUNT(*) AS count
+        FROM reasons
+        WHERE reason IS NOT NULL AND reason != ''
+        GROUP BY profile_id, reason
+        """,
+        (start_at, end_at, *profile_ids, *profile_ids),
+    ).fetchall()
+    summaries: dict[str, dict[str, int]] = {}
+    for row in rows:
+        summaries.setdefault(str(row["profile_id"]), {})[str(row["reason"])] = int(
+            row["count"] or 0
+        )
+    return summaries
 
 
 def is_profile_condition_metadata(metadata: Mapping[str, Any]) -> bool:
@@ -462,6 +661,14 @@ def _resolve_trade_date(trade_date: str | None, settings: Settings) -> str:
         .date()
         .isoformat()
     )
+
+
+def _trade_date_bounds(trade_date: str, settings: Settings) -> tuple[str, str]:
+    trade_day = date.fromisoformat(trade_date)
+    timezone = candidate_timezone(settings.candidate_trade_date_timezone)
+    start = datetime.combine(trade_day, time.min, tzinfo=timezone)
+    end = start + timedelta(days=1)
+    return datetime_to_wire(start), datetime_to_wire(end)
 
 
 def _trade_date_for_timestamp(value: str, settings: Settings) -> str:

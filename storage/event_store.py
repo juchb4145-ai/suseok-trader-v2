@@ -10,7 +10,12 @@ from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
 from domain.broker.orders import BrokerExecutionEvent
 from domain.broker.tr import BrokerTrResponse
-from domain.broker.utils import BrokerValidationError, datetime_to_wire, utc_now
+from domain.broker.utils import (
+    BrokerValidationError,
+    datetime_to_wire,
+    parse_timestamp,
+    utc_now,
+)
 
 from storage.gateway_command_store import (
     canonical_json,
@@ -24,6 +29,7 @@ SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
         "login_status",
         "orderability",
         "price_tick",
+        "quote_tick",
         "condition_event",
         "condition_load_result",
         "condition_loaded",
@@ -174,8 +180,9 @@ def append_gateway_event(
         )
         _upsert_gateway_status(connection, "last_event_received_at", received_at)
         if event_type == "heartbeat":
-            _upsert_gateway_status(connection, "last_heartbeat_at", event_ts)
-            _upsert_heartbeat_status(connection, event.payload)
+            if _heartbeat_is_fresh(connection, event_ts):
+                _upsert_gateway_status(connection, "last_heartbeat_at", event_ts)
+                _upsert_heartbeat_status(connection, event.payload)
         if event_type in {"command_started", "command_ack", "command_failed"} and event.command_id:
             record_command_event(
                 connection,
@@ -267,6 +274,20 @@ def _upsert_gateway_status(
         """,
         (key, value, datetime_to_wire(utc_now())),
     )
+
+
+def _heartbeat_is_fresh(connection: sqlite3.Connection, event_ts: str) -> bool:
+    row = connection.execute(
+        "SELECT value FROM gateway_status WHERE key = 'last_heartbeat_at'"
+    ).fetchone()
+    if row is None or not row["value"]:
+        return True
+    try:
+        incoming = parse_timestamp(event_ts, "heartbeat_event_ts")
+        current = parse_timestamp(row["value"], "last_heartbeat_at")
+    except ValueError:
+        return event_ts >= str(row["value"])
+    return incoming >= current
 
 
 def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, Any]) -> None:
