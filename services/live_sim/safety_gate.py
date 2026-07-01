@@ -5,7 +5,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
-from domain.broker.utils import parse_timestamp, utc_now
+from domain.broker.utils import market_today, parse_timestamp, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
 from storage.gateway_command_store import get_command_status_counts
 
@@ -244,8 +244,9 @@ def _daily_live_sim_order_count(connection: sqlite3.Connection) -> int:
         """
         SELECT COUNT(*) AS count
         FROM live_sim_orders
-        WHERE trade_date = date('now', 'localtime')
-        """
+        WHERE trade_date = ?
+        """,
+        (market_today(),),
     ).fetchone()
     return int(row["count"])
 

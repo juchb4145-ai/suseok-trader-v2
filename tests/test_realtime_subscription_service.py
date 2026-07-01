@@ -11,7 +11,6 @@ from services.realtime_subscription import (
 )
 from storage.sqlite import initialize_database
 
-
 TRADE_DATE = "2026-06-30"
 
 

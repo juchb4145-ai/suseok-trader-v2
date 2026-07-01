@@ -12,6 +12,8 @@ from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import (
     datetime_to_wire,
+    market_time_str,
+    market_today,
     new_message_id,
     normalize_value,
     parse_timestamp,
@@ -3167,7 +3169,7 @@ def _mark_position_to_market(
 
 
 def _is_eod_flatten_time(settings: Settings) -> bool:
-    return datetime_to_wire(utc_now())[11:19] >= settings.live_sim_exit_eod_flatten_time
+    return market_time_str() >= settings.live_sim_exit_eod_flatten_time
 
 
 def _build_gateway_send_order_payload(
@@ -4348,7 +4350,7 @@ def _idempotency_key(
 
 
 def _today_trade_date() -> str:
-    return datetime_to_wire(utc_now())[:10]
+    return market_today()
 
 
 def _age_seconds_from_wire(value: object) -> float:

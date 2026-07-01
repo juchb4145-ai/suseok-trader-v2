@@ -6,7 +6,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
@@ -624,6 +624,87 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._registered_realtime_codes == {"005930", "000660"}
 
 
+def _disconnectable_mock_client() -> MockKiwoomClient:
+    client = MockKiwoomClient()
+    client.connect_state = True
+    client.get_accounts = lambda: ["1234567890"] if client.connect_state else []
+    return client
+
+
+def test_runtime_reconnects_with_backoff_after_session_drop(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = _disconnectable_mock_client()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            realtime_codes=("005930",),
+            login_reconnect_base_delay_sec=5.0,
+            login_reconnect_max_delay_sec=300.0,
+        ),
+    )
+    reconnect_calls: list[datetime] = []
+    runtime.reconnect_login = lambda: reconnect_calls.append(clock["now"])
+
+    runtime.on_connected(True, 0, "ok")
+    assert client.registered_codes == {"005930"}
+    assert runtime.heartbeat_payload()["reconnect_count"] == 0
+
+    # Session drops: Kiwoom also loses the realtime registrations.
+    client.connect_state = False
+    client.registered_codes.clear()
+
+    runtime.emit_heartbeat()
+    payload = runtime.heartbeat_payload()
+    assert payload["reconnect_pending"] is True
+    assert reconnect_calls == []  # first heartbeat only schedules the retry
+
+    def advance(seconds: float) -> None:
+        clock["now"] = clock["now"] + timedelta(seconds=seconds)
+
+    advance(5)
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 1
+
+    advance(5)  # next retry is 10s of backoff away, so nothing fires yet
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 1
+
+    advance(5)
+    runtime.emit_heartbeat()
+    assert len(reconnect_calls) == 2
+
+    # Login succeeds again: counters reset and realtime is re-registered.
+    client.connect_state = True
+    runtime.request_login_started(threaded=False)
+    runtime.on_connected(True, 0, "ok")
+    payload = runtime.heartbeat_payload()
+    assert payload["reconnect_count"] == 1
+    assert payload["reconnect_pending"] is False
+    assert payload["reconnect_attempt_count"] == 0
+    assert client.registered_codes == {"005930"}
+
+
+def test_runtime_reconnect_loop_ignores_never_connected_sessions(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = _disconnectable_mock_client()
+    client.connect_state = False
+    runtime = KiwoomGatewayRuntime(client=client, core_client=object())
+    reconnect_calls: list[datetime] = []
+    runtime.reconnect_login = lambda: reconnect_calls.append(clock["now"])
+
+    for _ in range(3):
+        clock["now"] = clock["now"] + timedelta(seconds=10)
+        runtime.emit_heartbeat()
+
+    assert reconnect_calls == []
+    assert runtime.heartbeat_payload()["reconnect_pending"] is False
+
+
 def test_runtime_does_not_register_market_index_when_feature_flag_off() -> None:
     client = MockKiwoomClient()
     runtime = KiwoomGatewayRuntime(
@@ -1033,6 +1114,86 @@ def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -
     assert worker._core_client.events[0].event_id == "evt_heartbeat_new"
 
 
+def test_core_io_worker_bounds_buffer_and_preserves_order_events() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> None:
+            raise RuntimeError("core unreachable")
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=1000,
+        max_buffer_size=5,
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_ack",
+            event_type="command_ack",
+            source="kiwoom_gateway",
+            payload={"command_id": "cmd_1"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_exec",
+            event_type="execution_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "quantity": 1},
+        )
+    )
+    for index in range(10):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_tick_{index}",
+                event_type="price_tick",
+                source="kiwoom_gateway",
+                # Distinct codes so coalescing cannot absorb the overflow.
+                payload={"code": f"{index:06d}", "price": 1000 + index},
+            )
+        )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 5
+    assert snapshot.dropped_count == 7
+    assert snapshot.max_buffer_size == 5
+    with worker._condition:
+        queued_ids = [event.event_id for event in worker._events]
+    assert "evt_ack" in queued_ids
+    assert "evt_exec" in queued_ids
+    # Oldest ticks were dropped first; the newest ticks survive.
+    assert queued_ids[-1] == "evt_tick_9"
+
+
+def test_core_io_worker_never_drops_protected_events_even_over_cap() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> None:
+            raise RuntimeError("core unreachable")
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=1000,
+        max_buffer_size=2,
+    )
+    for index in range(4):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_ack_{index}",
+                event_type="command_ack",
+                source="kiwoom_gateway",
+                payload={"command_id": f"cmd_{index}"},
+            )
+        )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 4
+    assert snapshot.dropped_count == 0
+
+
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
     command = GatewayCommand(
         command_id="cmd_boom",
@@ -1151,6 +1312,83 @@ def test_multi_condition_profiles_send_sequential_with_distinct_screens(monkeypa
         "7601": "leader:auto:leader",
         "7602": "pullback:auto:pullback",
     }
+
+
+def test_condition_send_pacing_never_sleeps_on_main_thread(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gateway.kiwoom_runtime.current_condition_session_profile",
+        lambda: ConditionSessionProfile.OPENING_0900_0915,
+    )
+
+    def _forbidden_sleep(_seconds: float) -> None:
+        raise AssertionError("time.sleep must not run on the Qt main thread")
+
+    monkeypatch.setattr("gateway.kiwoom_runtime.time.sleep", _forbidden_sleep)
+
+    clock = {"now": 100.0}
+    monkeypatch.setattr("gateway.kiwoom_runtime.time.monotonic", lambda: clock["now"])
+
+    scheduled: list[tuple[float, Callable[[], None]]] = []
+    client = MockKiwoomClient()
+    client.set_conditions([(1, "Discovery"), (2, "Leader"), (3, "Pullback")])
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        schedule_delayed=lambda delay, callback: scheduled.append((delay, callback)),
+        config=KiwoomGatewayRuntimeConfig(
+            condition_send_interval_sec=0.25,
+            condition_profiles=(
+                ConditionProfile(
+                    condition_name="Discovery",
+                    role=ConditionRole.DISCOVERY,
+                    price_subscribe_policy=PriceSubscribePolicy.BATCH,
+                ),
+                ConditionProfile(
+                    condition_name="Leader",
+                    role=ConditionRole.LEADER,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=900,
+                ),
+                ConditionProfile(
+                    condition_name="Pullback",
+                    role=ConditionRole.PULLBACK,
+                    realtime_search=False,
+                    price_subscribe_policy=PriceSubscribePolicy.IMMEDIATE,
+                    priority=800,
+                ),
+            ),
+        ),
+    )
+
+    runtime.on_condition_loaded(client.condition_name_list())
+
+    # Only the first profile is sent inline; the rest wait for the scheduler.
+    assert [call["condition_name"] for call in client.send_condition_calls] == ["Discovery"]
+    assert len(scheduled) == 1
+    assert scheduled[0][0] > 0
+
+    # Firing the scheduled callback after the interval sends the next profile.
+    clock["now"] += 0.25
+    scheduled[0][1]()
+    assert [call["condition_name"] for call in client.send_condition_calls] == [
+        "Discovery",
+        "Leader",
+    ]
+    assert len(scheduled) == 2
+
+    clock["now"] += 0.25
+    scheduled[1][1]()
+    assert [call["condition_name"] for call in client.send_condition_calls] == [
+        "Discovery",
+        "Leader",
+        "Pullback",
+    ]
+    assert [call["screen_no"] for call in client.send_condition_calls] == [
+        "7600",
+        "7601",
+        "7602",
+    ]
+    assert len(scheduled) == 2
 
 
 def test_condition_tr_initial_results_batch_register_with_role_metadata(monkeypatch) -> None:

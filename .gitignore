@@ -9,6 +9,7 @@ htmlcov/
 
 .venv/
 venv/
+venv_32/
 ENV/
 
 .env

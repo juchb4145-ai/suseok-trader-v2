@@ -3,9 +3,9 @@ from __future__ import annotations
 import os
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
@@ -68,6 +68,9 @@ class KiwoomGatewayRuntimeConfig:
     market_index_poll_sec: float = 60.0
     condition_load_timeout_sec: float = 10.0
     condition_load_max_retry: int = 1
+    login_reconnect_enabled: bool = True
+    login_reconnect_base_delay_sec: float = 5.0
+    login_reconnect_max_delay_sec: float = 300.0
     core_io_enabled: bool = True
     command_polling_enabled: bool = True
     event_posting_enabled: bool = True
@@ -185,9 +188,11 @@ class KiwoomGatewayRuntime:
         client: Any,
         core_client: CoreClient,
         config: KiwoomGatewayRuntimeConfig | None = None,
+        schedule_delayed: Callable[[float, Callable[[], None]], None] | None = None,
     ) -> None:
         self.client = client
         self.core_client = core_client
+        self.schedule_delayed = schedule_delayed
         self.config = config or KiwoomGatewayRuntimeConfig()
         self.pending_orders = PendingOrderRegistry()
         self.command_handler = KiwoomGatewayCommandHandler(
@@ -209,6 +214,12 @@ class KiwoomGatewayRuntime:
         self._login_finished_at = ""
         self._login_threaded = False
         self._login_connect_state_fallback_skipped = False
+        self.reconnect_login: Callable[[], None] | None = None
+        self._was_logged_in = False
+        self._reconnect_pending = False
+        self._reconnect_attempt_count = 0
+        self._reconnect_count = 0
+        self._next_reconnect_at: datetime | None = None
         self._latest_comm_connect_call_at: datetime | None = None
         self._latest_comm_connect_result_at: datetime | None = None
         self._latest_comm_connect_result_code: int | None = None
@@ -230,6 +241,8 @@ class KiwoomGatewayRuntime:
         self._condition_profile_by_key: dict[tuple[str, int], ConditionProfile] = {}
         self._condition_send_results: list[dict[str, Any]] = []
         self._condition_reason_codes: list[str] = []
+        self._condition_send_queue: deque[ConditionProfile] = deque()
+        self._last_condition_send_at = 0.0
         self._condition_admission = GatewayConditionAdmissionController()
         self._registered_realtime_codes: set[str] = set()
         self._last_price_tick_at: datetime | None = None
@@ -280,6 +293,7 @@ class KiwoomGatewayRuntime:
     def emit_heartbeat(self) -> None:
         self._heartbeat_sequence += 1
         self._finish_pending_login_if_connected()
+        self._check_login_reconnect()
         self._recover_realtime_if_stalled()
         payload = self.heartbeat_payload()
         payload["sequence"] = self._heartbeat_sequence
@@ -415,6 +429,10 @@ class KiwoomGatewayRuntime:
         worker_coalesce_after_size = (
             worker_snapshot.coalesce_after_size if worker_snapshot is not None else 0
         )
+        worker_dropped_count = worker_snapshot.dropped_count if worker_snapshot is not None else 0
+        worker_max_buffer_size = (
+            worker_snapshot.max_buffer_size if worker_snapshot is not None else 0
+        )
         logged_in = self.kiwoom_logged_in()
         accounts = self._accounts() if logged_in else []
         account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
@@ -436,7 +454,10 @@ class KiwoomGatewayRuntime:
             "account_mode": broker_env,
             "server_gubun": server_gubun,
             "last_error": self._last_error or worker_last_error,
-            "reconnect_count": 0,
+            "reconnect_count": self._reconnect_count,
+            "reconnect_pending": self._reconnect_pending,
+            "reconnect_attempt_count": self._reconnect_attempt_count,
+            "next_reconnect_at": _datetime_or_empty(self._next_reconnect_at),
             "rate_limit": {"adapter": "kiwoom", "local": True},
             "command_queue_size": worker_command_queue_size,
             "event_queue_size": len(self._event_queue) + worker_event_queue_size,
@@ -455,6 +476,8 @@ class KiwoomGatewayRuntime:
             "core_io_worker_last_error": worker_last_error,
             "core_io_worker_coalesced_event_count": worker_coalesced_count,
             "core_io_worker_coalesce_after_size": worker_coalesce_after_size,
+            "core_io_worker_dropped_event_count": worker_dropped_count,
+            "core_io_worker_max_buffer_size": worker_max_buffer_size,
             "local_event_count": self._local_event_count,
             "latest_local_event": dict(self._latest_local_event),
             "login_in_progress": self._login_in_progress,
@@ -639,6 +662,23 @@ class KiwoomGatewayRuntime:
         )
         self.emit("orderability", self.heartbeat_payload())
         if ok:
+            reconnecting = self._reconnect_pending
+            self._reconnect_pending = False
+            self._reconnect_attempt_count = 0
+            self._next_reconnect_at = None
+            self._was_logged_in = True
+            if reconnecting:
+                self._reconnect_count += 1
+                self.emit(
+                    "gateway_log",
+                    {
+                        "message": "KIWOOM_RECONNECT_SUCCEEDED",
+                        "reconnect_count": self._reconnect_count,
+                    },
+                )
+                previously_registered = sorted(self._registered_realtime_codes)
+                if previously_registered:
+                    self.register_realtime_codes(previously_registered, force=True)
             self._register_initial_realtime()
             self._register_initial_market_index_realtime()
             self._load_conditions()
@@ -1048,6 +1088,78 @@ class KiwoomGatewayRuntime:
         if self._login_ready_for_fallback():
             self.on_connected(True, 0, "already connected")
 
+    def _check_login_reconnect(self) -> None:
+        if not self.config.login_reconnect_enabled:
+            return
+        if self._login_in_progress:
+            return
+        if self.kiwoom_logged_in():
+            return
+        if not self._was_logged_in:
+            # Initial login is scheduled by the app entrypoint; the reconnect
+            # loop only recovers sessions that were connected at least once.
+            return
+        now = utc_now()
+        if not self._reconnect_pending:
+            self._reconnect_pending = True
+            self._reconnect_attempt_count = 0
+            delay = self._reconnect_delay_sec()
+            self._next_reconnect_at = now + timedelta(seconds=delay)
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "KIWOOM_SESSION_DISCONNECTED",
+                    "reason_codes": ["SESSION_DISCONNECTED"],
+                    "reconnect_count": self._reconnect_count,
+                    "reconnect_delay_sec": delay,
+                },
+            )
+            return
+        if self._next_reconnect_at is not None and now < self._next_reconnect_at:
+            return
+        self._reconnect_attempt_count += 1
+        delay = self._reconnect_delay_sec()
+        self._next_reconnect_at = now + timedelta(seconds=delay)
+        self.emit(
+            "gateway_log",
+            {
+                "message": "KIWOOM_RECONNECT_ATTEMPT",
+                "reconnect_attempt": self._reconnect_attempt_count,
+                "next_retry_delay_sec": delay,
+                "reconnect_count": self._reconnect_count,
+            },
+        )
+        try:
+            self._request_reconnect_login()
+        except Exception as exc:
+            self._last_error = str(exc)
+            self.emit(
+                "gateway_error",
+                {
+                    "message": f"KIWOOM_RECONNECT_REQUEST_FAILED:{exc}",
+                    "reason_codes": ["RECONNECT_REQUEST_FAILED"],
+                    "reconnect_attempt": self._reconnect_attempt_count,
+                },
+            )
+
+    def _reconnect_delay_sec(self) -> float:
+        base = max(float(self.config.login_reconnect_base_delay_sec), 1.0)
+        cap = max(float(self.config.login_reconnect_max_delay_sec), base)
+        return min(base * (2**self._reconnect_attempt_count), cap)
+
+    def _request_reconnect_login(self) -> None:
+        if self.reconnect_login is not None:
+            self.reconnect_login()
+            return
+        self.request_login_started(threaded=False)
+        try:
+            self.client.login()
+        except Exception as exc:
+            self.request_login_failed(exc)
+            return
+        if not bool(getattr(self.client, "login_waits_for_event_loop", False)):
+            self._finish_pending_login_if_connected()
+
     def _comm_connect_state(self) -> str:
         if self._latest_on_event_connect_timeout_at is not None:
             if self._latest_comm_connect_result_at is None:
@@ -1173,9 +1285,18 @@ class KiwoomGatewayRuntime:
         self._condition_profiles = tuple(profile for profile in profiles if profile.enabled)
         if not self._condition_profiles:
             return
-        last_send_at = 0.0
-        for offset, profile in enumerate(self._condition_profiles):
+        self._condition_send_queue.clear()
+        self._condition_send_queue.extend(self._condition_profiles)
+        self._process_condition_send_queue()
+
+    def _process_condition_send_queue(self) -> None:
+        # Runs on the Qt main thread; pacing between sends must never block the
+        # event loop, so a wait is rescheduled through schedule_delayed instead
+        # of time.sleep (which starves ActiveX callbacks).
+        while self._condition_send_queue:
+            profile = self._condition_send_queue[0]
             if profile.condition_index is None:
+                self._condition_send_queue.popleft()
                 self._add_condition_reason("CONDITION_PROFILE_INDEX_UNRESOLVED")
                 self._record_condition_send_result(
                     profile,
@@ -1184,65 +1305,83 @@ class KiwoomGatewayRuntime:
                     reason_codes=["CONDITION_PROFILE_INDEX_UNRESOLVED"],
                 )
                 continue
-            screen_no = profile.screen_no or f"{7600 + offset:04d}"
-            resolved = profile.with_resolution(screen_no=screen_no)
-            self._register_condition_profile_mapping(resolved)
             interval = max(float(self.config.condition_send_interval_sec), 0.0)
-            elapsed = time.monotonic() - last_send_at
-            if last_send_at and elapsed < interval:
-                time.sleep(interval - elapsed)
-            try:
-                result = int(
-                    self.client.send_condition(
-                        screen_no,
-                        resolved.condition_name,
-                        int(resolved.condition_index),
-                        realtime=resolved.realtime_search,
-                    )
-                    or 0
+            elapsed = time.monotonic() - self._last_condition_send_at
+            if self._last_condition_send_at and elapsed < interval:
+                self._schedule_delayed(interval - elapsed, self._process_condition_send_queue)
+                return
+            self._condition_send_queue.popleft()
+            self._send_condition_profile(profile)
+
+    def _send_condition_profile(self, profile: ConditionProfile) -> None:
+        screen_no = profile.screen_no or "7600"
+        resolved = profile.with_resolution(screen_no=screen_no)
+        self._register_condition_profile_mapping(resolved)
+        try:
+            result = int(
+                self.client.send_condition(
+                    screen_no,
+                    resolved.condition_name,
+                    int(resolved.condition_index),
+                    realtime=resolved.realtime_search,
                 )
-            except Exception as exc:
-                self._add_condition_reason("CONDITION_SEND_EXCEPTION")
-                self._record_condition_send_result(
-                    resolved,
-                    result_code=-1,
-                    success=False,
-                    reason_codes=["CONDITION_SEND_EXCEPTION"],
-                    error=str(exc),
-                )
-                self.emit(
-                    "gateway_error",
-                    {
-                        "message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}",
-                        "condition_profile": resolved.to_dict(),
-                        "reason_codes": ["CONDITION_SEND_EXCEPTION"],
-                    },
-                )
-                continue
-            last_send_at = time.monotonic()
-            success = result == 1
-            reason_codes = [] if success else ["CONDITION_SEND_FAILED"]
-            if not success:
-                self._add_condition_reason("CONDITION_SEND_FAILED")
+                or 0
+            )
+        except Exception as exc:
+            self._add_condition_reason("CONDITION_SEND_EXCEPTION")
             self._record_condition_send_result(
                 resolved,
-                result_code=result,
-                success=success,
-                reason_codes=reason_codes,
+                result_code=-1,
+                success=False,
+                reason_codes=["CONDITION_SEND_EXCEPTION"],
+                error=str(exc),
             )
             self.emit(
-                "gateway_log",
+                "gateway_error",
                 {
-                    "message": "configured condition profile send requested",
+                    "message": f"CONFIGURED_CONDITION_SEND_FAILED:{exc}",
                     "condition_profile": resolved.to_dict(),
-                    "condition_name": resolved.condition_name,
-                    "condition_index": resolved.condition_index,
-                    "screen_no": screen_no,
-                    "result_code": result,
-                    "success": success,
-                    "reason_codes": reason_codes,
+                    "reason_codes": ["CONDITION_SEND_EXCEPTION"],
                 },
             )
+            return
+        self._last_condition_send_at = time.monotonic()
+        success = result == 1
+        reason_codes = [] if success else ["CONDITION_SEND_FAILED"]
+        if not success:
+            self._add_condition_reason("CONDITION_SEND_FAILED")
+        self._record_condition_send_result(
+            resolved,
+            result_code=result,
+            success=success,
+            reason_codes=reason_codes,
+        )
+        self.emit(
+            "gateway_log",
+            {
+                "message": "configured condition profile send requested",
+                "condition_profile": resolved.to_dict(),
+                "condition_name": resolved.condition_name,
+                "condition_index": resolved.condition_index,
+                "screen_no": screen_no,
+                "result_code": result,
+                "success": success,
+                "reason_codes": reason_codes,
+            },
+        )
+
+    def _schedule_delayed(self, delay_sec: float, callback: Callable[[], None]) -> None:
+        if self.schedule_delayed is not None:
+            self.schedule_delayed(delay_sec, callback)
+            return
+        try:
+            from PyQt5.QtCore import QTimer
+
+            QTimer.singleShot(max(int(delay_sec * 1000), 0), callback)
+        except Exception:
+            # No Qt available (mock/test runtime without an injected scheduler):
+            # run inline rather than blocking or dropping the queued sends.
+            callback()
 
     def _resolve_condition_profiles(
         self,
