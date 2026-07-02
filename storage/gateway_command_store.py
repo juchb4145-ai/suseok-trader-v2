@@ -17,6 +17,7 @@ from domain.broker.utils import datetime_to_wire, normalize_payload, parse_times
 class GatewayCommandStatus(StrEnum):
     QUEUED = "QUEUED"
     DISPATCHED = "DISPATCHED"
+    UNCONFIRMED = "UNCONFIRMED"
     ACKED = "ACKED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
@@ -225,6 +226,25 @@ def record_command_event(
         (command_id, event_type, next_status.value if next_status else None, payload_json, now),
     )
 
+    if event_type.strip().lower() == "rate_limited":
+        wait_time_sec = _extract_wait_time_sec(payload)
+        available_at = datetime_to_wire(utc_now() + timedelta(seconds=wait_time_sec))
+        connection.execute(
+            """
+            UPDATE gateway_commands
+            SET
+                status = ?,
+                available_at = ?,
+                completed_at = NULL,
+                last_error = NULL
+            WHERE command_id = ?
+            """,
+            (GatewayCommandStatus.QUEUED.value, available_at, command_id),
+        )
+        if commit:
+            connection.commit()
+        return GatewayCommandStatus.QUEUED
+
     if next_status is not None:
         completed_at = now if next_status in _COMPLETED_STATUSES else None
         connection.execute(
@@ -327,6 +347,7 @@ def expire_stale_gateway_commands(
                 'Gateway command dispatch timed out before ack/failure event.'
             )
         WHERE status = ?
+            AND command_type NOT IN ('send_order', 'cancel_order')
             AND dispatched_at IS NOT NULL
             AND dispatched_at <= ?
         """,
@@ -337,11 +358,32 @@ def expire_stale_gateway_commands(
             dispatched_cutoff,
         ),
     )
+    order_cursor = connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?,
+            completed_at = NULL,
+            last_error = COALESCE(
+                last_error,
+                'Gateway order dispatch timed out; reconciliation required.'
+            )
+        WHERE status = ?
+            AND command_type IN ('send_order', 'cancel_order')
+            AND dispatched_at IS NOT NULL
+            AND dispatched_at <= ?
+        """,
+        (
+            GatewayCommandStatus.UNCONFIRMED.value,
+            GatewayCommandStatus.DISPATCHED.value,
+            dispatched_cutoff,
+        ),
+    )
     _upsert_command_queue_health(connection, healthy=True)
     connection.commit()
     return {
         "expired_queued_count": max(int(queued_cursor.rowcount or 0), 0),
         "timed_out_dispatched_count": max(int(dispatched_cursor.rowcount or 0), 0),
+        "unconfirmed_order_count": max(int(order_cursor.rowcount or 0), 0),
     }
 
 
@@ -594,6 +636,8 @@ def _status_for_command_event(event_type: str) -> GatewayCommandStatus | None:
         return GatewayCommandStatus.DISPATCHED
     if normalized == "command_ack":
         return GatewayCommandStatus.ACKED
+    if normalized == "execution_event":
+        return GatewayCommandStatus.ACKED
     if normalized == "command_failed":
         return GatewayCommandStatus.FAILED
     return None
@@ -605,6 +649,17 @@ def _extract_error_message(payload: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _extract_wait_time_sec(payload: dict[str, Any]) -> float:
+    for key in ("next_available_in_sec", "wait_time_sec", "retry_after_sec"):
+        value = payload.get(key)
+        try:
+            wait_time = float(value)
+        except (TypeError, ValueError):
+            continue
+        return min(max(wait_time, 0.001), 300.0)
+    return 1.0
 
 
 def _optional_timestamp(value: datetime | str | None) -> str | None:

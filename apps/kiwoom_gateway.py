@@ -175,6 +175,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Use an in-process mock Kiwoom client for adapter smoke tests.",
     )
+    parser.add_argument(
+        "--order-pre-ack-journal-path",
+        default=os.environ.get(
+            "KIWOOM_ORDER_PRE_ACK_JOURNAL_PATH",
+            "storage/kiwoom_order_pre_ack_journal.jsonl",
+        ),
+        help="Append-only local JSONL journal written immediately before Kiwoom SendOrder.",
+    )
     return parser.parse_args(argv)
 
 
@@ -258,6 +266,7 @@ def run_gateway(args: argparse.Namespace) -> int:
             command_polling_enabled=command_polling_enabled,
             event_posting_enabled=event_posting_enabled,
             core_io_worker_enabled=core_io_worker_enabled,
+            order_pre_ack_journal_path=str(args.order_pre_ack_journal_path or ""),
         ),
     )
     wire_kiwoom_signals(client, runtime)

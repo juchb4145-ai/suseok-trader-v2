@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import json
 import sys
 import threading
 import time
@@ -37,6 +38,8 @@ from gateway.kiwoom_client import (
     FID_TRADE_TIME,
     MAX_PENDING_THREAD_AUDIT_EVENTS,
     KiwoomClient,
+    KiwoomOrderRequest,
+    KiwoomOrderResult,
     MockKiwoomClient,
     Signal,
     broker_env_from_server_gubun,
@@ -55,8 +58,10 @@ from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
 from gateway.kiwoom_runtime import (
     KiwoomGatewayRuntime,
     KiwoomGatewayRuntimeConfig,
+    PendingOrderRegistry,
     wire_kiwoom_signals,
 )
+from gateway.order_pre_ack_journal import OrderPreAckJournal
 from services.market_index_service import get_latest_market_index_tick, process_market_index_event
 from storage.event_store import append_gateway_event
 from storage.sqlite import initialize_database
@@ -1997,6 +2002,126 @@ def test_kiwoom_handler_live_sim_send_order_requires_safety_metadata() -> None:
     assert [event.event_type for event in accepted] == ["command_started", "command_ack"]
     assert len(client.orders) == 1
     assert client.orders[0].code == "005930"
+
+
+def test_kiwoom_handler_rate_limit_delays_without_failure_event() -> None:
+    now = [100.0]
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(client, clock=lambda: now[0])
+    command = GatewayCommand(
+        command_id="cmd_condition_rate_limit",
+        command_type="send_condition",
+        source="core",
+        payload={"condition_name": "Breakout", "condition_index": 3},
+    )
+
+    first = handler.handle(command)
+    second = handler.handle(
+        GatewayCommand(
+            command_id="cmd_condition_rate_limit_2",
+            command_type="send_condition",
+            source="core",
+            payload={"condition_name": "Breakout", "condition_index": 3},
+        )
+    )
+
+    assert [event.event_type for event in first] == ["command_started", "command_ack"]
+    assert [event.event_type for event in second] == ["command_started", "rate_limited"]
+    assert second[1].payload["reason"] == "type_min_interval"
+    assert len(client.send_condition_calls) == 1
+
+
+def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> None:
+    journal_path = tmp_path / "orders.jsonl"
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        order_journal=OrderPreAckJournal(journal_path),
+    )
+
+    events = handler.handle(_live_sim_order_command(command_id="cmd_journaled"))
+
+    journal_rows = [
+        json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "order_pre_ack",
+        "command_ack",
+    ]
+    assert [row["status"] for row in journal_rows] == ["PRE_ACK", "BROKER_ACCEPTED"]
+    assert journal_rows[0]["command_id"] == "cmd_journaled"
+    assert events[1].command_id == "cmd_journaled"
+    recovery_events = OrderPreAckJournal(journal_path).recovery_events(source="kiwoom_gateway")
+    assert [event.event_type for event in recovery_events] == ["order_pre_ack"]
+    assert recovery_events[0].payload["status"] == "RECOVERED_BROKER_ACCEPTED"
+
+
+def test_pending_order_registry_uses_command_id_before_ambiguous_signature() -> None:
+    registry = PendingOrderRegistry()
+    request_one = KiwoomOrderRequest(
+        account="1234567890",
+        code="005930",
+        quantity=1,
+        price=70000,
+        side="BUY",
+        tag="cmd_order_1",
+        command_id="cmd_order_1",
+        idempotency_key="idem-1",
+        metadata={"live_sim_intent_id": "intent-1"},
+    )
+    request_two = KiwoomOrderRequest(
+        account="1234567890",
+        code="005930",
+        quantity=1,
+        price=70000,
+        side="BUY",
+        tag="cmd_order_2",
+        command_id="cmd_order_2",
+        idempotency_key="idem-2",
+        metadata={"live_sim_intent_id": "intent-2"},
+    )
+    command_one = _live_sim_order_command(command_id="cmd_order_1")
+    command_two = _live_sim_order_command(command_id="cmd_order_2")
+
+    registry.record_ack(
+        command_one,
+        request_one,
+        KiwoomOrderResult(
+            ok=True,
+            code=0,
+            message="accepted",
+            request=request_one,
+            order_no="broker-1",
+        ),
+    )
+    registry.record_ack(
+        command_two,
+        request_two,
+        KiwoomOrderResult(
+            ok=True,
+            code=0,
+            message="accepted",
+            request=request_two,
+            order_no="broker-2",
+        ),
+    )
+
+    ambiguous = registry.enrich_chejan_payload(
+        {"account_id": "1234567890", "code": "005930", "side": "BUY"}
+    )
+    matched = registry.enrich_chejan_payload(
+        {
+            "account_id": "1234567890",
+            "code": "005930",
+            "side": "BUY",
+            "command_id": "cmd_order_1",
+        }
+    )
+
+    assert "command_id" not in ambiguous
+    assert matched["command_id"] == "cmd_order_1"
+    assert matched["live_sim_intent_id"] == "intent-1"
 
 
 def test_kiwoom_handler_rejects_live_real_and_cancel_modify() -> None:

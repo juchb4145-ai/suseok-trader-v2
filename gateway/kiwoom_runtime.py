@@ -40,6 +40,7 @@ from gateway.kiwoom_client import (
     realtime_code_for_exchange,
 )
 from gateway.kiwoom_command_handlers import KiwoomGatewayCommandHandler
+from gateway.order_pre_ack_journal import OrderPreAckJournal
 from gateway.transport import GatewayTransportError
 
 
@@ -75,6 +76,7 @@ class KiwoomGatewayRuntimeConfig:
     command_polling_enabled: bool = True
     event_posting_enabled: bool = True
     core_io_worker_enabled: bool = False
+    order_pre_ack_journal_path: str | None = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -92,7 +94,8 @@ class PendingOrderRecord:
 
 class PendingOrderRegistry:
     def __init__(self) -> None:
-        self._by_signature: dict[tuple[str, str, str], PendingOrderRecord] = {}
+        self._by_command_id: dict[str, PendingOrderRecord] = {}
+        self._by_signature: dict[tuple[str, str, str], list[PendingOrderRecord]] = {}
         self._by_broker_order_no: dict[str, PendingOrderRecord] = {}
 
     def record_ack(
@@ -117,7 +120,11 @@ class PendingOrderRegistry:
             broker_env=str(command.payload.get("broker_env") or "SIMULATION").upper(),
             server_mode=str(command.payload.get("server_mode") or "SIMULATION").upper(),
         )
-        self._by_signature[self._signature(record.account_id, record.code, record.side)] = record
+        self._by_command_id[record.command_id] = record
+        signature = self._signature(record.account_id, record.code, record.side)
+        records = self._by_signature.setdefault(signature, [])
+        if not any(existing.command_id == record.command_id for existing in records):
+            records.append(record)
         if result.order_no:
             self._by_broker_order_no[str(result.order_no)] = record
 
@@ -164,6 +171,9 @@ class PendingOrderRegistry:
         return enriched, command_id, idempotency_key
 
     def _match(self, payload: Mapping[str, Any]) -> PendingOrderRecord | None:
+        command_id = self._payload_command_id(payload)
+        if command_id and command_id in self._by_command_id:
+            return self._by_command_id[command_id]
         broker_order_no = str(
             payload.get("broker_order_no") or payload.get("broker_order_id") or ""
         )
@@ -174,7 +184,22 @@ class PendingOrderRegistry:
         side = str(payload.get("side") or "").upper()
         if not account or not code or not side:
             return None
-        return self._by_signature.get(self._signature(account, normalize_code(code), side))
+        records = self._by_signature.get(self._signature(account, normalize_code(code), side), [])
+        return records[0] if len(records) == 1 else None
+
+    @staticmethod
+    def _payload_command_id(payload: Mapping[str, Any]) -> str:
+        for key in ("command_id", "gateway_command_id", "client_order_id"):
+            value = payload.get(key)
+            if value:
+                return str(value)
+        metadata = payload.get("metadata")
+        if isinstance(metadata, Mapping):
+            for key in ("gateway_command_id", "command_id", "client_order_id"):
+                value = metadata.get(key)
+                if value:
+                    return str(value)
+        return ""
 
     @staticmethod
     def _signature(account: str, code: str, side: str) -> tuple[str, str, str]:
@@ -194,11 +219,17 @@ class KiwoomGatewayRuntime:
         self.core_client = core_client
         self.schedule_delayed = schedule_delayed
         self.config = config or KiwoomGatewayRuntimeConfig()
+        self.order_journal = (
+            OrderPreAckJournal(self.config.order_pre_ack_journal_path)
+            if self.config.order_pre_ack_journal_path
+            else None
+        )
         self.pending_orders = PendingOrderRegistry()
         self.command_handler = KiwoomGatewayCommandHandler(
             client,
             source=self.config.source,
             on_order_ack=self.pending_orders.record_ack,
+            order_journal=self.order_journal,
         )
         self._event_queue: deque[GatewayEvent] = deque()
         self._heartbeat_sequence = 0
@@ -276,6 +307,7 @@ class KiwoomGatewayRuntime:
         self._core_worker: CoreIoWorker | None = None
         self._local_event_count = 0
         self._latest_local_event: dict[str, Any] = {}
+        self.replay_order_pre_ack_journal()
 
     def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
         self.emit_event(
@@ -289,6 +321,12 @@ class KiwoomGatewayRuntime:
 
     def emit_event(self, event: GatewayEvent) -> None:
         self._event_queue.append(event)
+
+    def replay_order_pre_ack_journal(self) -> None:
+        if self.order_journal is None:
+            return
+        for event in self.order_journal.recovery_events(source=self.config.source):
+            self.emit_event(event)
 
     def emit_heartbeat(self) -> None:
         self._heartbeat_sequence += 1
