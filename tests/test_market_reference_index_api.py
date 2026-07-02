@@ -6,10 +6,10 @@ from tests.test_market_index_service import index_tick_event
 
 
 def test_market_reference_api_reads_memberships_after_gateway_post(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "reference_api.sqlite3"))
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         response = client.post(
             "/api/gateway/events",
             json={
@@ -21,6 +21,7 @@ def test_market_reference_api_reads_memberships_after_gateway_post(tmp_path, mon
                     "KOSDAQ": [{"code": "035420", "name": "NAVER"}],
                 },
             },
+            headers=headers,
         )
         duplicate = client.post(
             "/api/gateway/events",
@@ -33,6 +34,7 @@ def test_market_reference_api_reads_memberships_after_gateway_post(tmp_path, mon
                     "KOSDAQ": [{"code": "035420", "name": "NAVER"}],
                 },
             },
+            headers=headers,
         )
         symbols = client.get("/api/market-reference/symbols")
         samsung = client.get("/api/market-reference/symbols/A005930")
@@ -49,13 +51,16 @@ def test_market_reference_api_reads_memberships_after_gateway_post(tmp_path, mon
 
 
 def test_market_index_api_reads_projection_after_gateway_post(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "index_api.sqlite3"))
     monkeypatch.setenv("MARKET_INDEX_STALE_SEC", "999999999")
 
     event = index_tick_event("evt_api_kospi_index", index_code="KOSPI", price=2800.0)
     with TestClient(app) as client:
-        response = client.post("/api/gateway/events", json=event.to_dict())
+        response = client.post(
+            "/api/gateway/events",
+            json=event.to_dict(),
+            headers={"X-Local-Token": "test-token"},
+        )
         status = client.get("/api/market-indexes/status")
         latest = client.get("/api/market-indexes/latest")
         tick = client.get("/api/market-indexes/KOSPI")
@@ -82,7 +87,6 @@ def test_gateway_index_event_throttles_recent_market_regime_rebuild(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "index_api_throttle.sqlite3"))
     monkeypatch.setenv("MARKET_INDEX_STALE_SEC", "999999999")
 
@@ -90,8 +94,13 @@ def test_gateway_index_event_throttles_recent_market_regime_rebuild(
     second = index_tick_event("evt_api_kospi_index_second", index_code="KOSPI", price=2801.0)
 
     with TestClient(app) as client:
-        first_response = client.post("/api/gateway/events", json=first.to_dict())
-        second_response = client.post("/api/gateway/events", json=second.to_dict())
+        headers = {"X-Local-Token": "test-token"}
+        first_response = client.post("/api/gateway/events", json=first.to_dict(), headers=headers)
+        second_response = client.post(
+            "/api/gateway/events",
+            json=second.to_dict(),
+            headers=headers,
+        )
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200

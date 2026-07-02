@@ -297,16 +297,20 @@ def test_rca_api_requires_token_and_reads_reports(tmp_path, monkeypatch) -> None
 def test_rca_candidate_api_and_batch_endpoint(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "rca-api-candidate.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     connection = initialize_database(db_path)
     _insert_candidate(connection, state="DATA_WAIT")
     connection.close()
 
     with TestClient(app) as client:
-        candidate = client.post("/api/ai-sidecar/rca/candidate/candidate-1")
+        headers = {"X-Local-Token": "test-token"}
+        candidate = client.post(
+            "/api/ai-sidecar/rca/candidate/candidate-1",
+            headers=headers,
+        )
         batch = client.post(
             "/api/ai-sidecar/rca/candidates/batch",
             json={"trade_date": "2026-06-27", "limit": 1},
+            headers=headers,
         )
 
     assert candidate.status_code == 200

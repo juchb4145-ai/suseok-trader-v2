@@ -14,7 +14,6 @@ from tests.test_mock_gateway_integration import FastApiClientTransport, integrat
 
 
 def test_dashboard_snapshot_after_mock_observe_pipeline_flow(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     db_path = tmp_path / "dashboard-integration.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
     settings = _fresh_settings()
@@ -22,6 +21,7 @@ def test_dashboard_snapshot_after_mock_observe_pipeline_flow(tmp_path, monkeypat
     with TestClient(app) as client:
         core_client = CoreClient(
             core_url="http://testserver",
+            token="test-token",
             transport=FastApiClientTransport(client),
         )
         runtime = MockGatewayRuntime(settings=integration_settings(), client=core_client)

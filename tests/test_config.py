@@ -1,5 +1,5 @@
 from gateway.settings import load_gateway_settings
-from services.config import TradingMode, TradingProfile, load_settings
+from services.config import TradingMode, TradingProfile, clear_settings_cache, load_settings
 
 
 def test_default_settings_are_observe_with_live_flags_disabled() -> None:
@@ -89,6 +89,9 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.naver_theme_import_replace is False
     assert settings.naver_theme_import_min_member_count == 2
     assert settings.naver_theme_import_abort_on_empty is True
+    assert settings.condition_fusion_event_incremental_enabled is True
+    assert settings.condition_fusion_sweep_enabled is True
+    assert settings.condition_fusion_sweep_interval_sec == 60
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -245,6 +248,24 @@ def test_default_gateway_settings_are_mock_local_transport() -> None:
     assert settings.mock_price_tick_interval_sec == 2.0
 
 
+def test_default_environment_settings_are_cached_until_cleared(tmp_path, monkeypatch) -> None:
+    first_db = tmp_path / "first.sqlite3"
+    second_db = tmp_path / "second.sqlite3"
+
+    clear_settings_cache()
+    monkeypatch.setenv("TRADING_DB_PATH", str(first_db))
+    first = load_settings()
+
+    monkeypatch.setenv("TRADING_DB_PATH", str(second_db))
+    cached = load_settings()
+    clear_settings_cache()
+    refreshed = load_settings()
+
+    assert first is cached
+    assert cached.trading_db_path == first_db
+    assert refreshed.trading_db_path == second_db
+
+
 def test_market_data_interval_settings_are_validated() -> None:
     try:
         load_settings({"MARKET_DATA_BAR_INTERVALS_SEC": "60,90"})
@@ -297,6 +318,13 @@ def test_naver_theme_import_settings_are_validated() -> None:
 
 
 def test_candidate_settings_are_validated() -> None:
+    try:
+        load_settings({"CONDITION_FUSION_SWEEP_INTERVAL_SEC": "0"})
+    except ValueError as exc:
+        assert "CONDITION_FUSION_SWEEP_INTERVAL_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid condition fusion sweep interval")
+
     try:
         load_settings({"CANDIDATE_SOURCE_STALE_SEC": "0"})
     except ValueError as exc:

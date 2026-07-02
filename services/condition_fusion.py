@@ -100,6 +100,50 @@ def rebuild_condition_fusion(
     )
 
 
+def rebuild_condition_fusion_for_code(
+    connection: sqlite3.Connection,
+    code: str,
+    trade_date: str | None = None,
+    *,
+    settings: Settings | None = None,
+) -> ConditionFusionRebuildResult:
+    resolved_settings = settings or load_settings()
+    target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
+    normalized_code = validate_stock_code(code)
+    start_at, end_at = _trade_date_bounds(target_trade_date, resolved_settings)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM market_condition_signals
+        WHERE code = ?
+            AND event_ts >= ?
+            AND event_ts < ?
+        ORDER BY event_ts ASC, id ASC
+        """,
+        (normalized_code, start_at, end_at),
+    ).fetchall()
+
+    events: list[_ConditionProfileEvent] = []
+    for row in rows:
+        metadata = _metadata(row)
+        if not is_profile_condition_metadata(metadata):
+            continue
+        events.append(_profile_event_from_row(row, metadata))
+
+    if not events:
+        return ConditionFusionRebuildResult(processed_event_count=0, fused_code_count=0)
+
+    now = utc_now()
+    updated_at = datetime_to_wire(now)
+    fusion = _fuse_code_events(normalized_code, events, now=now, updated_at=updated_at)
+    _upsert_fusion(connection, target_trade_date, fusion)
+    connection.commit()
+    return ConditionFusionRebuildResult(
+        processed_event_count=len(events),
+        fused_code_count=1,
+    )
+
+
 def list_condition_fusion(
     connection: sqlite3.Connection,
     *,

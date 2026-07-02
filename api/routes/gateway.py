@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
+from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from services.condition_fusion import rebuild_condition_fusion_for_code
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
@@ -36,6 +39,7 @@ from storage.sqlite import open_connection
 from api.dependencies.auth import require_local_token
 
 router = APIRouter(prefix="/api/gateway")
+logger = logging.getLogger(__name__)
 
 
 @router.post("/events", dependencies=[Depends(require_local_token)])
@@ -60,6 +64,18 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                 projection_result = process_gateway_event(connection, event, settings=settings)
                 projection_status = projection_result.status
                 projection_statuses["market_data"] = projection_result.status
+                if (
+                    event_type == "condition_event"
+                    and projection_result.status == "APPLIED"
+                    and settings.condition_fusion_event_incremental_enabled
+                ):
+                    projection_statuses["condition_fusion"] = (
+                        _refresh_condition_fusion_for_condition_event(
+                            connection,
+                            event,
+                            settings=settings,
+                        )
+                    )
             if event_type in MARKET_SYMBOL_EVENT_TYPES:
                 reference_result = process_market_symbols_event(connection, event)
                 projection_statuses["market_reference"] = reference_result.status
@@ -99,6 +115,25 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     if projection_statuses:
         response["projection_statuses"] = projection_statuses
     return response
+
+
+def _refresh_condition_fusion_for_condition_event(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+) -> str:
+    try:
+        condition = BrokerConditionEvent.from_dict(event.payload)
+        result = rebuild_condition_fusion_for_code(
+            connection,
+            condition.code,
+            settings=settings,
+        )
+    except Exception:
+        logger.exception("condition fusion incremental refresh failed")
+        return "ERROR"
+    return "APPLIED" if result.fused_code_count else "IGNORED_NO_PROFILE"
 
 
 @router.get("/commands", dependencies=[Depends(require_local_token)])

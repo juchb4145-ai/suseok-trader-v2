@@ -10,7 +10,6 @@ from tools.run_market_open_observe_cycle import write_observe_cycle_report
 
 
 def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     db_path = tmp_path / "market_open_observe_cycle.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
     monkeypatch.setenv("MARKET_DATA_TICK_STALE_SEC", "999999999")
@@ -25,6 +24,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     trade_date = utc_now().astimezone(candidate_timezone("Asia/Seoul")).date().isoformat()
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         tick = client.post(
             "/api/gateway/events",
             json=make_price_tick_event(
@@ -38,6 +38,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
                 day_high=100_000,
                 day_low=94_000,
             ).to_dict(),
+            headers=headers,
         )
         condition = client.post(
             "/api/gateway/events",
@@ -48,10 +49,14 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
                 price=97_000,
                 metadata=_condition_profile_metadata("LEADER", "LeaderCondition", 90),
             ).to_dict(),
+            headers=headers,
         )
         latest_ticks = client.get("/api/market-data/ticks/latest")
-        theme_import = client.post("/api/themes/import", json=_theme_payload())
-        result = client.post(f"/api/operator/observe-cycle/run-once?trade_date={trade_date}")
+        theme_import = client.post("/api/themes/import", json=_theme_payload(), headers=headers)
+        result = client.post(
+            f"/api/operator/observe-cycle/run-once?trade_date={trade_date}",
+            headers=headers,
+        )
         latest_run = client.get("/api/operator/observe-cycle/runs/latest")
         commands = client.get("/api/gateway/commands/status")
 

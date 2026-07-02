@@ -6,7 +6,6 @@ from gateway.event_factory import make_condition_event, make_price_tick_event
 
 
 def test_candidate_api_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "candidate_api.sqlite3"))
     monkeypatch.setenv("MARKET_DATA_TICK_STALE_SEC", "999999999")
     monkeypatch.setenv("MARKET_DATA_DEGRADED_TICK_STALE_SEC", "999999999")
@@ -15,6 +14,7 @@ def test_candidate_api_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CANDIDATE_EPISODE_TTL_SEC", "999999999")
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         tick = client.post(
             "/api/gateway/events",
             json=make_price_tick_event(
@@ -23,14 +23,19 @@ def test_candidate_api_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
                 change_rate=1.0,
                 trade_value=100_000_000,
             ).to_dict(),
+            headers=headers,
         )
         condition = client.post(
             "/api/gateway/events",
             json=make_condition_event(code="005930", name="삼성전자").to_dict(),
+            headers=headers,
         )
-        theme_import = client.post("/api/themes/import", json=_theme_payload())
-        theme_rebuild = client.post("/api/themes/snapshots/rebuild?theme_id=semiconductor")
-        candidate_rebuild = client.post("/api/candidates/rebuild")
+        theme_import = client.post("/api/themes/import", json=_theme_payload(), headers=headers)
+        theme_rebuild = client.post(
+            "/api/themes/snapshots/rebuild?theme_id=semiconductor",
+            headers=headers,
+        )
+        candidate_rebuild = client.post("/api/candidates/rebuild", headers=headers)
 
         status = client.get("/api/candidates/status")
         candidates = client.get("/api/candidates")

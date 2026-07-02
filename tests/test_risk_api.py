@@ -8,7 +8,6 @@ from tests.test_strategy_service import _insert_strategy_fixture
 
 
 def test_risk_api_evaluate_and_read_paths(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "risk_api.sqlite3"))
     monkeypatch.setenv("STRATEGY_ENGINE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("RISK_GATE_STALE_TICK_SEC", "999999999")
@@ -18,9 +17,16 @@ def test_risk_api_evaluate_and_read_paths(tmp_path, monkeypatch) -> None:
     connection.close()
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         status_before = client.get("/api/risk/status")
-        strategy = client.post(f"/api/strategy/evaluate?candidate_instance_id={candidate_id}")
-        evaluated = client.post(f"/api/risk/evaluate?candidate_instance_id={candidate_id}")
+        strategy = client.post(
+            f"/api/strategy/evaluate?candidate_instance_id={candidate_id}",
+            headers=headers,
+        )
+        evaluated = client.post(
+            f"/api/risk/evaluate?candidate_instance_id={candidate_id}",
+            headers=headers,
+        )
         latest = client.get("/api/risk/observations/latest")
         latest_for_candidate = client.get(f"/api/risk/candidates/{candidate_id}")
         history = client.get(f"/api/risk/candidates/{candidate_id}/history")
@@ -71,7 +77,6 @@ def test_risk_evaluate_requires_token_when_configured(tmp_path, monkeypatch) -> 
 
 
 def test_risk_integration_flow_stays_observe_only(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "risk_flow.sqlite3"))
     monkeypatch.setenv("MARKET_DATA_TICK_STALE_SEC", "999999999")
     monkeypatch.setenv("MARKET_DATA_DEGRADED_TICK_STALE_SEC", "999999999")
@@ -84,6 +89,7 @@ def test_risk_integration_flow_stays_observe_only(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("THEME_MIN_ACTIVE_MEMBERS", "1")
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         tick = client.post(
             "/api/gateway/events",
             json=make_price_tick_event(
@@ -95,15 +101,19 @@ def test_risk_integration_flow_stays_observe_only(tmp_path, monkeypatch) -> None
                 change_rate=2.0,
                 trade_value=97_000_000,
             ).to_dict(),
+            headers=headers,
         )
-        theme_import = client.post("/api/themes/import", json=_theme_payload())
-        theme_rebuild = client.post("/api/themes/snapshots/rebuild?theme_id=semiconductor")
-        first_rebuild = client.post("/api/candidates/rebuild")
-        second_rebuild = client.post("/api/candidates/rebuild")
+        theme_import = client.post("/api/themes/import", json=_theme_payload(), headers=headers)
+        theme_rebuild = client.post(
+            "/api/themes/snapshots/rebuild?theme_id=semiconductor",
+            headers=headers,
+        )
+        first_rebuild = client.post("/api/candidates/rebuild", headers=headers)
+        second_rebuild = client.post("/api/candidates/rebuild", headers=headers)
         candidates = client.get("/api/candidates")
         candidate = candidates.json()["candidates"][0]
-        strategy = client.post("/api/strategy/evaluate")
-        risk = client.post("/api/risk/evaluate")
+        strategy = client.post("/api/strategy/evaluate", headers=headers)
+        risk = client.post("/api/risk/evaluate", headers=headers)
         latest = client.get("/api/risk/observations/latest")
         command_status = client.get("/api/gateway/commands/status")
 

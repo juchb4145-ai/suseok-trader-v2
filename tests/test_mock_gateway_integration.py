@@ -54,12 +54,12 @@ def integration_settings() -> GatewaySettings:
 
 
 def test_mock_gateway_once_posts_events_to_core_api(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "integration.sqlite3"))
 
     with TestClient(app) as fastapi_client:
         core_client = CoreClient(
             core_url="http://testserver",
+            token="test-token",
             transport=FastApiClientTransport(fastapi_client),
         )
         runtime = MockGatewayRuntime(settings=integration_settings(), client=core_client)
@@ -82,7 +82,6 @@ def test_mock_gateway_once_posts_events_to_core_api(tmp_path, monkeypatch) -> No
 
 
 def test_mock_gateway_request_tr_command_updates_core_command_status(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     db_path = tmp_path / "integration.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
 
@@ -108,6 +107,7 @@ def test_mock_gateway_request_tr_command_updates_core_command_status(tmp_path, m
 
         core_client = CoreClient(
             core_url="http://testserver",
+            token="test-token",
             transport=FastApiClientTransport(fastapi_client),
         )
         runtime = MockGatewayRuntime(settings=integration_settings(), client=core_client)

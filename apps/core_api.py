@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
+from api.dependencies.auth import enforce_local_token_middleware, ensure_auth_token_configured
 from api.routes.ai_advisory import router as ai_advisory_router
 from api.routes.ai_codex import router as ai_codex_router
 from api.routes.ai_live_sim_review import router as ai_live_sim_review_router
@@ -29,19 +32,51 @@ from api.routes.theme_leadership import router as theme_leadership_router
 from api.routes.themes import router as themes_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from services.config import load_settings
+from services.condition_fusion import rebuild_condition_fusion
+from services.config import Settings, load_settings
 from storage.sqlite import initialize_database
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "web" / "static"
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    ensure_auth_token_configured()
     settings = load_settings()
     connection = initialize_database(settings.trading_db_path)
     connection.close()
-    yield
+    condition_fusion_sweep_task = (
+        asyncio.create_task(_condition_fusion_sweep_loop(settings))
+        if settings.condition_fusion_sweep_enabled
+        else None
+    )
+    try:
+        yield
+    finally:
+        if condition_fusion_sweep_task is not None:
+            condition_fusion_sweep_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await condition_fusion_sweep_task
+
+
+async def _condition_fusion_sweep_loop(settings: Settings) -> None:
+    interval_sec = max(int(settings.condition_fusion_sweep_interval_sec), 1)
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await asyncio.to_thread(_run_condition_fusion_sweep_once, settings)
+        except Exception:
+            logger.exception("condition fusion periodic sweep failed")
+
+
+def _run_condition_fusion_sweep_once(settings: Settings) -> None:
+    connection = initialize_database(settings.trading_db_path)
+    try:
+        rebuild_condition_fusion(connection, settings=settings)
+    finally:
+        connection.close()
 
 
 def create_app() -> FastAPI:
@@ -50,6 +85,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.middleware("http")(enforce_local_token_middleware)
     application.include_router(health_router)
     application.include_router(ai_advisory_router)
     application.include_router(ai_sidecar_router)
