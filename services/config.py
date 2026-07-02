@@ -172,6 +172,10 @@ class Settings:
     market_data_bar_intervals_sec: tuple[int, ...] = (60, 180, 300)
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
+    event_store_retention_enabled: bool = False
+    event_store_retention_days: int = 30
+    event_store_retention_batch_size: int = 5000
+    event_store_retention_interval_sec: int = 86400
     market_regime_enabled: bool = True
     market_index_stale_sec: int = 30
     market_regime_risk_on_return_5m: float = 0.15
@@ -1050,6 +1054,12 @@ class Settings:
             raise ValueError("AI_EXTERNAL_LLM_DAILY_CALL_LIMIT must be >= 0")
         if self.ai_external_llm_per_run_call_limit < 0:
             raise ValueError("AI_EXTERNAL_LLM_PER_RUN_CALL_LIMIT must be >= 0")
+        if self.event_store_retention_days < 1:
+            raise ValueError("EVENT_STORE_RETENTION_DAYS must be >= 1")
+        if self.event_store_retention_batch_size < 1:
+            raise ValueError("EVENT_STORE_RETENTION_BATCH_SIZE must be >= 1")
+        if self.event_store_retention_interval_sec < 60:
+            raise ValueError("EVENT_STORE_RETENTION_INTERVAL_SEC must be >= 60")
         object.__setattr__(
             self,
             "no_buy_sentinel_market_open_time",
@@ -1383,6 +1393,24 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("MARKET_DATA_MAX_RECENT_TICKS", "1000"),
             "MARKET_DATA_MAX_RECENT_TICKS",
             min_value=1,
+        ),
+        event_store_retention_enabled=_parse_bool(
+            env.get("EVENT_STORE_RETENTION_ENABLED", "false")
+        ),
+        event_store_retention_days=_parse_int(
+            env.get("EVENT_STORE_RETENTION_DAYS", "30"),
+            "EVENT_STORE_RETENTION_DAYS",
+            min_value=1,
+        ),
+        event_store_retention_batch_size=_parse_int(
+            env.get("EVENT_STORE_RETENTION_BATCH_SIZE", "5000"),
+            "EVENT_STORE_RETENTION_BATCH_SIZE",
+            min_value=1,
+        ),
+        event_store_retention_interval_sec=_parse_int(
+            env.get("EVENT_STORE_RETENTION_INTERVAL_SEC", "86400"),
+            "EVENT_STORE_RETENTION_INTERVAL_SEC",
+            min_value=60,
         ),
         market_regime_enabled=_parse_bool(env.get("MARKET_REGIME_ENABLED", "true")),
         market_index_stale_sec=_parse_int(

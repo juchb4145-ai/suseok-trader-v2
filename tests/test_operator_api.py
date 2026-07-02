@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from apps.core_api import app
 from fastapi.testclient import TestClient
-from storage.sqlite import open_connection
+from storage.sqlite import initialize_database, open_connection
 from tests.test_live_sim_order_plan_pipeline import _prepared_order_plan_connection
 
 
@@ -60,6 +60,30 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
     assert realtime_run.json()["command_count"] == 0
     assert after_counts == before_counts
     assert int(snapshot_count) == 1
+
+
+def test_operator_event_retention_endpoints_are_token_protected(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "operator-retention.sqlite3"
+    initialize_database(db_path).close()
+    _set_operator_env(monkeypatch, db_path)
+
+    with TestClient(app) as client:
+        status = client.get("/api/operator/event-retention/status")
+        unauthorized = client.post("/api/operator/event-retention/prune")
+        dry_run = client.post(
+            "/api/operator/event-retention/prune",
+            headers={"X-Local-Token": "secret-token"},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["read_only"] is True
+    assert status.json()["dry_run_default"] is True
+    assert unauthorized.status_code == 401
+    assert dry_run.status_code == 200
+    assert dry_run.json()["dry_run"] is True
 
 
 def _set_operator_env(monkeypatch, db_path) -> None:

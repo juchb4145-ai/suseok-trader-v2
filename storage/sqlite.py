@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 APP_NAME = "suseok-trader-v2"
 
 
@@ -35,6 +35,8 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_live_sim_review_tables(connection)
     _create_ai_advisory_tables(connection)
     _create_gateway_transport_tables(connection)
+    _create_projection_watermark_tables(connection)
+    _create_event_retention_tables(connection)
     _create_market_data_tables(connection)
     _create_market_reference_tables(connection)
     _create_market_index_tables(connection)
@@ -1011,6 +1013,54 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_gateway_events_received_at
         ON gateway_events (received_at)
+        """
+    )
+
+
+def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projection_watermarks (
+            projection_name TEXT PRIMARY KEY,
+            last_event_rowid INTEGER NOT NULL DEFAULT 0,
+            last_event_id TEXT,
+            last_event_received_at TEXT,
+            last_processed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            metadata_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_watermarks_updated_at
+        ON projection_watermarks (updated_at)
+        """
+    )
+
+
+def _create_event_retention_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS event_retention_runs (
+            run_id TEXT PRIMARY KEY,
+            cutoff_at TEXT NOT NULL,
+            retention_days INTEGER NOT NULL,
+            dry_run INTEGER NOT NULL DEFAULT 0,
+            candidate_event_count INTEGER NOT NULL,
+            selected_event_count INTEGER NOT NULL,
+            deleted_gateway_event_count INTEGER NOT NULL,
+            deleted_raw_event_count INTEGER NOT NULL,
+            market_data_watermark_rowid INTEGER NOT NULL,
+            prunable_event_types_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_event_retention_runs_created_at
+        ON event_retention_runs (created_at)
         """
     )
 

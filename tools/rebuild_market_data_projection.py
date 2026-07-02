@@ -15,6 +15,11 @@ def main() -> int:
         help="Clear market projection tables before replaying accepted Gateway events.",
     )
     parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="Replay only accepted market events after the projection watermark.",
+    )
+    parser.add_argument(
         "--limit",
         type=int,
         default=None,
@@ -29,6 +34,7 @@ def main() -> int:
             connection,
             clear_projection=args.clear_projection,
             require_clear=args.clear_projection,
+            incremental=args.incremental,
             limit=args.limit,
             settings=settings,
         )

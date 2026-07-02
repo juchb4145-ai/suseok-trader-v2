@@ -25,6 +25,10 @@ from services.runtime.market_open_observe_cycle import (
     list_market_open_observe_cycle_runs,
     run_market_open_observe_cycle_once,
 )
+from storage.event_retention import (
+    get_event_retention_status,
+    prune_event_store_events,
+)
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -201,6 +205,45 @@ def operator_incremental_evaluation_run_once(
                 status_code=http_status.HTTP_409_CONFLICT,
                 detail=exc.to_dict(),
             ) from exc
+        return result.to_dict()
+    finally:
+        connection.close()
+
+
+@router.get("/event-retention/status")
+def operator_event_retention_status(
+    retention_days: int | None = Query(default=None, ge=1),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        payload = get_event_retention_status(
+            connection,
+            settings=settings,
+            retention_days=retention_days,
+        )
+        payload["read_only"] = True
+        return payload
+    finally:
+        connection.close()
+
+
+@router.post("/event-retention/prune", dependencies=[Depends(require_local_token)])
+def operator_event_retention_prune(
+    retention_days: int | None = Query(default=None, ge=1),
+    dry_run: bool = Query(default=True),
+    limit: int | None = Query(default=None, ge=1, le=100000),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = prune_event_store_events(
+            connection,
+            settings=settings,
+            retention_days=retention_days,
+            dry_run=dry_run,
+            limit=limit,
+        )
         return result.to_dict()
     finally:
         connection.close()

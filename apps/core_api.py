@@ -36,6 +36,7 @@ from services.condition_fusion import rebuild_condition_fusion
 from services.config import Settings, load_settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
+from storage.event_retention import prune_event_store_events
 from storage.sqlite import initialize_database
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -60,6 +61,11 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         and settings.incremental_evaluation_worker_enabled
         else None
     )
+    event_retention_task = (
+        asyncio.create_task(_event_retention_loop(settings))
+        if settings.event_store_retention_enabled
+        else None
+    )
     try:
         yield
     finally:
@@ -71,6 +77,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             incremental_evaluation_task.cancel()
             with suppress(asyncio.CancelledError):
                 await incremental_evaluation_task
+        if event_retention_task is not None:
+            event_retention_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await event_retention_task
 
 
 async def _condition_fusion_sweep_loop(settings: Settings) -> None:
@@ -107,6 +117,24 @@ def _run_incremental_evaluation_once(settings: Settings) -> None:
     connection = initialize_database(settings.trading_db_path)
     try:
         process_incremental_evaluation_batch(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+async def _event_retention_loop(settings: Settings) -> None:
+    interval_sec = max(int(settings.event_store_retention_interval_sec), 60)
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await asyncio.to_thread(_run_event_retention_once, settings)
+        except Exception:
+            logger.exception("event retention worker failed")
+
+
+def _run_event_retention_once(settings: Settings) -> None:
+    connection = initialize_database(settings.trading_db_path)
+    try:
+        prune_event_store_events(connection, settings=settings, dry_run=False)
     finally:
         connection.close()
 

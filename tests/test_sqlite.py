@@ -103,6 +103,31 @@ def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> Non
     }
 
 
+def test_sqlite_initialization_creates_projection_watermark_and_retention_tables(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    table_rows = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name IN (
+                'projection_watermarks',
+                'event_retention_runs'
+            )
+        """
+    ).fetchall()
+    connection.close()
+
+    assert {row["name"] for row in table_rows} == {
+        "projection_watermarks",
+        "event_retention_runs",
+    }
+
+
 def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
     db_path = tmp_path / "app.sqlite3"
     connection = initialize_database(db_path)

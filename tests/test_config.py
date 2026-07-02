@@ -69,6 +69,10 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
+    assert settings.event_store_retention_enabled is False
+    assert settings.event_store_retention_days == 30
+    assert settings.event_store_retention_batch_size == 5000
+    assert settings.event_store_retention_interval_sec == 86400
     assert gateway_settings.kiwoom_market_index_enabled is False
     assert gateway_settings.kiwoom_market_index_realtime_enabled is False
     assert gateway_settings.kiwoom_market_index_tr_bootstrap_enabled is False

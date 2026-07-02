@@ -21,9 +21,16 @@ from domain.market.bars import bucket_start_for, calculate_vwap
 from domain.market.models import MarketDataQualityStatus
 from domain.market.quality import assess_price_tick_quality, freshness_status, tick_age_seconds
 from storage.gateway_command_store import canonical_json
+from storage.projection_watermarks import (
+    ProjectionWatermark,
+    advance_projection_watermark,
+    get_projection_watermark,
+    reset_projection_watermark,
+)
 
 from services.config import Settings, load_settings
 
+MARKET_DATA_PROJECTION_NAME = "market_data"
 MARKET_DATA_EVENT_TYPES: frozenset[str] = frozenset(
     {"price_tick", "condition_event", "tr_response"}
 )
@@ -57,13 +64,19 @@ class MarketDataRebuildResult:
     applied_count: int
     ignored_count: int
     error_count: int
+    mode: str = "full"
+    from_event_rowid: int = 0
+    last_event_rowid: int = 0
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         return {
+            "mode": self.mode,
             "processed_count": self.processed_count,
             "applied_count": self.applied_count,
             "ignored_count": self.ignored_count,
             "error_count": self.error_count,
+            "from_event_rowid": self.from_event_rowid,
+            "last_event_rowid": self.last_event_rowid,
         }
 
 
@@ -90,18 +103,28 @@ def process_gateway_event(
             ignored_count=1,
         )
     if _projection_exists(connection, event_type, event.event_id):
-        return MarketDataProcessResult(
-            event_id=event.event_id,
-            event_type=event_type,
-            status="DUPLICATE",
-            ignored_count=1,
+        return _with_market_data_watermark(
+            connection,
+            event,
+            MarketDataProcessResult(
+                event_id=event.event_id,
+                event_type=event_type,
+                status="DUPLICATE",
+                ignored_count=1,
+            ),
+            commit=True,
         )
     if event_type == "price_tick" and _is_older_than_latest_price_tick(connection, event):
-        return MarketDataProcessResult(
-            event_id=event.event_id,
-            event_type=event_type,
-            status="IGNORED",
-            ignored_count=1,
+        return _with_market_data_watermark(
+            connection,
+            event,
+            MarketDataProcessResult(
+                event_id=event.event_id,
+                event_type=event_type,
+                status="IGNORED",
+                ignored_count=1,
+            ),
+            commit=True,
         )
 
     try:
@@ -112,10 +135,12 @@ def process_gateway_event(
             applied_count = _process_condition_event(connection, event)
         else:
             applied_count = _process_tr_response(connection, event)
+        _advance_market_data_watermark_for_event(connection, event, commit=False)
         connection.commit()
     except Exception as exc:
         connection.rollback()
         _record_projection_error(connection, event, error_message=str(exc))
+        _advance_market_data_watermark_for_event(connection, event, commit=False)
         connection.commit()
         return MarketDataProcessResult(
             event_id=event.event_id,
@@ -314,6 +339,7 @@ def get_market_data_status(
     resolved_settings = settings or load_settings()
     freshness_counts = _latest_tick_freshness_counts(connection, settings=resolved_settings)
     recent_window_sec = max(int(resolved_settings.market_data_tick_stale_sec), 60)
+    watermark = get_market_data_projection_watermark(connection)
     return {
         "enabled": resolved_settings.market_data_enabled,
         "latest_tick_count": _count_rows(connection, "market_ticks_latest"),
@@ -337,7 +363,14 @@ def get_market_data_status(
         "tick_stale_sec": resolved_settings.market_data_tick_stale_sec,
         "bar_intervals_sec": list(resolved_settings.market_data_bar_intervals_sec),
         "max_recent_ticks": resolved_settings.market_data_max_recent_ticks,
+        "projection_watermark": watermark.to_dict(),
     }
+
+
+def get_market_data_projection_watermark(
+    connection: sqlite3.Connection,
+) -> ProjectionWatermark:
+    return get_projection_watermark(connection, MARKET_DATA_PROJECTION_NAME)
 
 
 def clear_market_data_projection(connection: sqlite3.Connection) -> None:
@@ -345,6 +378,11 @@ def clear_market_data_projection(connection: sqlite3.Connection) -> None:
         connection.execute("BEGIN IMMEDIATE")
         for table_name in MARKET_PROJECTION_TABLES:
             connection.execute(f"DELETE FROM {table_name}")
+        reset_projection_watermark(
+            connection,
+            MARKET_DATA_PROJECTION_NAME,
+            commit=False,
+        )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -356,15 +394,24 @@ def rebuild_market_data_projection(
     *,
     clear_projection: bool = False,
     require_clear: bool = False,
+    incremental: bool = False,
     limit: int | None = None,
     settings: Settings | None = None,
 ) -> MarketDataRebuildResult:
     if clear_projection and not require_clear:
         raise ValueError("clear_projection requires require_clear=True")
+    if clear_projection and incremental:
+        raise ValueError("incremental rebuild cannot clear projection")
     if clear_projection:
         clear_market_data_projection(connection)
 
-    rows = _list_replayable_gateway_events(connection, limit=limit)
+    starting_watermark = get_market_data_projection_watermark(connection)
+    from_event_rowid = starting_watermark.last_event_rowid if incremental else 0
+    rows = _list_replayable_gateway_events(
+        connection,
+        limit=limit,
+        after_event_rowid=from_event_rowid,
+    )
     processed_count = applied_count = ignored_count = error_count = 0
     for row in rows:
         processed_count += 1
@@ -382,11 +429,15 @@ def rebuild_market_data_projection(
         ignored_count += result.ignored_count
         error_count += result.error_count
 
+    ending_watermark = get_market_data_projection_watermark(connection)
     return MarketDataRebuildResult(
         processed_count=processed_count,
         applied_count=applied_count,
         ignored_count=ignored_count,
         error_count=error_count,
+        mode="incremental" if incremental else "full",
+        from_event_rowid=from_event_rowid,
+        last_event_rowid=ending_watermark.last_event_rowid,
     )
 
 
@@ -945,12 +996,18 @@ def _list_replayable_gateway_events(
     connection: sqlite3.Connection,
     *,
     limit: int | None,
+    after_event_rowid: int = 0,
 ) -> list[sqlite3.Row]:
     limit_sql = "" if limit is None else "LIMIT ?"
-    params: tuple[int, ...] = () if limit is None else (max(int(limit), 1),)
+    params: tuple[int, ...]
+    if limit is None:
+        params = (max(int(after_event_rowid), 0),)
+    else:
+        params = (max(int(after_event_rowid), 0), max(int(limit), 1))
     return connection.execute(
         f"""
         SELECT
+            rowid AS event_rowid,
             event_id,
             event_type,
             source,
@@ -962,11 +1019,53 @@ def _list_replayable_gateway_events(
         FROM gateway_events
         WHERE status = 'ACCEPTED'
             AND event_type IN ('price_tick', 'condition_event', 'tr_response')
-        ORDER BY event_ts ASC, received_at ASC, event_id ASC
+            AND rowid > ?
+        ORDER BY rowid ASC
         {limit_sql}
         """,
         params,
     ).fetchall()
+
+
+def _with_market_data_watermark(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    result: MarketDataProcessResult,
+    *,
+    commit: bool,
+) -> MarketDataProcessResult:
+    _advance_market_data_watermark_for_event(connection, event, commit=commit)
+    return result
+
+
+def _advance_market_data_watermark_for_event(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    *,
+    commit: bool,
+) -> ProjectionWatermark | None:
+    event_type = event.event_type.strip().lower()
+    if event_type not in MARKET_DATA_EVENT_TYPES:
+        return None
+    row = connection.execute(
+        """
+        SELECT rowid AS event_rowid, received_at
+        FROM gateway_events
+        WHERE event_id = ?
+        """,
+        (event.event_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return advance_projection_watermark(
+        connection,
+        MARKET_DATA_PROJECTION_NAME,
+        last_event_rowid=int(row["event_rowid"]),
+        last_event_id=event.event_id,
+        last_event_received_at=row["received_at"],
+        metadata={"event_type": event_type},
+        commit=commit,
+    )
 
 
 def _latest_tick_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

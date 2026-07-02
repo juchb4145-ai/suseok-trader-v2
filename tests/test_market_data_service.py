@@ -11,7 +11,9 @@ from domain.broker.utils import utc_now
 from services.config import Settings
 from services.market_data_service import (
     get_latest_tick,
+    get_market_data_projection_watermark,
     get_market_data_readiness,
+    get_market_data_status,
     list_bars,
     process_gateway_event,
     rebuild_market_data_projection,
@@ -408,3 +410,84 @@ def test_rebuild_replays_accepted_gateway_events_with_clear_guard(tmp_path) -> N
     assert result.error_count == 0
     assert latest is not None
     assert signal_count == 1
+
+
+def test_projection_watermark_advances_on_live_ingest(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    tick = price_tick_event("evt_watermark_live", ts=TS, trade_time=TS)
+
+    result = append_and_project(connection, tick, Settings())
+    row = connection.execute(
+        "SELECT rowid AS event_rowid FROM gateway_events WHERE event_id = ?",
+        (tick.event_id,),
+    ).fetchone()
+    watermark = get_market_data_projection_watermark(connection)
+    status = get_market_data_status(connection, settings=Settings())
+    connection.close()
+
+    assert result.status == "APPLIED"
+    assert watermark.last_event_rowid == row["event_rowid"]
+    assert watermark.last_event_id == tick.event_id
+    assert status["projection_watermark"]["last_event_id"] == tick.event_id
+
+
+def test_incremental_rebuild_replays_after_projection_watermark_only(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    first = price_tick_event(
+        "evt_watermark_first",
+        price=70000,
+        volume=1000,
+        trade_value=70_000_000,
+        ts=TS,
+        trade_time=TS,
+    )
+    second = price_tick_event(
+        "evt_watermark_second",
+        price=70100,
+        volume=1010,
+        trade_value=70_701_000,
+        ts=TS + timedelta(seconds=5),
+        trade_time=TS + timedelta(seconds=5),
+    )
+    append_and_project(connection, first, Settings())
+    append_gateway_event(connection, second)
+    first_row = connection.execute(
+        "SELECT rowid AS event_rowid FROM gateway_events WHERE event_id = ?",
+        (first.event_id,),
+    ).fetchone()
+    second_row = connection.execute(
+        "SELECT rowid AS event_rowid FROM gateway_events WHERE event_id = ?",
+        (second.event_id,),
+    ).fetchone()
+
+    result = rebuild_market_data_projection(
+        connection,
+        incremental=True,
+        settings=Settings(),
+    )
+    repeat = rebuild_market_data_projection(
+        connection,
+        incremental=True,
+        settings=Settings(),
+    )
+    samples = connection.execute(
+        """
+        SELECT event_id
+        FROM market_tick_samples
+        ORDER BY event_ts
+        """
+    ).fetchall()
+    watermark = get_market_data_projection_watermark(connection)
+    connection.close()
+
+    assert result.mode == "incremental"
+    assert result.from_event_rowid == first_row["event_rowid"]
+    assert result.last_event_rowid == second_row["event_rowid"]
+    assert result.processed_count == 1
+    assert result.applied_count == 4
+    assert repeat.processed_count == 0
+    assert [row["event_id"] for row in samples] == [
+        first.event_id,
+        second.event_id,
+    ]
+    assert watermark.last_event_id == second.event_id
