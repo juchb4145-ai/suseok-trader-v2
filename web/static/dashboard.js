@@ -56,6 +56,28 @@ const reasonList = (reasons) => {
     .join("")}</div>`;
 };
 
+const reasonChannelList = (channels, reasons) => {
+  if (!channels || typeof channels !== "object") {
+    return reasonList(reasons);
+  }
+  const rows = ["BLOCKING", "WAITING", "INFO"]
+    .map((channel) => [channel, Array.isArray(channels[channel]) ? channels[channel] : []])
+    .filter(([, items]) => items.length);
+  if (!rows.length) {
+    return reasonList(reasons);
+  }
+  return `<div class="reason-channel-list">${rows
+    .map(
+      ([channel, items]) => `
+        <div class="reason-channel-row">
+          ${badge(channel)}
+          ${reasonList(items)}
+        </div>
+      `,
+    )
+    .join("")}</div>`;
+};
+
 const emptyState = (message) => `<div class="empty-state">${escapeHtml(message)}</div>`;
 
 const number = (value) => {
@@ -457,8 +479,8 @@ const nearMissTable = (rows) =>
       `${text(row.name)} ${text(row.code)}`,
       `${text(row.order_plan_status)} / ${text(row.entry_timing_state)}`,
       `${text(row.ai_selected)} · ${number(row.ai_score)} / ${number(row.ai_confidence)}`,
-      `${text(row.primary_block_stage)} / ${text(row.primary_block_type)}`,
-      reasonList(row.reason_codes),
+      `${badge(row.primary_reason_channel || "INFO")} ${text(row.primary_block_stage)} / ${text(row.primary_block_type)}`,
+      reasonChannelList(row.reason_channels, row.reason_codes),
       row.operator_hint,
     ]),
   );

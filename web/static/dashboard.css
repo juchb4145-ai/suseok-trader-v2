@@ -264,6 +264,24 @@ h2 {
   background: rgba(240, 101, 101, 0.18);
 }
 
+.badge-BLOCKING {
+  border-color: rgba(240, 101, 101, 0.68);
+  background: rgba(240, 101, 101, 0.16);
+  color: #ffc9c9;
+}
+
+.badge-WAITING {
+  border-color: rgba(245, 185, 66, 0.62);
+  background: rgba(245, 185, 66, 0.14);
+  color: #ffe0a3;
+}
+
+.badge-INFO {
+  border-color: rgba(116, 192, 252, 0.58);
+  background: rgba(116, 192, 252, 0.13);
+  color: #d0ebff;
+}
+
 .pipeline-stack {
   display: grid;
   gap: 14px;
@@ -376,6 +394,23 @@ td {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
+}
+
+.reason-channel-list {
+  display: grid;
+  gap: 6px;
+}
+
+.reason-channel-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.reason-channel-row .badge {
+  min-height: 21px;
+  padding: 2px 7px;
+  font-size: 10px;
 }
 
 .reason {

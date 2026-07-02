@@ -37,6 +37,7 @@ from services.operator.models import (
 )
 from services.operator.reason_classifier import (
     aggregate_reason_summary,
+    group_reason_codes_by_channel,
     primary_classification,
     summarize_classifications,
 )
@@ -378,7 +379,8 @@ def _top_near_misses(
         ai_selected = code in ai_selected_codes or bool(ai_score.get("selected"))
         if ai_selected and eligibility and not eligibility.get("eligible", False):
             reason_codes.append("SYSTEM_BLOCK_WITH_AI_INTEREST")
-        classification = primary_classification(reason_codes or [plan.get("status")])
+        normalized_reasons = _dedupe(reason_codes or [str(plan.get("status") or "UNKNOWN")])
+        classification = primary_classification(normalized_reasons)
         item = {
             "code": code,
             "name": plan.get("name"),
@@ -395,7 +397,9 @@ def _top_near_misses(
             "ai_selected": bool(ai_selected),
             "primary_block_stage": classification.stage.value,
             "primary_block_type": classification.block_type.value,
-            "reason_codes": _dedupe(reason_codes or [str(plan.get("status") or "UNKNOWN")]),
+            "primary_reason_channel": classification.channel.value,
+            "reason_codes": normalized_reasons,
+            "reason_channels": group_reason_codes_by_channel(normalized_reasons),
             "admission_trace": admission_trace,
             "operator_hint": classification.operator_hint,
             "not_buy_recommendation": True,
@@ -431,7 +435,9 @@ def _top_near_misses(
                 "ai_selected": code in ai_selected_codes,
                 "primary_block_stage": classification.stage.value,
                 "primary_block_type": classification.block_type.value,
+                "primary_reason_channel": classification.channel.value,
                 "reason_codes": reason_codes,
+                "reason_channels": group_reason_codes_by_channel(reason_codes),
                 "operator_hint": classification.operator_hint,
                 "not_buy_recommendation": True,
             }
@@ -465,7 +471,9 @@ def _top_near_misses(
                 "ai_selected": code in ai_selected_codes,
                 "primary_block_stage": classification.stage.value,
                 "primary_block_type": classification.block_type.value,
+                "primary_reason_channel": classification.channel.value,
                 "reason_codes": reason_codes,
+                "reason_channels": group_reason_codes_by_channel(reason_codes),
                 "operator_hint": classification.operator_hint,
                 "not_buy_recommendation": True,
             }

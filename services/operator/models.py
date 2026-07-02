@@ -56,11 +56,18 @@ class BlockType(StrEnum):
     NOT_APPLICABLE = "NOT_APPLICABLE"
 
 
+class ReasonChannel(StrEnum):
+    BLOCKING = "BLOCKING"
+    WAITING = "WAITING"
+    INFO = "INFO"
+
+
 @dataclass(frozen=True, kw_only=True)
 class ReasonClassification:
     reason_code: str
     stage: StageCategory = StageCategory.UNKNOWN
     block_type: BlockType = BlockType.NOT_APPLICABLE
+    channel: ReasonChannel = ReasonChannel.INFO
     operator_hint: str = "관련 원천 데이터와 최근 오류를 확인합니다."
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +75,7 @@ class ReasonClassification:
             "reason_code": self.reason_code,
             "stage": self.stage.value,
             "block_type": self.block_type.value,
+            "channel": self.channel.value,
             "operator_hint": self.operator_hint,
         }
 

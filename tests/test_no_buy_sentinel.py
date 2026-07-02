@@ -39,8 +39,20 @@ def test_no_buy_schema_config_and_reason_classifier(tmp_path) -> None:
     settings = Settings()
     classification = classify_reason("LIVE_SIM_RECONCILE_MISMATCH_BLOCK")
     summary = aggregate_reason_summary(
-        ["AI_NO_TRADE", "ORDER_PLAN_NOT_READY", "UNEXPECTED_REASON"]
+        [
+            "AI_NO_TRADE",
+            "ORDER_PLAN_NOT_READY",
+            "CANDIDATE_WITHOUT_ORDER_PLAN",
+            "MARKET_TICK_FRESH",
+            "THEME_FOLLOWER_MEMBER",
+            "RISK_BLOCKED_BY_CONDITION",
+            "UNEXPECTED_REASON",
+        ]
     )
+    candidate_wait = classify_reason("CANDIDATE_WITHOUT_ORDER_PLAN")
+    market_info = classify_reason("MARKET_TICK_FRESH")
+    theme_info = classify_reason("THEME_FOLLOWER_MEMBER")
+    risk_block = classify_reason("RISK_BLOCKED_BY_CONDITION")
 
     assert "no_buy_sentinel_snapshots" in tables
     assert "stage_funnel_json" in columns
@@ -48,6 +60,20 @@ def test_no_buy_schema_config_and_reason_classifier(tmp_path) -> None:
     assert settings.no_buy_sentinel_write_snapshots is True
     assert classification.stage == "RECONCILE"
     assert summary["reason_counts"]["AI_NO_TRADE"] == 1
+    assert summary["channel_counts"]["BLOCKING"] == 1
+    assert summary["channel_counts"]["WAITING"] == 3
+    assert summary["channel_counts"]["INFO"] == 3
+    assert summary["channel_reason_counts"]["WAITING"]["CANDIDATE_WITHOUT_ORDER_PLAN"] == 1
+    assert summary["channel_reason_counts"]["INFO"]["MARKET_TICK_FRESH"] == 1
+    assert candidate_wait.stage == "CANDIDATE"
+    assert candidate_wait.block_type == "SOFT_WAIT"
+    assert candidate_wait.channel == "WAITING"
+    assert market_info.block_type == "NOT_APPLICABLE"
+    assert market_info.channel == "INFO"
+    assert theme_info.channel == "INFO"
+    assert risk_block.stage == "RISK"
+    assert risk_block.block_type == "HARD_BLOCK"
+    assert risk_block.channel == "BLOCKING"
     assert classify_reason("UNEXPECTED_REASON").stage == "UNKNOWN"
 
 
@@ -159,6 +185,16 @@ def test_stage_funnel_records_pipeline_survival_counts(tmp_path) -> None:
     assert "005930" in stages["order_plan_ready"]["sample_codes"]
     assert snapshot["top_near_miss"][0]["admission_trace"]["policy"] == "live_sim_order_plan"
     assert snapshot["top_near_miss"][0]["admission_trace"]["reason_codes"] == []
+    assert snapshot["top_near_miss"][0]["primary_reason_channel"] in {
+        "BLOCKING",
+        "WAITING",
+        "INFO",
+    }
+    assert set(snapshot["top_near_miss"][0]["reason_channels"]) == {
+        "BLOCKING",
+        "WAITING",
+        "INFO",
+    }
     assert json.loads(stored["stage_funnel_json"])["version"] == 1
 
 
@@ -274,6 +310,13 @@ def test_gateway_realtime_stalled_is_separated_from_theme_data_wait(tmp_path) ->
     assert snapshot["status"] == "GATEWAY_REALTIME_STALLED"
     assert snapshot["system_summary"]["gateway"]["realtime_stalled"] is True
     assert "GATEWAY_REALTIME_STALLED" in snapshot["reason_summary"]["reason_counts"]
+    assert snapshot["reason_summary"]["channel_counts"]["BLOCKING"] >= 1
+    assert (
+        snapshot["reason_summary"]["channel_reason_counts"]["BLOCKING"][
+            "GATEWAY_REALTIME_STALLED"
+        ]
+        == 1
+    )
 
 
 def test_gateway_unavailable_overrides_theme_data_wait(tmp_path) -> None:
