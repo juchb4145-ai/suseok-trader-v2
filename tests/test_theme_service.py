@@ -6,12 +6,14 @@ from domain.broker.market import BrokerPriceTick
 from domain.broker.utils import utc_now
 from services.config import Settings
 from services.market_data_service import process_gateway_event
+from services.market_scan_service import process_market_scan_event
 from services.theme_service import (
     calculate_all_theme_snapshots,
     calculate_theme_snapshot,
     import_theme_memberships,
     list_theme_members,
     list_theme_snapshot_members,
+    list_top_theme_snapshots_for_dashboard,
     list_themes,
     list_themes_for_code,
     upsert_theme,
@@ -395,3 +397,140 @@ def test_invalid_theme_import_records_error_batch(tmp_path) -> None:
 
     assert row["status"] == "ERROR"
     assert "6-digit domestic stock code" in row["error_message"]
+
+
+def test_scan_only_theme_exits_data_wait_and_marks_observation_source(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "theme-scan-only.sqlite3")
+    settings = Settings(
+        market_scan_enabled=True,
+        market_data_tick_stale_sec=999_999_999,
+        market_data_degraded_tick_stale_sec=999_999_999,
+    )
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": "005930", "name": "삼성전자"},
+                {"code": "000660", "name": "SK하이닉스"},
+            ]
+        ),
+    )
+    _project_scan(
+        connection,
+        "scan1",
+        rows=[
+            _scan_row("005930", "삼성전자", rank=1, trade_value=500_000_000, change_rate=2.0),
+            _scan_row("000660", "SK하이닉스", rank=2, trade_value=350_000_000, change_rate=1.4),
+        ],
+        settings=settings,
+    )
+
+    snapshot = calculate_theme_snapshot(connection, "semiconductor", settings=settings)
+    member_rows = list_theme_snapshot_members(connection, snapshot.snapshot_id)
+    connection.close()
+
+    assert snapshot.state == "LEADING"
+    assert snapshot.scan_coverage_ratio == 1.0
+    assert snapshot.realtime_coverage_ratio == 0.0
+    assert snapshot.reason_codes == []
+    assert {row["observation_source"] for row in member_rows} == {"MARKET_SCAN"}
+
+
+def test_flow_score_does_not_rank_single_mega_cap_above_broad_inflow(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "theme-flow-score.sqlite3")
+    settings = Settings(
+        market_scan_enabled=True,
+        theme_min_active_members=1,
+        market_data_tick_stale_sec=999_999_999,
+        market_data_degraded_tick_stale_sec=999_999_999,
+    )
+    import_theme_memberships(
+        connection,
+        {
+            "source_type": "MOCK",
+            "source_name": "flow_fixture",
+            "themes": [
+                {
+                    "theme_id": "mega",
+                    "theme_name": "초대형 단일",
+                    "members": [{"code": "005930", "name": "삼성전자"}],
+                },
+                {
+                    "theme_id": "broad",
+                    "theme_name": "확산형",
+                    "members": [
+                        {"code": "000660", "name": "SK하이닉스"},
+                        {"code": "035420", "name": "NAVER"},
+                        {"code": "035720", "name": "카카오"},
+                    ],
+                },
+            ],
+        },
+    )
+    _project_scan(
+        connection,
+        "prev",
+        rows=[
+            _scan_row("005930", "삼성전자", rank=250, trade_value=1_000_000_000, change_rate=0.1),
+            _scan_row("000660", "SK하이닉스", rank=250, trade_value=100_000_000, change_rate=0.1),
+            _scan_row("035420", "NAVER", rank=251, trade_value=100_000_000, change_rate=0.1),
+            _scan_row("035720", "카카오", rank=252, trade_value=100_000_000, change_rate=0.1),
+        ],
+        settings=settings,
+    )
+    _project_scan(
+        connection,
+        "curr",
+        rows=[
+            _scan_row("005930", "삼성전자", rank=1, trade_value=1_001_000_000_000, change_rate=2.0),
+            _scan_row("000660", "SK하이닉스", rank=2, trade_value=1_100_000_000, change_rate=2.0),
+            _scan_row("035420", "NAVER", rank=3, trade_value=1_100_000_000, change_rate=2.0),
+            _scan_row("035720", "카카오", rank=4, trade_value=1_100_000_000, change_rate=2.0),
+        ],
+        settings=settings,
+    )
+
+    mega = calculate_theme_snapshot(connection, "mega", settings=settings)
+    broad = calculate_theme_snapshot(connection, "broad", settings=settings)
+    top = list_top_theme_snapshots_for_dashboard(connection, limit=2)
+    connection.close()
+
+    assert mega.flow_trade_value_delta > broad.flow_trade_value_delta
+    assert broad.flow_score > mega.flow_score
+    assert top[0]["theme_id"] == "broad"
+
+
+def _project_scan(connection, suffix: str, *, rows, settings: Settings) -> None:
+    event = GatewayEvent(
+        event_id=f"evt_scan_{suffix}",
+        event_type="tr_response",
+        source="mock_gateway",
+        payload={
+            "request_id": f"market_scan:TRADE_VALUE:KOSPI:{suffix}",
+            "tr_code": "OPT10032",
+            "request_name": "market_scan_trade_value_kospi",
+            "success": True,
+            "rows": rows,
+        },
+    )
+    result = process_market_scan_event(connection, event, settings=settings)
+    assert result.status in {"APPLIED", "PARTIAL"}
+
+
+def _scan_row(
+    code: str,
+    name: str,
+    *,
+    rank: int,
+    trade_value: int,
+    change_rate: float,
+) -> dict[str, object]:
+    return {
+        "code": code,
+        "name": name,
+        "rank": rank,
+        "price": 10_000,
+        "change_rate": change_rate,
+        "trade_value": trade_value,
+        "volume": 100_000,
+    }

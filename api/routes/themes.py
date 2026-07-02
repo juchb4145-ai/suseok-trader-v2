@@ -6,7 +6,12 @@ from domain.broker.utils import BrokerValidationError, validate_stock_code
 from domain.theme.state import ThemeState
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
-from services.theme_diagnostics import build_theme_data_wait_diagnostics
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.theme_refresh_cycle import run_theme_refresh_cycle_once
+from services.theme_diagnostics import (
+    build_naver_leading_theme_overlap_report,
+    build_theme_data_wait_diagnostics,
+)
 from services.theme_service import (
     calculate_all_theme_snapshots,
     calculate_theme_snapshot,
@@ -106,6 +111,18 @@ def theme_data_wait_diagnostics(
         connection.close()
 
 
+@router.get("/diagnostics/naver-overlap")
+def theme_naver_overlap_diagnostics(
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_naver_leading_theme_overlap_report(connection, limit=limit)
+    finally:
+        connection.close()
+
+
 @router.post("/import", dependencies=[Depends(require_local_token)])
 def themes_import(
     body: dict[str, Any],
@@ -158,6 +175,30 @@ def rebuild_theme_snapshots(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),
             ) from exc
+        return result.to_dict()
+    finally:
+        connection.close()
+
+
+@router.post("/refresh-cycle/run-once", dependencies=[Depends(require_local_token)])
+def run_theme_refresh_cycle(
+    trade_date: str | None = Query(default=None),
+    queue_market_scan_commands: bool | None = Query(default=None),
+    queue_realtime_commands: bool | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            result = run_theme_refresh_cycle_once(
+                connection,
+                trade_date=trade_date,
+                settings=settings,
+                queue_market_scan_commands=queue_market_scan_commands,
+                queue_realtime_commands=queue_realtime_commands,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.to_dict()) from exc
         return result.to_dict()
     finally:
         connection.close()

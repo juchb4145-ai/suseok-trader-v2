@@ -115,6 +115,7 @@ class ThemeMemberSnapshot:
     above_vwap: bool = False
     readiness_status: str = "MISSING"
     member_role: ThemeMemberRole = ThemeMemberRole.UNKNOWN
+    observation_source: str = "UNKNOWN"
     tick_age_sec: float | None = None
     event_ts: datetime | str | None = None
     calculated_at: datetime | str | None = None
@@ -178,6 +179,11 @@ class ThemeMemberSnapshot:
             "member_role",
             parse_str_enum(self.member_role, ThemeMemberRole, "member_role"),
         )
+        object.__setattr__(
+            self,
+            "observation_source",
+            require_non_empty_str(self.observation_source, "observation_source").upper(),
+        )
         if self.tick_age_sec is not None:
             object.__setattr__(
                 self,
@@ -211,6 +217,7 @@ class ThemeMemberSnapshot:
             "above_vwap": self.above_vwap,
             "readiness_status": self.readiness_status,
             "member_role": self.member_role.value,
+            "observation_source": self.observation_source,
             "tick_age_sec": self.tick_age_sec,
             "metadata": normalize_payload(self.metadata),
         }
@@ -238,6 +245,8 @@ class ThemeSnapshot:
     observed_member_count: int
     fresh_member_count: int
     fresh_coverage_ratio: float
+    scan_coverage_ratio: float = 0.0
+    realtime_coverage_ratio: float = 0.0
     rising_member_count: int
     rising_ratio: float
     avg_change_rate: float
@@ -246,6 +255,9 @@ class ThemeSnapshot:
     trade_value_delta_1m: float
     trade_value_delta_3m: float
     trade_value_delta_5m: float
+    flow_trade_value_delta: float = 0.0
+    flow_rank_inflow_count: int = 0
+    flow_score: float = 0.0
     leading_code: str | None
     leading_name: str | None
     co_leader_codes: list[str] = field(default_factory=list)
@@ -275,6 +287,7 @@ class ThemeSnapshot:
             "observed_member_count",
             "fresh_member_count",
             "rising_member_count",
+            "flow_rank_inflow_count",
         ):
             object.__setattr__(
                 self,
@@ -283,6 +296,8 @@ class ThemeSnapshot:
             )
         for field_name in (
             "fresh_coverage_ratio",
+            "scan_coverage_ratio",
+            "realtime_coverage_ratio",
             "rising_ratio",
             "avg_change_rate",
             "max_change_rate",
@@ -290,6 +305,8 @@ class ThemeSnapshot:
             "trade_value_delta_1m",
             "trade_value_delta_3m",
             "trade_value_delta_5m",
+            "flow_trade_value_delta",
+            "flow_score",
         ):
             min_value = 0.0 if field_name not in {"avg_change_rate", "max_change_rate"} else None
             object.__setattr__(
@@ -338,6 +355,8 @@ class ThemeSnapshot:
             "observed_member_count": self.observed_member_count,
             "fresh_member_count": self.fresh_member_count,
             "fresh_coverage_ratio": self.fresh_coverage_ratio,
+            "scan_coverage_ratio": self.scan_coverage_ratio,
+            "realtime_coverage_ratio": self.realtime_coverage_ratio,
             "rising_member_count": self.rising_member_count,
             "rising_ratio": self.rising_ratio,
             "avg_change_rate": self.avg_change_rate,
@@ -346,6 +365,9 @@ class ThemeSnapshot:
             "trade_value_delta_1m": self.trade_value_delta_1m,
             "trade_value_delta_3m": self.trade_value_delta_3m,
             "trade_value_delta_5m": self.trade_value_delta_5m,
+            "flow_trade_value_delta": self.flow_trade_value_delta,
+            "flow_rank_inflow_count": self.flow_rank_inflow_count,
+            "flow_score": self.flow_score,
             "leading_code": self.leading_code,
             "leading_name": self.leading_name,
             "co_leader_codes": list(self.co_leader_codes),

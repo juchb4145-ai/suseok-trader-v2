@@ -141,3 +141,43 @@ def test_market_index_readiness_reports_stale_without_hard_failure(tmp_path) -> 
 
     assert readiness["quality_status"] in {"STALE", "DEGRADED"}
     assert any(reason.startswith("INDEX_TICK_") for reason in readiness["reason_codes"])
+
+
+def test_market_index_records_unverified_and_implausible_guard(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-index-guard.sqlite3")
+    settings = Settings(market_index_stale_sec=999_999_999)
+    unverified = index_tick_event(
+        "evt_kospi_unverified",
+        index_code="KOSPI",
+        price=2800.0,
+        ts=TS,
+    )
+    unverified_payload = dict(unverified.payload)
+    unverified_payload["metadata"] = {"parser_status": "PILOT_UNVERIFIED"}
+    unverified = GatewayEvent(
+        event_id=unverified.event_id,
+        event_type=unverified.event_type,
+        source=unverified.source,
+        payload=unverified_payload,
+        ts=unverified.ts,
+    )
+    implausible = index_tick_event(
+        "evt_kospi_implausible",
+        index_code="KOSPI",
+        price=800.0,
+        ts=TS + timedelta(seconds=5),
+    )
+
+    append_and_project(connection, unverified, settings)
+    result = append_and_project(connection, implausible, settings)
+    latest = get_latest_market_index_tick(connection, "KOSPI")
+    error = connection.execute(
+        "SELECT reason_code FROM market_index_projection_errors ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    connection.close()
+
+    assert latest is not None
+    assert latest["parser_status"] == "PILOT_UNVERIFIED"
+    assert latest["unverified"] is True
+    assert result.status == "ERROR"
+    assert error["reason_code"] == "INDEX_IMPLAUSIBLE"

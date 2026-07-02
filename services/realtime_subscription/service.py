@@ -565,6 +565,8 @@ def _theme_subscription_items(
             s.calculated_at,
             s.leading_code,
             s.fresh_coverage_ratio,
+            s.scan_coverage_ratio,
+            s.flow_score,
             s.rising_ratio,
             s.total_trade_value,
             m.code,
@@ -588,8 +590,10 @@ def _theme_subscription_items(
                 WHEN 'FADING' THEN 6
                 ELSE 9
             END ASC,
+            s.flow_score DESC,
             s.total_trade_value DESC,
-            s.fresh_coverage_ratio ASC,
+            s.scan_coverage_ratio DESC,
+            s.fresh_coverage_ratio DESC,
             s.theme_name ASC,
             m.code ASC
         """
@@ -630,6 +634,8 @@ def _theme_subscription_items(
             f"THEME_{state}",
             f"THEME_MEMBER_{readiness}",
         ]
+        if _float_or_zero(row["flow_score"]) > 0:
+            reason_codes.append("THEME_FLOW_SCORE")
         if state == "DATA_WAIT":
             reason_codes.append("THEME_DATA_COVERAGE")
         if code == _safe_code(row["leading_code"]):
@@ -651,6 +657,8 @@ def _theme_subscription_items(
                 "member_role": role,
                 "readiness_status": readiness,
                 "fresh_coverage_ratio": row["fresh_coverage_ratio"],
+                "scan_coverage_ratio": row["scan_coverage_ratio"],
+                "flow_score": row["flow_score"],
                 "rising_ratio": row["rising_ratio"],
                 "total_trade_value": row["total_trade_value"],
                 "calculated_at": row["calculated_at"],

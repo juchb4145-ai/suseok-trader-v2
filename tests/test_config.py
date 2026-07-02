@@ -243,6 +243,17 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_order_plan_max_notional == 100_000
     assert settings.live_sim_order_plan_allow_market_order is False
     assert settings.live_sim_order_plan_allowed_side == "BUY"
+    assert settings.market_scan_enabled is False
+    assert settings.market_scan_interval_sec == 120
+    assert settings.market_scan_top_n == 200
+    assert settings.market_scan_tr_codes == {
+        "TRADE_VALUE": "OPT10032",
+        "CHANGE_RATE": "OPT10027",
+    }
+    assert settings.market_scan_markets == ("KOSPI", "KOSDAQ")
+    assert settings.market_scan_market_codes == {"KOSPI": "001", "KOSDAQ": "101"}
+    assert settings.market_scan_parser_status == "PILOT_UNVERIFIED"
+    assert settings.theme_snapshot_stale_sec == 300
     assert settings.dashboard_enabled is True
     assert settings.dashboard_refresh_sec == 5
     assert settings.dashboard_snapshot_default_limit == 50
@@ -368,6 +379,24 @@ def test_theme_ratio_settings_are_validated() -> None:
         assert "ratio between 0 and 1" in str(exc)
     else:
         raise AssertionError("expected invalid theme ratio configuration")
+
+
+def test_market_scan_settings_are_validated() -> None:
+    invalid_cases = {
+        "MARKET_SCAN_INTERVAL_SEC": "0",
+        "MARKET_SCAN_TOP_N": "0",
+        "MARKET_SCAN_TR_CODES": "TRADE_VALUE=OPT10032",
+        "MARKET_SCAN_MARKETS": "KOSPI,NASDAQ",
+        "MARKET_SCAN_MARKET_CODES": "KOSPI=001",
+        "THEME_SNAPSHOT_STALE_SEC": "0",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid market scan setting for {key}")
 
 
 def test_naver_theme_import_settings_are_validated() -> None:

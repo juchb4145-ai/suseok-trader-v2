@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
 from datetime import timedelta, timezone, tzinfo
 from enum import StrEnum
 from functools import lru_cache
@@ -178,6 +178,24 @@ class Settings:
     event_store_retention_interval_sec: int = 86400
     market_regime_enabled: bool = True
     market_index_stale_sec: int = 30
+    market_scan_enabled: bool = False
+    market_scan_interval_sec: int = 120
+    market_scan_top_n: int = 200
+    market_scan_tr_codes: Mapping[str, str] = field(
+        default_factory=lambda: {
+            "TRADE_VALUE": "OPT10032",
+            "CHANGE_RATE": "OPT10027",
+        }
+    )
+    market_scan_markets: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+    market_scan_market_codes: Mapping[str, str] = field(
+        default_factory=lambda: {
+            "KOSPI": "001",
+            "KOSDAQ": "101",
+        }
+    )
+    market_scan_screen_no: str = "8800"
+    market_scan_parser_status: str = "PILOT_UNVERIFIED"
     market_regime_risk_on_return_5m: float = 0.15
     market_regime_weak_drawdown_15m: float = -0.40
     market_regime_risk_off_return_5m: float = -0.35
@@ -202,6 +220,7 @@ class Settings:
     theme_leader_min_trade_value_delta_1m: float = 0.0
     theme_co_leader_score_ratio: float = 0.8
     theme_snapshot_max_members: int = 200
+    theme_snapshot_stale_sec: int = 300
     theme_import_allow_replace: bool = False
     naver_theme_import_enabled: bool = False
     naver_theme_import_base_url: str = "https://finance.naver.com/sise/theme.naver"
@@ -460,6 +479,43 @@ class Settings:
             )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
+        if self.market_scan_interval_sec < 1:
+            raise ValueError("MARKET_SCAN_INTERVAL_SEC must be >= 1")
+        if self.market_scan_top_n < 1:
+            raise ValueError("MARKET_SCAN_TOP_N must be >= 1")
+        object.__setattr__(
+            self,
+            "market_scan_tr_codes",
+            _normalize_required_mapping(
+                self.market_scan_tr_codes,
+                "MARKET_SCAN_TR_CODES",
+                required_keys=("TRADE_VALUE", "CHANGE_RATE"),
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_scan_markets",
+            _normalize_market_scan_markets(self.market_scan_markets),
+        )
+        object.__setattr__(
+            self,
+            "market_scan_market_codes",
+            _normalize_required_mapping(
+                self.market_scan_market_codes,
+                "MARKET_SCAN_MARKET_CODES",
+                required_keys=self.market_scan_markets,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_scan_screen_no",
+            _require_non_empty_config(self.market_scan_screen_no),
+        )
+        object.__setattr__(
+            self,
+            "market_scan_parser_status",
+            _normalize_non_empty(self.market_scan_parser_status),
+        )
         for field_name in (
             "theme_min_fresh_coverage_ratio",
             "theme_leading_rising_ratio",
@@ -471,6 +527,8 @@ class Settings:
             raise ValueError("THEME_MIN_ACTIVE_MEMBERS must be >= 1")
         if self.theme_snapshot_max_members < 1:
             raise ValueError("THEME_SNAPSHOT_MAX_MEMBERS must be >= 1")
+        if self.theme_snapshot_stale_sec < 1:
+            raise ValueError("THEME_SNAPSHOT_STALE_SEC must be >= 1")
         if self.theme_min_total_trade_value < 0:
             raise ValueError("THEME_MIN_TOTAL_TRADE_VALUE must be >= 0")
         if self.theme_leader_min_trade_value_delta_1m < 0:
@@ -1418,6 +1476,37 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "MARKET_INDEX_STALE_SEC",
             min_value=1,
         ),
+        market_scan_enabled=_parse_bool(env.get("MARKET_SCAN_ENABLED", "false")),
+        market_scan_interval_sec=_parse_int(
+            env.get("MARKET_SCAN_INTERVAL_SEC", "120"),
+            "MARKET_SCAN_INTERVAL_SEC",
+            min_value=1,
+        ),
+        market_scan_top_n=_parse_int(
+            env.get("MARKET_SCAN_TOP_N", "200"),
+            "MARKET_SCAN_TOP_N",
+            min_value=1,
+        ),
+        market_scan_tr_codes=_parse_key_value_mapping(
+            env.get(
+                "MARKET_SCAN_TR_CODES",
+                "TRADE_VALUE=OPT10032,CHANGE_RATE=OPT10027",
+            ),
+            "MARKET_SCAN_TR_CODES",
+        ),
+        market_scan_markets=_parse_csv_list(
+            env.get("MARKET_SCAN_MARKETS", "KOSPI,KOSDAQ"),
+            "MARKET_SCAN_MARKETS",
+        ),
+        market_scan_market_codes=_parse_key_value_mapping(
+            env.get("MARKET_SCAN_MARKET_CODES", "KOSPI=001,KOSDAQ=101"),
+            "MARKET_SCAN_MARKET_CODES",
+        ),
+        market_scan_screen_no=env.get("MARKET_SCAN_SCREEN_NO", "8800"),
+        market_scan_parser_status=env.get(
+            "MARKET_SCAN_PARSER_STATUS",
+            "PILOT_UNVERIFIED",
+        ),
         market_regime_risk_on_return_5m=_parse_float(
             env.get("MARKET_REGIME_RISK_ON_RETURN_5M", "0.15"),
             "MARKET_REGIME_RISK_ON_RETURN_5M",
@@ -1514,6 +1603,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         theme_snapshot_max_members=_parse_int(
             env.get("THEME_SNAPSHOT_MAX_MEMBERS", "200"),
             "THEME_SNAPSHOT_MAX_MEMBERS",
+            min_value=1,
+        ),
+        theme_snapshot_stale_sec=_parse_int(
+            env.get("THEME_SNAPSHOT_STALE_SEC", "300"),
+            "THEME_SNAPSHOT_STALE_SEC",
             min_value=1,
         ),
         theme_import_allow_replace=_parse_bool(env.get("THEME_IMPORT_ALLOW_REPLACE", "false")),
@@ -2548,6 +2642,48 @@ def _parse_csv_list(value: str, field_name: str) -> tuple[str, ...]:
     if any(part == "" for part in parts):
         raise ValueError(f"{field_name} must be a comma-separated non-empty list")
     return _normalize_list_values(parts)
+
+
+def _parse_key_value_mapping(value: str, field_name: str) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for part in value.split(","):
+        normalized_part = part.strip()
+        if not normalized_part:
+            raise ValueError(f"{field_name} must be a comma-separated key=value map")
+        if "=" not in normalized_part:
+            raise ValueError(f"{field_name} must be a comma-separated key=value map")
+        key, raw_value = normalized_part.split("=", 1)
+        normalized_key = _normalize_non_empty(key)
+        normalized_value = _require_non_empty_config(raw_value).upper()
+        if normalized_key in result:
+            raise ValueError(f"{field_name} must not contain duplicate keys")
+        result[normalized_key] = normalized_value
+    return result
+
+
+def _normalize_required_mapping(
+    value: Mapping[str, str],
+    field_name: str,
+    *,
+    required_keys: Iterable[str],
+) -> dict[str, str]:
+    normalized = {
+        _normalize_non_empty(key): _require_non_empty_config(raw_value).upper()
+        for key, raw_value in dict(value).items()
+    }
+    missing = [key for key in required_keys if _normalize_non_empty(key) not in normalized]
+    if missing:
+        raise ValueError(f"{field_name} missing required keys: {','.join(missing)}")
+    return normalized
+
+
+def _normalize_market_scan_markets(values: tuple[str, ...]) -> tuple[str, ...]:
+    normalized = _normalize_list_values(values)
+    allowed = {"KOSPI", "KOSDAQ"}
+    unsupported = [value for value in normalized if value not in allowed]
+    if unsupported:
+        raise ValueError("MARKET_SCAN_MARKETS must contain only KOSPI,KOSDAQ")
+    return normalized
 
 
 def _normalize_stock_code_list(values: tuple[str, ...]) -> tuple[str, ...]:

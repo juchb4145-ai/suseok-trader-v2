@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import math
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from math import ceil
@@ -18,6 +20,8 @@ from services.candidate_service import (
 )
 from services.config import Settings, candidate_timezone, load_settings
 from services.theme_leadership.models import (
+    StockRole,
+    ThemeMemberLeadership,
     ThemeLeadershipSnapshot,
     ThemeState,
     WatchsetItem,
@@ -93,9 +97,16 @@ class ThemeLeadershipService:
         if not self.settings.theme_leadership_enabled:
             return ThemeLeadershipRebuildResult(status="DISABLED")
 
-        universe = self.universe_builder.build(connection)
-        stock_snapshots = self.snapshot_builder.build_for_universe(connection, universe)
-        snapshots = self.ranker.rank(universe, stock_snapshots, created_at=utc_now())
+        if self.settings.market_scan_enabled:
+            snapshots = _rank_from_theme_flow_snapshots(connection, created_at=utc_now())
+            if not snapshots:
+                universe = self.universe_builder.build(connection)
+                stock_snapshots = self.snapshot_builder.build_for_universe(connection, universe)
+                snapshots = self.ranker.rank(universe, stock_snapshots, created_at=utc_now())
+        else:
+            universe = self.universe_builder.build(connection)
+            stock_snapshots = self.snapshot_builder.build_for_universe(connection, universe)
+            snapshots = self.ranker.rank(universe, stock_snapshots, created_at=utc_now())
         top_count = self.settings.theme_leadership_top_theme_count
         top_snapshots = snapshots[:top_count]
         (
@@ -214,6 +225,179 @@ def rebuild_theme_leadership(
     )
 
 
+def _rank_from_theme_flow_snapshots(
+    connection: sqlite3.Connection,
+    *,
+    created_at: datetime,
+) -> list[ThemeLeadershipSnapshot]:
+    rows = connection.execute(
+        """
+        SELECT s.*
+        FROM theme_latest_snapshots AS l
+        JOIN theme_snapshots AS s ON s.snapshot_id = l.snapshot_id
+        ORDER BY
+            s.flow_score DESC,
+            s.total_trade_value DESC,
+            s.rising_ratio DESC,
+            s.theme_name ASC,
+            s.theme_id ASC
+        """
+    ).fetchall()
+    snapshots = []
+    for index, row in enumerate(rows, start=1):
+        members = _flow_members(connection, row["snapshot_id"])
+        reasons = _json_array(row["reason_codes_json"])
+        reasons = _dedupe([*reasons, "MARKET_SCAN_FLOW_RANKING"])
+        snapshots.append(
+            ThemeLeadershipSnapshot(
+                theme_id=row["theme_id"],
+                theme_name=row["theme_name"],
+                state=_leadership_state(row["state"]),
+                score=float(row["flow_score"] or 0.0),
+                rank=index,
+                observable_member_count=int(row["observed_member_count"] or 0),
+                valid_member_count=int(row["observed_member_count"] or 0),
+                fresh_member_count=int(row["fresh_member_count"] or 0),
+                fresh_coverage_ratio=float(row["scan_coverage_ratio"] or 0.0),
+                rising_count=int(row["rising_member_count"] or 0),
+                rising_ratio=float(row["rising_ratio"] or 0.0),
+                leader_count=sum(1 for member in members if member.role is StockRole.LEADER),
+                co_leader_count=sum(
+                    1 for member in members if member.role is StockRole.CO_LEADER
+                ),
+                follower_count=sum(1 for member in members if member.role is StockRole.FOLLOWER),
+                total_turnover_krw=float(row["total_trade_value"] or 0.0),
+                turnover_share=0.0,
+                weighted_return_pct=float(row["avg_change_rate"] or 0.0),
+                leader_code=row["leading_code"],
+                leader_name=row["leading_name"],
+                members=members,
+                reason_codes=reasons,
+                created_at=created_at,
+                avg_change_rate_pct=float(row["avg_change_rate"] or 0.0),
+                max_change_rate_pct=float(row["max_change_rate"] or 0.0),
+                leader_concentration=0.0,
+                full_member_count=int(row["active_member_count"] or 0),
+                full_observed_count=int(row["observed_member_count"] or 0),
+                full_fresh_member_count=int(row["fresh_member_count"] or 0),
+                full_fresh_coverage_ratio=float(row["scan_coverage_ratio"] or 0.0),
+                score_components={
+                    "flow_score": float(row["flow_score"] or 0.0),
+                    "flow_trade_value_delta": float(row["flow_trade_value_delta"] or 0.0),
+                    "flow_rank_inflow_count": float(row["flow_rank_inflow_count"] or 0),
+                    "scan_coverage_ratio": float(row["scan_coverage_ratio"] or 0.0),
+                    "realtime_coverage_ratio": float(row["realtime_coverage_ratio"] or 0.0),
+                },
+            )
+        )
+    return snapshots
+
+
+def _flow_members(
+    connection: sqlite3.Connection,
+    snapshot_id: str,
+) -> list[ThemeMemberLeadership]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM theme_snapshot_members
+        WHERE snapshot_id = ?
+        ORDER BY
+            CASE member_role
+                WHEN 'LEADER_CANDIDATE' THEN 0
+                WHEN 'CO_LEADER_CANDIDATE' THEN 1
+                WHEN 'FOLLOWER_CANDIDATE' THEN 2
+                ELSE 9
+            END,
+            trade_value_delta_1m DESC,
+            code ASC
+        """,
+        (snapshot_id,),
+    ).fetchall()
+    members = []
+    for row in rows:
+        metadata = _json_object(row["metadata_json"])
+        members.append(
+            ThemeMemberLeadership(
+                code=row["code"],
+                name=row["name"],
+                role=_stock_role(row["member_role"], row["readiness_status"]),
+                member_score=_member_flow_score(row, metadata),
+                change_rate_pct=row["change_rate"],
+                turnover_krw=row["cumulative_trade_value"],
+                execution_strength=row["execution_strength"],
+                momentum_1m=None,
+                momentum_3m=None,
+                momentum_5m=None,
+                vwap=row["vwap"],
+                pullback_from_high_pct=None,
+                stale=str(row["readiness_status"]).upper() != "FRESH",
+                reason_codes=_member_flow_reasons(row, metadata),
+                source_flags={
+                    "observation_source": row["observation_source"],
+                    "market_scan": metadata.get("market_scan"),
+                    "condition_latest": metadata.get("condition_latest", []),
+                },
+            )
+        )
+    members.sort(key=lambda member: (-member.member_score, member.code))
+    return members
+
+
+def _leadership_state(value: object) -> ThemeState:
+    text = str(value or "DATA_WAIT").upper()
+    return ThemeState(text) if text in {item.value for item in ThemeState} else ThemeState.WATCH
+
+
+def _stock_role(role: object, readiness_status: object) -> StockRole:
+    if str(readiness_status or "").upper() != "FRESH":
+        return StockRole.STALE
+    normalized = str(role or "").upper()
+    if normalized == "LEADER_CANDIDATE":
+        return StockRole.LEADER
+    if normalized == "CO_LEADER_CANDIDATE":
+        return StockRole.CO_LEADER
+    if normalized == "FOLLOWER_CANDIDATE":
+        return StockRole.FOLLOWER
+    if normalized == "STALE":
+        return StockRole.STALE
+    return StockRole.UNKNOWN
+
+
+def _member_flow_score(row: sqlite3.Row, metadata: Mapping[str, Any]) -> float:
+    delta = float(row["trade_value_delta_1m"] or 0.0)
+    change = float(row["change_rate"] or 0.0)
+    source_bonus = 3.0 if row["observation_source"] == "MARKET_SCAN" else 0.0
+    rank = _market_scan_rank(metadata)
+    rank_score = 0.0 if rank is None else max(200 - rank, 0) / 20.0
+    return round(math.log1p(delta) / math.log1p(100_000_000) * 30.0 + change * 4.0 + source_bonus + rank_score, 6)
+
+
+def _member_flow_reasons(row: sqlite3.Row, metadata: Mapping[str, Any]) -> list[str]:
+    reasons = [f"OBSERVATION_SOURCE_{row['observation_source']}"]
+    if float(row["change_rate"] or 0.0) > 0:
+        reasons.append("MEMBER_RISING")
+    if float(row["trade_value_delta_1m"] or 0.0) > 0:
+        reasons.append("FLOW_DELTA_OBSERVED")
+    if _market_scan_rank(metadata) is not None:
+        reasons.append("MARKET_SCAN_RANKED")
+    return _dedupe(reasons)
+
+
+def _market_scan_rank(metadata: Mapping[str, Any]) -> int | None:
+    market_scan = metadata.get("market_scan")
+    if not isinstance(market_scan, Mapping):
+        return None
+    current = market_scan.get("current")
+    if not isinstance(current, Mapping):
+        return None
+    try:
+        rank = int(current.get("rank"))
+    except (TypeError, ValueError):
+        return None
+    return rank if rank > 0 else None
+
+
 def build_candidate_source_events(
     watchset_items: Sequence[WatchsetItem],
     *,
@@ -319,6 +503,28 @@ def _dedupe(values: Sequence[str]) -> list[str]:
             seen.add(normalized)
             result.append(normalized)
     return result
+
+
+def _json_array(value: object) -> list[str]:
+    if not value:
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(loaded, list):
+        return []
+    return [str(item).upper() for item in loaded if str(item).strip()]
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 @dataclass

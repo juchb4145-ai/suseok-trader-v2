@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -501,6 +502,12 @@ def calculate_theme_snapshot(
         for member in member_snapshots
         if member.price is not None and member.readiness_status == "FRESH"
     ]
+    scan_observed_members = [
+        member for member in member_snapshots if member.observation_source == "MARKET_SCAN"
+    ]
+    realtime_observed_members = [
+        member for member in member_snapshots if member.observation_source == "REALTIME_TICK"
+    ]
     rising_members = [
         member
         for member in observed_members
@@ -508,6 +515,8 @@ def calculate_theme_snapshot(
     ]
     active_member_count = len(members)
     fresh_coverage_ratio = _ratio(len(fresh_members), active_member_count)
+    scan_coverage_ratio = _ratio(len(scan_observed_members), active_member_count)
+    realtime_coverage_ratio = _ratio(len(realtime_observed_members), active_member_count)
     rising_ratio = _ratio(len(rising_members), max(len(observed_members), 1))
     observed_change_rates = [
         member.change_rate for member in observed_members if member.change_rate is not None
@@ -522,6 +531,12 @@ def calculate_theme_snapshot(
     trade_value_delta_1m = sum(member.trade_value_delta_1m for member in member_snapshots)
     trade_value_delta_3m = sum(member.trade_value_delta_3m for member in member_snapshots)
     trade_value_delta_5m = sum(member.trade_value_delta_5m for member in member_snapshots)
+    flow_metrics = _theme_flow_metrics(
+        member_snapshots,
+        active_member_count=active_member_count,
+        rising_ratio=rising_ratio,
+        top_n=resolved_settings.market_scan_top_n,
+    )
 
     leader = _select_leader(fresh_members, member_scores)
     co_leader_codes = _select_co_leaders(
@@ -545,6 +560,7 @@ def calculate_theme_snapshot(
         active_member_count=active_member_count,
         observed_member_count=len(observed_members),
         fresh_coverage_ratio=fresh_coverage_ratio,
+        scan_coverage_ratio=scan_coverage_ratio,
         rising_ratio=rising_ratio,
         leading_member=leader,
         total_trade_value=total_trade_value,
@@ -563,6 +579,8 @@ def calculate_theme_snapshot(
         observed_member_count=len(observed_members),
         fresh_member_count=len(fresh_members),
         fresh_coverage_ratio=fresh_coverage_ratio,
+        scan_coverage_ratio=scan_coverage_ratio,
+        realtime_coverage_ratio=realtime_coverage_ratio,
         rising_member_count=len(rising_members),
         rising_ratio=rising_ratio,
         avg_change_rate=avg_change_rate,
@@ -571,6 +589,9 @@ def calculate_theme_snapshot(
         trade_value_delta_1m=trade_value_delta_1m,
         trade_value_delta_3m=trade_value_delta_3m,
         trade_value_delta_5m=trade_value_delta_5m,
+        flow_trade_value_delta=flow_metrics["flow_trade_value_delta"],
+        flow_rank_inflow_count=int(flow_metrics["flow_rank_inflow_count"]),
+        flow_score=flow_metrics["flow_score"],
         leading_code=leader.code if leader else None,
         leading_name=leader.name if leader else None,
         co_leader_codes=co_leader_codes,
@@ -581,9 +602,12 @@ def calculate_theme_snapshot(
         members=member_snapshots,
         metadata={
             "observation_only": True,
+            "observe_only": True,
+            "no_order_side_effects": True,
             "member_error_count": member_error_count,
             "score_formula": "change_rate*100 + delta1m/1e6 + delta3m/3e6 "
             "+ cumulative_trade_value/1e9 + execution_strength/100, stale members half score",
+            "flow_score_formula": flow_metrics["flow_score_formula"],
         },
     )
     _save_theme_snapshot(connection, snapshot)
@@ -706,6 +730,7 @@ def list_top_theme_snapshots_for_dashboard(
                 WHEN 'SPREADING' THEN 1
                 ELSE 9
             END,
+            l.flow_score DESC,
             l.total_trade_value DESC,
             l.trade_value_delta_3m DESC,
             l.trade_value_delta_1m DESC,
@@ -835,6 +860,7 @@ def _calculate_member_snapshot(
 ) -> tuple[ThemeMemberSnapshot, float]:
     latest_tick = get_latest_tick(connection, member["code"])
     readiness = get_market_data_readiness(connection, member["code"], settings=settings)
+    latest_scan = _latest_market_scan(connection, member["code"])
     bar_1m = _latest_bar(connection, member["code"], 60)
     bar_3m = _latest_bar(connection, member["code"], 180)
     bar_5m = _latest_bar(connection, member["code"], 300)
@@ -843,7 +869,27 @@ def _calculate_member_snapshot(
         bar_3m["vwap"] if bar_3m is not None else None,
         bar_5m["vwap"] if bar_5m is not None else None,
     )
-    price = latest_tick["price"] if latest_tick is not None else None
+    observation_source = "UNKNOWN"
+    if latest_tick is not None:
+        observation_source = "REALTIME_TICK"
+    elif latest_scan is not None:
+        observation_source = "MARKET_SCAN"
+    price = _first_not_none(
+        latest_tick["price"] if latest_tick is not None else None,
+        latest_scan["price"] if latest_scan is not None else None,
+    )
+    change_rate = _first_not_none(
+        latest_tick["change_rate"] if latest_tick is not None else None,
+        latest_scan["change_rate"] if latest_scan is not None else None,
+    )
+    cumulative_trade_value = _first_not_none(
+        latest_tick["cumulative_trade_value"] if latest_tick is not None else None,
+        latest_scan["trade_value"] if latest_scan is not None else None,
+    )
+    scan_trade_value_delta, scan_previous = _scan_trade_value_delta(
+        connection,
+        latest_scan,
+    )
     above_vwap = bool(price is not None and vwap is not None and float(price) >= float(vwap))
     snapshot = ThemeMemberSnapshot(
         theme_id=theme["theme_id"],
@@ -851,13 +897,13 @@ def _calculate_member_snapshot(
         code=member["code"],
         name=member["name"],
         price=price,
-        change_rate=latest_tick["change_rate"] if latest_tick is not None else None,
-        cumulative_trade_value=(
-            latest_tick["cumulative_trade_value"] if latest_tick is not None else None
-        ),
+        change_rate=change_rate,
+        cumulative_trade_value=cumulative_trade_value,
         volume_delta_1m=int(bar_1m["volume_delta"]) if bar_1m is not None else 0,
         trade_value_delta_1m=(
-            float(bar_1m["trade_value_delta"]) if bar_1m is not None else 0.0
+            float(bar_1m["trade_value_delta"])
+            if bar_1m is not None
+            else scan_trade_value_delta
         ),
         trade_value_delta_3m=(
             float(bar_3m["trade_value_delta"]) if bar_3m is not None else 0.0
@@ -868,12 +914,35 @@ def _calculate_member_snapshot(
         execution_strength=latest_tick["execution_strength"] if latest_tick is not None else None,
         vwap=vwap,
         above_vwap=above_vwap,
-        readiness_status=readiness["quality_status"],
-        member_role=_base_member_role(latest_tick, readiness),
-        tick_age_sec=readiness["tick_age_sec"],
-        event_ts=latest_tick["event_ts"] if latest_tick is not None else None,
+        readiness_status=(
+            readiness["quality_status"]
+            if latest_tick is not None
+            else "FRESH"
+            if latest_scan is not None
+            else readiness["quality_status"]
+        ),
+        member_role=_base_member_role(latest_tick, readiness, latest_scan=latest_scan),
+        observation_source=observation_source,
+        tick_age_sec=(
+            readiness["tick_age_sec"]
+            if latest_tick is not None
+            else _age_seconds(latest_scan["scanned_at"])
+            if latest_scan is not None
+            else readiness["tick_age_sec"]
+        ),
+        event_ts=(
+            latest_tick["event_ts"]
+            if latest_tick is not None
+            else latest_scan["scanned_at"]
+            if latest_scan is not None
+            else None
+        ),
         calculated_at=calculated_at,
-        metadata={"condition_latest": _condition_observations(connection, member["code"])},
+        metadata={
+            "condition_latest": _condition_observations(connection, member["code"]),
+            "observation_source": observation_source,
+            "market_scan": _market_scan_metadata(latest_scan, scan_previous),
+        },
     )
     return snapshot, _member_score(snapshot)
 
@@ -896,6 +965,8 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             observed_member_count,
             fresh_member_count,
             fresh_coverage_ratio,
+            scan_coverage_ratio,
+            realtime_coverage_ratio,
             rising_member_count,
             rising_ratio,
             avg_change_rate,
@@ -904,6 +975,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             trade_value_delta_1m,
             trade_value_delta_3m,
             trade_value_delta_5m,
+            flow_trade_value_delta,
+            flow_rank_inflow_count,
+            flow_score,
             leading_code,
             leading_name,
             co_leader_codes_json,
@@ -913,7 +987,7 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             reason_codes_json,
             metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(snapshot_id) DO UPDATE SET
             theme_name = excluded.theme_name,
             calculated_at = excluded.calculated_at,
@@ -922,6 +996,8 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             observed_member_count = excluded.observed_member_count,
             fresh_member_count = excluded.fresh_member_count,
             fresh_coverage_ratio = excluded.fresh_coverage_ratio,
+            scan_coverage_ratio = excluded.scan_coverage_ratio,
+            realtime_coverage_ratio = excluded.realtime_coverage_ratio,
             rising_member_count = excluded.rising_member_count,
             rising_ratio = excluded.rising_ratio,
             avg_change_rate = excluded.avg_change_rate,
@@ -930,6 +1006,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             trade_value_delta_1m = excluded.trade_value_delta_1m,
             trade_value_delta_3m = excluded.trade_value_delta_3m,
             trade_value_delta_5m = excluded.trade_value_delta_5m,
+            flow_trade_value_delta = excluded.flow_trade_value_delta,
+            flow_rank_inflow_count = excluded.flow_rank_inflow_count,
+            flow_score = excluded.flow_score,
             leading_code = excluded.leading_code,
             leading_name = excluded.leading_name,
             co_leader_codes_json = excluded.co_leader_codes_json,
@@ -949,6 +1028,8 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             data["observed_member_count"],
             data["fresh_member_count"],
             data["fresh_coverage_ratio"],
+            data["scan_coverage_ratio"],
+            data["realtime_coverage_ratio"],
             data["rising_member_count"],
             data["rising_ratio"],
             data["avg_change_rate"],
@@ -957,6 +1038,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             data["trade_value_delta_1m"],
             data["trade_value_delta_3m"],
             data["trade_value_delta_5m"],
+            data["flow_trade_value_delta"],
+            data["flow_rank_inflow_count"],
+            data["flow_score"],
             data["leading_code"],
             data["leading_name"],
             _json_dumps(data["co_leader_codes"]),
@@ -981,13 +1065,18 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             leading_code,
             leading_name,
             fresh_coverage_ratio,
+            scan_coverage_ratio,
+            realtime_coverage_ratio,
             rising_ratio,
             total_trade_value,
             trade_value_delta_1m,
             trade_value_delta_3m,
-            trade_value_delta_5m
+            trade_value_delta_5m,
+            flow_trade_value_delta,
+            flow_rank_inflow_count,
+            flow_score
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(theme_id) DO UPDATE SET
             snapshot_id = excluded.snapshot_id,
             theme_name = excluded.theme_name,
@@ -997,11 +1086,16 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             leading_code = excluded.leading_code,
             leading_name = excluded.leading_name,
             fresh_coverage_ratio = excluded.fresh_coverage_ratio,
+            scan_coverage_ratio = excluded.scan_coverage_ratio,
+            realtime_coverage_ratio = excluded.realtime_coverage_ratio,
             rising_ratio = excluded.rising_ratio,
             total_trade_value = excluded.total_trade_value,
             trade_value_delta_1m = excluded.trade_value_delta_1m,
             trade_value_delta_3m = excluded.trade_value_delta_3m,
-            trade_value_delta_5m = excluded.trade_value_delta_5m
+            trade_value_delta_5m = excluded.trade_value_delta_5m,
+            flow_trade_value_delta = excluded.flow_trade_value_delta,
+            flow_rank_inflow_count = excluded.flow_rank_inflow_count,
+            flow_score = excluded.flow_score
         """,
         (
             data["theme_id"],
@@ -1013,11 +1107,16 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             data["leading_code"],
             data["leading_name"],
             data["fresh_coverage_ratio"],
+            data["scan_coverage_ratio"],
+            data["realtime_coverage_ratio"],
             data["rising_ratio"],
             data["total_trade_value"],
             data["trade_value_delta_1m"],
             data["trade_value_delta_3m"],
             data["trade_value_delta_5m"],
+            data["flow_trade_value_delta"],
+            data["flow_rank_inflow_count"],
+            data["flow_score"],
         ),
     )
 
@@ -1047,12 +1146,13 @@ def _insert_snapshot_member(
             above_vwap,
             readiness_status,
             member_role,
+            observation_source,
             tick_age_sec,
             event_ts,
             calculated_at,
             metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot_id,
@@ -1071,6 +1171,7 @@ def _insert_snapshot_member(
             1 if data["above_vwap"] else 0,
             data["readiness_status"],
             data["member_role"],
+            data["observation_source"],
             data["tick_age_sec"],
             data["event_ts"],
             data["calculated_at"],
@@ -1084,6 +1185,7 @@ def _classify_theme_snapshot(
     active_member_count: int,
     observed_member_count: int,
     fresh_coverage_ratio: float,
+    scan_coverage_ratio: float,
     rising_ratio: float,
     leading_member: ThemeMemberSnapshot | None,
     total_trade_value: float,
@@ -1097,7 +1199,10 @@ def _classify_theme_snapshot(
         )
     if observed_member_count == 0:
         return ThemeState.DATA_WAIT, ThemeSnapshotQuality.DATA_WAIT, ["NO_OBSERVED_MEMBERS"]
-    if fresh_coverage_ratio < settings.theme_min_fresh_coverage_ratio:
+    coverage_for_state = (
+        scan_coverage_ratio if settings.market_scan_enabled else fresh_coverage_ratio
+    )
+    if coverage_for_state < settings.theme_min_fresh_coverage_ratio:
         return ThemeState.DATA_WAIT, ThemeSnapshotQuality.PARTIAL, ["LOW_FRESH_COVERAGE"]
 
     reasons: list[str] = []
@@ -1158,6 +1263,7 @@ def _with_member_roles(
                 above_vwap=member.above_vwap,
                 readiness_status=member.readiness_status,
                 member_role=role,
+                observation_source=member.observation_source,
                 tick_age_sec=member.tick_age_sec,
                 event_ts=member.event_ts,
                 calculated_at=member.calculated_at,
@@ -1170,9 +1276,11 @@ def _with_member_roles(
 def _base_member_role(
     latest_tick: Mapping[str, Any] | None,
     readiness: Mapping[str, Any],
+    *,
+    latest_scan: Mapping[str, Any] | None = None,
 ) -> ThemeMemberRole:
     if latest_tick is None:
-        return ThemeMemberRole.UNKNOWN
+        return ThemeMemberRole.LAGGARD if latest_scan is not None else ThemeMemberRole.UNKNOWN
     if readiness["quality_status"] != "FRESH":
         return ThemeMemberRole.STALE
     return ThemeMemberRole.LAGGARD
@@ -1288,6 +1396,152 @@ def _latest_bar(
         """,
         (code, interval_sec),
     ).fetchone()
+
+
+def _latest_market_scan(connection: sqlite3.Connection, code: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM market_scan_latest
+        WHERE code = ?
+        """,
+        (validate_stock_code(code),),
+    ).fetchone()
+    if row is None:
+        return None
+    data = row_to_dict(row)
+    data["metadata"] = json.loads(data.pop("metadata_json"))
+    return data
+
+
+def _previous_market_scan(
+    connection: sqlite3.Connection,
+    latest_scan: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM market_scan_snapshots
+        WHERE code = ? AND scanned_at < ?
+        ORDER BY scanned_at DESC, rank ASC
+        LIMIT 1
+        """,
+        (latest_scan["code"], latest_scan["scanned_at"]),
+    ).fetchone()
+    if row is None:
+        return None
+    data = row_to_dict(row)
+    data["metadata"] = json.loads(data.pop("metadata_json"))
+    return data
+
+
+def _scan_trade_value_delta(
+    connection: sqlite3.Connection,
+    latest_scan: Mapping[str, Any] | None,
+) -> tuple[float, Mapping[str, Any] | None]:
+    if latest_scan is None or latest_scan.get("trade_value") is None:
+        return 0.0, None
+    previous = _previous_market_scan(connection, latest_scan)
+    if previous is None or previous.get("trade_value") is None:
+        return 0.0, previous
+    return max(float(latest_scan["trade_value"]) - float(previous["trade_value"]), 0.0), previous
+
+
+def _market_scan_metadata(
+    latest_scan: Mapping[str, Any] | None,
+    previous_scan: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if latest_scan is None:
+        return None
+    current = {
+        "scan_id": latest_scan.get("scan_id"),
+        "scan_type": latest_scan.get("scan_type"),
+        "market": latest_scan.get("market"),
+        "rank": latest_scan.get("rank"),
+        "scanned_at": latest_scan.get("scanned_at"),
+        "parser_status": _nested_metadata_value(latest_scan, "parser_status"),
+    }
+    previous = None
+    if previous_scan is not None:
+        previous = {
+            "scan_id": previous_scan.get("scan_id"),
+            "rank": previous_scan.get("rank"),
+            "trade_value": previous_scan.get("trade_value"),
+            "scanned_at": previous_scan.get("scanned_at"),
+        }
+    return {
+        "current": current,
+        "previous": previous,
+    }
+
+
+def _theme_flow_metrics(
+    members: Sequence[ThemeMemberSnapshot],
+    *,
+    active_member_count: int,
+    rising_ratio: float,
+    top_n: int,
+) -> dict[str, Any]:
+    deltas: list[float] = []
+    inflow_count = 0
+    for member in members:
+        metadata = member.metadata.get("market_scan") if isinstance(member.metadata, Mapping) else None
+        if not isinstance(metadata, Mapping):
+            deltas.append(0.0)
+            continue
+        current = metadata.get("current")
+        previous = metadata.get("previous")
+        current_rank = _metadata_rank(current)
+        previous_rank = _metadata_rank(previous)
+        trade_delta = max(float(member.trade_value_delta_1m or 0.0), 0.0)
+        deltas.append(trade_delta)
+        if current_rank is not None and current_rank <= top_n and (
+            previous_rank is None or previous_rank > top_n
+        ):
+            inflow_count += 1
+
+    flow_delta = sum(deltas)
+    denominator = max(active_member_count, 1)
+    mean_log_delta = sum(math.log1p(delta) for delta in deltas) / denominator
+    normalized_delta_score = min(mean_log_delta / math.log1p(1_000_000_000), 1.0) * 45.0
+    inflow_score = _ratio(inflow_count, denominator) * 35.0
+    breadth_score = max(min(rising_ratio, 1.0), 0.0) * 20.0
+    concentration = _ratio(max(deltas) if deltas else 0.0, flow_delta)
+    concentration_penalty = max(concentration - 0.7, 0.0) * 40.0
+    flow_score = max(
+        normalized_delta_score + inflow_score + breadth_score - concentration_penalty,
+        0.0,
+    )
+    return {
+        "flow_trade_value_delta": flow_delta,
+        "flow_rank_inflow_count": inflow_count,
+        "flow_score": round(flow_score, 6),
+        "flow_score_formula": (
+            "min(mean(log1p(member_delta))/log1p(1e9),1)*45 + "
+            "rank_inflow_ratio*35 + rising_ratio*20 - concentration_penalty"
+        ),
+        "flow_score_components": {
+            "normalized_delta_score": round(normalized_delta_score, 6),
+            "inflow_score": round(inflow_score, 6),
+            "breadth_score": round(breadth_score, 6),
+            "concentration_penalty": round(concentration_penalty, 6),
+        },
+    }
+
+
+def _metadata_rank(value: object) -> int | None:
+    if not isinstance(value, Mapping):
+        return None
+    try:
+        rank = int(value.get("rank"))
+    except (TypeError, ValueError):
+        return None
+    return rank if rank > 0 else None
+
+
+def _nested_metadata_value(item: Mapping[str, Any], key: str) -> Any:
+    metadata = item.get("metadata")
+    return metadata.get(key) if isinstance(metadata, Mapping) else None
 
 
 def _condition_observations(connection: sqlite3.Connection, code: str) -> list[dict[str, Any]]:
@@ -1454,6 +1708,15 @@ def _ratio(numerator: int, denominator: int) -> float:
     if denominator <= 0:
         return 0.0
     return numerator / denominator
+
+
+def _age_seconds(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max((utc_now() - parse_timestamp(value, "timestamp")).total_seconds(), 0.0)
+    except Exception:
+        return None
 
 
 def _first_not_none(*values: Any) -> Any:

@@ -199,6 +199,99 @@ def build_theme_data_wait_diagnostics(
     }
 
 
+def build_naver_leading_theme_overlap_report(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 50,
+) -> dict[str, Any]:
+    leading_rows = connection.execute(
+        """
+        SELECT theme_id, theme_name, leading_code, state, calculated_at
+        FROM theme_latest_snapshots
+        WHERE state = 'LEADING'
+        ORDER BY flow_score DESC, total_trade_value DESC, theme_name ASC
+        LIMIT ?
+        """,
+        (_bounded_limit(limit),),
+    ).fetchall()
+    reports = []
+    overlap_ratios = []
+    for row in leading_rows:
+        system_codes = _active_theme_codes(connection, row["theme_id"], source_type=None)
+        naver_codes = _active_theme_codes(
+            connection,
+            row["theme_id"],
+            source_type="NAVER_REFERENCE",
+        )
+        if not naver_codes:
+            naver_codes = _naver_codes_by_theme_name(connection, row["theme_name"])
+        overlap = sorted(system_codes & naver_codes)
+        denominator = len(system_codes | naver_codes)
+        overlap_ratio = _ratio(len(overlap), denominator)
+        overlap_ratios.append(overlap_ratio)
+        reports.append(
+            {
+                "theme_id": row["theme_id"],
+                "theme_name": row["theme_name"],
+                "state": row["state"],
+                "calculated_at": row["calculated_at"],
+                "system_member_count": len(system_codes),
+                "naver_reference_member_count": len(naver_codes),
+                "overlap_count": len(overlap),
+                "overlap_ratio": overlap_ratio,
+                "overlap_codes": overlap[:20],
+                "reason_codes": [] if naver_codes else ["NAVER_REFERENCE_THEME_MISSING"],
+            }
+        )
+    return {
+        "read_only": True,
+        "observe_only": True,
+        "no_order_side_effects": True,
+        "leading_theme_count": len(leading_rows),
+        "avg_overlap_ratio": (
+            sum(overlap_ratios) / len(overlap_ratios) if overlap_ratios else 0.0
+        ),
+        "themes": reports,
+    }
+
+
+def _active_theme_codes(
+    connection: sqlite3.Connection,
+    theme_id: str,
+    *,
+    source_type: str | None,
+) -> set[str]:
+    clauses = ["theme_id = ?", "active = 1"]
+    params: list[Any] = [theme_id]
+    if source_type is not None:
+        clauses.append("source_type = ?")
+        params.append(source_type)
+    rows = connection.execute(
+        f"""
+        SELECT code
+        FROM theme_members
+        WHERE {" AND ".join(clauses)}
+        """,
+        tuple(params),
+    ).fetchall()
+    return {str(row["code"]) for row in rows}
+
+
+def _naver_codes_by_theme_name(connection: sqlite3.Connection, theme_name: str) -> set[str]:
+    rows = connection.execute(
+        """
+        SELECT m.code
+        FROM theme_members AS m
+        JOIN themes AS t ON t.theme_id = m.theme_id
+        WHERE t.theme_name = ?
+            AND m.source_type = 'NAVER_REFERENCE'
+            AND m.active = 1
+        """,
+        (theme_name,),
+    ).fetchall()
+    return {str(row["code"]) for row in rows}
+
+
 def _latest_snapshot_rows(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     return connection.execute(
         """

@@ -250,6 +250,32 @@ def test_dashboard_top_leading_and_spreading_use_state_filtered_queries(tmp_path
     }
 
 
+def test_dashboard_theme_snapshot_exposes_age_and_stale_flag(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-theme-stale.sqlite3")
+    calculated_at = datetime_to_wire(utc_now() - timedelta(seconds=600))
+    _insert_theme_snapshot(
+        connection,
+        theme_id="stale-leading",
+        theme_name="오래된 주도",
+        state="LEADING",
+        calculated_at=calculated_at,
+        total_trade_value=100_000_000,
+    )
+
+    snapshot = build_dashboard_snapshot(
+        connection,
+        Settings(theme_snapshot_stale_sec=300),
+        limit=10,
+    )
+    connection.close()
+
+    row = snapshot["themes"]["top_tradable_themes"][0]
+    assert row["theme_id"] == "stale-leading"
+    assert row["stale"] is True
+    assert row["age_sec"] >= 300
+    assert snapshot["themes"]["status"]["snapshot_stale_sec"] == 300
+
+
 def test_dashboard_market_index_core_status_requires_fresh_kospi_and_kosdaq(tmp_path) -> None:
     connection = initialize_database(tmp_path / "dashboard-index-readiness.sqlite3")
     old_ts = datetime_to_wire(utc_now() - timedelta(seconds=120))

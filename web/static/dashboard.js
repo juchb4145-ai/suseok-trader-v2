@@ -262,6 +262,7 @@ const renderMarketTheme = (snapshot) => {
   document.getElementById("market-theme-badges").innerHTML = [
     badge(dbTradableCount ? "OBSERVE" : "DATA_WAIT", `DB tradable ${dbTradableCount}`),
     badge("OBSERVE", `watchset ${leadershipWatchsetCount}`),
+    badge(rows.some((row) => row.stale) ? "STALE" : "FRESH", `theme stale ${rows.filter((row) => row.stale).length}`),
     badge(coreStatus.badgeStatus, coreStatus.label),
     badge(indexAdapter.enabled ? "ENABLED" : "OBSERVE", `index adapter ${text(indexAdapter.enabled)}`),
   ].join("");
@@ -281,12 +282,13 @@ const renderMarketTheme = (snapshot) => {
   ].join("");
   document.getElementById("market-theme-table").innerHTML = rows.length
     ? table(
-        ["테마", "상태", "리더", "fresh/rising"],
+        ["테마", "상태", "리더", "fresh/rising", "age"],
         rows.map((row) => [
           row.theme_name,
-          badge(row.state),
+          `${badge(row.state)}${row.stale ? badge("STALE") : ""}`,
           `${text(row.leading_name)} ${text(row.leading_code)}`,
           `${pct(row.fresh_coverage_ratio)} / ${pct(row.rising_ratio)}`,
+          row.age_sec == null ? "-" : `${Math.round(Number(row.age_sec))}s`,
         ]),
       )
     : emptyState(

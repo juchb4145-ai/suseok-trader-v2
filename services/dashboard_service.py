@@ -258,7 +258,10 @@ def build_dashboard_snapshot(
         connection,
         limit=bounded_limit,
     )
-    latest_theme_snapshots = list_latest_theme_snapshots(connection, limit=bounded_limit)
+    latest_theme_snapshots = _with_theme_snapshot_freshness(
+        list_latest_theme_snapshots(connection, limit=bounded_limit),
+        settings=settings,
+    )
     candidates = list_candidates(connection, active_only=True, limit=bounded_limit)
     strategy_observations = list_latest_strategy_observations(connection, limit=bounded_limit)
     risk_observations = list_latest_risk_observations(connection, limit=bounded_limit)
@@ -350,16 +353,25 @@ def build_dashboard_snapshot(
         ThemeState,
     )
     latest_sample_state_counts = _state_counts_from_theme_rows(latest_theme_snapshots)
-    top_tradable_themes = list_top_theme_snapshots_for_dashboard(connection, limit=10)
-    top_leading_themes = list_top_theme_snapshots_for_dashboard(
-        connection,
-        states=(ThemeState.LEADING,),
-        limit=10,
+    top_tradable_themes = _with_theme_snapshot_freshness(
+        list_top_theme_snapshots_for_dashboard(connection, limit=10),
+        settings=settings,
     )
-    top_spreading_themes = list_top_theme_snapshots_for_dashboard(
-        connection,
-        states=(ThemeState.SPREADING,),
-        limit=10,
+    top_leading_themes = _with_theme_snapshot_freshness(
+        list_top_theme_snapshots_for_dashboard(
+            connection,
+            states=(ThemeState.LEADING,),
+            limit=10,
+        ),
+        settings=settings,
+    )
+    top_spreading_themes = _with_theme_snapshot_freshness(
+        list_top_theme_snapshots_for_dashboard(
+            connection,
+            states=(ThemeState.SPREADING,),
+            limit=10,
+        ),
+        settings=settings,
     )
     theme_dashboard_warnings = _theme_dashboard_warnings(
         full_state_counts=theme_state_counts,
@@ -417,7 +429,10 @@ def build_dashboard_snapshot(
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "themes": {
-            "status": theme_status,
+            "status": {
+                **theme_status,
+                "snapshot_stale_sec": settings.theme_snapshot_stale_sec,
+            },
             "latest_snapshots": latest_theme_snapshots,
             "state_counts": theme_state_counts,
             "top_tradable_themes": top_tradable_themes,
@@ -1763,6 +1778,22 @@ def _theme_dashboard_warnings(
     if full_tradable_count > 0 and sample_nonzero_states == {"DATA_WAIT"}:
         warnings.append("DASHBOARD_SAMPLE_LIMIT_HIDES_TRADABLE_THEME")
     return warnings
+
+
+def _with_theme_snapshot_freshness(
+    rows: list[dict[str, Any]],
+    *,
+    settings: Settings,
+) -> list[dict[str, Any]]:
+    resolved = []
+    for row in rows:
+        item = dict(row)
+        age_sec = _age_seconds(item.get("calculated_at"))
+        item["age_sec"] = age_sec
+        item["stale"] = age_sec is None or age_sec > settings.theme_snapshot_stale_sec
+        item["stale_sec"] = settings.theme_snapshot_stale_sec
+        resolved.append(item)
+    return resolved
 
 
 def _filter_status(rows: list[dict[str, Any]], status: str) -> list[dict[str, Any]]:

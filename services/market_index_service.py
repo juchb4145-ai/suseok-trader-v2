@@ -70,6 +70,22 @@ def process_market_index_event(
 
     try:
         tick = BrokerMarketIndexTick.from_dict(event.payload)
+        implausible_reason = _index_implausible_reason(tick)
+        if implausible_reason is not None:
+            _record_projection_error(
+                connection,
+                event,
+                error_message=implausible_reason,
+                reason_code="INDEX_IMPLAUSIBLE",
+            )
+            connection.commit()
+            return MarketIndexProcessResult(
+                event_id=event.event_id,
+                event_type=event_type,
+                status="ERROR",
+                error_count=1,
+                error_message=implausible_reason,
+            )
         event_ts, received_at = _event_store_times(connection, event)
         connection.execute("BEGIN IMMEDIATE")
         _upsert_latest_tick(connection, tick, event, event_ts=event_ts, received_at=received_at)
@@ -231,6 +247,7 @@ def get_market_index_status(
         "readiness": readiness,
         "core_status": _market_index_core_status(readiness),
         "sanity_warnings": _market_index_sanity_warnings(connection),
+        "unverified": _has_unverified_index_parser(connection),
         "stale_sec": resolved_settings.market_index_stale_sec,
         "bar_intervals_sec": list(resolved_settings.market_data_bar_intervals_sec),
     }
@@ -478,6 +495,7 @@ def _record_projection_error(
     event: GatewayEvent,
     *,
     error_message: str,
+    reason_code: str = "INDEX_PROJECTION_ERROR",
 ) -> None:
     connection.execute(
         """
@@ -485,15 +503,17 @@ def _record_projection_error(
             event_id,
             event_type,
             index_code,
+            reason_code,
             error_message,
             payload_json
         )
-        VALUES (?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
         """,
         (
             event.event_id,
             event.event_type.strip().lower(),
             _payload_index_code(event.payload),
+            reason_code,
             error_message,
             canonical_json(event.payload),
         ),
@@ -594,10 +614,38 @@ def _market_index_sanity_warnings(connection: sqlite3.Connection) -> list[str]:
     return _dedupe(warnings)
 
 
+def _index_implausible_reason(tick: BrokerMarketIndexTick) -> str | None:
+    if tick.index_code == "KOSPI" and (tick.price < 1000 or tick.price > 6000):
+        return "INDEX_IMPLAUSIBLE:KOSPI_PRICE_OUT_OF_RANGE"
+    if abs(float(tick.change_rate)) > 15.0:
+        return "INDEX_IMPLAUSIBLE:CHANGE_RATE_OUT_OF_RANGE"
+    return None
+
+
+def _has_unverified_index_parser(connection: sqlite3.Connection) -> bool:
+    rows = connection.execute(
+        """
+        SELECT metadata_json
+        FROM market_index_ticks_latest
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            return True
+        parser_status = str(metadata.get("parser_status") or "VERIFIED").upper()
+        if parser_status != "VERIFIED":
+            return True
+    return False
+
+
 def _latest_tick_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = json.loads(data.pop("metadata_json"))
     data["tick_age_sec"] = tick_age_seconds(data["event_ts"])
+    data["parser_status"] = str(data["metadata"].get("parser_status") or "VERIFIED").upper()
+    data["unverified"] = data["parser_status"] != "VERIFIED"
     return data
 
 

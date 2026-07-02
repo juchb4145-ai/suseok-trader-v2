@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 APP_NAME = "suseok-trader-v2"
 
 
@@ -40,6 +40,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_data_tables(connection)
     _create_market_reference_tables(connection)
     _create_market_index_tables(connection)
+    _create_market_scan_tables(connection)
     _create_market_regime_tables(connection)
     _create_theme_projection_tables(connection)
     _create_candidate_projection_tables(connection)
@@ -1322,6 +1323,13 @@ def _create_market_index_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        connection,
+        "market_index_projection_errors",
+        {
+            "reason_code": "TEXT NOT NULL DEFAULT 'INDEX_PROJECTION_ERROR'",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_market_index_samples_code_event_ts
@@ -1338,6 +1346,89 @@ def _create_market_index_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_index_projection_errors_created_at
         ON market_index_projection_errors (created_at)
+        """
+    )
+
+
+def _create_market_scan_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_snapshots (
+            scan_id TEXT NOT NULL,
+            scan_type TEXT NOT NULL,
+            market TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            price REAL,
+            change_rate REAL,
+            trade_value REAL,
+            volume INTEGER,
+            scanned_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (scan_id, scan_type, market, code)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_latest (
+            code TEXT PRIMARY KEY,
+            scan_id TEXT NOT NULL,
+            scan_type TEXT NOT NULL,
+            market TEXT NOT NULL,
+            name TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            price REAL,
+            change_rate REAL,
+            trade_value REAL,
+            volume INTEGER,
+            scanned_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_errors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
+            request_id TEXT,
+            tr_code TEXT,
+            scan_type TEXT,
+            market TEXT,
+            reason_code TEXT NOT NULL,
+            error_message TEXT NOT NULL,
+            payload_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_code_scanned
+        ON market_scan_snapshots (code, scanned_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_type_market_scanned
+        ON market_scan_snapshots (scan_type, market, scanned_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_latest_type_market_rank
+        ON market_scan_latest (scan_type, market, rank)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_errors_created_at
+        ON market_scan_errors (created_at)
         """
     )
 
@@ -1487,6 +1578,35 @@ def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
             trade_value_delta_5m REAL NOT NULL
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "theme_snapshots",
+        {
+            "scan_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+            "realtime_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+            "flow_trade_value_delta": "REAL NOT NULL DEFAULT 0",
+            "flow_rank_inflow_count": "INTEGER NOT NULL DEFAULT 0",
+            "flow_score": "REAL NOT NULL DEFAULT 0",
+        },
+    )
+    _ensure_columns(
+        connection,
+        "theme_snapshot_members",
+        {
+            "observation_source": "TEXT NOT NULL DEFAULT 'UNKNOWN'",
+        },
+    )
+    _ensure_columns(
+        connection,
+        "theme_latest_snapshots",
+        {
+            "scan_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+            "realtime_coverage_ratio": "REAL NOT NULL DEFAULT 0",
+            "flow_trade_value_delta": "REAL NOT NULL DEFAULT 0",
+            "flow_rank_inflow_count": "INTEGER NOT NULL DEFAULT 0",
+            "flow_score": "REAL NOT NULL DEFAULT 0",
+        },
     )
     connection.execute(
         """
