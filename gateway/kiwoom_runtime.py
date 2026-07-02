@@ -229,6 +229,7 @@ class KiwoomGatewayRuntime:
             client,
             source=self.config.source,
             on_order_ack=self.pending_orders.record_ack,
+            on_async_events=self.emit_events,
             order_journal=self.order_journal,
         )
         self._event_queue: deque[GatewayEvent] = deque()
@@ -321,6 +322,10 @@ class KiwoomGatewayRuntime:
 
     def emit_event(self, event: GatewayEvent) -> None:
         self._event_queue.append(event)
+
+    def emit_events(self, events: Iterable[GatewayEvent]) -> None:
+        for event in events:
+            self.emit_event(event)
 
     def replay_order_pre_ack_journal(self) -> None:
         if self.order_journal is None:

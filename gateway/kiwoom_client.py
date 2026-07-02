@@ -321,7 +321,7 @@ class KiwoomChejanParser:
 
 
 class KiwoomClient:
-    login_waits_for_event_loop = True
+    login_waits_for_event_loop = False
 
     def __init__(self) -> None:
         try:
@@ -355,10 +355,6 @@ class KiwoomClient:
         self._conditions: list[ConditionInfo] = []
         self._realtime_screen_codes: dict[str, set[str]] = {}
         self._pending_thread_audit_events: list[dict[str, Any]] = []
-        self._login_event_loop: Any | None = None
-        self._login_callback_result: tuple[int, str] | None = None
-        self._condition_event_loop: Any | None = None
-        self._condition_callback_result: tuple[bool, str] | None = None
         self.chejan_parser = KiwoomChejanParser()
         self._market_index_realtime_codes: dict[str, str] = {}
         self._market_index_realtime_screen_codes: dict[str, set[str]] = {}
@@ -376,51 +372,25 @@ class KiwoomClient:
         self._record_thread_audit("QAxWidget.signal_connect", phase="RESULT", success=True)
 
     def login(self, timeout_ms: int | None = None) -> int:
-        from PyQt5.QtCore import QTimer
-
         wait_timeout_ms = int(timeout_ms or DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS)
-        loop, timer, timed_out = self._prepare_callback_wait(
-            "OnEventConnect",
-            wait_timeout_ms,
+        self._record_thread_audit("CommConnect", phase="CALL")
+        result = int(self.ocx.dynamicCall("CommConnect()") or 0)
+        self._record_thread_audit(
+            "CommConnect",
+            phase="RESULT",
+            result_code=result,
         )
-        self._login_event_loop = loop
-        self._login_callback_result = None
-        result_holder: dict[str, int | None] = {"value": None}
-
-        def call_comm_connect() -> None:
-            self._record_thread_audit("CommConnect", phase="CALL")
-            result_holder["value"] = int(self.ocx.dynamicCall("CommConnect()") or 0)
-            self._record_thread_audit(
-                "CommConnect",
-                phase="RESULT",
-                result_code=result_holder["value"],
-            )
-            if result_holder["value"] != 0 and self._login_event_loop is not None:
-                self._login_event_loop.exit()
-
-        QTimer.singleShot(0, call_comm_connect)
-        self._exec_callback_wait(loop, timer)
-        result = result_holder["value"]
-        callback_result = self._login_callback_result
-        timed_out_value = bool(timed_out["value"])
-        self._login_event_loop = None
-        self._login_callback_result = None
-        if result is not None and result != 0:
-            code = int(result)
-            message = ERROR_MESSAGES.get(code, str(code))
-        elif callback_result is None:
-            code = LOGIN_EVENT_TIMEOUT_CODE
-            message = f"OnEventConnect callback timeout after {wait_timeout_ms}ms"
-        else:
-            code, message = callback_result
         self._record_thread_audit(
             "OnEventConnect.wait",
-            phase="RESULT",
-            timed_out=timed_out_value,
-            result_code=code,
+            phase="PENDING_CALLBACK",
+            timeout_ms=wait_timeout_ms,
+            non_blocking=True,
         )
-        self.connected.emit(code == 0, code, message)
-        return int(result if result is not None else LOGIN_EVENT_TIMEOUT_CODE)
+        if result != 0:
+            code = int(result)
+            message = ERROR_MESSAGES.get(code, str(code))
+            self.connected.emit(False, code, message)
+        return int(result)
 
     def get_accounts(self) -> list[str]:
         raw = self.ocx.dynamicCall("GetLoginInfo(QString)", "ACCNO") or ""
@@ -629,53 +599,28 @@ class KiwoomClient:
         self._market_index_realtime_codes.clear()
 
     def load_conditions(self, timeout_ms: int | None = None) -> int:
-        from PyQt5.QtCore import QTimer
-
         self.condition_load_state = ConditionLoadState.LOADING
         self.condition_state_changed.emit(self.condition_load_state.value, "")
         wait_timeout_ms = int(timeout_ms or DEFAULT_CONDITION_EVENT_LOOP_TIMEOUT_MS)
-        loop, timer, timed_out = self._prepare_callback_wait(
-            "OnReceiveConditionVer",
-            wait_timeout_ms,
+        self._record_thread_audit("GetConditionLoad", phase="CALL")
+        result = int(self.ocx.dynamicCall("GetConditionLoad()") or 0)
+        self._record_thread_audit(
+            "GetConditionLoad",
+            phase="RESULT",
+            result_code=result,
         )
-        self._condition_event_loop = loop
-        self._condition_callback_result = None
-        result_holder: dict[str, int | None] = {"value": None}
-
-        def call_get_condition_load() -> None:
-            self._record_thread_audit("GetConditionLoad", phase="CALL")
-            result_holder["value"] = int(self.ocx.dynamicCall("GetConditionLoad()") or 0)
-            self._record_thread_audit(
-                "GetConditionLoad",
-                phase="RESULT",
-                result_code=result_holder["value"],
-            )
-            if result_holder["value"] <= 0 and self._condition_event_loop is not None:
-                self._condition_event_loop.exit()
-
-        QTimer.singleShot(0, call_get_condition_load)
-        self._exec_callback_wait(loop, timer)
-        result = int(result_holder["value"] or 0)
         if result <= 0:
-            self._condition_event_loop = None
-            self._condition_callback_result = None
             self.condition_load_state = ConditionLoadState.FAILED
             message = "GetConditionLoad failed"
             self.condition_state_changed.emit(self.condition_load_state.value, message)
             self.condition_load_result.emit(False, message)
             return result
-        callback_result = self._condition_callback_result
-        timed_out_value = bool(timed_out["value"])
-        self._condition_event_loop = None
-        self._condition_callback_result = None
         self._record_thread_audit(
             "OnReceiveConditionVer.wait",
-            phase="RESULT",
-            timed_out=timed_out_value,
-            result_code=1 if callback_result and callback_result[0] else 0,
+            phase="PENDING_CALLBACK",
+            timeout_ms=wait_timeout_ms,
+            non_blocking=True,
         )
-        if callback_result is not None:
-            self._emit_condition_load_result(*callback_result)
         return result
 
     def condition_name_list(self) -> list[ConditionInfo]:
@@ -795,10 +740,6 @@ class KiwoomClient:
         )
         code = int(error_code)
         message = ERROR_MESSAGES.get(code, str(code))
-        if self._login_event_loop is not None:
-            self._login_callback_result = (code, message)
-            self._login_event_loop.exit()
-            return
         self.connected.emit(code == 0, code, message)
 
     def _on_receive_msg(self, screen_no: str, rq_name: str, tr_code: str, message: str) -> None:
@@ -820,10 +761,6 @@ class KiwoomClient:
         )
         success = int(result) == 1
         result_message = str(message or "")
-        if self._condition_event_loop is not None:
-            self._condition_callback_result = (success, result_message)
-            self._condition_event_loop.exit()
-            return
         self._emit_condition_load_result(success, result_message)
 
     def _on_receive_tr_condition(
@@ -1123,43 +1060,6 @@ class KiwoomClient:
         self.condition_load_result.emit(bool(success), str(message or ""))
         if success:
             self.condition_loaded.emit(self.condition_name_list())
-
-    def _prepare_callback_wait(
-        self,
-        method: str,
-        timeout_ms: int,
-    ) -> tuple[Any, Any, dict[str, bool]]:
-        from PyQt5.QtCore import QEventLoop, QTimer
-
-        loop = QEventLoop()
-        timer = QTimer()
-        timer.setSingleShot(True)
-        timed_out = {"value": False}
-
-        def on_timeout() -> None:
-            timed_out["value"] = True
-            self._record_thread_audit(method, phase="TIMEOUT", timeout_ms=int(timeout_ms))
-            loop.exit()
-
-        timer.timeout.connect(on_timeout)
-        timer.setInterval(int(timeout_ms))
-        self._record_thread_audit(method, phase="WAIT", timeout_ms=int(timeout_ms))
-        return loop, timer, timed_out
-
-    def _exec_callback_wait(self, loop: Any, timer: Any) -> None:
-        timer.start()
-        try:
-            loop.exec_()
-        finally:
-            self._cleanup_callback_wait(timer)
-
-    @staticmethod
-    def _cleanup_callback_wait(timer: Any) -> None:
-        try:
-            if timer is not None and timer.isActive():
-                timer.stop()
-        except RuntimeError:
-            pass
 
     def _realtime_screen_code_map(self) -> dict[str, set[str]]:
         screen_map = getattr(self, "_realtime_screen_codes", None)

@@ -27,6 +27,7 @@ from gateway.kiwoom_tr import KiwoomTrRunner
 from gateway.order_pre_ack_journal import OrderPreAckJournal
 
 OrderAckCallback = Callable[[GatewayCommand, KiwoomOrderRequest, KiwoomOrderResult], None]
+AsyncEventsCallback = Callable[[list[GatewayEvent]], None]
 
 ALLOWED_KIWOOM_COMMAND_TYPES = {
     "heartbeat_request",
@@ -149,6 +150,7 @@ class KiwoomGatewayCommandHandler:
         source: str = "kiwoom_gateway",
         tr_runner: KiwoomTrRunner | None = None,
         on_order_ack: OrderAckCallback | None = None,
+        on_async_events: AsyncEventsCallback | None = None,
         order_journal: OrderPreAckJournal | None = None,
         rate_limit_governor: KiwoomRateLimitGovernor | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -157,6 +159,7 @@ class KiwoomGatewayCommandHandler:
         self.source = source
         self.tr_runner = tr_runner or KiwoomTrRunner(client)
         self.on_order_ack = on_order_ack
+        self.on_async_events = on_async_events
         self.order_journal = order_journal
         self.clock = clock
         self.subscriptions: set[str] = set()
@@ -263,14 +266,54 @@ class KiwoomGatewayCommandHandler:
         if not params:
             params = _mapping_value(payload, "inputs")
         fields = _string_list(payload.get("fields"))
-        result = self.tr_runner.request(
-            request_id=request_id,
-            tr_code=tr_code,
-            request_name=request_name,
-            params=dict(params),
-            continuation_key=payload.get("continuation_key"),
-            fields=fields or None,
-            screen_no=_string_value(payload, "screen_no", "8700"),
+        common_kwargs = {
+            "request_id": request_id,
+            "tr_code": tr_code,
+            "request_name": request_name,
+            "params": dict(params),
+            "continuation_key": payload.get("continuation_key"),
+            "fields": fields or None,
+            "screen_no": _string_value(payload, "screen_no", "8700"),
+        }
+        if self.on_async_events is not None:
+            completed_results: list[Any] = []
+            submitting = True
+
+            def on_complete(result) -> None:
+                if submitting:
+                    completed_results.append(result)
+                    return
+                self.on_async_events(self._tr_result_events(command, result, request_id))
+
+            submission = self.tr_runner.submit(**common_kwargs, on_complete=on_complete)
+            submitting = False
+            if not submission.accepted:
+                return [
+                    make_command_failed_event(
+                        command,
+                        ";".join(submission.result.errors) or "TR_REQUEST_FAILED",
+                        source=self.source,
+                    )
+                ]
+            if completed_results:
+                return self._tr_result_events(command, completed_results[-1], request_id)
+            return []
+
+        result = self.tr_runner.request(**common_kwargs)
+        return self._tr_result_events(command, result, request_id)
+
+    def _tr_result_events(
+        self,
+        command: GatewayCommand,
+        result,
+        request_id: str,
+    ) -> list[GatewayEvent]:
+        payload = command.payload
+        tr_code = _string_value(payload, "tr_code", "")
+        request_name = _string_value(
+            payload,
+            "request_name",
+            _string_value(payload, "rq_name", tr_code or "KIWOOM_TR"),
         )
         if not result.success:
             return [

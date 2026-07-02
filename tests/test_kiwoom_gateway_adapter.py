@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
@@ -37,6 +38,7 @@ from gateway.kiwoom_client import (
     FID_OPEN_PRICE,
     FID_TRADE_TIME,
     MAX_PENDING_THREAD_AUDIT_EVENTS,
+    ConditionLoadState,
     KiwoomClient,
     KiwoomOrderRequest,
     KiwoomOrderResult,
@@ -95,6 +97,13 @@ def test_kiwoom_gateway_threaded_login_defaults_to_false() -> None:
     assert parse_args([]).threaded_login is False
     assert parse_args(["--threaded-login"]).threaded_login is True
     assert parse_args(["--no-threaded-login"]).threaded_login is False
+
+
+def test_kiwoom_gateway_avoids_nested_qt_event_loops_and_process_events() -> None:
+    for path in (Path("gateway/kiwoom_client.py"), Path("gateway/kiwoom_tr.py")):
+        source = path.read_text(encoding="utf-8")
+        assert "QEventLoop" not in source
+        assert "processEvents" not in source
 
 
 def test_kiwoom_gateway_realtime_exchange_option() -> None:
@@ -483,9 +492,9 @@ def test_login_request_default_uses_non_threaded_main_path() -> None:
     assert runtime.threaded_values == [False]
 
 
-def test_login_request_skips_connect_state_fallback_for_event_loop_client() -> None:
+def test_login_request_finishes_connect_state_fallback_for_nonblocking_client() -> None:
     class Client:
-        login_waits_for_event_loop = True
+        login_waits_for_event_loop = False
 
         def __init__(self) -> None:
             self.login_calls = 0
@@ -518,25 +527,16 @@ def test_login_request_skips_connect_state_fallback_for_event_loop_client() -> N
     request_kiwoom_login(client, runtime)
 
     assert client.login_calls == 1
-    assert runtime.connected_calls == []
-    assert runtime._login_in_progress is True
-    assert KiwoomClient.login_waits_for_event_loop is True
+    assert runtime.connected_calls == [(True, 0, "already connected")]
+    assert runtime._login_in_progress is False
+    assert KiwoomClient.login_waits_for_event_loop is False
 
 
-def test_event_connect_callback_exits_login_loop_before_runtime_signal() -> None:
-    class Loop:
-        def __init__(self) -> None:
-            self.exited = False
-
-        def exit(self) -> None:
-            self.exited = True
-
+def test_event_connect_callback_emits_connected_without_nested_loop() -> None:
     client = object.__new__(KiwoomClient)
     client.active_x_thread_audit = Signal()
     client.connected = Signal()
     client._pending_thread_audit_events = []
-    client._login_event_loop = Loop()
-    client._login_callback_result = None
     connected_calls: list[tuple[bool, int, str]] = []
     client.connected.connect(
         lambda ok, code, message: connected_calls.append((bool(ok), int(code), str(message)))
@@ -544,26 +544,18 @@ def test_event_connect_callback_exits_login_loop_before_runtime_signal() -> None
 
     client._on_event_connect(0)
 
-    assert client._login_event_loop.exited is True
-    assert client._login_callback_result == (0, "정상처리")
-    assert connected_calls == []
+    assert connected_calls == [(True, 0, "정상처리")]
 
 
-def test_condition_ver_callback_exits_condition_loop_before_runtime_signal() -> None:
-    class Loop:
-        def __init__(self) -> None:
-            self.exited = False
-
-        def exit(self) -> None:
-            self.exited = True
-
+def test_condition_ver_callback_emits_result_without_nested_loop() -> None:
     client = object.__new__(KiwoomClient)
     client.active_x_thread_audit = Signal()
+    client.condition_state_changed = Signal()
     client.condition_load_result = Signal()
     client.condition_loaded = Signal()
     client._pending_thread_audit_events = []
-    client._condition_event_loop = Loop()
-    client._condition_callback_result = None
+    client.condition_load_state = ConditionLoadState.LOADING
+    client.condition_name_list = lambda: []
     result_calls: list[tuple[bool, str]] = []
     client.condition_load_result.connect(
         lambda success, message: result_calls.append((bool(success), str(message)))
@@ -571,9 +563,8 @@ def test_condition_ver_callback_exits_condition_loop_before_runtime_signal() -> 
 
     client._on_receive_condition_ver(1, "ok")
 
-    assert client._condition_event_loop.exited is True
-    assert client._condition_callback_result == (True, "ok")
-    assert result_calls == []
+    assert client.condition_load_state is ConditionLoadState.LOADED
+    assert result_calls == [(True, "ok")]
 
 
 def test_kiwoom_client_creates_activex_with_set_control() -> None:
@@ -1954,6 +1945,65 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
     ]
     response = BrokerTrResponse.from_dict(events[1].payload)
     assert response.rows[0]["종목코드"] == "005930"
+
+
+def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() -> None:
+    class DeferredTrClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.pending_tr: tuple[str, str, str] | None = None
+
+        def comm_rq_data(
+            self,
+            rq_name: str,
+            tr_code: str,
+            prev_next: int,
+            screen_no: str,
+        ) -> int:
+            del prev_next
+            self.pending_tr = (str(screen_no), str(rq_name), str(tr_code))
+            return 0
+
+        def emit_pending_tr(self) -> None:
+            assert self.pending_tr is not None
+            screen_no, rq_name, tr_code = self.pending_tr
+            self.tr_data_received.emit(
+                screen_no,
+                rq_name,
+                tr_code,
+                rq_name,
+                "",
+                0,
+                "",
+                "",
+                "",
+            )
+
+    client = DeferredTrClient()
+    client.set_tr_rows([{"종목코드": "005930", "종목명": "삼성전자", "현재가": "70000"}])
+    runtime = KiwoomGatewayRuntime(client=client, core_client=object())
+    command = GatewayCommand(
+        command_id="cmd_async_tr",
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": "tr_async",
+            "tr_code": "OPT10001",
+            "request_name": "stock_basic",
+            "params": {"종목코드": "005930"},
+            "fields": ["종목코드", "종목명", "현재가"],
+        },
+    )
+
+    runtime.handle_commands([command])
+    event_types_before_callback = [event.event_type for event in runtime._event_queue]
+    client.emit_pending_tr()
+    event_types_after_callback = [event.event_type for event in runtime._event_queue]
+    response = next(event for event in runtime._event_queue if event.event_type == "tr_response")
+
+    assert event_types_before_callback == ["command_started"]
+    assert event_types_after_callback == ["command_started", "tr_response", "command_ack"]
+    assert BrokerTrResponse.from_dict(response.payload).rows[0]["종목코드"] == "005930"
 
 
 def test_kiwoom_handler_register_realtime_and_send_condition_call_client() -> None:

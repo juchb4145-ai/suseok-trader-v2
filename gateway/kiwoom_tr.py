@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -53,6 +52,18 @@ class TrRequestResult:
         return not self.errors
 
 
+@dataclass(frozen=True, kw_only=True)
+class TrRequestSubmission:
+    key: str
+    request_code: int
+    result: TrRequestResult
+    completed: bool = False
+
+    @property
+    def accepted(self) -> bool:
+        return self.request_code >= 0 and not self.result.errors
+
+
 DEFAULT_TR_FIELDS: dict[str, list[str]] = {
     "OPT10001": [
         "종목코드",
@@ -76,18 +87,12 @@ class KiwoomTrRunner:
         *,
         timeout_sec: float = 20.0,
         request_delay_sec: float = 1.2,
-        clock=time.monotonic,
-        sleeper=time.sleep,
-        process_events=None,
     ) -> None:
         self.client = client
         self.timeout_sec = max(float(timeout_sec), 0.1)
         self.request_delay_sec = max(float(request_delay_sec), 0.0)
-        self.clock = clock
-        self.sleeper = sleeper
-        self.process_events = process_events or _process_qt_events
         self._pending_page: TrPage | None = None
-        self._active_request: dict[str, Any] | None = None
+        self._pending_requests: dict[str, dict[str, Any]] = {}
         signal = getattr(client, "tr_data_received", None)
         if signal is not None and hasattr(signal, "connect"):
             signal.connect(self._handle_tr_data)
@@ -103,8 +108,44 @@ class KiwoomTrRunner:
         fields: list[str] | None = None,
         screen_no: str = "8700",
     ) -> TrRequestResult:
+        completed_results: list[TrRequestResult] = []
+        submission = self.submit(
+            request_id=request_id,
+            tr_code=tr_code,
+            request_name=request_name,
+            params=params,
+            continuation_key=continuation_key,
+            fields=fields,
+            screen_no=screen_no,
+            on_complete=completed_results.append,
+            schedule_timeout=False,
+        )
+        if completed_results:
+            return completed_results[-1]
+        if submission.completed:
+            return submission.result
+        self.cancel(submission.key)
+        submission.result.errors.append(
+            f"TR_PENDING_CALLBACK:{submission.result.tr_code}:{submission.result.request_name}"
+        )
+        return submission.result
+
+    def submit(
+        self,
+        *,
+        request_id: str,
+        tr_code: str,
+        request_name: str,
+        params: dict[str, Any],
+        continuation_key: str | None = None,
+        fields: list[str] | None = None,
+        screen_no: str = "8700",
+        on_complete,
+        schedule_timeout: bool = True,
+    ) -> TrRequestSubmission:
         normalized_tr_code = str(tr_code or "").upper()
         normalized_request_name = str(request_name or normalized_tr_code or "KIWOOM_TR")
+        normalized_screen_no = str(screen_no or "8700")
         result = TrRequestResult(
             request_id=str(request_id),
             tr_code=normalized_tr_code,
@@ -112,44 +153,51 @@ class KiwoomTrRunner:
         )
         requested_fields = fields or DEFAULT_TR_FIELDS.get(normalized_tr_code, [])
         prev_next = 2 if str(continuation_key or "").strip() == "2" else 0
+        key = _pending_key(normalized_screen_no, normalized_request_name, normalized_tr_code)
 
         for input_name, value in params.items():
             self.client.set_input_value(str(input_name), str(value))
         self._pending_page = None
-        self._active_request = {
+        self._pending_requests[key] = {
             "result": result,
             "fields": list(requested_fields),
             "tr_code": normalized_tr_code,
             "request_name": normalized_request_name,
+            "screen_no": normalized_screen_no,
+            "on_complete": on_complete,
         }
         request_code = int(
             self.client.comm_rq_data(
                 normalized_request_name,
                 normalized_tr_code,
                 int(prev_next),
-                str(screen_no),
+                normalized_screen_no,
             )
             or 0
         )
         result.request_count += 1
         if request_code < 0:
             result.errors.append(f"TR_REQUEST_FAILED:{normalized_tr_code}:{request_code}")
-            self._active_request = None
-            return result
+            self._pending_requests.pop(key, None)
+            return TrRequestSubmission(
+                key=key,
+                request_code=request_code,
+                result=result,
+                completed=True,
+            )
+        if key not in self._pending_requests:
+            return TrRequestSubmission(
+                key=key,
+                request_code=request_code,
+                result=result,
+                completed=True,
+            )
+        if schedule_timeout:
+            self._schedule_timeout(key)
+        return TrRequestSubmission(key=key, request_code=request_code, result=result)
 
-        deadline = self.clock() + self.timeout_sec
-        while self._pending_page is None and self.clock() < deadline:
-            self.process_events()
-            if self._pending_page is None:
-                self.sleeper(0.01)
-        if self._pending_page is None:
-            result.errors.append(f"TR_TIMEOUT:{normalized_tr_code}:{normalized_request_name}")
-            self._active_request = None
-            return result
-        result.pages.append(self._pending_page)
-        self._pending_page = None
-        self._active_request = None
-        return result
+    def cancel(self, key: str) -> None:
+        self._pending_requests.pop(str(key), None)
 
     def _handle_tr_data(self, *args: Any) -> None:
         values = list(args) + [""] * 9
@@ -163,14 +211,45 @@ class KiwoomTrRunner:
             message=str(values[7] or ""),
             splm_msg=str(values[8] or ""),
         )
-        active = self._active_request
-        if active is None:
+        key = self._find_pending_key(meta)
+        if key is None:
             self._pending_page = TrPage(meta=meta, rows=[])
             return
+        active = self._pending_requests.pop(key)
         result = active["result"]
         fields = list(active["fields"])
         rows = self._extract_rows(result, meta, fields)
-        self._pending_page = TrPage(meta=meta, rows=rows)
+        result.pages.append(TrPage(meta=meta, rows=rows))
+        on_complete = active["on_complete"]
+        if callable(on_complete):
+            on_complete(result)
+
+    def _find_pending_key(self, meta: TrResponseMeta) -> str | None:
+        exact_key = _pending_key(meta.screen_no, meta.rq_name, meta.tr_code)
+        if exact_key in self._pending_requests:
+            return exact_key
+        for key, pending in self._pending_requests.items():
+            if str(pending.get("request_name") or "") == meta.rq_name:
+                return key
+        return None
+
+    def _schedule_timeout(self, key: str) -> None:
+        timeout_ms = max(int(self.timeout_sec * 1000), 1)
+        try:
+            from PyQt5.QtCore import QTimer
+        except ImportError:
+            return
+        QTimer.singleShot(timeout_ms, lambda: self._timeout_request(key))
+
+    def _timeout_request(self, key: str) -> None:
+        pending = self._pending_requests.pop(str(key), None)
+        if pending is None:
+            return
+        result = pending["result"]
+        result.errors.append(f"TR_TIMEOUT:{result.tr_code}:{result.request_name}")
+        on_complete = pending["on_complete"]
+        if callable(on_complete):
+            on_complete(result)
 
     def _extract_rows(
         self,
@@ -240,16 +319,6 @@ class KiwoomTrRunner:
             return ""
 
 
-def _process_qt_events() -> None:
-    try:
-        from PyQt5.QtWidgets import QApplication
-    except ImportError:
-        return
-    app = QApplication.instance()
-    if app is not None:
-        app.processEvents()
-
-
 def _dedupe(values: list[str]) -> list[str]:
     result: list[str] = []
     for value in values:
@@ -257,3 +326,7 @@ def _dedupe(values: list[str]) -> list[str]:
         if text and text not in result:
             result.append(text)
     return result
+
+
+def _pending_key(screen_no: str, request_name: str, tr_code: str) -> str:
+    return f"{str(screen_no or '')}|{str(request_name or '')}|{str(tr_code or '').upper()}"
