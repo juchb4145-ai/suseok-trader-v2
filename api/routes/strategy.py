@@ -9,6 +9,7 @@ from domain.strategy.status import StrategyObservationStatus
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from services.config import load_settings
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.strategy_engine import (
     evaluate_candidates,
     get_latest_strategy_observation,
@@ -146,14 +147,20 @@ def strategy_evaluate(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        result = evaluate_candidates(
-            connection,
-            trade_date=trade_date,
-            candidate_state=None if candidate_instance_id is not None else state,
-            limit=limit,
-            settings=settings,
-            candidate_instance_id=candidate_instance_id,
-        )
+        try:
+            result = evaluate_candidates(
+                connection,
+                trade_date=trade_date,
+                candidate_state=None if candidate_instance_id is not None else state,
+                limit=limit,
+                settings=settings,
+                candidate_instance_id=candidate_instance_id,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
     finally:
         connection.close()
     return result.to_dict()

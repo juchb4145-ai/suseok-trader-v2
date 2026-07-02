@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from apps.core_api import app
-from domain.broker.utils import utc_now
+from domain.broker.utils import datetime_to_wire, utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.config import candidate_timezone
-from storage.sqlite import open_connection
+from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK
+from storage.gateway_command_store import canonical_json
+from storage.sqlite import initialize_database, open_connection
 from tools.run_market_open_observe_cycle import write_observe_cycle_report
 
 
@@ -120,6 +124,47 @@ def test_observe_cycle_requires_token_when_configured(tmp_path, monkeypatch) -> 
     assert auth_probe_missing.status_code == 401
     assert auth_probe_ok.status_code == 200
     assert auth_probe_ok.json()["read_only"] is True
+
+
+def test_observe_cycle_returns_conflict_when_evaluation_lock_is_active(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "observe_cycle_locked.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    connection = initialize_database(db_path)
+    try:
+        now = utc_now()
+        connection.execute(
+            """
+            INSERT INTO runtime_execution_locks (
+                lock_name,
+                owner_id,
+                acquired_at,
+                expires_at,
+                detail_json
+            )
+            VALUES (?, 'test-owner', ?, ?, ?)
+            """,
+            (
+                EVALUATION_PIPELINE_LOCK,
+                datetime_to_wire(now),
+                datetime_to_wire(now + timedelta(seconds=300)),
+                canonical_json({"test": True}),
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/operator/observe-cycle/run-once",
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error"] == "EVALUATION_RUN_LOCKED"
 
 
 def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> None:

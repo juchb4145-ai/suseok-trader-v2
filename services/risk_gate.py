@@ -28,6 +28,11 @@ from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
+from services.runtime.evaluation_run_guard import (
+    EVALUATION_PIPELINE_LOCK,
+    immediate_transaction,
+    runtime_execution_lock,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -968,6 +973,34 @@ def save_risk_observation(
 
 
 def evaluate_risk_observations(
+    connection: sqlite3.Connection,
+    trade_date: str | None = None,
+    strategy_status: StrategyObservationStatus | str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+    candidate_instance_id: str | None = None,
+    strategy_observation_id: str | None = None,
+    manage_run_lock: bool = True,
+) -> RiskEvaluationRunResult:
+    with runtime_execution_lock(
+        connection,
+        EVALUATION_PIPELINE_LOCK,
+        details={"run_type": "risk_evaluation", "trade_date": trade_date},
+        manage_lock=manage_run_lock,
+    ):
+        with immediate_transaction(connection):
+            return _evaluate_risk_observations(
+                connection,
+                trade_date=trade_date,
+                strategy_status=strategy_status,
+                limit=limit,
+                settings=settings,
+                candidate_instance_id=candidate_instance_id,
+                strategy_observation_id=strategy_observation_id,
+            )
+
+
+def _evaluate_risk_observations(
     connection: sqlite3.Connection,
     trade_date: str | None = None,
     strategy_status: StrategyObservationStatus | str | None = None,

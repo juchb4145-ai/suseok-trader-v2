@@ -19,6 +19,7 @@ from services.risk_gate import (
     list_risk_observations_for_candidate,
     list_risk_runs,
 )
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -172,17 +173,23 @@ def risk_evaluate(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        result = evaluate_risk_observations(
-            connection,
-            trade_date=trade_date,
-            candidate_instance_id=candidate_instance_id,
-            strategy_observation_id=strategy_observation_id,
-            strategy_status=(
-                None if candidate_instance_id or strategy_observation_id else strategy_status
-            ),
-            limit=limit,
-            settings=settings,
-        )
+        try:
+            result = evaluate_risk_observations(
+                connection,
+                trade_date=trade_date,
+                candidate_instance_id=candidate_instance_id,
+                strategy_observation_id=strategy_observation_id,
+                strategy_status=(
+                    None if candidate_instance_id or strategy_observation_id else strategy_status
+                ),
+                limit=limit,
+                settings=settings,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
     finally:
         connection.close()
     return result.to_dict()

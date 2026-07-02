@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import status as http_status
 from services.config import load_settings
 from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
@@ -14,6 +15,7 @@ from services.realtime_subscription import (
     build_realtime_subscription_plan,
     run_realtime_subscription_once,
 )
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
@@ -116,12 +118,18 @@ def operator_observe_cycle_run_once(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        result = run_market_open_observe_cycle_once(
-            connection,
-            settings=settings,
-            trade_date=trade_date,
-            limit=limit,
-        )
+        try:
+            result = run_market_open_observe_cycle_once(
+                connection,
+                settings=settings,
+                trade_date=trade_date,
+                limit=limit,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
         return result.to_dict()
     finally:
         connection.close()

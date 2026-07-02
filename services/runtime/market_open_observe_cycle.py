@@ -20,6 +20,7 @@ from services.entry_timing.service import evaluate_entry_timing, get_entry_timin
 from services.live_sim.live_sim_service import get_live_sim_status
 from services.realtime_subscription import run_realtime_subscription_once
 from services.risk_gate import evaluate_risk_observations, get_risk_status
+from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runtime_execution_lock
 from services.runtime.preflight import OperatingMode, run_live_sim_preflight
 from services.strategy_engine import evaluate_candidates, get_strategy_status
 from services.theme_leadership import rebuild_theme_leadership
@@ -123,6 +124,28 @@ class MarketOpenObserveCycleRunResult:
 
 
 def run_market_open_observe_cycle_once(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+    write_run: bool = True,
+) -> MarketOpenObserveCycleRunResult:
+    with runtime_execution_lock(
+        connection,
+        EVALUATION_PIPELINE_LOCK,
+        details={"run_type": "market_open_observe_cycle", "trade_date": trade_date},
+    ):
+        return _run_market_open_observe_cycle_once(
+            connection,
+            trade_date=trade_date,
+            limit=limit,
+            settings=settings,
+            write_run=write_run,
+        )
+
+
+def _run_market_open_observe_cycle_once(
     connection: sqlite3.Connection,
     *,
     trade_date: str | None = None,
@@ -239,6 +262,7 @@ def run_market_open_observe_cycle_once(
             candidate_state=None,
             limit=limit,
             settings=resolved_settings,
+            manage_run_lock=False,
         )
         strategy_status = get_strategy_status(connection, resolved_settings)
         stages["Strategy"] = _strategy_stage(
@@ -257,6 +281,7 @@ def run_market_open_observe_cycle_once(
             strategy_status=StrategyObservationStatus.MATCHED_OBSERVATION,
             limit=limit,
             settings=resolved_settings,
+            manage_run_lock=False,
         )
         risk_status = get_risk_status(connection, resolved_settings)
         stages["Risk"] = _risk_stage(
@@ -275,6 +300,7 @@ def run_market_open_observe_cycle_once(
             limit=limit,
             write_order_plan_drafts=True,
             settings=resolved_settings,
+            manage_run_lock=False,
         )
         entry_status = get_entry_timing_status(connection, settings=resolved_settings)
         stages["EntryTiming"] = _entry_timing_stage(

@@ -40,6 +40,11 @@ from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
+from services.runtime.evaluation_run_guard import (
+    EVALUATION_PIPELINE_LOCK,
+    immediate_transaction,
+    runtime_execution_lock,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -414,6 +419,32 @@ def save_strategy_observation(
 
 
 def evaluate_candidates(
+    connection: sqlite3.Connection,
+    trade_date: str | None = None,
+    candidate_state: CandidateState | str | None = None,
+    limit: int | None = None,
+    settings: Settings | None = None,
+    candidate_instance_id: str | None = None,
+    manage_run_lock: bool = True,
+) -> StrategyEvaluationRunResult:
+    with runtime_execution_lock(
+        connection,
+        EVALUATION_PIPELINE_LOCK,
+        details={"run_type": "strategy_evaluation", "trade_date": trade_date},
+        manage_lock=manage_run_lock,
+    ):
+        with immediate_transaction(connection):
+            return _evaluate_candidates(
+                connection,
+                trade_date=trade_date,
+                candidate_state=candidate_state,
+                limit=limit,
+                settings=settings,
+                candidate_instance_id=candidate_instance_id,
+            )
+
+
+def _evaluate_candidates(
     connection: sqlite3.Connection,
     trade_date: str | None = None,
     candidate_state: CandidateState | str | None = None,

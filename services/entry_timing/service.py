@@ -25,6 +25,11 @@ from services.entry_timing.models import (
     OrderPlanStatus,
 )
 from services.entry_timing.order_plan import OrderPlanDraftBuilder
+from services.runtime.evaluation_run_guard import (
+    EVALUATION_PIPELINE_LOCK,
+    immediate_transaction,
+    runtime_execution_lock,
+)
 from services.theme_leadership import ThemeLeadershipService
 
 
@@ -63,6 +68,33 @@ class EntryTimingEvaluationRunResult:
 
 
 def evaluate_entry_timing(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None = None,
+    candidate_instance_id: str | None = None,
+    limit: int | None = None,
+    write_order_plan_drafts: bool | None = None,
+    settings: Settings | None = None,
+    manage_run_lock: bool = True,
+) -> EntryTimingEvaluationRunResult:
+    with runtime_execution_lock(
+        connection,
+        EVALUATION_PIPELINE_LOCK,
+        details={"run_type": "entry_timing_evaluation", "trade_date": trade_date},
+        manage_lock=manage_run_lock,
+    ):
+        with immediate_transaction(connection):
+            return _evaluate_entry_timing(
+                connection,
+                trade_date=trade_date,
+                candidate_instance_id=candidate_instance_id,
+                limit=limit,
+                write_order_plan_drafts=write_order_plan_drafts,
+                settings=settings,
+            )
+
+
+def _evaluate_entry_timing(
     connection: sqlite3.Connection,
     *,
     trade_date: str | None = None,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 APP_NAME = "suseok-trader-v2"
 
 
@@ -741,6 +741,23 @@ def _create_ai_advisory_tables(connection: sqlite3.Connection) -> None:
 
 
 def _create_operator_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_execution_locks (
+            lock_name TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_expires
+        ON runtime_execution_locks (expires_at)
+        """
+    )
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS market_open_observe_cycle_runs (

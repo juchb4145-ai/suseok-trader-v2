@@ -15,6 +15,7 @@ from services.entry_timing.service import (
     list_entry_timing_evaluations,
     list_latest_order_plan_drafts,
 )
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -123,6 +124,11 @@ def entry_timing_evaluate(
                 write_order_plan_drafts=write_order_plan_drafts,
                 settings=settings,
             )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
         except (BrokerValidationError, ValueError) as exc:
             raise HTTPException(
                 status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
