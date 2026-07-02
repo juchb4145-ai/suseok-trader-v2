@@ -294,7 +294,7 @@ def test_dashboard_snapshot_with_sample_data_reflects_pipeline_rows(tmp_path) ->
     assert snapshot["pipeline_summary"]["condition_fusion"]["fused_code_count"] >= 1
     assert snapshot["condition_fusion"]["status"]["fused_code_count"] >= 1
     assert snapshot["condition_fusion"]["top_priority_codes"]
-    assert "조건식 hit는 매수 신호가 아님" in snapshot["condition_fusion"]["summary"]["notice"]
+    assert "role별 admission" in snapshot["condition_fusion"]["summary"]["notice"]
     assert snapshot["themes"]["latest_snapshots"]
     assert snapshot["candidates"]["candidates"]
     assert "sources" in snapshot["candidates"]["candidates"][0]

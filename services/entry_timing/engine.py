@@ -183,10 +183,10 @@ def _hard_context_state(
         )
     if "DISCOVERY_OBSERVATION_ONLY" in sensor_reasons:
         return (
-            EntryTimingState.BLOCKED_CONTEXT,
+            EntryTimingState.DATA_WAIT,
             SetupType.NO_SETUP,
-            OrderPlanStatus.NO_PLAN,
-            ["DISCOVERY_OBSERVATION_ONLY", "CONDITION_SENSOR_NOT_BUY_SIGNAL"],
+            OrderPlanStatus.DATA_WAIT,
+            ["DISCOVERY_OBSERVATION_ONLY", "DISCOVERY_PROMOTION_PENDING"],
         )
     if item.stale or (tick_age is not None and tick_age > settings.entry_timing_stale_max_seconds):
         return (

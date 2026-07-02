@@ -751,6 +751,8 @@ def _fusion_row_to_source_event(
     trade_date: str,
 ) -> CandidateSourceEvent:
     roles = [str(role).upper() for role in fusion.get("active_roles", ())]
+    metadata = fusion.get("metadata") if isinstance(fusion.get("metadata"), Mapping) else {}
+    not_buy_signal = bool(metadata.get("not_buy_signal", False))
     source_type = _fusion_source_type(roles, bool(fusion.get("risk_blocked")))
     reasons = _fusion_reason_codes(fusion)
     condition_names = [str(name) for name in fusion.get("condition_names", ())]
@@ -778,7 +780,7 @@ def _fusion_row_to_source_event(
         payload={
             **dict(fusion),
             "sensor_evidence": True,
-            "not_buy_signal": True,
+            "not_buy_signal": not_buy_signal,
         },
         reason_codes=reasons,
     )
@@ -1452,6 +1454,7 @@ def _condition_fusion_context_for_candidate(
     active_roles = _read_json_array(row["active_roles_json"])
     reason_codes = _read_json_array(row["reason_codes_json"])
     condition_names = _read_json_array(row["condition_names_json"])
+    metadata = _read_json_object(row["metadata_json"])
     return {
         "present": True,
         "source": "candidate_condition_fusion",
@@ -1462,7 +1465,7 @@ def _condition_fusion_context_for_candidate(
         "condition_names": condition_names,
         "condition_latest_hit_at": row["latest_hit_at"],
         "condition_fusion_updated_at": row["updated_at"],
-        "condition_fusion_not_buy_signal": True,
+        "condition_fusion_not_buy_signal": bool(metadata.get("not_buy_signal", False)),
     }
 
 
@@ -1812,10 +1815,10 @@ def _fusion_reason_codes(fusion: Mapping[str, Any]) -> list[str]:
         "BREAKOUT": CandidateReasonCode.CONDITION_BREAKOUT_OBSERVED.value,
         "RISK_BLOCK": CandidateReasonCode.CONDITION_RISK_BLOCKED.value,
     }
-    reasons = [
-        CandidateReasonCode.CONDITION_SENSOR_EVIDENCE.value,
-        CandidateReasonCode.MARKET_SENSOR_NOT_BUY_SIGNAL.value,
-    ]
+    metadata = fusion.get("metadata") if isinstance(fusion.get("metadata"), Mapping) else {}
+    reasons = [CandidateReasonCode.CONDITION_SENSOR_EVIDENCE.value]
+    if bool(metadata.get("not_buy_signal")):
+        reasons.append(CandidateReasonCode.MARKET_SENSOR_NOT_BUY_SIGNAL.value)
     for role in fusion.get("active_roles", ()):
         reason = role_reasons.get(str(role).upper())
         if reason:
@@ -1824,6 +1827,8 @@ def _fusion_reason_codes(fusion: Mapping[str, Any]) -> list[str]:
         text = str(reason).upper()
         if text == "DISCOVERY_OBSERVATION_ONLY":
             reasons.append(CandidateReasonCode.DISCOVERY_OBSERVATION_ONLY.value)
+        elif text == "DISCOVERY_PROMOTION_PENDING":
+            reasons.append(CandidateReasonCode.DISCOVERY_PROMOTION_PENDING.value)
         elif text == "RISK_BLOCKED_BY_CONDITION":
             reasons.append(CandidateReasonCode.CONDITION_RISK_BLOCKED.value)
         elif text == "CONDITION_FUSION_PRIORITY_READY":
@@ -1853,9 +1858,11 @@ def _active_condition_fusion_blocked(active_sources: list[sqlite3.Row]) -> bool:
             return True
         if row["source_type"] == CandidateSourceType.CONDITION_RISK_BLOCK.value:
             return True
-        if isinstance(metadata, Mapping) and metadata.get("candidate_promotion_allowed") is False:
-            return True
-        if isinstance(metadata, Mapping) and metadata.get("discovery_only") is True:
+        if (
+            isinstance(metadata, Mapping)
+            and metadata.get("candidate_promotion_allowed") is False
+            and metadata.get("discovery_promotion_pending") is not True
+        ):
             return True
     return False
 
@@ -1924,6 +1931,16 @@ def _read_json_array(value: str) -> list[str]:
     if not isinstance(loaded, list):
         return []
     return [str(item) for item in loaded]
+
+
+def _read_json_object(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        loaded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
 
 
 def _record_projection_error(

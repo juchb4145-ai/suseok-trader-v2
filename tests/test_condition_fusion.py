@@ -40,18 +40,35 @@ def test_condition_fusion_scores_discovery_low_and_leader_pullback_high(tmp_path
         _condition_event("000660", "Pullback", "PULLBACK", priority=450),
         settings,
     )
+    _append_and_project(
+        connection,
+        _condition_event("035420", "Leader2", "LEADER", priority=500),
+        settings,
+    )
+    _append_and_project(
+        connection,
+        _condition_event("035420", "Breakout", "BREAKOUT", priority=450),
+        settings,
+    )
 
     result = rebuild_condition_fusion(connection, trade_date, settings=settings)
     rows = {row["code"]: row for row in list_condition_fusion(connection, settings=settings)}
     connection.close()
 
-    assert result.processed_event_count == 3
+    assert result.processed_event_count == 5
     assert rows["005930"]["active_roles"] == ["DISCOVERY"]
     assert rows["005930"]["priority_score"] <= 25
     assert "DISCOVERY_OBSERVATION_ONLY" in rows["005930"]["reason_codes"]
+    assert "DISCOVERY_PROMOTION_PENDING" in rows["005930"]["reason_codes"]
     assert rows["000660"]["active_roles"] == ["LEADER", "PULLBACK"]
     assert rows["000660"]["priority_score"] > rows["005930"]["priority_score"]
     assert "LEADER_PULLBACK_FUSION_PRIORITY" in rows["000660"]["reason_codes"]
+    assert "MARKET_SENSOR_NOT_BUY_SIGNAL" not in rows["000660"]["reason_codes"]
+    assert rows["000660"]["metadata"]["not_buy_signal"] is False
+    assert rows["035420"]["active_roles"] == ["BREAKOUT", "LEADER"]
+    assert "LEADER_BREAKOUT_FUSION_PRIORITY" in rows["035420"]["reason_codes"]
+    assert "MARKET_SENSOR_NOT_BUY_SIGNAL" not in rows["035420"]["reason_codes"]
+    assert rows["035420"]["metadata"]["not_buy_signal"] is False
 
 
 def test_condition_fusion_rebuild_for_code_updates_only_target_code(tmp_path) -> None:
@@ -146,13 +163,14 @@ def test_condition_fusion_marks_risk_blocked_and_candidate_source_types(tmp_path
     assert ingest_result.source_event_count == 1
     assert fusion["risk_blocked"] is True
     assert "RISK_BLOCKED_BY_CONDITION" in fusion["reason_codes"]
+    assert "MARKET_SENSOR_NOT_BUY_SIGNAL" in fusion["reason_codes"]
     assert latest_source["source_type"] == "CONDITION_RISK_BLOCK"
     assert "CONDITION_RISK_BLOCKED" in refreshed["reason_codes"]
     assert refreshed["state"] == "BLOCKED_OBSERVATION"
     assert command_count == 0
 
 
-def test_discovery_only_condition_fusion_blocks_strategy_promotion(tmp_path) -> None:
+def test_discovery_only_condition_fusion_stays_retriable(tmp_path) -> None:
     connection = initialize_database(tmp_path / "condition-discovery-only.sqlite3")
     settings = _settings()
     trade_date = _trade_date(settings)
@@ -171,7 +189,8 @@ def test_discovery_only_condition_fusion_blocks_strategy_promotion(tmp_path) -> 
 
     assert refreshed["primary_source_type"] == "CONDITION_DISCOVERY"
     assert "DISCOVERY_OBSERVATION_ONLY" in refreshed["reason_codes"]
-    assert refreshed["state"] == "BLOCKED_OBSERVATION"
+    assert "DISCOVERY_PROMOTION_PENDING" in refreshed["reason_codes"]
+    assert refreshed["state"] != "BLOCKED_OBSERVATION"
 
 
 def test_candidate_context_includes_condition_fusion_fields(tmp_path) -> None:

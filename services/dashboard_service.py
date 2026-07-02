@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import Counter
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from domain.ai_sidecar.policy import get_allowed_tasks, get_forbidden_actions
@@ -1079,7 +1080,8 @@ def _pipeline_summary(
             "risk_blocked_count": condition_fusion_status.get("risk_blocked_count", 0),
             "discovery_only_count": condition_fusion_status.get("discovery_only_count", 0),
             "subscribed_count": condition_fusion_status.get("subscribed_count", 0),
-            "not_buy_signal": True,
+            "not_buy_signal_count": condition_fusion_status.get("not_buy_signal_count", 0),
+            "not_buy_signal": bool(condition_fusion_status.get("not_buy_signal")),
             "read_only": True,
         },
         "themes": {
@@ -1276,6 +1278,7 @@ def _condition_fusion_section(
         for row in rows
         if not row.get("risk_blocked") and row not in discovery_only_codes
     ][:10]
+    not_buy_signal_count = sum(1 for row in rows if _condition_fusion_not_buy_signal(row))
     profile_rows = profiles or fallback_profiles
     return {
         "status": {
@@ -1285,16 +1288,17 @@ def _condition_fusion_section(
             "discovery_only_count": len(discovery_only_codes),
             "subscribed_count": sum(1 for row in rows if row.get("subscribed")),
             "top_priority_count": len(top_priority_codes),
+            "not_buy_signal_count": not_buy_signal_count,
             "read_only": True,
-            "not_buy_signal": True,
-            "notice": "조건식 hit는 매수 신호가 아님",
+            "not_buy_signal": not_buy_signal_count > 0,
+            "notice": "조건식 hit는 센서 증거이며 role별 admission에서 판단",
         },
         "summary": {
             "label": "조건검색 센서",
             "top_priority_label": "우선 관찰",
             "risk_blocked_label": "위험 차단",
             "discovery_only_label": "넓은 후보",
-            "notice": "조건식 hit는 매수 신호가 아님",
+            "notice": "조건식 hit는 센서 증거이며 role별 admission에서 판단",
         },
         "profiles": profile_rows,
         "codes": rows,
@@ -1302,6 +1306,11 @@ def _condition_fusion_section(
         "risk_blocked_codes": risk_blocked_codes,
         "discovery_only_codes": discovery_only_codes,
     }
+
+
+def _condition_fusion_not_buy_signal(row: Mapping[str, Any]) -> bool:
+    metadata = row.get("metadata")
+    return bool(metadata.get("not_buy_signal")) if isinstance(metadata, Mapping) else False
 
 
 def _pipeline_stage_statuses(

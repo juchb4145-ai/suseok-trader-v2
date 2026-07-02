@@ -185,7 +185,7 @@ def test_stale_vi_upper_limit_and_risk_block_prevent_plan_ready() -> None:
     assert builder.build(risk_block_item, risk_block) is None
 
 
-def test_condition_risk_and_discovery_only_prevent_plan_ready() -> None:
+def test_condition_risk_blocks_and_discovery_only_waits_for_recheck() -> None:
     settings = _settings()
     engine = EntryTimingEngine(settings=settings)
     builder = OrderPlanDraftBuilder(settings=settings)
@@ -207,10 +207,13 @@ def test_condition_risk_and_discovery_only_prevent_plan_ready() -> None:
     blocked_eval = engine.evaluate(blocked_candidate)
 
     assert risk_eval.status is OrderPlanStatus.BLOCKED_RISK
-    assert discovery_eval.status is OrderPlanStatus.NO_PLAN
+    assert discovery_eval.status is OrderPlanStatus.DATA_WAIT
     assert blocked_eval.status is OrderPlanStatus.NO_PLAN
     assert builder.build(risk_item, risk_eval) is None
-    assert builder.build(discovery_item, discovery_eval) is None
+    discovery_draft = builder.build(discovery_item, discovery_eval)
+    assert discovery_draft is not None
+    assert discovery_draft.status is OrderPlanStatus.DATA_WAIT
+    assert "DISCOVERY_PROMOTION_PENDING" in discovery_draft.reason_codes
     assert builder.build(blocked_candidate, blocked_eval) is None
 
 

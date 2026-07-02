@@ -575,6 +575,7 @@ def _condition_fusion_stage(
         for row in rows
         if set(str(role).upper() for role in row.get("active_roles", ())) == {"DISCOVERY"}
     ]
+    not_buy_signal_count = sum(1 for row in rows if _condition_fusion_not_buy_signal(row))
     top_priority_codes = [
         _condition_code_summary(row)
         for row in rows
@@ -605,6 +606,7 @@ def _condition_fusion_stage(
             "subscribed_count": subscribed_count,
             "top_priority_codes": top_priority_codes,
             "discovery_only_count": len(discovery_only_rows),
+            "not_buy_signal_count": not_buy_signal_count,
             "promoted_condition_source_count": promoted_source_count,
         },
         details={
@@ -615,7 +617,7 @@ def _condition_fusion_stage(
             "discovery_only_codes": [
                 _condition_code_summary(row) for row in discovery_only_rows
             ][:10],
-            "not_buy_signal": True,
+            "not_buy_signal": not_buy_signal_count > 0,
             "read_only": True,
         },
     )
@@ -928,6 +930,11 @@ def _condition_code_summary(row: Mapping[str, Any]) -> dict[str, Any]:
         "risk_blocked": bool(row.get("risk_blocked")),
         "reason_codes": list(row.get("reason_codes") or []),
     }
+
+
+def _condition_fusion_not_buy_signal(row: Mapping[str, Any]) -> bool:
+    metadata = row.get("metadata")
+    return bool(metadata.get("not_buy_signal")) if isinstance(metadata, Mapping) else False
 
 
 def _command_delta(before: Mapping[str, int], after: Mapping[str, int]) -> dict[str, int]:

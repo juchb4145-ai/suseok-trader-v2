@@ -694,14 +694,6 @@ def _candidate_rows_for_evaluation(
         clauses.append("c.state != ?")
         params.append(CandidateState.BLOCKED_OBSERVATION.value)
         clauses.append("(f.risk_blocked IS NULL OR f.risk_blocked = 0)")
-        clauses.append(
-            """
-            (
-                f.reason_codes_json IS NULL
-                OR f.reason_codes_json NOT LIKE '%DISCOVERY_OBSERVATION_ONLY%'
-            )
-            """
-        )
     params.append(limit)
     return connection.execute(
         f"""

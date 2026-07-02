@@ -23,6 +23,7 @@ from services.market_data_service import get_market_data_readiness
 CONDITION_SENSOR_REASON = "CONDITION_SENSOR_EVIDENCE"
 CONDITION_NOT_BUY_SIGNAL_REASON = "MARKET_SENSOR_NOT_BUY_SIGNAL"
 DISCOVERY_ONLY_REASON = "DISCOVERY_OBSERVATION_ONLY"
+DISCOVERY_PROMOTION_PENDING_REASON = "DISCOVERY_PROMOTION_PENDING"
 RISK_BLOCK_REASON = "RISK_BLOCKED_BY_CONDITION"
 FUSION_PRIORITY_REASON = "CONDITION_FUSION_PRIORITY_READY"
 
@@ -515,11 +516,12 @@ def _fuse_code_events(
         if event.role != ConditionRole.RISK_BLOCK.value
     )
     priority_score = positive_score * 10.0 + float(role_priority)
-    reasons = [CONDITION_SENSOR_REASON, CONDITION_NOT_BUY_SIGNAL_REASON]
+    reasons = [CONDITION_SENSOR_REASON]
     role_set = set(active_roles)
     discovery_only = role_set == {ConditionRole.DISCOVERY.value}
     if discovery_only:
         reasons.append(DISCOVERY_ONLY_REASON)
+        reasons.append(DISCOVERY_PROMOTION_PENDING_REASON)
         priority_score = min(priority_score, 25.0)
     if ConditionRole.LEADER.value in role_set and ConditionRole.PULLBACK.value in role_set:
         reasons.append("LEADER_PULLBACK_FUSION_PRIORITY")
@@ -529,16 +531,17 @@ def _fuse_code_events(
         priority_score += 500.0
     if risk_blocked:
         reasons.append(RISK_BLOCK_REASON)
+        reasons.append(CONDITION_NOT_BUY_SIGNAL_REASON)
         priority_score = 0.0
     if active_roles and not discovery_only and not risk_blocked:
         reasons.append(FUSION_PRIORITY_REASON)
     if not active_roles:
         reasons.append("CONDITION_FUSION_NO_ACTIVE_ROLE")
+        reasons.append(CONDITION_NOT_BUY_SIGNAL_REASON)
         priority_score = 0.0
 
-    candidate_promotion_allowed = bool(
-        active_roles and not discovery_only and not risk_blocked
-    )
+    not_buy_signal = bool(risk_blocked or not active_roles)
+    candidate_promotion_allowed = bool(active_roles and not risk_blocked)
     return {
         "code": validate_stock_code(code),
         "name": latest_event.name,
@@ -555,9 +558,10 @@ def _fuse_code_events(
         "updated_at": updated_at,
         "metadata": {
             "sensor_evidence": True,
-            "not_buy_signal": True,
+            "not_buy_signal": not_buy_signal,
             "candidate_promotion_allowed": candidate_promotion_allowed,
             "discovery_only": discovery_only,
+            "discovery_promotion_pending": discovery_only,
             "active_profiles": [event.to_payload() for event in active_events],
             "latest_event": latest_event.to_payload(),
         },
