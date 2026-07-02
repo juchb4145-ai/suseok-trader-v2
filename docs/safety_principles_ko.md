@@ -30,6 +30,14 @@
 
 코드에서는 `settings.trading_capabilities`를 단일 capability matrix로 읽는다.
 
+운영자는 먼저 `TRADING_PROFILE`을 고르고, 그 다음 profile 안에서 필요한 safety switch를
+켜야 한다. `TRADING_MODE`, `TRADING_ALLOW_LIVE_SIM`, `STRATEGY_ENGINE_OBSERVE_ONLY`,
+`RISK_GATE_OBSERVE_ONLY`는 compatibility/legacy flag로 남아 있으며 capability의 단일
+source of truth가 아니다. `TRADING_ALLOW_LIVE_REAL=false`는 deprecated가 아니라 안전 잠금이다.
+
+`settings.deprecated_flag_warnings`와 No-Buy Sentinel `system_summary.config`는 현재 env에
+legacy flag가 들어왔을 때 replacement와 의미를 함께 노출한다.
+
 도메인 모델의 `observe_only` 필드는 기본값이 `true`지만, 모델 생성자가 입력값을
 무조건 `true`로 덮어쓰지 않는다. 주문 가능성은 `MATCHED_OBSERVATION`,
 `OBSERVE_PASS`, `observe_only=false` 같은 단일 필드가 아니라 profile capability와

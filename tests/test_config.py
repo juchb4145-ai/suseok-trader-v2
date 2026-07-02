@@ -18,6 +18,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.trading_capabilities.live_sim_gateway_command_allowed is False
     assert settings.trading_capabilities.live_real_order_allowed is False
     assert settings.trading_capabilities.broker_order_path == "OBSERVE_ONLY"
+    assert settings.deprecated_flag_warnings == ()
     assert settings.ai_sidecar_enabled is False
     assert settings.ai_sidecar_intraday_allowed is False
     assert settings.ai_sidecar_order_context_allowed is False
@@ -270,6 +271,31 @@ def test_trading_profile_capability_matrix() -> None:
         "live_real_order_allowed": False,
         "broker_order_path": "LIVE_SIM_ONLY",
     }
+
+
+def test_deprecated_flag_warnings_point_to_trading_profile() -> None:
+    settings = load_settings(
+        {
+            "TRADING_PROFILE": "LIVE_SIM_PILOT",
+            "TRADING_MODE": "LIVE_SIM",
+            "TRADING_ALLOW_LIVE_SIM": "true",
+            "STRATEGY_ENGINE_OBSERVE_ONLY": "true",
+            "RISK_GATE_OBSERVE_ONLY": "true",
+        }
+    )
+    warnings = {item.flag: item for item in settings.deprecated_flag_warnings}
+
+    assert set(warnings) == {
+        "TRADING_MODE",
+        "TRADING_ALLOW_LIVE_SIM",
+        "STRATEGY_ENGINE_OBSERVE_ONLY",
+        "RISK_GATE_OBSERVE_ONLY",
+    }
+    assert warnings["TRADING_MODE"].replacement == "TRADING_PROFILE"
+    assert warnings["TRADING_ALLOW_LIVE_SIM"].status == "LEGACY_ENABLE_SWITCH"
+    assert settings.deprecated_flag_warning_dicts[0]["flag"] == "TRADING_MODE"
+    assert settings.trading_capabilities.live_sim_intent_allowed is True
+    assert settings.trading_capabilities.live_real_order_allowed is False
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:

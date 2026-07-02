@@ -49,6 +49,22 @@ class TradingCapabilities:
         }
 
 
+@dataclass(frozen=True)
+class DeprecatedFlagWarning:
+    flag: str
+    status: str
+    replacement: str
+    message: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "flag": self.flag,
+            "status": self.status,
+            "replacement": self.replacement,
+            "message": self.message,
+        }
+
+
 _TRADING_CAPABILITY_MATRIX = {
     TradingProfile.OBSERVE: TradingCapabilities(
         profile=TradingProfile.OBSERVE,
@@ -431,6 +447,7 @@ class Settings:
     dashboard_max_limit: int = 200
     dashboard_show_raw_json: bool = True
     dashboard_route_enabled: bool = True
+    deprecated_flag_warnings: tuple[DeprecatedFlagWarning, ...] = ()
 
     def __post_init__(self) -> None:
         if self.market_data_degraded_tick_stale_sec < self.market_data_tick_stale_sec:
@@ -1060,6 +1077,10 @@ class Settings:
     @property
     def trading_capabilities(self) -> TradingCapabilities:
         return _TRADING_CAPABILITY_MATRIX[self.trading_profile]
+
+    @property
+    def deprecated_flag_warning_dicts(self) -> tuple[dict[str, str], ...]:
+        return tuple(item.to_dict() for item in self.deprecated_flag_warnings)
 
     @property
     def ai_sidecar_enabled(self) -> bool:
@@ -2338,6 +2359,53 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         dashboard_show_raw_json=_parse_bool(env.get("DASHBOARD_SHOW_RAW_JSON", "true")),
         dashboard_route_enabled=_parse_bool(env.get("DASHBOARD_ROUTE_ENABLED", "true")),
+        deprecated_flag_warnings=_deprecated_flag_warnings(env),
+    )
+
+
+_DEPRECATED_FLAG_RULES: dict[str, DeprecatedFlagWarning] = {
+    "TRADING_MODE": DeprecatedFlagWarning(
+        flag="TRADING_MODE",
+        status="LEGACY_PROFILE_SELECTOR",
+        replacement="TRADING_PROFILE",
+        message=(
+            "TRADING_MODE is retained for compatibility; choose OBSERVE or "
+            "LIVE_SIM_PILOT through TRADING_PROFILE first."
+        ),
+    ),
+    "TRADING_ALLOW_LIVE_SIM": DeprecatedFlagWarning(
+        flag="TRADING_ALLOW_LIVE_SIM",
+        status="LEGACY_ENABLE_SWITCH",
+        replacement="TRADING_PROFILE=LIVE_SIM_PILOT plus LIVE_SIM safety flags",
+        message=(
+            "TRADING_ALLOW_LIVE_SIM is a legacy safety switch and no longer the "
+            "capability source of truth."
+        ),
+    ),
+    "STRATEGY_ENGINE_OBSERVE_ONLY": DeprecatedFlagWarning(
+        flag="STRATEGY_ENGINE_OBSERVE_ONLY",
+        status="LEGACY_OBSERVE_FLAG",
+        replacement="TRADING_PROFILE capabilities and admission_trace",
+        message=(
+            "Strategy observation remains read-only; order admission is decided "
+            "outside this flag."
+        ),
+    ),
+    "RISK_GATE_OBSERVE_ONLY": DeprecatedFlagWarning(
+        flag="RISK_GATE_OBSERVE_ONLY",
+        status="LEGACY_OBSERVE_FLAG",
+        replacement="TRADING_PROFILE capabilities and admission_trace",
+        message=(
+            "Risk observation remains read-only; OBSERVE_PASS is not an order "
+            "approval flag."
+        ),
+    ),
+}
+
+
+def _deprecated_flag_warnings(env: Mapping[str, str]) -> tuple[DeprecatedFlagWarning, ...]:
+    return tuple(
+        warning for flag, warning in _DEPRECATED_FLAG_RULES.items() if flag in env
     )
 
 

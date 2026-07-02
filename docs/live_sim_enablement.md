@@ -19,8 +19,14 @@
 
 ## Safety Gate
 
+`TRADING_PROFILE=LIVE_SIM_PILOT` is the profile-level capability selector for LIVE_SIM pilot
+work. The older `TRADING_MODE` and `TRADING_ALLOW_LIVE_SIM` flags are still read as
+compatibility/safety switches, but they are not the source of truth for capabilities. Keep
+`TRADING_ALLOW_LIVE_REAL=false`; that flag is a safety lock, not a deprecated toggle.
+
 `check_live_sim_safety_gate(connection, settings)`는 다음을 확인한다.
 
+- `TRADING_PROFILE=LIVE_SIM_PILOT`
 - `TRADING_MODE=LIVE_SIM` 또는 explicit LIVE_SIM enablement
 - `TRADING_ALLOW_LIVE_SIM=true`
 - `TRADING_ALLOW_LIVE_REAL=false`
@@ -89,6 +95,7 @@ $env:AI_CANDIDATE_SCORER_ATTACH_TO_LIVE_SIM_RUN = "false"
 
 ```powershell
 $env:TRADING_PROFILE = "LIVE_SIM_PILOT"
+# legacy compatibility/safety switches below; profile remains the capability source.
 $env:TRADING_MODE = "LIVE_SIM"
 $env:TRADING_ALLOW_LIVE_SIM = "true"
 $env:TRADING_ALLOW_LIVE_REAL = "false"

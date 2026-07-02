@@ -643,10 +643,12 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
     ]
     if settings.live_sim_allowed or settings.live_real_allowed:
         warnings.append(
-            "LIVE flag가 켜져 있어도 이 PR에는 주문 라우팅이 없어서 주문이 전송되지 않습니다."
+            "legacy LIVE flag가 켜져 있어도 capability source는 TRADING_PROFILE입니다."
         )
     return {
+        "trading_profile": settings.trading_profile.value,
         "trading_mode": settings.trading_mode.value,
+        "trading_capabilities": settings.trading_capabilities.to_dict(),
         "live_sim_allowed": settings.live_sim_allowed,
         "live_real_allowed": settings.live_real_allowed,
         "order_routing_enabled": False,
@@ -666,6 +668,8 @@ def build_safety_section(settings: Settings) -> dict[str, Any]:
         "openai_client_available": get_openai_client_status(settings)["available"],
         "order_context_allowed": settings.ai_sidecar_order_context_allowed,
         "observe_only_pipeline": True,
+        "deprecated_flag_warnings": list(settings.deprecated_flag_warning_dicts),
+        "deprecated_flag_warning_count": len(settings.deprecated_flag_warnings),
         "warnings": warnings,
     }
 

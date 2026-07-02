@@ -51,6 +51,11 @@ order plan, LIVE_SIM eligibility, intent, gateway command 순서로 `input_count
 `bypass_count`는 condition fusion 이외의 source에서 들어온 후보처럼 이전 단계보다 다음 단계
 관측 수가 많을 때 표시된다.
 
+`system_summary.config`는 `trading_capabilities`, `deprecated_flag_warnings`,
+`disabled_flags`를 함께 표시한다. `deprecated_flag_warnings`는 `TRADING_MODE` 같은 legacy
+flag가 env에 남아 있을 때 profile-first replacement를 알려주는 진단 정보이며, 그 자체로
+주문 차단 reason은 아니다.
+
 ## CLI
 
 ```powershell
