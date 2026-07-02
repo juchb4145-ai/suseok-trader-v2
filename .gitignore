@@ -20,6 +20,8 @@ build/
 dist/
 *.egg-info/
 
+reports/
+
 *.sqlite
 *.sqlite3
 *.sqlite3-shm
