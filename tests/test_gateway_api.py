@@ -22,12 +22,19 @@ def heartbeat_event(event_id: str = "evt_api_heartbeat") -> dict[str, object]:
 
 
 def test_gateway_event_api_accepts_duplicates_and_lists_recent(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
 
     with TestClient(app) as client:
-        first = client.post("/api/gateway/events", json=heartbeat_event())
-        duplicate = client.post("/api/gateway/events", json=heartbeat_event())
+        first = client.post(
+            "/api/gateway/events",
+            json=heartbeat_event(),
+            headers={"X-Local-Token": "test-token"},
+        )
+        duplicate = client.post(
+            "/api/gateway/events",
+            json=heartbeat_event(),
+            headers={"X-Local-Token": "test-token"},
+        )
         recent = client.get("/api/gateway/events/recent")
         gateway_status = client.get("/api/gateway/status")
 
@@ -45,7 +52,6 @@ def test_gateway_event_api_accepts_duplicates_and_lists_recent(tmp_path, monkeyp
 
 
 def test_gateway_commands_api_dispatches_queued_commands(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     db_path = tmp_path / "api.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
 
@@ -64,7 +70,10 @@ def test_gateway_commands_api_dispatches_queued_commands(tmp_path, monkeypatch) 
         finally:
             connection.close()
 
-        response = client.get("/api/gateway/commands")
+        response = client.get(
+            "/api/gateway/commands",
+            headers={"X-Local-Token": "test-token"},
+        )
         status_response = client.get("/api/gateway/commands/status")
 
     assert response.status_code == 200
@@ -103,7 +112,6 @@ def test_gateway_status_exposes_market_index_adapter_separate_from_projection_er
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api_index_status.sqlite3"))
 
     heartbeat = heartbeat_event("evt_index_adapter_heartbeat")
@@ -130,8 +138,16 @@ def test_gateway_status_exposes_market_index_adapter_separate_from_projection_er
     }
 
     with TestClient(app) as client:
-        heartbeat_response = client.post("/api/gateway/events", json=heartbeat)
-        projection_response = client.post("/api/gateway/events", json=invalid_index_event)
+        heartbeat_response = client.post(
+            "/api/gateway/events",
+            json=heartbeat,
+            headers={"X-Local-Token": "test-token"},
+        )
+        projection_response = client.post(
+            "/api/gateway/events",
+            json=invalid_index_event,
+            headers={"X-Local-Token": "test-token"},
+        )
         gateway_status = client.get("/api/gateway/status")
         market_index_status = client.get("/api/market-indexes/status")
 

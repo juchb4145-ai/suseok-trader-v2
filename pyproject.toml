@@ -17,6 +17,10 @@ src = ["api", "apps", "domain", "gateway", "infrastructure", "services", "storag
 [tool.ruff.lint]
 select = ["B", "E", "F", "I", "UP"]
 
-[tool.black]
-line-length = 100
-target-version = ["py311"]
+[tool.mypy]
+python_version = "3.11"
+files = ["api/dependencies/auth.py", "apps/core_api.py", "services/config.py"]
+ignore_missing_imports = true
+follow_imports = "silent"
+show_error_codes = true
+warn_unused_configs = true

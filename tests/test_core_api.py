@@ -1,4 +1,5 @@
-from apps.core_api import app
+import pytest
+from apps.core_api import app, create_app
 from domain.ai_sidecar.policy import get_allowed_tasks, get_forbidden_actions
 from fastapi.testclient import TestClient
 
@@ -11,6 +12,14 @@ def test_health_returns_ok(tmp_path, monkeypatch) -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_app_startup_rejects_missing_core_token(monkeypatch) -> None:
+    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
+
+    with pytest.raises(RuntimeError, match="TRADING_CORE_TOKEN"):
+        with TestClient(create_app()):
+            pass
 
 
 def test_status_returns_observe_and_default_live_flags(tmp_path, monkeypatch) -> None:

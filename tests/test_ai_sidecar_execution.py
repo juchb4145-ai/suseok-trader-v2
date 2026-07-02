@@ -240,14 +240,17 @@ def test_run_api_requires_token_when_configured_and_can_use_mock_client(
 
 def test_run_api_disabled_records_failure_without_model_call(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "ai-api-disabled.sqlite3"))
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("AI_SIDECAR_ENABLED", "false")
     monkeypatch.setenv("AI_SIDECAR_MODEL", "mock-model")
     mock = MockAISidecarModelClient(output=_valid_output())
     ai_sidecar_routes._MODEL_CLIENT_OVERRIDE = mock
     try:
         with TestClient(app) as client:
-            run = client.post("/api/ai-sidecar/run", json={"task_type": "NO_TRADE_RCA"})
+            run = client.post(
+                "/api/ai-sidecar/run",
+                json={"task_type": "NO_TRADE_RCA"},
+                headers={"X-Local-Token": "test-token"},
+            )
             requests = client.get("/api/ai-sidecar/requests")
     finally:
         ai_sidecar_routes._MODEL_CLIENT_OVERRIDE = None
@@ -264,13 +267,16 @@ def test_run_api_missing_api_key_records_failure_but_status_stays_available(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "ai-api-key.sqlite3"))
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("AI_SIDECAR_ENABLED", "true")
     monkeypatch.setenv("AI_SIDECAR_MODEL", "gpt-test")
 
     with TestClient(app) as client:
-        run = client.post("/api/ai-sidecar/run", json={"task_type": "NO_TRADE_RCA"})
+        run = client.post(
+            "/api/ai-sidecar/run",
+            json={"task_type": "NO_TRADE_RCA"},
+            headers={"X-Local-Token": "test-token"},
+        )
         health = client.get("/health")
         core_status = client.get("/api/status")
         execution_status = client.get("/api/ai-sidecar/execution/status")

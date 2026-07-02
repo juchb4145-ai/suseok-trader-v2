@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import timedelta, timezone, tzinfo
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -1008,7 +1009,21 @@ _FALSE_VALUES = {"0", "false", "f", "no", "n", "off", ""}
 
 
 def load_settings(environ: Mapping[str, str] | None = None) -> Settings:
-    env = os.environ if environ is None else environ
+    if environ is None:
+        return _load_default_settings()
+    return _build_settings(environ)
+
+
+def clear_settings_cache() -> None:
+    _load_default_settings.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _load_default_settings() -> Settings:
+    return _build_settings(os.environ)
+
+
+def _build_settings(env: Mapping[str, str]) -> Settings:
 
     return Settings(
         trading_profile=_parse_trading_profile(

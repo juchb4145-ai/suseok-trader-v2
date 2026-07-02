@@ -4,6 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from api.dependencies.auth import enforce_local_token_middleware, ensure_auth_token_configured
 from api.routes.ai_advisory import router as ai_advisory_router
 from api.routes.ai_codex import router as ai_codex_router
 from api.routes.ai_live_sim_review import router as ai_live_sim_review_router
@@ -38,6 +39,7 @@ STATIC_DIR = ROOT_DIR / "web" / "static"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    ensure_auth_token_configured()
     settings = load_settings()
     connection = initialize_database(settings.trading_db_path)
     connection.close()
@@ -50,6 +52,7 @@ def create_app() -> FastAPI:
         version="0.1.0",
         lifespan=lifespan,
     )
+    application.middleware("http")(enforce_local_token_middleware)
     application.include_router(health_router)
     application.include_router(ai_advisory_router)
     application.include_router(ai_sidecar_router)

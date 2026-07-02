@@ -212,6 +212,7 @@ def test_ai_context_api_endpoints_are_get_read_only_without_api_key(tmp_path, mo
         preview = client.get(
             "/api/ai-sidecar/context/preview",
             params={"task_type": "NO_TRADE_RCA", "trade_date": "2026-06-27", "persist": True},
+            headers={"X-Local-Token": "test-token"},
         )
         packets = client.get("/api/ai-sidecar/context/packets")
         detail = client.get(f"/api/ai-sidecar/context/packets/{preview.json()['context_id']}")

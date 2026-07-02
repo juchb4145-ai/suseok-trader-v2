@@ -10,10 +10,10 @@ from gateway.event_factory import (
 
 
 def test_market_data_api_reads_projection_after_gateway_posts(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
 
     with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
         tick_event = make_price_tick_event(price=70000, volume=1000)
         condition_event = make_condition_event(action="ENTER", price=70000)
         tr_event = make_tr_response_event(
@@ -23,10 +23,26 @@ def test_market_data_api_reads_projection_after_gateway_posts(tmp_path, monkeypa
             rows=[{"code": "A005930", "name": "삼성전자", "price": 70000}],
         )
 
-        tick_response = client.post("/api/gateway/events", json=tick_event.to_dict())
-        duplicate_response = client.post("/api/gateway/events", json=tick_event.to_dict())
-        condition_response = client.post("/api/gateway/events", json=condition_event.to_dict())
-        tr_response = client.post("/api/gateway/events", json=tr_event.to_dict())
+        tick_response = client.post(
+            "/api/gateway/events",
+            json=tick_event.to_dict(),
+            headers=headers,
+        )
+        duplicate_response = client.post(
+            "/api/gateway/events",
+            json=tick_event.to_dict(),
+            headers=headers,
+        )
+        condition_response = client.post(
+            "/api/gateway/events",
+            json=condition_event.to_dict(),
+            headers=headers,
+        )
+        tr_response = client.post(
+            "/api/gateway/events",
+            json=tr_event.to_dict(),
+            headers=headers,
+        )
 
         status = client.get("/api/market-data/status")
         latest = client.get("/api/market-data/ticks/latest")
@@ -81,7 +97,6 @@ def test_market_data_tick_endpoint_404s_for_missing_code(tmp_path, monkeypatch) 
 
 
 def test_invalid_price_tick_rejected_without_projection(tmp_path, monkeypatch) -> None:
-    monkeypatch.delenv("TRADING_CORE_TOKEN", raising=False)
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
 
     with TestClient(app) as client:
@@ -93,6 +108,7 @@ def test_invalid_price_tick_rejected_without_projection(tmp_path, monkeypatch) -
                 "source": "test-gateway",
                 "payload": {"code": "005930"},
             },
+            headers={"X-Local-Token": "test-token"},
         )
         status = client.get("/api/market-data/status")
 
