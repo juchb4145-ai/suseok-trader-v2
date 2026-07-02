@@ -89,6 +89,9 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.naver_theme_import_replace is False
     assert settings.naver_theme_import_min_member_count == 2
     assert settings.naver_theme_import_abort_on_empty is True
+    assert settings.condition_fusion_event_incremental_enabled is True
+    assert settings.condition_fusion_sweep_enabled is True
+    assert settings.condition_fusion_sweep_interval_sec == 60
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -315,6 +318,13 @@ def test_naver_theme_import_settings_are_validated() -> None:
 
 
 def test_candidate_settings_are_validated() -> None:
+    try:
+        load_settings({"CONDITION_FUSION_SWEEP_INTERVAL_SEC": "0"})
+    except ValueError as exc:
+        assert "CONDITION_FUSION_SWEEP_INTERVAL_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid condition fusion sweep interval")
+
     try:
         load_settings({"CANDIDATE_SOURCE_STALE_SEC": "0"})
     except ValueError as exc:

@@ -151,6 +151,9 @@ class Settings:
     theme_leadership_min_fresh_coverage_ratio: float = 0.4
     theme_leadership_condition_boost_enabled: bool = True
     theme_leadership_write_candidate_sources: bool = False
+    condition_fusion_event_incremental_enabled: bool = True
+    condition_fusion_sweep_enabled: bool = True
+    condition_fusion_sweep_interval_sec: int = 60
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -457,6 +460,8 @@ class Settings:
         )
         if self.realtime_subscription_exchange not in {"KRX", "NXT", "ALL"}:
             raise ValueError("REALTIME_SUBSCRIPTION_EXCHANGE must be one of KRX, NXT, ALL")
+        if self.condition_fusion_sweep_interval_sec < 1:
+            raise ValueError("CONDITION_FUSION_SWEEP_INTERVAL_SEC must be >= 1")
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -1461,6 +1466,17 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         theme_leadership_write_candidate_sources=_parse_bool(
             env.get("THEME_LEADERSHIP_WRITE_CANDIDATE_SOURCES", "false")
+        ),
+        condition_fusion_event_incremental_enabled=_parse_bool(
+            env.get("CONDITION_FUSION_EVENT_INCREMENTAL_ENABLED", "true")
+        ),
+        condition_fusion_sweep_enabled=_parse_bool(
+            env.get("CONDITION_FUSION_SWEEP_ENABLED", "true")
+        ),
+        condition_fusion_sweep_interval_sec=_parse_int(
+            env.get("CONDITION_FUSION_SWEEP_INTERVAL_SEC", "60"),
+            "CONDITION_FUSION_SWEEP_INTERVAL_SEC",
+            min_value=1,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),
