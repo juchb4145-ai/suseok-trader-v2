@@ -31,6 +31,15 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "--market-index-realtime-enabled" in script
     assert "--market-index-codes" in script
     assert "--no-market-index-tr-bootstrap-enabled" in script
+    assert "RunAll" in script
+    assert "RunGateway" in script
+    assert "RunThemeRefreshLoop" in script
+    assert "start_kiwoom_gateway_visible.ps1" in script
+    assert "start_theme_refresh_loop.ps1" in script
+    assert "Start-DetachedRuntimeProcess" in script
+    assert 'WindowStyle = "Hidden"' in script
+    assert '$env:MARKET_SCAN_ENABLED = "true"' in script
+    assert "One-shot launcher command:" in script
     assert 'queue_commands = "true"' not in script.lower()
 
 
