@@ -370,6 +370,8 @@ def _top_near_misses(
         planned_candidate_ids.add(candidate_id)
         planned_codes.add(code)
         eligibility = dict(eligibility_by_order_plan.get(order_plan_id, {}))
+        eligibility_evidence = _json_object(eligibility.get("evidence_json"))
+        admission_trace = _json_object(eligibility_evidence.get("admission_trace"))
         reason_codes = _as_reason_list(plan.get("reason_codes"))
         reason_codes.extend(_as_reason_list(eligibility.get("reason_codes")))
         ai_score = _ai_score_for(plan, ai_scores)
@@ -394,6 +396,7 @@ def _top_near_misses(
             "primary_block_stage": classification.stage.value,
             "primary_block_type": classification.block_type.value,
             "reason_codes": _dedupe(reason_codes or [str(plan.get("status") or "UNKNOWN")]),
+            "admission_trace": admission_trace,
             "operator_hint": classification.operator_hint,
             "not_buy_recommendation": True,
         }

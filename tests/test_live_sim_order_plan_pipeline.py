@@ -40,6 +40,9 @@ def test_order_plan_eligibility_and_intent_create_without_command(tmp_path) -> N
 
     assert eligibility.eligible is True
     assert eligibility.live_real_allowed is False
+    assert eligibility.evidence_json["admission_trace"]["policy"] == "live_sim_order_plan"
+    assert eligibility.evidence_json["admission_trace"]["reason_codes"] == []
+    assert "candidate_context" in eligibility.candidate_evidence
     assert intent.status is LiveSimIntentStatus.CREATED
     assert intent.order_type.value == "LIMIT"
     assert intent.side.value == "BUY"

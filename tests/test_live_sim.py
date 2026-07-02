@@ -148,6 +148,9 @@ def test_live_sim_pilot_can_create_dry_run_evidence_and_intent_same_profile(tmp_
 
     assert dry_run.status.value == "CREATED"
     assert eligibility.eligible is True
+    assert eligibility.evidence_json["admission_trace"]["policy"] == "live_sim_intent"
+    assert eligibility.evidence_json["admission_trace"]["reason_codes"] == []
+    assert eligibility.evidence_json["dry_run"]["dry_run_intent_id"] == dry_run.dry_run_intent_id
     assert LiveSimReasonCode.DRY_RUN_EVIDENCE_MISSING.value not in eligibility.reason_codes
     assert intent.status is LiveSimIntentStatus.CREATED
     assert command_count == 0

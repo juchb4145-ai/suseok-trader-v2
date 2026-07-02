@@ -35,6 +35,10 @@
 `OBSERVE_PASS`, `observe_only=false` 같은 단일 필드가 아니라 profile capability와
 admission 결과가 함께 결정한다.
 
+`admission_trace`는 candidate, strategy, risk, tick, dry-run evidence의 공통 판정 근거를
+남기는 진단 자료다. trace가 `eligible=true`여도 safety gate, order-plan 정책, 계좌/한도
+검사를 통과해야 하며, 단독 주문 승인으로 해석하지 않는다.
+
 ## 주문 관련 금지 원칙
 
 - `GatewayCommand`는 safety gate 없이는 생성 금지다.

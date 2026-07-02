@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -16,8 +16,6 @@ from domain.broker.utils import (
     utc_now,
     validate_stock_code,
 )
-from domain.candidate.state import CandidateState
-from domain.market.quality import tick_age_seconds
 from domain.oms.models import (
     DryRunEligibility,
     DryRunExecution,
@@ -28,9 +26,8 @@ from domain.oms.models import (
 from domain.oms.reasons import DryRunRejectionReason
 from domain.oms.sides import DryRunOrderType, DryRunSide
 from domain.oms.status import DryRunIntentStatus, DryRunOrderStatus
-from domain.risk.status import RiskObservationStatus
-from domain.strategy.status import StrategyObservationStatus
 
+from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, TradingMode, load_settings
 from services.oms.safety_gate import check_pr10_safety_gate
 
@@ -43,6 +40,37 @@ ACTIVE_ORDER_STATUSES = {
     DryRunOrderStatus.SIMULATED_PARTIALLY_FILLED.value,
 }
 ACTIVE_POSITION_STATUSES = {"OPEN"}
+
+DRY_RUN_ADMISSION_REASON_MAP = {
+    AdmissionReason.CANDIDATE_NOT_FOUND.value: DryRunRejectionReason.CANDIDATE_NOT_FOUND.value,
+    AdmissionReason.CANDIDATE_NOT_CONTEXT_READY.value: (
+        DryRunRejectionReason.CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.CANDIDATE_CONTEXT_MISSING.value: (
+        DryRunRejectionReason.CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.STRATEGY_OBSERVATION_MISSING.value: (
+        DryRunRejectionReason.STRATEGY_OBSERVATION_MISSING.value
+    ),
+    AdmissionReason.STRATEGY_NOT_MATCHED.value: DryRunRejectionReason.STRATEGY_NOT_MATCHED.value,
+    AdmissionReason.STRATEGY_OBSERVE_ONLY_MISMATCH.value: (
+        DryRunRejectionReason.STRATEGY_NOT_MATCHED.value
+    ),
+    AdmissionReason.RISK_OBSERVATION_MISSING.value: (
+        DryRunRejectionReason.RISK_OBSERVATION_MISSING.value
+    ),
+    AdmissionReason.RISK_NOT_OBSERVE_PASS.value: (
+        DryRunRejectionReason.RISK_NOT_OBSERVE_PASS.value
+    ),
+    AdmissionReason.RISK_OBSERVE_ONLY_MISMATCH.value: (
+        DryRunRejectionReason.RISK_NOT_OBSERVE_PASS.value
+    ),
+    AdmissionReason.LATEST_TICK_MISSING.value: DryRunRejectionReason.LATEST_TICK_MISSING.value,
+    AdmissionReason.LATEST_TICK_STALE.value: DryRunRejectionReason.LATEST_TICK_STALE.value,
+    AdmissionReason.DRY_RUN_EVIDENCE_MISSING.value: (
+        DryRunRejectionReason.STRATEGY_NOT_MATCHED.value
+    ),
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -89,11 +117,25 @@ def evaluate_dry_run_eligibility(
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
     safety_gate = check_pr10_safety_gate(connection, resolved_settings)
-    candidate = _candidate_row(connection, normalized_id)
-    strategy = _strategy_latest_row(connection, normalized_id)
-    risk = _risk_latest_row(connection, normalized_id)
+    admission = evaluate_trade_admission(
+        connection,
+        normalized_id,
+        AdmissionPolicy(
+            name="dry_run_shadow",
+            require_candidate_context_ready=(
+                resolved_settings.dry_run_require_candidate_context_ready
+            ),
+            require_strategy_matched=resolved_settings.dry_run_require_strategy_matched,
+            require_risk_observe_pass=resolved_settings.dry_run_require_risk_observe_pass,
+            require_fresh_tick=True,
+            stale_tick_sec=resolved_settings.dry_run_stale_tick_sec,
+        ),
+    )
 
-    reason_codes: list[str] = []
+    reason_codes: list[str] = _map_admission_reasons(
+        admission.reason_codes,
+        DRY_RUN_ADMISSION_REASON_MAP,
+    )
     evidence: dict[str, Any] = {
         "candidate_instance_id": normalized_id,
         "observe_only": True,
@@ -102,12 +144,7 @@ def evaluate_dry_run_eligibility(
         "gateway_command_allowed": False,
         "broker_order_sent": False,
     }
-    if candidate is not None:
-        evidence["candidate"] = _candidate_evidence(candidate)
-    if strategy is not None:
-        evidence["strategy"] = _strategy_evidence(strategy)
-    if risk is not None:
-        evidence["risk"] = _risk_evidence(risk)
+    evidence.update(admission.to_evidence())
 
     shadow_live_sim = _live_sim_pilot_shadow_dry_run_allowed(resolved_settings)
     safety_reason_codes = list(safety_gate.reason_codes)
@@ -143,46 +180,9 @@ def evaluate_dry_run_eligibility(
     if resolved_settings.dry_run_gateway_command_enabled:
         reason_codes.append(DryRunRejectionReason.GATEWAY_COMMAND_FORBIDDEN.value)
 
-    if candidate is None:
-        reason_codes.append(DryRunRejectionReason.CANDIDATE_NOT_FOUND.value)
-        trade_date = None
-        code = None
-        name = "UNKNOWN"
-    else:
-        trade_date = str(candidate["trade_date"])
-        code = validate_stock_code(candidate["code"])
-        name = str(candidate["name"])
-        if (
-            resolved_settings.dry_run_require_candidate_context_ready
-            and str(candidate["state"]).upper() != CandidateState.CONTEXT_READY.value
-        ):
-            reason_codes.append(DryRunRejectionReason.CANDIDATE_NOT_CONTEXT_READY.value)
-
-    if strategy is None:
-        reason_codes.append(DryRunRejectionReason.STRATEGY_OBSERVATION_MISSING.value)
-    elif (
-        resolved_settings.dry_run_require_strategy_matched
-        and str(strategy["overall_status"]).upper()
-        != StrategyObservationStatus.MATCHED_OBSERVATION.value
-    ):
-        reason_codes.append(DryRunRejectionReason.STRATEGY_NOT_MATCHED.value)
-
-    if risk is None:
-        reason_codes.append(DryRunRejectionReason.RISK_OBSERVATION_MISSING.value)
-    elif (
-        resolved_settings.dry_run_require_risk_observe_pass
-        and str(risk["overall_status"]).upper() != RiskObservationStatus.OBSERVE_PASS.value
-    ):
-        reason_codes.append(DryRunRejectionReason.RISK_NOT_OBSERVE_PASS.value)
-
-    tick = _latest_tick_row(connection, code) if code is not None else None
-    if tick is None:
-        reason_codes.append(DryRunRejectionReason.LATEST_TICK_MISSING.value)
-    else:
-        tick_age = tick_age_seconds(tick["event_ts"])
-        evidence["latest_tick"] = _tick_evidence(tick, tick_age)
-        if tick_age > resolved_settings.dry_run_stale_tick_sec:
-            reason_codes.append(DryRunRejectionReason.LATEST_TICK_STALE.value)
+    trade_date = admission.trade_date
+    code = admission.code
+    name = admission.name
 
     if code is not None and trade_date is not None:
         if _active_position_count_for_code(connection, trade_date, code) > 0:
@@ -200,9 +200,9 @@ def evaluate_dry_run_eligibility(
     if _active_position_count(connection) >= resolved_settings.dry_run_max_active_positions:
         reason_codes.append(DryRunRejectionReason.MAX_ACTIVE_POSITIONS_REACHED.value)
 
-    if tick is not None:
+    if admission.latest_tick_evidence:
         quantity, notional = _calculate_quantity_and_notional(
-            float(tick["price"]),
+            float(admission.latest_tick_evidence["price"]),
             resolved_settings,
         )
         evidence["sizing"] = {
@@ -240,10 +240,8 @@ def evaluate_dry_run_eligibility(
     eligibility = DryRunEligibility(
         eligible=not blocking_reasons,
         candidate_instance_id=normalized_id,
-        strategy_observation_id=(
-            None if strategy is None else str(strategy["strategy_observation_id"])
-        ),
-        risk_observation_id=None if risk is None else str(risk["risk_observation_id"]),
+        strategy_observation_id=admission.strategy_observation_id,
+        risk_observation_id=admission.risk_observation_id,
         status="ELIGIBLE" if not blocking_reasons else "INELIGIBLE",
         reason_codes=reason_codes,
         evidence_json=evidence
@@ -1758,6 +1756,13 @@ def _placeholders(values: set[str]) -> str:
 
 def _merge_reasons(reasons: list[str]) -> list[str]:
     return [*dict.fromkeys(str(reason).upper() for reason in reasons if str(reason).strip())]
+
+
+def _map_admission_reasons(
+    reasons: Sequence[str],
+    reason_map: Mapping[str, str],
+) -> list[str]:
+    return [reason_map.get(str(reason).upper(), str(reason).upper()) for reason in reasons]
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

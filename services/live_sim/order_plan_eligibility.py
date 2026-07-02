@@ -14,11 +14,9 @@ from domain.broker.utils import (
     utc_now,
     validate_stock_code,
 )
-from domain.candidate.state import CandidateState
 from domain.live_sim.reasons import LiveSimReasonCode
-from domain.risk.status import RiskObservationStatus
-from domain.strategy.status import StrategyObservationStatus
 
+from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, load_settings
 from services.entry_timing.models import EntryTimingState, OrderPlanStatus, SetupType
 from services.live_sim.live_sim_service import (
@@ -44,6 +42,41 @@ READY_ENTRY_TIMING_STATES = {
 }
 
 BLOCKED_ORDER_PLAN_REASON_TOKENS = ("BLOCKED", "CHASE", "OVERHEAT", "STALE")
+
+ORDER_PLAN_ADMISSION_REASON_MAP = {
+    AdmissionReason.CANDIDATE_NOT_FOUND.value: LiveSimReasonCode.CANDIDATE_NOT_FOUND.value,
+    AdmissionReason.CANDIDATE_NOT_CONTEXT_READY.value: (
+        LiveSimReasonCode.ORDER_PLAN_CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.CANDIDATE_CONTEXT_MISSING.value: (
+        LiveSimReasonCode.ORDER_PLAN_CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.STRATEGY_OBSERVATION_MISSING.value: (
+        LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value
+    ),
+    AdmissionReason.STRATEGY_NOT_MATCHED.value: (
+        LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value
+    ),
+    AdmissionReason.STRATEGY_OBSERVE_ONLY_MISMATCH.value: (
+        LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value
+    ),
+    AdmissionReason.RISK_OBSERVATION_MISSING.value: (
+        LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value
+    ),
+    AdmissionReason.RISK_NOT_OBSERVE_PASS.value: LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value,
+    AdmissionReason.RISK_OBSERVE_ONLY_MISMATCH.value: (
+        LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value
+    ),
+    AdmissionReason.LATEST_TICK_MISSING.value: (
+        LiveSimReasonCode.ORDER_PLAN_LATEST_TICK_MISSING.value
+    ),
+    AdmissionReason.LATEST_TICK_STALE.value: (
+        LiveSimReasonCode.ORDER_PLAN_LATEST_TICK_STALE.value
+    ),
+    AdmissionReason.DRY_RUN_EVIDENCE_MISSING.value: (
+        LiveSimReasonCode.ORDER_PLAN_DRY_RUN_EVIDENCE_MISSING.value
+    ),
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -185,67 +218,52 @@ def evaluate_live_sim_order_plan_eligibility(
     if _has_blocked_order_plan_reason(order_plan_reasons):
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_BLOCKED_REASON.value)
 
-    candidate = _candidate_row(connection, candidate_id)
-    candidate_context = _candidate_context_row(connection, candidate_id)
-    strategy = _strategy_latest_row(connection, candidate_id)
-    risk = _risk_latest_row(connection, candidate_id)
+    dry_run_evidence = _latest_dry_run_evidence(connection, candidate_id)
+    admission = evaluate_trade_admission(
+        connection,
+        candidate_id,
+        AdmissionPolicy(
+            name="live_sim_order_plan",
+            require_candidate_context_ready=(
+                resolved_settings.live_sim_order_plan_require_candidate_context_ready
+            ),
+            require_candidate_context_row=(
+                resolved_settings.live_sim_order_plan_require_candidate_context_ready
+            ),
+            require_strategy_matched=(
+                resolved_settings.live_sim_order_plan_require_strategy_matched
+            ),
+            require_risk_observe_pass=(
+                resolved_settings.live_sim_order_plan_require_risk_observe_pass
+            ),
+            require_fresh_tick=resolved_settings.live_sim_order_plan_require_fresh_tick,
+            stale_tick_sec=resolved_settings.live_sim_order_plan_stale_sec,
+            require_dry_run_evidence=(
+                resolved_settings.live_sim_order_plan_require_dry_run_evidence
+            ),
+            require_strategy_observe_only=True,
+            require_risk_observe_only=True,
+        ),
+        fallback_trade_date=str(order_plan["trade_date"]),
+        fallback_code=code,
+        fallback_name=name,
+        dry_run_evidence=dry_run_evidence,
+    )
+    reason_codes.extend(
+        _map_admission_reasons(
+            admission.reason_codes,
+            ORDER_PLAN_ADMISSION_REASON_MAP,
+        )
+    )
 
-    if candidate is None:
-        reason_codes.append(LiveSimReasonCode.CANDIDATE_NOT_FOUND.value)
-    elif (
-        resolved_settings.live_sim_order_plan_require_candidate_context_ready
-        and str(candidate["state"]).upper() != CandidateState.CONTEXT_READY.value
-    ):
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_CANDIDATE_NOT_CONTEXT_READY.value)
-    if (
-        resolved_settings.live_sim_order_plan_require_candidate_context_ready
-        and candidate_context is None
-    ):
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_CANDIDATE_NOT_CONTEXT_READY.value)
-
-    strategy_id = None
-    if strategy is None:
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value)
-    else:
-        strategy_id = str(strategy["strategy_observation_id"])
-        if (
-            resolved_settings.live_sim_order_plan_require_strategy_matched
-            and str(strategy["overall_status"]).upper()
-            != StrategyObservationStatus.MATCHED_OBSERVATION.value
-        ):
-            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value)
-        if not bool(strategy["observe_only"]):
-            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value)
-
-    risk_id = None
-    if risk is None:
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value)
-    else:
-        risk_id = str(risk["risk_observation_id"])
-        if (
-            resolved_settings.live_sim_order_plan_require_risk_observe_pass
-            and str(risk["overall_status"]).upper() != RiskObservationStatus.OBSERVE_PASS.value
-        ):
-            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value)
-        if not bool(risk["observe_only"]):
-            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_RISK_NOT_PASS.value)
-
-    tick = _latest_tick_row(connection, code)
-    latest_tick_evidence: dict[str, Any] = {}
+    strategy_id = admission.strategy_observation_id
+    risk_id = admission.risk_observation_id
+    latest_tick_evidence = dict(admission.latest_tick_evidence)
     latest_price = 0.0
-    if tick is None:
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_LATEST_TICK_MISSING.value)
-    else:
-        latest_price = _float(tick["price"])
-        tick_age = _age_seconds(tick["event_ts"])
-        latest_tick_evidence = _tick_evidence(tick, tick_age)
+    if latest_tick_evidence:
+        latest_price = _float(latest_tick_evidence.get("price"))
         if latest_price <= 0:
             reason_codes.append(LiveSimReasonCode.ORDER_PLAN_INVALID_PRICE.value)
-        if (
-            resolved_settings.live_sim_order_plan_require_fresh_tick
-            and tick_age > resolved_settings.live_sim_order_plan_stale_sec
-        ):
-            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_LATEST_TICK_STALE.value)
         draft_price = _float(order_plan["current_price"])
         if draft_price > 0:
             drift_pct = abs(latest_price - draft_price) / draft_price * 100
@@ -257,15 +275,11 @@ def evaluate_live_sim_order_plan_eligibility(
             1 + resolved_settings.live_sim_order_plan_max_price_drift_pct / 100
         ):
             reason_codes.append(LiveSimReasonCode.ORDER_PLAN_PRICE_DRIFT_EXCEEDED.value)
-        if _int(tick["spread_ticks"]) > resolved_settings.entry_timing_max_spread_ticks:
+        if (
+            _int(latest_tick_evidence.get("spread_ticks"))
+            > resolved_settings.entry_timing_max_spread_ticks
+        ):
             reason_codes.append(LiveSimReasonCode.ORDER_PLAN_BLOCKED_REASON.value)
-
-    dry_run_evidence = _latest_dry_run_evidence(connection, candidate_id)
-    if (
-        resolved_settings.live_sim_order_plan_require_dry_run_evidence
-        and not dry_run_evidence
-    ):
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_DRY_RUN_EVIDENCE_MISSING.value)
 
     existing_intent = find_live_sim_intent_by_order_plan(connection, normalized_id)
     if existing_intent is not None:
@@ -299,9 +313,12 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value)
 
     reason_codes = _merge_reasons(reason_codes)
-    candidate_evidence = _candidate_evidence(candidate, candidate_context)
-    strategy_evidence = _strategy_evidence(strategy)
-    risk_evidence = _risk_evidence(risk)
+    admission_evidence = admission.to_evidence()
+    candidate_evidence = dict(admission.candidate_evidence)
+    if admission.candidate_context_evidence:
+        candidate_evidence["candidate_context"] = dict(admission.candidate_context_evidence)
+    strategy_evidence = dict(admission.strategy_evidence)
+    risk_evidence = dict(admission.risk_evidence)
     evidence = {
         "order_plan_id": normalized_id,
         "trade_date": order_plan["trade_date"],
@@ -324,6 +341,7 @@ def evaluate_live_sim_order_plan_eligibility(
         "reason_categories": {
             reason: _reason_category(reason) for reason in reason_codes
         },
+        "admission_trace": admission_evidence["admission_trace"],
         "live_sim_only": True,
         "live_real_allowed": False,
         "broker_order_path": "LIVE_SIM_ONLY",
@@ -548,53 +566,6 @@ def _entry_timing_evaluation_row(
     ).fetchone()
 
 
-def _candidate_row(
-    connection: sqlite3.Connection,
-    candidate_instance_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM candidates WHERE candidate_instance_id = ?",
-        (candidate_instance_id,),
-    ).fetchone()
-
-
-def _candidate_context_row(
-    connection: sqlite3.Connection,
-    candidate_instance_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM candidate_context_latest WHERE candidate_instance_id = ?",
-        (candidate_instance_id,),
-    ).fetchone()
-
-
-def _strategy_latest_row(
-    connection: sqlite3.Connection,
-    candidate_instance_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM strategy_observations_latest WHERE candidate_instance_id = ?",
-        (candidate_instance_id,),
-    ).fetchone()
-
-
-def _risk_latest_row(
-    connection: sqlite3.Connection,
-    candidate_instance_id: str,
-) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM risk_observations_latest WHERE candidate_instance_id = ?",
-        (candidate_instance_id,),
-    ).fetchone()
-
-
-def _latest_tick_row(connection: sqlite3.Connection, code: str) -> sqlite3.Row | None:
-    return connection.execute(
-        "SELECT * FROM market_ticks_latest WHERE code = ?",
-        (validate_stock_code(code),),
-    ).fetchone()
-
-
 def _order_plan_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = _row_to_dict(row)
     item["observe_only"] = bool(item["observe_only"])
@@ -621,55 +592,6 @@ def _order_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return item
 
 
-def _candidate_evidence(
-    candidate: sqlite3.Row | None,
-    candidate_context: sqlite3.Row | None,
-) -> dict[str, Any]:
-    if candidate is None:
-        return {}
-    evidence = {
-        "candidate_instance_id": candidate["candidate_instance_id"],
-        "trade_date": candidate["trade_date"],
-        "code": candidate["code"],
-        "name": candidate["name"],
-        "state": candidate["state"],
-        "last_seen_at": candidate["last_seen_at"],
-    }
-    if candidate_context is not None:
-        evidence["candidate_context"] = {
-            "refreshed_at": candidate_context["refreshed_at"],
-            "readiness": _json_object(candidate_context["readiness_json"]),
-        }
-    return evidence
-
-
-def _strategy_evidence(strategy: sqlite3.Row | None) -> dict[str, Any]:
-    if strategy is None:
-        return {}
-    return {
-        "strategy_observation_id": strategy["strategy_observation_id"],
-        "overall_status": strategy["overall_status"],
-        "primary_setup_type": strategy["primary_setup_type"],
-        "score": strategy["score"],
-        "confidence": strategy["confidence"],
-        "evaluated_at": strategy["evaluated_at"],
-        "observe_only": bool(strategy["observe_only"]),
-    }
-
-
-def _risk_evidence(risk: sqlite3.Row | None) -> dict[str, Any]:
-    if risk is None:
-        return {}
-    return {
-        "risk_observation_id": risk["risk_observation_id"],
-        "strategy_observation_id": risk["strategy_observation_id"],
-        "overall_status": risk["overall_status"],
-        "reason_codes": _json_array(risk["reason_codes_json"]),
-        "evaluated_at": risk["evaluated_at"],
-        "observe_only": bool(risk["observe_only"]),
-    }
-
-
 def _evaluation_evidence(evaluation: sqlite3.Row) -> dict[str, Any]:
     return {
         "entry_timing_evaluation_id": evaluation["entry_timing_evaluation_id"],
@@ -681,20 +603,6 @@ def _evaluation_evidence(evaluation: sqlite3.Row) -> dict[str, Any]:
         "evidence_json": _json_object(evaluation["evidence_json"]),
         "observe_only": bool(evaluation["observe_only"]),
         "not_order_intent": bool(evaluation["not_order_intent"]),
-    }
-
-
-def _tick_evidence(row: sqlite3.Row, tick_age: float) -> dict[str, Any]:
-    return {
-        "code": row["code"],
-        "name": row["name"],
-        "price": row["price"],
-        "best_bid": row["best_bid"],
-        "best_ask": row["best_ask"],
-        "spread_ticks": row["spread_ticks"],
-        "event_ts": row["event_ts"],
-        "quality_status": row["quality_status"],
-        "tick_age_sec": tick_age,
     }
 
 
@@ -737,13 +645,6 @@ def _is_expired(value: object) -> bool:
         return parse_timestamp(value, "expires_at") <= utc_now()
     except ValueError:
         return True
-
-
-def _age_seconds(value: object) -> float:
-    try:
-        return max((utc_now() - parse_timestamp(value, "event_ts")).total_seconds(), 0.0)
-    except ValueError:
-        return float("inf")
 
 
 def _reason_category(reason: str) -> str:
@@ -806,6 +707,13 @@ def _json_array(value: object) -> list[str]:
 
 def _merge_reasons(reasons: list[str]) -> list[str]:
     return [*dict.fromkeys(str(reason).upper() for reason in reasons if str(reason).strip())]
+
+
+def _map_admission_reasons(
+    reasons: Sequence[str],
+    reason_map: Mapping[str, str],
+) -> list[str]:
+    return [reason_map.get(str(reason).upper(), str(reason).upper()) for reason in reasons]
 
 
 def _float(value: object) -> float:

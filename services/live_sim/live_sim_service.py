@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -21,7 +21,6 @@ from domain.broker.utils import (
     utc_now,
     validate_stock_code,
 )
-from domain.candidate.state import CandidateState
 from domain.live_sim.models import (
     LiveSimEligibility,
     LiveSimExecutionRecord,
@@ -37,10 +36,9 @@ from domain.live_sim.status import (
     LiveSimSide,
 )
 from domain.market.quality import tick_age_seconds
-from domain.risk.status import RiskObservationStatus
-from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import enqueue_command
 
+from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, load_settings
 from services.live_sim.safety_gate import check_live_sim_safety_gate, is_simulation_like
 
@@ -73,6 +71,35 @@ ACTIVE_LIVE_SIM_POSITION_STATUSES = {"OPEN", "CLOSING", "RECONCILE_MISMATCH"}
 ACTIVE_CANCEL_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
 ACTIVE_EXIT_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
 ACTIVE_EXIT_SIGNAL_STATUSES = {"SIGNALLED", "EXIT_INTENT_CREATED", "COMMAND_QUEUED"}
+
+LIVE_SIM_ADMISSION_REASON_MAP = {
+    AdmissionReason.CANDIDATE_NOT_FOUND.value: LiveSimReasonCode.CANDIDATE_NOT_FOUND.value,
+    AdmissionReason.CANDIDATE_NOT_CONTEXT_READY.value: (
+        LiveSimReasonCode.CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.CANDIDATE_CONTEXT_MISSING.value: (
+        LiveSimReasonCode.CANDIDATE_NOT_CONTEXT_READY.value
+    ),
+    AdmissionReason.STRATEGY_OBSERVATION_MISSING.value: (
+        LiveSimReasonCode.STRATEGY_OBSERVATION_MISSING.value
+    ),
+    AdmissionReason.STRATEGY_NOT_MATCHED.value: LiveSimReasonCode.STRATEGY_NOT_MATCHED.value,
+    AdmissionReason.STRATEGY_OBSERVE_ONLY_MISMATCH.value: (
+        LiveSimReasonCode.STRATEGY_NOT_MATCHED.value
+    ),
+    AdmissionReason.RISK_OBSERVATION_MISSING.value: (
+        LiveSimReasonCode.RISK_OBSERVATION_MISSING.value
+    ),
+    AdmissionReason.RISK_NOT_OBSERVE_PASS.value: LiveSimReasonCode.RISK_NOT_OBSERVE_PASS.value,
+    AdmissionReason.RISK_OBSERVE_ONLY_MISMATCH.value: (
+        LiveSimReasonCode.RISK_NOT_OBSERVE_PASS.value
+    ),
+    AdmissionReason.LATEST_TICK_MISSING.value: LiveSimReasonCode.LATEST_TICK_MISSING.value,
+    AdmissionReason.LATEST_TICK_STALE.value: LiveSimReasonCode.LATEST_TICK_STALE.value,
+    AdmissionReason.DRY_RUN_EVIDENCE_MISSING.value: (
+        LiveSimReasonCode.DRY_RUN_EVIDENCE_MISSING.value
+    ),
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -151,11 +178,30 @@ def evaluate_live_sim_eligibility(
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
     safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
-    candidate = _candidate_row(connection, normalized_id)
-    strategy = _strategy_latest_row(connection, normalized_id)
-    risk = _risk_latest_row(connection, normalized_id)
+    dry_run_evidence = _latest_dry_run_evidence(connection, normalized_id)
+    admission = evaluate_trade_admission(
+        connection,
+        normalized_id,
+        AdmissionPolicy(
+            name="live_sim_intent",
+            require_candidate_context_ready=(
+                resolved_settings.live_sim_require_candidate_context_ready
+            ),
+            require_strategy_matched=resolved_settings.live_sim_require_strategy_matched,
+            require_risk_observe_pass=resolved_settings.live_sim_require_risk_observe_pass,
+            require_fresh_tick=resolved_settings.live_sim_require_fresh_tick,
+            stale_tick_sec=resolved_settings.live_sim_stale_tick_sec,
+            require_dry_run_evidence=(
+                resolved_settings.live_sim_require_dry_run_evidence
+            ),
+        ),
+        dry_run_evidence=dry_run_evidence,
+    )
 
-    reason_codes: list[str] = []
+    reason_codes: list[str] = _map_admission_reasons(
+        admission.reason_codes,
+        LIVE_SIM_ADMISSION_REASON_MAP,
+    )
     evidence: dict[str, Any] = {
         "candidate_instance_id": normalized_id,
         "live_sim_only": True,
@@ -164,65 +210,15 @@ def evaluate_live_sim_eligibility(
         "real_order_allowed": False,
         "ai_artifacts_used": False,
     }
+    evidence.update(admission.to_evidence())
     if not safety_gate.passed:
         reason_codes.extend(safety_gate.reason_codes)
-    if candidate is not None:
-        evidence["candidate"] = _candidate_evidence(candidate)
-    if strategy is not None:
-        evidence["strategy"] = _strategy_evidence(strategy)
-    if risk is not None:
-        evidence["risk"] = _risk_evidence(risk)
-
-    if candidate is None:
-        reason_codes.append(LiveSimReasonCode.CANDIDATE_NOT_FOUND.value)
-        trade_date = None
-        code = None
-        name = "UNKNOWN"
-    else:
-        trade_date = str(candidate["trade_date"])
-        code = validate_stock_code(candidate["code"])
-        name = str(candidate["name"])
-        if (
-            resolved_settings.live_sim_require_candidate_context_ready
-            and str(candidate["state"]).upper() != CandidateState.CONTEXT_READY.value
-        ):
-            reason_codes.append(LiveSimReasonCode.CANDIDATE_NOT_CONTEXT_READY.value)
-
-    if strategy is None:
-        reason_codes.append(LiveSimReasonCode.STRATEGY_OBSERVATION_MISSING.value)
-    elif (
-        resolved_settings.live_sim_require_strategy_matched
-        and str(strategy["overall_status"]).upper()
-        != StrategyObservationStatus.MATCHED_OBSERVATION.value
-    ):
-        reason_codes.append(LiveSimReasonCode.STRATEGY_NOT_MATCHED.value)
-
-    if risk is None:
-        reason_codes.append(LiveSimReasonCode.RISK_OBSERVATION_MISSING.value)
-    elif (
-        resolved_settings.live_sim_require_risk_observe_pass
-        and str(risk["overall_status"]).upper() != RiskObservationStatus.OBSERVE_PASS.value
-    ):
-        reason_codes.append(LiveSimReasonCode.RISK_NOT_OBSERVE_PASS.value)
-
-    tick = _latest_tick_row(connection, code) if code is not None else None
+    trade_date = admission.trade_date
+    code = admission.code
+    name = admission.name
     price = 0.0
-    if tick is None:
-        reason_codes.append(LiveSimReasonCode.LATEST_TICK_MISSING.value)
-    else:
-        tick_age = tick_age_seconds(tick["event_ts"])
-        price = float(tick["price"])
-        evidence["latest_tick"] = _tick_evidence(tick, tick_age)
-        if resolved_settings.live_sim_require_fresh_tick and (
-            tick_age > resolved_settings.live_sim_stale_tick_sec
-        ):
-            reason_codes.append(LiveSimReasonCode.LATEST_TICK_STALE.value)
-
-    dry_run_evidence = _latest_dry_run_evidence(connection, normalized_id)
-    if dry_run_evidence:
-        evidence["dry_run"] = dry_run_evidence
-    elif resolved_settings.live_sim_require_dry_run_evidence:
-        reason_codes.append(LiveSimReasonCode.DRY_RUN_EVIDENCE_MISSING.value)
+    if admission.latest_tick_evidence:
+        price = float(admission.latest_tick_evidence["price"])
 
     side = LiveSimSide.BUY
     order_type = LiveSimOrderType(resolved_settings.live_sim_default_order_type)
@@ -284,10 +280,8 @@ def evaluate_live_sim_eligibility(
     eligibility = LiveSimEligibility(
         eligible=not reason_codes,
         candidate_instance_id=normalized_id,
-        strategy_observation_id=(
-            None if strategy is None else str(strategy["strategy_observation_id"])
-        ),
-        risk_observation_id=None if risk is None else str(risk["risk_observation_id"]),
+        strategy_observation_id=admission.strategy_observation_id,
+        risk_observation_id=admission.risk_observation_id,
         status="ELIGIBLE" if not reason_codes else "INELIGIBLE",
         reason_codes=reason_codes,
         evidence_json=evidence
@@ -4376,6 +4370,13 @@ def _placeholders(values: set[str]) -> str:
 
 def _merge_reasons(reasons: list[str]) -> list[str]:
     return [*dict.fromkeys(str(reason).upper() for reason in reasons if str(reason).strip())]
+
+
+def _map_admission_reasons(
+    reasons: Sequence[str],
+    reason_map: Mapping[str, str],
+) -> list[str]:
+    return [reason_map.get(str(reason).upper(), str(reason).upper()) for reason in reasons]
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
