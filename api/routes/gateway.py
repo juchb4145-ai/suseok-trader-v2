@@ -17,6 +17,7 @@ from services.market_reference_service import (
     MARKET_SYMBOL_EVENT_TYPES,
     process_market_symbols_event,
 )
+from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
 from services.market_regime_service import (
     rebuild_market_regime_snapshot,
     should_rebuild_market_regime_snapshot,
@@ -97,6 +98,10 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         projection_statuses["market_regime"] = regime["regime_status"]
                     else:
                         projection_statuses["market_regime"] = "SKIPPED_RECENT"
+            if event_type in SCAN_EVENT_TYPES:
+                scan_result = process_market_scan_event(connection, event, settings=settings)
+                if scan_result.status != "IGNORED":
+                    projection_statuses["market_scan"] = scan_result.status
         if result.status == "ACCEPTED" and not result.duplicate:
             handle_live_sim_gateway_event(connection, event, settings=settings)
     finally:
