@@ -868,6 +868,7 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
             ai_selected_count INTEGER NOT NULL DEFAULT 0,
             primary_reason TEXT,
             stage_summary_json TEXT NOT NULL DEFAULT '{}',
+            stage_funnel_json TEXT NOT NULL DEFAULT '{}',
             reason_summary_json TEXT NOT NULL DEFAULT '{}',
             top_near_miss_json TEXT NOT NULL DEFAULT '[]',
             operator_checklist_json TEXT NOT NULL DEFAULT '[]',
@@ -882,6 +883,7 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         "no_buy_sentinel_snapshots",
         {
             "command_count": "INTEGER NOT NULL DEFAULT 0",
+            "stage_funnel_json": "TEXT NOT NULL DEFAULT '{}'",
             "read_only": "INTEGER NOT NULL DEFAULT 1",
             "no_order_side_effects": "INTEGER NOT NULL DEFAULT 1",
         },

@@ -47,9 +47,22 @@ def main() -> int:
         f"eligible={snapshot['buy_eligible_count']} "
         f"AI_SELECTED={snapshot['ai_selected_count']}"
     )
+    funnel_line = _funnel_line(snapshot)
+    if funnel_line:
+        print(f"funnel: {funnel_line}")
     for item in snapshot["operator_checklist"]:
         print(f"- {item}")
     return 0
+
+
+def _funnel_line(snapshot: dict) -> str:
+    stages = (snapshot.get("stage_funnel") or {}).get("stages") or []
+    if not stages:
+        return ""
+    return " -> ".join(
+        f"{stage.get('stage')}={stage.get('survived_count', 0)}"
+        for stage in stages
+    )
 
 
 if __name__ == "__main__":

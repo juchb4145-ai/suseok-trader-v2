@@ -50,6 +50,7 @@ SYSTEM_BLOCK_STATUSES = {
     NoBuyStatus.GATEWAY_UNAVAILABLE,
     NoBuyStatus.MIXED_BLOCKS,
 }
+FUNNEL_SAMPLE_LIMIT = 5
 
 
 def build_no_buy_sentinel_snapshot(
@@ -98,10 +99,18 @@ def build_no_buy_sentinel_snapshot(
         trade_date=resolved_trade_date,
         limit=500,
     )
+    condition_fusions = _list_condition_fusions(connection, resolved_trade_date)
+    strategy_observations = _list_strategy_latest(connection, resolved_trade_date)
+    risk_observations = _list_risk_latest(connection, resolved_trade_date)
 
     intent_count = _count_live_sim_intents(connection, resolved_trade_date)
     order_count = _count_live_sim_orders(connection, resolved_trade_date)
     command_count = _count_live_sim_commands(
+        connection,
+        lookback_minutes=resolved_settings.no_buy_sentinel_lookback_minutes,
+    )
+    live_sim_intents = _list_live_sim_intents(connection, resolved_trade_date)
+    gateway_commands = _list_live_sim_commands(
         connection,
         lookback_minutes=resolved_settings.no_buy_sentinel_lookback_minutes,
     )
@@ -187,6 +196,18 @@ def build_no_buy_sentinel_snapshot(
         data_wait_count=data_wait_count,
         buy_eligible_count=buy_eligible_count,
     )
+    stage_funnel = _stage_funnel(
+        condition_fusions=condition_fusions,
+        candidates=candidates,
+        strategy_observations=strategy_observations,
+        risk_observations=risk_observations,
+        order_plans=order_plans,
+        eligibility_by_order_plan=eligibility_by_order_plan,
+        live_sim_intents=live_sim_intents,
+        gateway_commands=gateway_commands,
+        intent_count=_int(intent_count),
+        command_count=_int(command_count),
+    )
     reason_summary = aggregate_reason_summary(all_reason_codes)
     status = _resolve_status(
         intent_count=_int(intent_count),
@@ -242,6 +263,7 @@ def build_no_buy_sentinel_snapshot(
         ai_selected_count=int(ai_summary.get("selected_count", 0)),
         top_near_miss=top_near_miss,
         stage_summary=stage_summary,
+        stage_funnel=stage_funnel,
         reason_summary=reason_summary,
         ai_summary=ai_summary,
         system_summary=system_summary,
@@ -588,6 +610,373 @@ def _stage_summary(
     }
 
 
+def _stage_funnel(
+    *,
+    condition_fusions: Sequence[Mapping[str, Any]],
+    candidates: Sequence[Mapping[str, Any]],
+    strategy_observations: Sequence[Mapping[str, Any]],
+    risk_observations: Sequence[Mapping[str, Any]],
+    order_plans: Sequence[Mapping[str, Any]],
+    eligibility_by_order_plan: Mapping[str, Mapping[str, Any]],
+    live_sim_intents: Sequence[Mapping[str, Any]],
+    gateway_commands: Sequence[Mapping[str, Any]],
+    intent_count: int,
+    command_count: int,
+) -> dict[str, Any]:
+    condition_hits = [
+        row for row in condition_fusions if _int(row.get("hit_count")) > 0
+    ]
+    fusion_promoted = [row for row in condition_hits if _fusion_promoted(row)]
+    context_ready = [
+        row for row in candidates if str(row.get("state") or "").upper() == "CONTEXT_READY"
+    ]
+    strategy_matched = [
+        row
+        for row in strategy_observations
+        if str(row.get("overall_status") or "").upper() == "MATCHED_OBSERVATION"
+    ]
+    risk_pass = [
+        row
+        for row in risk_observations
+        if str(row.get("overall_status") or "").upper() == "OBSERVE_PASS"
+    ]
+    plan_ready = [
+        row for row in order_plans if str(row.get("status") or "").upper() == "PLAN_READY"
+    ]
+    eligible_plan_ids = {
+        str(plan_id)
+        for plan_id, eligibility in eligibility_by_order_plan.items()
+        if bool(eligibility.get("eligible"))
+    }
+    live_sim_eligible = [
+        row for row in order_plans if str(row.get("order_plan_id") or "") in eligible_plan_ids
+    ]
+
+    candidate_roles = _candidate_role_lookup(candidates, order_plans)
+    stages = [
+        _funnel_stage(
+            stage="condition_hit",
+            label="Condition hit",
+            input_count=len(condition_hits),
+            survived_count=len(condition_hits),
+            survivors=condition_hits,
+            role_counts=_role_counts(condition_hits, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="fusion_promoted",
+            label="Fusion promoted",
+            input_count=len(condition_hits),
+            survived_count=len(fusion_promoted),
+            survivors=fusion_promoted,
+            drop_reason_counts=_drop_reason_counts(
+                [row for row in condition_hits if row not in fusion_promoted],
+                default_reason="FUSION_NOT_PROMOTED",
+            ),
+            role_counts=_role_counts(fusion_promoted, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="candidate_context_ready",
+            label="Candidate CONTEXT_READY",
+            input_count=len(fusion_promoted),
+            survived_count=len(context_ready),
+            survivors=context_ready,
+            drop_reason_counts=_drop_reason_counts(
+                [row for row in candidates if row not in context_ready],
+                default_reason="CANDIDATE_NOT_CONTEXT_READY",
+            ),
+            role_counts=_role_counts(context_ready, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="strategy_matched",
+            label="Strategy MATCHED_OBSERVATION",
+            input_count=len(context_ready),
+            survived_count=len(strategy_matched),
+            survivors=strategy_matched,
+            drop_reason_counts=_drop_reason_counts(
+                [row for row in strategy_observations if row not in strategy_matched],
+                default_reason="STRATEGY_NOT_MATCHED",
+            ),
+            role_counts=_role_counts(strategy_matched, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="risk_pass",
+            label="Risk OBSERVE_PASS",
+            input_count=len(strategy_matched),
+            survived_count=len(risk_pass),
+            survivors=risk_pass,
+            drop_reason_counts=_drop_reason_counts(
+                [row for row in risk_observations if row not in risk_pass],
+                default_reason="RISK_NOT_OBSERVE_PASS",
+            ),
+            role_counts=_role_counts(risk_pass, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="order_plan_ready",
+            label="OrderPlan PLAN_READY",
+            input_count=len(risk_pass),
+            survived_count=len(plan_ready),
+            survivors=plan_ready,
+            drop_reason_counts=_drop_reason_counts(
+                [row for row in order_plans if row not in plan_ready],
+                default_reason="ORDER_PLAN_NOT_READY",
+            ),
+            role_counts=_role_counts(plan_ready, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="live_sim_eligible",
+            label="LIVE_SIM eligible",
+            input_count=len(plan_ready),
+            survived_count=len(live_sim_eligible),
+            survivors=live_sim_eligible,
+            drop_reason_counts=_drop_reason_counts(
+                [
+                    eligibility
+                    for eligibility in eligibility_by_order_plan.values()
+                    if not bool(eligibility.get("eligible"))
+                ],
+                default_reason="LIVE_SIM_NOT_ELIGIBLE",
+            ),
+            role_counts=_role_counts(live_sim_eligible, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="live_sim_intent_created",
+            label="LIVE_SIM intent",
+            input_count=len(live_sim_eligible),
+            survived_count=intent_count,
+            survivors=live_sim_intents,
+            drop_reason_counts=(
+                {"LIVE_SIM_INTENT_NOT_CREATED": len(live_sim_eligible) - intent_count}
+                if len(live_sim_eligible) > intent_count
+                else {}
+            ),
+            role_counts=_role_counts(live_sim_intents, candidate_roles),
+        ),
+        _funnel_stage(
+            stage="gateway_command_queued",
+            label="Gateway command queued",
+            input_count=intent_count,
+            survived_count=command_count,
+            survivors=gateway_commands,
+            drop_reason_counts=(
+                {"GATEWAY_COMMAND_NOT_QUEUED": intent_count - command_count}
+                if intent_count > command_count
+                else {}
+            ),
+            role_counts=_role_counts(gateway_commands, candidate_roles),
+        ),
+    ]
+    return {
+        "version": 1,
+        "stages": stages,
+        "bottleneck": _funnel_bottleneck(stages),
+        "role_summary": _funnel_role_summary(
+            condition_hits=condition_hits,
+            fusion_promoted=fusion_promoted,
+            context_ready=context_ready,
+            strategy_matched=strategy_matched,
+            risk_pass=risk_pass,
+            plan_ready=plan_ready,
+            live_sim_eligible=live_sim_eligible,
+            live_sim_intents=live_sim_intents,
+            gateway_commands=gateway_commands,
+            candidate_roles=candidate_roles,
+        ),
+        "notes": [
+            "bypass_count는 condition fusion 이외의 source에서 들어온 후보 때문에 "
+            "이전 단계보다 생존 수가 많을 때 표시됩니다.",
+            "gateway_command_queued는 trade_date가 아니라 No-Buy Sentinel "
+            "lookback window 기준입니다.",
+        ],
+    }
+
+
+def _funnel_stage(
+    *,
+    stage: str,
+    label: str,
+    input_count: int,
+    survived_count: int,
+    survivors: Sequence[Mapping[str, Any]],
+    drop_reason_counts: Mapping[str, int] | None = None,
+    role_counts: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    normalized_input = max(int(input_count), 0)
+    normalized_survived = max(int(survived_count), 0)
+    drop_count = max(normalized_input - normalized_survived, 0)
+    bypass_count = max(normalized_survived - normalized_input, 0)
+    return {
+        "stage": stage,
+        "label": label,
+        "input_count": normalized_input,
+        "survived_count": normalized_survived,
+        "drop_count": drop_count,
+        "bypass_count": bypass_count,
+        "survival_rate": _ratio(normalized_survived, normalized_input),
+        "drop_rate": _ratio(drop_count, normalized_input),
+        "drop_reasons": (
+            _top_counts(drop_reason_counts or {}) if drop_count > 0 else {}
+        ),
+        "sample_candidate_ids": _sample_values(survivors, "candidate_instance_id"),
+        "sample_codes": _sample_values(survivors, "code"),
+        "role_counts": dict(role_counts or {}),
+    }
+
+
+def _funnel_bottleneck(stages: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None:
+    dropped = [stage for stage in stages if _int(stage.get("drop_count")) > 0]
+    if not dropped:
+        return None
+    bottleneck = max(
+        dropped,
+        key=lambda item: (_int(item.get("drop_count")), _int(item.get("input_count"))),
+    )
+    return {
+        "stage": bottleneck.get("stage"),
+        "label": bottleneck.get("label"),
+        "drop_count": bottleneck.get("drop_count"),
+        "drop_rate": bottleneck.get("drop_rate"),
+        "drop_reasons": bottleneck.get("drop_reasons", {}),
+    }
+
+
+def _funnel_role_summary(
+    *,
+    condition_hits: Sequence[Mapping[str, Any]],
+    fusion_promoted: Sequence[Mapping[str, Any]],
+    context_ready: Sequence[Mapping[str, Any]],
+    strategy_matched: Sequence[Mapping[str, Any]],
+    risk_pass: Sequence[Mapping[str, Any]],
+    plan_ready: Sequence[Mapping[str, Any]],
+    live_sim_eligible: Sequence[Mapping[str, Any]],
+    live_sim_intents: Sequence[Mapping[str, Any]],
+    gateway_commands: Sequence[Mapping[str, Any]],
+    candidate_roles: Mapping[str, str],
+) -> dict[str, dict[str, int]]:
+    summary: dict[str, dict[str, int]] = {}
+    for stage_name, rows in (
+        ("condition_hit", condition_hits),
+        ("fusion_promoted", fusion_promoted),
+        ("candidate_context_ready", context_ready),
+        ("strategy_matched", strategy_matched),
+        ("risk_pass", risk_pass),
+        ("order_plan_ready", plan_ready),
+        ("live_sim_eligible", live_sim_eligible),
+        ("live_sim_intent_created", live_sim_intents),
+        ("gateway_command_queued", gateway_commands),
+    ):
+        for role, count in _role_counts(rows, candidate_roles).items():
+            summary.setdefault(role, {})[stage_name] = count
+    return summary
+
+
+def _fusion_promoted(row: Mapping[str, Any]) -> bool:
+    metadata = _json_object(row.get("metadata"))
+    if "candidate_promotion_allowed" in metadata:
+        return bool(metadata.get("candidate_promotion_allowed"))
+    active_roles = {str(role).upper() for role in _json_array(row.get("active_roles"))}
+    return bool(active_roles) and active_roles != {"DISCOVERY"} and not bool(
+        row.get("risk_blocked")
+    )
+
+
+def _candidate_role_lookup(
+    candidates: Sequence[Mapping[str, Any]],
+    order_plans: Sequence[Mapping[str, Any]],
+) -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for item in candidates:
+        candidate_id = str(item.get("candidate_instance_id") or "")
+        role = _first_role(item)
+        if candidate_id and role:
+            lookup[candidate_id] = role
+    for item in order_plans:
+        candidate_id = str(item.get("candidate_instance_id") or "")
+        role = _first_role(item)
+        if candidate_id and role:
+            lookup.setdefault(candidate_id, role)
+    return lookup
+
+
+def _role_counts(
+    rows: Sequence[Mapping[str, Any]],
+    candidate_roles: Mapping[str, str],
+) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        roles = _roles_for_row(row, candidate_roles)
+        for role in roles or ["UNKNOWN"]:
+            counter[role] += 1
+    return dict(counter)
+
+
+def _roles_for_row(
+    row: Mapping[str, Any],
+    candidate_roles: Mapping[str, str],
+) -> list[str]:
+    active_roles = _json_array(row.get("active_roles"))
+    if active_roles:
+        return _dedupe([str(role) for role in active_roles])
+    role = _first_role(row)
+    if role:
+        return [role]
+    candidate_id = str(row.get("candidate_instance_id") or "")
+    if candidate_id and candidate_id in candidate_roles:
+        return [candidate_roles[candidate_id]]
+    return []
+
+
+def _first_role(row: Mapping[str, Any]) -> str | None:
+    for key in ("stock_role", "theme_role", "role"):
+        value = str(row.get(key) or "").strip().upper()
+        if value:
+            return value
+    return None
+
+
+def _drop_reason_counts(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    default_reason: str,
+) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        status_reason = (
+            row.get("overall_status")
+            or row.get("status")
+            or row.get("state")
+        )
+        reasons = _as_reason_list(row.get("reason_codes"))
+        if status_reason:
+            reasons = [str(status_reason).upper(), *reasons]
+        if not reasons:
+            reasons = [default_reason.upper()]
+        for reason in reasons:
+            counter[reason] += 1
+    return _top_counts(counter)
+
+
+def _top_counts(counts: Mapping[str, int], *, limit: int = 8) -> dict[str, int]:
+    counter = Counter({str(key): int(value) for key, value in counts.items() if int(value) > 0})
+    return dict(counter.most_common(limit))
+
+
+def _sample_values(rows: Sequence[Mapping[str, Any]], key: str) -> list[str]:
+    values: list[str] = []
+    for row in rows:
+        value = str(row.get(key) or "").strip()
+        if value and value not in values:
+            values.append(value)
+        if len(values) >= FUNNEL_SAMPLE_LIMIT:
+            break
+    return values
+
+
+def _ratio(numerator: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return round(max(float(numerator), 0.0) / float(denominator), 4)
+
+
 def _ai_summary(
     connection: sqlite3.Connection,
     settings: Settings,
@@ -832,12 +1221,13 @@ def _save_snapshot(connection: sqlite3.Connection, snapshot: NoBuySentinelSnapsh
                 ai_selected_count,
                 primary_reason,
                 stage_summary_json,
+                stage_funnel_json,
                 reason_summary_json,
                 top_near_miss_json,
                 operator_checklist_json,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload["snapshot_id"],
@@ -851,6 +1241,7 @@ def _save_snapshot(connection: sqlite3.Connection, snapshot: NoBuySentinelSnapsh
                 payload["ai_selected_count"],
                 _primary_reason(payload),
                 _json_dumps(payload["stage_summary"]),
+                _json_dumps(payload["stage_funnel"]),
                 _json_dumps(payload["reason_summary"]),
                 _json_dumps(payload["top_near_miss"]),
                 _json_dumps(payload["operator_checklist"]),
@@ -866,6 +1257,7 @@ def _snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in row.keys()}
     item["no_buy_detected"] = bool(item["no_buy_detected"])
     item["stage_summary"] = _json_object(item.pop("stage_summary_json"))
+    item["stage_funnel"] = _json_object(item.pop("stage_funnel_json", "{}"))
     item["reason_summary"] = _json_object(item.pop("reason_summary_json"))
     item["top_near_miss"] = _json_array(item.pop("top_near_miss_json"))
     item["operator_checklist"] = _json_array(item.pop("operator_checklist_json"))
@@ -1023,6 +1415,137 @@ def _compact_live_sim_status(status: Mapping[str, Any]) -> dict[str, Any]:
         "reconcile_enabled",
     )
     return {key: status.get(key) for key in keys}
+
+
+def _list_condition_fusions(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM candidate_condition_fusion
+        WHERE trade_date = ?
+        ORDER BY priority_score DESC, latest_hit_at DESC, code ASC
+        LIMIT ?
+        """,
+        (trade_date, _bounded_limit(limit)),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        item["active_roles"] = _json_array(item.pop("active_roles_json"))
+        item["condition_names"] = _json_array(item.pop("condition_names_json"))
+        item["reason_codes"] = _json_array(item.pop("reason_codes_json"))
+        item["metadata"] = _json_object(item.pop("metadata_json"))
+        item["risk_blocked"] = bool(item.get("risk_blocked"))
+        item["subscribed"] = bool(item.get("subscribed"))
+        result.append(item)
+    return result
+
+
+def _list_strategy_latest(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM strategy_observations_latest
+        WHERE trade_date = ?
+        ORDER BY evaluated_at DESC, candidate_instance_id ASC
+        LIMIT ?
+        """,
+        (trade_date, _bounded_limit(limit)),
+    ).fetchall()
+    return [_latest_observation_row_to_dict(row) for row in rows]
+
+
+def _list_risk_latest(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM risk_observations_latest
+        WHERE trade_date = ?
+        ORDER BY evaluated_at DESC, candidate_instance_id ASC
+        LIMIT ?
+        """,
+        (trade_date, _bounded_limit(limit)),
+    ).fetchall()
+    return [_latest_observation_row_to_dict(row) for row in rows]
+
+
+def _latest_observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    item = {key: row[key] for key in row.keys()}
+    item["reason_codes"] = _json_array(item.pop("reason_codes_json"))
+    item["observe_only"] = bool(item.get("observe_only", True))
+    return item
+
+
+def _list_live_sim_intents(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    *,
+    limit: int = FUNNEL_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT live_sim_intent_id, candidate_instance_id, code, name, status, reason_codes_json
+        FROM live_sim_intents
+        WHERE trade_date = ?
+        ORDER BY created_at DESC, live_sim_intent_id DESC
+        LIMIT ?
+        """,
+        (trade_date, _bounded_limit(limit)),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        item["reason_codes"] = _json_array(item.pop("reason_codes_json"))
+        result.append(item)
+    return result
+
+
+def _list_live_sim_commands(
+    connection: sqlite3.Connection,
+    *,
+    lookback_minutes: int,
+    limit: int = FUNNEL_SAMPLE_LIMIT,
+) -> list[dict[str, Any]]:
+    cutoff = datetime_to_wire(utc_now() - timedelta(minutes=max(int(lookback_minutes), 1)))
+    rows = connection.execute(
+        """
+        SELECT command_id, command_type, source, status, payload_json, created_at
+        FROM gateway_commands
+        WHERE created_at >= ?
+            AND (
+                source = 'live_sim'
+                OR payload_json LIKE '%"live_sim_only":true%'
+                OR payload_json LIKE '%"live_sim_only": true%'
+            )
+        ORDER BY created_at DESC, command_id DESC
+        LIMIT ?
+        """,
+        (cutoff, _bounded_limit(limit)),
+    ).fetchall()
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        item = {key: row[key] for key in row.keys()}
+        payload = _json_object(item.pop("payload_json"))
+        item["payload"] = payload
+        item["code"] = payload.get("code") or payload.get("stock_code")
+        item["candidate_instance_id"] = payload.get("candidate_instance_id")
+        result.append(item)
+    return result
 
 
 def _count_live_sim_intents(connection: sqlite3.Connection, trade_date: str) -> int:

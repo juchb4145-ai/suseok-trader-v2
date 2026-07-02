@@ -88,6 +88,7 @@ class NoBuySentinelSnapshot:
     ai_selected_count: int = 0
     top_near_miss: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     stage_summary: Mapping[str, Any] = field(default_factory=dict)
+    stage_funnel: Mapping[str, Any] = field(default_factory=dict)
     reason_summary: Mapping[str, Any] = field(default_factory=dict)
     ai_summary: Mapping[str, Any] = field(default_factory=dict)
     system_summary: Mapping[str, Any] = field(default_factory=dict)
@@ -112,6 +113,7 @@ class NoBuySentinelSnapshot:
             "ai_selected_count": int(self.ai_selected_count),
             "top_near_miss": normalize_value(list(self.top_near_miss)),
             "stage_summary": normalize_value(dict(self.stage_summary)),
+            "stage_funnel": normalize_value(dict(self.stage_funnel)),
             "reason_summary": normalize_value(dict(self.reason_summary)),
             "ai_summary": normalize_value(dict(self.ai_summary)),
             "system_summary": normalize_value(dict(self.system_summary)),

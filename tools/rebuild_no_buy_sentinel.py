@@ -37,9 +37,22 @@ def main() -> int:
 
     print(f"Saved No-Buy Sentinel snapshot: {snapshot['snapshot_id']}")
     print(f"status: {snapshot['status']}")
+    funnel_line = _funnel_line(snapshot)
+    if funnel_line:
+        print(f"funnel: {funnel_line}")
     print(f"read_only: {snapshot['read_only']}")
     print(f"no_order_side_effects: {snapshot['no_order_side_effects']}")
     return 0
+
+
+def _funnel_line(snapshot: dict) -> str:
+    stages = (snapshot.get("stage_funnel") or {}).get("stages") or []
+    if not stages:
+        return ""
+    return " -> ".join(
+        f"{stage.get('stage')}={stage.get('survived_count', 0)}"
+        for stage in stages
+    )
 
 
 if __name__ == "__main__":

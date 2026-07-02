@@ -31,6 +31,10 @@ def test_no_buy_schema_config_and_reason_classifier(tmp_path) -> None:
         row["name"]
         for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(no_buy_sentinel_snapshots)")
+    }
     connection.close()
     settings = Settings()
     classification = classify_reason("LIVE_SIM_RECONCILE_MISMATCH_BLOCK")
@@ -39,6 +43,7 @@ def test_no_buy_schema_config_and_reason_classifier(tmp_path) -> None:
     )
 
     assert "no_buy_sentinel_snapshots" in tables
+    assert "stage_funnel_json" in columns
     assert settings.no_buy_sentinel_enabled is True
     assert settings.no_buy_sentinel_write_snapshots is True
     assert classification.stage == "RECONCILE"
@@ -123,6 +128,38 @@ def test_plan_ready_config_reconcile_and_duplicate_statuses(tmp_path) -> None:
     assert duplicate_snapshot["status"] == "DUPLICATE_OR_POSITION_BLOCK"
 
 
+def test_stage_funnel_records_pipeline_survival_counts(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "stage-funnel.sqlite3")
+
+    snapshot = build_no_buy_sentinel_snapshot(
+        connection,
+        settings=_pilot_settings(),
+        trade_date="2026-06-27",
+        manual=True,
+        write_snapshot=True,
+    ).to_dict()
+    stored = connection.execute(
+        "SELECT stage_funnel_json FROM no_buy_sentinel_snapshots"
+    ).fetchone()
+    connection.close()
+
+    stages = {
+        item["stage"]: item for item in snapshot["stage_funnel"]["stages"]
+    }
+    assert stages["condition_hit"]["survived_count"] == 0
+    assert stages["candidate_context_ready"]["survived_count"] == 1
+    assert stages["candidate_context_ready"]["bypass_count"] == 1
+    assert stages["strategy_matched"]["survived_count"] == 1
+    assert stages["risk_pass"]["survived_count"] == 1
+    assert stages["order_plan_ready"]["survived_count"] == 1
+    assert stages["live_sim_eligible"]["survived_count"] == 1
+    assert stages["live_sim_intent_created"]["drop_reasons"] == {
+        "LIVE_SIM_INTENT_NOT_CREATED": 1
+    }
+    assert "005930" in stages["order_plan_ready"]["sample_codes"]
+    assert json.loads(stored["stage_funnel_json"])["version"] == 1
+
+
 def test_entry_timing_and_theme_data_wait_statuses(tmp_path) -> None:
     entry_conn, order_plan_id = _prepared_order_plan_connection(tmp_path / "entry-wait.sqlite3")
     _update_plan(entry_conn, order_plan_id, status="DATA_WAIT")
@@ -160,6 +197,11 @@ def test_entry_timing_and_theme_data_wait_statuses(tmp_path) -> None:
     theme_conn.close()
 
     assert entry_snapshot["status"] == "ENTRY_TIMING_WAIT"
+    order_plan_stage = {
+        item["stage"]: item for item in entry_snapshot["stage_funnel"]["stages"]
+    }["order_plan_ready"]
+    assert order_plan_stage["survived_count"] == 0
+    assert order_plan_stage["drop_reasons"]["DATA_WAIT"] == 1
     assert theme_snapshot["status"] == "THEME_DATA_WAIT"
 
 
