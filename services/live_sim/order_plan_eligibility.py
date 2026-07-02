@@ -19,7 +19,7 @@ from domain.live_sim.reasons import LiveSimReasonCode
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
 
-from services.config import Settings, TradingProfile, load_settings
+from services.config import Settings, load_settings
 from services.entry_timing.models import EntryTimingState, OrderPlanStatus, SetupType
 from services.live_sim.live_sim_service import (
     _active_cancel_count_for_code,
@@ -122,7 +122,7 @@ def evaluate_live_sim_order_plan_eligibility(
     if not safety_gate.passed:
         reason_codes.extend(safety_gate.reason_codes)
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_SAFETY_GATE_FAILED.value)
-    if resolved_settings.trading_profile is not TradingProfile.LIVE_SIM_PILOT:
+    if not resolved_settings.trading_capabilities.live_sim_order_plan_allowed:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
     if not resolved_settings.live_sim_order_plan_routing_enabled:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)

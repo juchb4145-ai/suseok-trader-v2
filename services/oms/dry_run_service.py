@@ -31,7 +31,7 @@ from domain.oms.status import DryRunIntentStatus, DryRunOrderStatus
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
 
-from services.config import Settings, TradingMode, TradingProfile, load_settings
+from services.config import Settings, TradingMode, load_settings
 from services.oms.safety_gate import check_pr10_safety_gate
 
 ACTIVE_INTENT_STATUSES = {
@@ -262,8 +262,9 @@ def evaluate_dry_run_eligibility(
 
 
 def _live_sim_pilot_shadow_dry_run_allowed(settings: Settings) -> bool:
+    capabilities = settings.trading_capabilities
     return (
-        settings.trading_profile is TradingProfile.LIVE_SIM_PILOT
+        capabilities.dry_run_shadow_allowed
         and settings.trading_mode is TradingMode.LIVE_SIM
         and settings.live_sim_allowed
         and not settings.live_real_allowed

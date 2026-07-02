@@ -10,6 +10,14 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.trading_mode is TradingMode.OBSERVE
     assert settings.live_sim_allowed is False
     assert settings.live_real_allowed is False
+    assert settings.trading_capabilities.profile is TradingProfile.OBSERVE
+    assert settings.trading_capabilities.observation_allowed is True
+    assert settings.trading_capabilities.dry_run_shadow_allowed is False
+    assert settings.trading_capabilities.live_sim_intent_allowed is False
+    assert settings.trading_capabilities.live_sim_order_plan_allowed is False
+    assert settings.trading_capabilities.live_sim_gateway_command_allowed is False
+    assert settings.trading_capabilities.live_real_order_allowed is False
+    assert settings.trading_capabilities.broker_order_path == "OBSERVE_ONLY"
     assert settings.ai_sidecar_enabled is False
     assert settings.ai_sidecar_intraday_allowed is False
     assert settings.ai_sidecar_order_context_allowed is False
@@ -236,6 +244,32 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dashboard_max_limit == 200
     assert settings.dashboard_show_raw_json is True
     assert settings.dashboard_route_enabled is True
+
+
+def test_trading_profile_capability_matrix() -> None:
+    observe = load_settings({"TRADING_PROFILE": "OBSERVE"}).trading_capabilities
+    live_sim = load_settings({"TRADING_PROFILE": "LIVE_SIM_PILOT"}).trading_capabilities
+
+    assert observe.to_dict() == {
+        "profile": "OBSERVE",
+        "observation_allowed": True,
+        "dry_run_shadow_allowed": False,
+        "live_sim_intent_allowed": False,
+        "live_sim_order_plan_allowed": False,
+        "live_sim_gateway_command_allowed": False,
+        "live_real_order_allowed": False,
+        "broker_order_path": "OBSERVE_ONLY",
+    }
+    assert live_sim.to_dict() == {
+        "profile": "LIVE_SIM_PILOT",
+        "observation_allowed": True,
+        "dry_run_shadow_allowed": True,
+        "live_sim_intent_allowed": True,
+        "live_sim_order_plan_allowed": True,
+        "live_sim_gateway_command_allowed": True,
+        "live_real_order_allowed": False,
+        "broker_order_path": "LIVE_SIM_ONLY",
+    }
 
 
 def test_default_gateway_settings_are_mock_local_transport() -> None:

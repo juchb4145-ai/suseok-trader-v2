@@ -26,6 +26,54 @@ class TradingProfile(StrEnum):
 
 
 @dataclass(frozen=True)
+class TradingCapabilities:
+    profile: TradingProfile
+    observation_allowed: bool
+    dry_run_shadow_allowed: bool
+    live_sim_intent_allowed: bool
+    live_sim_order_plan_allowed: bool
+    live_sim_gateway_command_allowed: bool
+    live_real_order_allowed: bool
+    broker_order_path: str
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "profile": self.profile.value,
+            "observation_allowed": self.observation_allowed,
+            "dry_run_shadow_allowed": self.dry_run_shadow_allowed,
+            "live_sim_intent_allowed": self.live_sim_intent_allowed,
+            "live_sim_order_plan_allowed": self.live_sim_order_plan_allowed,
+            "live_sim_gateway_command_allowed": self.live_sim_gateway_command_allowed,
+            "live_real_order_allowed": self.live_real_order_allowed,
+            "broker_order_path": self.broker_order_path,
+        }
+
+
+_TRADING_CAPABILITY_MATRIX = {
+    TradingProfile.OBSERVE: TradingCapabilities(
+        profile=TradingProfile.OBSERVE,
+        observation_allowed=True,
+        dry_run_shadow_allowed=False,
+        live_sim_intent_allowed=False,
+        live_sim_order_plan_allowed=False,
+        live_sim_gateway_command_allowed=False,
+        live_real_order_allowed=False,
+        broker_order_path="OBSERVE_ONLY",
+    ),
+    TradingProfile.LIVE_SIM_PILOT: TradingCapabilities(
+        profile=TradingProfile.LIVE_SIM_PILOT,
+        observation_allowed=True,
+        dry_run_shadow_allowed=True,
+        live_sim_intent_allowed=True,
+        live_sim_order_plan_allowed=True,
+        live_sim_gateway_command_allowed=True,
+        live_real_order_allowed=False,
+        broker_order_path="LIVE_SIM_ONLY",
+    ),
+}
+
+
+@dataclass(frozen=True)
 class Settings:
     trading_profile: TradingProfile = TradingProfile.OBSERVE
     trading_mode: TradingMode = TradingMode.OBSERVE
@@ -1008,6 +1056,10 @@ class Settings:
     @property
     def live_real_allowed(self) -> bool:
         return self.trading_allow_live_real
+
+    @property
+    def trading_capabilities(self) -> TradingCapabilities:
+        return _TRADING_CAPABILITY_MATRIX[self.trading_profile]
 
     @property
     def ai_sidecar_enabled(self) -> bool:

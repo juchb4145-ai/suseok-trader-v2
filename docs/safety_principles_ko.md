@@ -18,6 +18,18 @@
 | LIVE_SIM은 모의투자 전용 | 실계좌 주문이 아니다. |
 | LIVE_REAL은 future safety project | 현재 구현되어 있지 않으며 금지다. |
 
+## TradingProfile Capability
+
+`TRADING_PROFILE`은 각 profile이 가질 수 있는 capability의 상한이다. 개별 env flag는
+운영 switch로 남아 있지만, profile이 허용하지 않는 capability는 사용할 수 없다.
+
+| Profile | observation | dry-run shadow | LIVE_SIM intent | LIVE_SIM command | LIVE_REAL |
+| --- | --- | --- | --- | --- | --- |
+| `OBSERVE` | 허용 | 금지 | 금지 | 금지 | 금지 |
+| `LIVE_SIM_PILOT` | 허용 | 허용 | 허용 | 모의투자 전용 허용 | 금지 |
+
+코드에서는 `settings.trading_capabilities`를 단일 capability matrix로 읽는다.
+
 ## 주문 관련 금지 원칙
 
 - `GatewayCommand`는 safety gate 없이는 생성 금지다.
