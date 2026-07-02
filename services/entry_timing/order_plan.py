@@ -21,7 +21,10 @@ READY_TIMING_STATES = {
     EntryTimingState.GOOD_PULLBACK,
     EntryTimingState.PULLBACK_RECLAIM,
     EntryTimingState.VWAP_RECLAIM,
+    EntryTimingState.MOMENTUM_CONTINUATION,
 }
+MOMENTUM_CONTINUATION_SIZE_MULTIPLIER = 0.5
+MOMENTUM_CONTINUATION_TTL_MULTIPLIER = 0.5
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -54,14 +57,31 @@ class OrderPlanDraftBuilder:
 
         idempotency_key = make_order_plan_idempotency_key(item, evaluation)
         order_plan_id = order_plan_id_from_key(idempotency_key)
+        route_controls = _route_risk_controls(evaluation, self.settings)
         max_notional = float(self.settings.entry_timing_max_notional)
-        configured_notional = min(float(self.settings.entry_timing_default_notional), max_notional)
+        base_notional = float(self.settings.entry_timing_default_notional)
+        configured_notional = min(
+            base_notional * float(route_controls["size_multiplier"]),
+            max_notional,
+        )
         quantity = int(configured_notional // limit_price.limit_price)
+        if (
+            status is OrderPlanStatus.PLAN_READY
+            and quantity < 1
+            and limit_price.limit_price <= max_notional
+        ):
+            quantity = 1
+            route_controls["min_quantity_floor_applied"] = True
+            route_controls["reason_codes"] = [
+                *[str(reason) for reason in route_controls["reason_codes"]],
+                "MOMENTUM_CONTINUATION_MIN_QUANTITY_FLOOR",
+            ]
         if status is not OrderPlanStatus.PLAN_READY:
             quantity = 0
         suggested_notional = float(quantity * limit_price.limit_price)
         created_at = utc_now()
-        expires_at = created_at + timedelta(seconds=self.settings.entry_timing_plan_ttl_seconds)
+        ttl_seconds = int(route_controls["ttl_seconds"])
+        expires_at = created_at + timedelta(seconds=ttl_seconds)
         priority_score, priority_reasons, condition_priority = _order_plan_priority(item)
         reasons = _dedupe(
             [
@@ -69,6 +89,7 @@ class OrderPlanDraftBuilder:
                 *status_reasons,
                 *limit_price.reason_codes,
                 *priority_reasons,
+                *[str(reason) for reason in route_controls["reason_codes"]],
                 "BUY_LIMIT_ONLY",
                 "PLAN_READY_NOT_ORDER_APPROVAL"
                 if status is OrderPlanStatus.PLAN_READY
@@ -112,6 +133,7 @@ class OrderPlanDraftBuilder:
                 "observe_only": True,
                 "not_order_signal": True,
                 "condition_fusion_priority": condition_priority,
+                "entry_route": route_controls,
             },
             created_at=created_at,
         )
@@ -252,6 +274,37 @@ def _order_plan_priority(
             ]
         )
     return score, reasons, condition_priority
+
+
+def _route_risk_controls(
+    evaluation: EntryTimingEvaluation,
+    settings: Settings,
+) -> dict[str, object]:
+    if evaluation.entry_timing_state is EntryTimingState.MOMENTUM_CONTINUATION:
+        ttl_seconds = max(
+            1,
+            int(settings.entry_timing_plan_ttl_seconds * MOMENTUM_CONTINUATION_TTL_MULTIPLIER),
+        )
+        return {
+            "route": "MOMENTUM_CONTINUATION",
+            "size_multiplier": MOMENTUM_CONTINUATION_SIZE_MULTIPLIER,
+            "ttl_seconds": ttl_seconds,
+            "tight_stop_required": True,
+            "min_quantity_floor_applied": False,
+            "reason_codes": [
+                "MOMENTUM_CONTINUATION_SIZE_REDUCED",
+                "MOMENTUM_CONTINUATION_SHORT_TTL",
+                "MOMENTUM_CONTINUATION_TIGHT_STOP_REQUIRED",
+            ],
+        }
+    return {
+        "route": evaluation.entry_timing_state.value,
+        "size_multiplier": 1.0,
+        "ttl_seconds": settings.entry_timing_plan_ttl_seconds,
+        "tight_stop_required": False,
+        "min_quantity_floor_applied": False,
+        "reason_codes": [],
+    }
 
 
 def make_order_plan_idempotency_key(

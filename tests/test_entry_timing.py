@@ -143,6 +143,44 @@ def test_chase_high_and_vwap_overextended_do_not_create_drafts() -> None:
     )
 
 
+def test_breakout_leader_near_high_uses_momentum_continuation_route() -> None:
+    settings = _settings()
+    item = _entry_input(
+        current_price=50_000,
+        day_high=50_100,
+        day_low=45_000,
+        vwap=49_300,
+        best_bid=49_950,
+        best_ask=50_000,
+        momentum_1m=0.4,
+        momentum_3m=0.5,
+        momentum_5m=0.2,
+        strategy_setup_type="BREAKOUT_RETEST",
+        active_condition_roles=("LEADER", "BREAKOUT"),
+        condition_fusion_reason_codes=(
+            "LEADER_BREAKOUT_FUSION_PRIORITY",
+            "CONDITION_FUSION_PRIORITY_READY",
+        ),
+        condition_fusion_priority_score=995.0,
+    )
+
+    evaluation = EntryTimingEngine(settings=settings).evaluate(item)
+    draft = OrderPlanDraftBuilder(settings=settings).build(item, evaluation)
+
+    assert evaluation.entry_timing_state is EntryTimingState.MOMENTUM_CONTINUATION
+    assert evaluation.setup_type is SetupType.MOMENTUM_CONTINUATION
+    assert evaluation.status is OrderPlanStatus.PLAN_READY
+    assert draft is not None
+    assert draft.status is OrderPlanStatus.PLAN_READY
+    assert draft.suggested_quantity == 1
+    assert draft.suggested_notional < settings.entry_timing_default_notional
+    assert draft.evidence_json["entry_route"]["size_multiplier"] == 0.5
+    assert draft.evidence_json["entry_route"]["tight_stop_required"] is True
+    assert draft.evidence_json["entry_route"]["ttl_seconds"] == 45
+    assert (draft.expires_at - draft.created_at).total_seconds() == 45
+    assert "MOMENTUM_CONTINUATION_SHORT_TTL" in draft.reason_codes
+
+
 def test_vwap_missing_and_momentum_warmup_are_near_miss_data_wait() -> None:
     settings = _settings()
     engine = EntryTimingEngine(settings=settings)

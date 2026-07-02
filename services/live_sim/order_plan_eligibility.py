@@ -39,6 +39,7 @@ READY_ENTRY_TIMING_STATES = {
     EntryTimingState.GOOD_PULLBACK.value,
     EntryTimingState.PULLBACK_RECLAIM.value,
     EntryTimingState.VWAP_RECLAIM.value,
+    EntryTimingState.MOMENTUM_CONTINUATION.value,
 }
 
 BLOCKED_ORDER_PLAN_REASON_TOKENS = ("BLOCKED", "CHASE", "OVERHEAT", "STALE")

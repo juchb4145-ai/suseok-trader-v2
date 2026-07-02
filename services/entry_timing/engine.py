@@ -39,6 +39,7 @@ class EntryTimingEngine:
                 EntryTimingState.GOOD_PULLBACK,
                 EntryTimingState.PULLBACK_RECLAIM,
                 EntryTimingState.VWAP_RECLAIM,
+                EntryTimingState.MOMENTUM_CONTINUATION,
             },
             "observe_only": True,
             "not_order_signal": True,
@@ -75,6 +76,7 @@ class EntryTimingEngine:
         momentum_negative = _negative(item.momentum_1m) and _negative(item.momentum_3m)
         role = _normalize_role(item.stock_role)
         theme_state = _normalize(item.theme_state)
+        breakout_route = _is_breakout_route(item, role)
 
         if item.vwap is None:
             return (
@@ -96,6 +98,26 @@ class EntryTimingEngine:
                 SetupType.NO_SETUP,
                 OrderPlanStatus.BLOCKED_OVERHEAT,
                 ["VWAP_OVEREXTENDED"],
+            )
+        if breakout_route and _is_momentum_continuation(
+            price_location,
+            pullback,
+            price_vs_vwap,
+            momentum_positive,
+            self.settings,
+        ):
+            return (
+                EntryTimingState.MOMENTUM_CONTINUATION,
+                SetupType.MOMENTUM_CONTINUATION,
+                OrderPlanStatus.PLAN_READY,
+                [
+                    "MOMENTUM_CONTINUATION",
+                    "BREAKOUT_NEAR_HIGH_ALLOWED",
+                    "SIZE_REDUCED",
+                    "TIGHT_STOP_REQUIRED",
+                    "SHORT_TTL_REQUIRED",
+                    "ENTRY_TIMING_ALLOWED",
+                ],
             )
         if price_location.state is PriceLocationState.NEAR_DAY_HIGH or (
             pullback is not None and pullback < self.settings.entry_timing_pullback_min_pct
@@ -326,6 +348,39 @@ def _is_vwap_reclaim(
         return False
     return -settings.entry_timing_vwap_reclaim_tolerance_pct <= price_vs_vwap <= (
         settings.entry_timing_vwap_reclaim_tolerance_pct
+    )
+
+
+def _is_breakout_route(item: EntryTimingInput, normalized_role: str) -> bool:
+    condition_roles = {_normalize(role) for role in item.active_condition_roles}
+    condition_reasons = {_normalize(reason) for reason in item.condition_fusion_reason_codes}
+    strategy_setup = _normalize(item.strategy_setup_type)
+    has_breakout_signal = (
+        "BREAKOUT" in condition_roles
+        or strategy_setup == "BREAKOUT_RETEST"
+        or "LEADER_BREAKOUT_FUSION_PRIORITY" in condition_reasons
+        or "CONDITION_BREAKOUT_OBSERVED" in condition_reasons
+    )
+    leader_role = normalized_role in {"LEADER", "CO_LEADER"} or "LEADER" in condition_roles
+    return bool(has_breakout_signal and leader_role)
+
+
+def _is_momentum_continuation(
+    price_location: PriceLocationResult,
+    pullback: float | None,
+    price_vs_vwap: float | None,
+    momentum_positive: bool,
+    settings: Settings,
+) -> bool:
+    if not momentum_positive:
+        return False
+    if (
+        price_vs_vwap is not None
+        and price_vs_vwap < -settings.entry_timing_vwap_reclaim_tolerance_pct
+    ):
+        return False
+    return price_location.state is PriceLocationState.NEAR_DAY_HIGH or (
+        pullback is not None and pullback < settings.entry_timing_pullback_min_pct
     )
 
 

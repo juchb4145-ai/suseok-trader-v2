@@ -116,7 +116,12 @@ def _score_candidate(candidate: Mapping[str, Any], settings: Settings) -> dict[s
     score += min(max(strategy_score, 0.0), 100.0) * 0.08
     confidence += min(max(strategy_confidence, 0.0), 100.0) * 0.05
 
-    if candidate.get("entry_timing_state") in {"GOOD_PULLBACK", "PULLBACK_RECLAIM", "VWAP_RECLAIM"}:
+    if candidate.get("entry_timing_state") in {
+        "GOOD_PULLBACK",
+        "PULLBACK_RECLAIM",
+        "VWAP_RECLAIM",
+        "MOMENTUM_CONTINUATION",
+    }:
         score += 5
         flags.append(str(candidate.get("entry_timing_state")))
     if candidate.get("price_location_state") in {"CHASE_NEAR_HIGH", "OVERHEATED"}:
