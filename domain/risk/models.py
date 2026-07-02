@@ -313,7 +313,7 @@ class RiskObservation:
             "config_version",
             require_non_empty_str(self.config_version, "config_version"),
         )
-        object.__setattr__(self, "observe_only", True)
+        object.__setattr__(self, "observe_only", parse_bool(self.observe_only, "observe_only"))
 
     def to_dict(self, *, include_checks: bool = True) -> dict[str, Any]:
         data = {

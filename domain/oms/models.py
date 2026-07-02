@@ -104,7 +104,7 @@ class DryRunIntent:
         if self.expires_at is not None:
             object.__setattr__(self, "expires_at", parse_timestamp(self.expires_at, "expires_at"))
         object.__setattr__(self, "source", require_non_empty_str(self.source, "source"))
-        object.__setattr__(self, "observe_only", True)
+        object.__setattr__(self, "observe_only", parse_bool(self.observe_only, "observe_only"))
         object.__setattr__(self, "dry_run_only", True)
         object.__setattr__(self, "live_order_allowed", False)
         object.__setattr__(self, "gateway_command_allowed", False)
@@ -129,7 +129,7 @@ class DryRunIntent:
             "created_at": _optional_wire(self.created_at),
             "expires_at": _optional_wire(self.expires_at),
             "source": self.source,
-            "observe_only": True,
+            "observe_only": self.observe_only,
             "dry_run_only": True,
             "live_order_allowed": False,
             "gateway_command_allowed": False,
@@ -158,6 +158,7 @@ class DryRunIntent:
             created_at=mapping.get("created_at"),
             expires_at=mapping.get("expires_at"),
             source=mapping.get("source", "manual"),
+            observe_only=mapping.get("observe_only", True),
         )
 
 

@@ -30,6 +30,11 @@
 
 코드에서는 `settings.trading_capabilities`를 단일 capability matrix로 읽는다.
 
+도메인 모델의 `observe_only` 필드는 기본값이 `true`지만, 모델 생성자가 입력값을
+무조건 `true`로 덮어쓰지 않는다. 주문 가능성은 `MATCHED_OBSERVATION`,
+`OBSERVE_PASS`, `observe_only=false` 같은 단일 필드가 아니라 profile capability와
+admission 결과가 함께 결정한다.
+
 ## 주문 관련 금지 원칙
 
 - `GatewayCommand`는 safety gate 없이는 생성 금지다.

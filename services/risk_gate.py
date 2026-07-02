@@ -1304,7 +1304,7 @@ def save_risk_observation(
             _json_dumps(data["reason_codes"]),
             canonical_json(data["evidence_json"]),
             data["config_version"],
-            1,
+            1 if data["observe_only"] else 0,
         ),
     )
     for check in observation.check_observations:
@@ -1370,7 +1370,7 @@ def save_risk_observation(
             pass_count = excluded.pass_count,
             reason_codes_json = excluded.reason_codes_json,
             config_version = excluded.config_version,
-            observe_only = 1
+            observe_only = excluded.observe_only
         """,
         (
             data["candidate_instance_id"],
@@ -1387,7 +1387,7 @@ def save_risk_observation(
             data["pass_count"],
             _json_dumps(data["reason_codes"]),
             data["config_version"],
-            1,
+            1 if data["observe_only"] else 0,
         ),
     )
 

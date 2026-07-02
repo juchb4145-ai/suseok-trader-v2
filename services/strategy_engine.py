@@ -333,7 +333,7 @@ def save_strategy_observation(
             _json_dumps(data["reason_codes"]),
             canonical_json(data["evidence_json"]),
             data["config_version"],
-            1,
+            1 if data["observe_only"] else 0,
         ),
     )
     for setup in observation.setup_observations:
@@ -397,7 +397,7 @@ def save_strategy_observation(
             confidence = excluded.confidence,
             reason_codes_json = excluded.reason_codes_json,
             config_version = excluded.config_version,
-            observe_only = 1
+            observe_only = excluded.observe_only
         """,
         (
             data["candidate_instance_id"],
@@ -413,7 +413,7 @@ def save_strategy_observation(
             data["confidence"],
             _json_dumps(data["reason_codes"]),
             data["config_version"],
-            1,
+            1 if data["observe_only"] else 0,
         ),
     )
 

@@ -286,7 +286,7 @@ class StrategyObservation:
             "config_version",
             require_non_empty_str(self.config_version, "config_version"),
         )
-        object.__setattr__(self, "observe_only", True)
+        object.__setattr__(self, "observe_only", parse_bool(self.observe_only, "observe_only"))
         object.__setattr__(self, "score", _bounded_observation_float(self.score, "score"))
         object.__setattr__(
             self,

@@ -997,7 +997,7 @@ def _insert_intent(connection: sqlite3.Connection, intent: DryRunIntent) -> None
             created_at,
             expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 1, 0, 0, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?, ?)
         """,
         (
             data["dry_run_intent_id"],
@@ -1016,6 +1016,7 @@ def _insert_intent(connection: sqlite3.Connection, intent: DryRunIntent) -> None
             _json_dumps(data["reason_codes"]),
             _json_dumps(data["evidence_json"]),
             data["source"],
+            1 if data["observe_only"] else 0,
             data["created_at"],
             data["expires_at"],
         ),
