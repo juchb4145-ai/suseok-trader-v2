@@ -12,6 +12,7 @@
 - SELL `send_order`는 PR-5 open position close-only exit 전용이다.
 - `modify_order`는 disabled다.
 - DRY_RUN evidence는 prerequisite이 될 수 있지만 DRY_RUN이 LIVE_SIM intent를 자동 생성하지 않는다.
+- `LIVE_SIM_PILOT`에서는 같은 profile 안에서 DRY_RUN shadow evidence와 LIVE_SIM intent를 순차 생성할 수 있다.
 - AI Sidecar, RCA, Codex prompt draft, LIVE_SIM Review report는 review-only이며 order input이 아니다.
 - AI Candidate Scorer는 advisory-only이며 score/confidence/risk_reward가 LIVE_SIM routing input이 아니다.
 - Dashboard는 read-only이며 buy, sell, cancel, modify, reconcile, queue button이 없다.

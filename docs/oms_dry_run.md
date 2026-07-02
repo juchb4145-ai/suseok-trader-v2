@@ -15,6 +15,12 @@ PR10 `DRY_RUN` OMS는 내부 모의 회계다. `DryRunIntent`, `DryRunOrder`, `D
 
 DRY_RUN은 LIVE_SIM도 아니고 LIVE_REAL도 아니다.
 
+예외적으로 `TRADING_PROFILE=LIVE_SIM_PILOT`, `TRADING_MODE=LIVE_SIM`,
+`TRADING_ALLOW_LIVE_SIM=true`, `TRADING_ALLOW_LIVE_REAL=false` 조합에서는 DRY_RUN을
+LIVE_SIM prerequisite evidence용 shadow record로 병행 생성할 수 있다. 이 경우에도
+`DRY_RUN_ORDER_ROUTING_ENABLED=false`, `DRY_RUN_GATEWAY_COMMAND_ENABLED=false`를 유지하며,
+DRY_RUN 자체는 broker 주문이나 Gateway command를 만들지 않는다.
+
 ## 하는 일 / 하지 않는 일
 
 | 구분 | 내용 |

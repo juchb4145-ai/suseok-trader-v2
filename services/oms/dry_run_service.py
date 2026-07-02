@@ -31,7 +31,7 @@ from domain.oms.status import DryRunIntentStatus, DryRunOrderStatus
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
 
-from services.config import Settings, load_settings
+from services.config import Settings, TradingMode, TradingProfile, load_settings
 from services.oms.safety_gate import check_pr10_safety_gate
 
 ACTIVE_INTENT_STATUSES = {
@@ -109,14 +109,34 @@ def evaluate_dry_run_eligibility(
     if risk is not None:
         evidence["risk"] = _risk_evidence(risk)
 
-    if resolved_settings.dry_run_require_safety_gate and not safety_gate.passed:
+    shadow_live_sim = _live_sim_pilot_shadow_dry_run_allowed(resolved_settings)
+    safety_reason_codes = list(safety_gate.reason_codes)
+    ignored_safety_reason_codes: list[str] = []
+    if shadow_live_sim:
+        safety_reason_codes = [
+            reason
+            for reason in safety_reason_codes
+            if reason != DryRunRejectionReason.LIVE_FLAGS_ENABLED.value
+        ]
+        ignored_safety_reason_codes = [
+            reason
+            for reason in safety_gate.reason_codes
+            if reason == DryRunRejectionReason.LIVE_FLAGS_ENABLED.value
+        ]
+        evidence["live_sim_pilot_shadow_dry_run"] = True
+        if ignored_safety_reason_codes:
+            evidence["ignored_safety_reason_codes"] = ignored_safety_reason_codes
+
+    if resolved_settings.dry_run_require_safety_gate and safety_reason_codes:
         reason_codes.append(DryRunRejectionReason.SAFETY_GATE_FAILED.value)
-        reason_codes.extend(safety_gate.reason_codes)
+        reason_codes.extend(safety_reason_codes)
     if not resolved_settings.dry_run_oms_enabled:
         reason_codes.append(DryRunRejectionReason.DRY_RUN_DISABLED.value)
     if not resolved_settings.dry_run_intent_creation_enabled:
         reason_codes.append(DryRunRejectionReason.DRY_RUN_DISABLED.value)
-    if resolved_settings.live_sim_allowed or resolved_settings.live_real_allowed:
+    if (
+        resolved_settings.live_sim_allowed or resolved_settings.live_real_allowed
+    ) and not shadow_live_sim:
         reason_codes.append(DryRunRejectionReason.LIVE_FLAGS_ENABLED.value)
     if resolved_settings.dry_run_order_routing_enabled:
         reason_codes.append(DryRunRejectionReason.ORDER_ROUTING_DISABLED.value)
@@ -239,6 +259,17 @@ def evaluate_dry_run_eligibility(
     _save_eligibility_check(connection, eligibility)
     connection.commit()
     return eligibility
+
+
+def _live_sim_pilot_shadow_dry_run_allowed(settings: Settings) -> bool:
+    return (
+        settings.trading_profile is TradingProfile.LIVE_SIM_PILOT
+        and settings.trading_mode is TradingMode.LIVE_SIM
+        and settings.live_sim_allowed
+        and not settings.live_real_allowed
+        and not settings.dry_run_order_routing_enabled
+        and not settings.dry_run_gateway_command_enabled
+    )
 
 
 def create_dry_run_intent(

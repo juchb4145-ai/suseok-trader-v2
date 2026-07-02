@@ -10,7 +10,7 @@ from domain.broker.utils import datetime_to_wire, utc_now
 from domain.candidate.state import CandidateState
 from domain.oms.reasons import DryRunRejectionReason
 from domain.oms.status import DryRunIntentStatus, DryRunOrderStatus
-from services.config import Settings
+from services.config import Settings, TradingMode, TradingProfile
 from services.oms.dry_run_service import (
     convert_intent_to_dry_run_order,
     create_dry_run_intent,
@@ -108,6 +108,32 @@ def test_eligibility_requires_strategy_risk_candidate_tick_and_saves_check(tmp_p
     assert candidate_blocked.eligible is False
     assert DryRunRejectionReason.CANDIDATE_NOT_CONTEXT_READY.value in candidate_blocked.reason_codes
     assert check_count == 4
+
+
+def test_live_sim_pilot_allows_shadow_dry_run_evidence(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "dry-run-live-sim-pilot.sqlite3")
+    settings = _settings(
+        trading_profile=TradingProfile.LIVE_SIM_PILOT,
+        trading_mode=TradingMode.LIVE_SIM,
+        trading_allow_live_sim=True,
+        trading_allow_live_real=False,
+    )
+
+    eligible = evaluate_dry_run_eligibility(connection, candidate_id, settings=settings)
+    intent = create_dry_run_intent(connection, candidate_id, settings=settings)
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert eligible.eligible is True
+    assert intent.status is DryRunIntentStatus.CREATED
+    assert DryRunRejectionReason.LIVE_FLAGS_ENABLED.value not in eligible.reason_codes
+    assert eligible.evidence_json["live_sim_pilot_shadow_dry_run"] is True
+    assert eligible.evidence_json["ignored_safety_reason_codes"] == [
+        DryRunRejectionReason.LIVE_FLAGS_ENABLED.value
+    ]
+    assert command_count == 0
 
 
 def test_eligibility_blocks_missing_stale_and_duplicate_market_state(tmp_path) -> None:

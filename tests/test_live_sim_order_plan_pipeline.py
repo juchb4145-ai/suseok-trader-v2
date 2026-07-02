@@ -158,6 +158,33 @@ def test_order_plan_rejects_plan_state_price_tick_strategy_risk_and_dry_run_mode
     )
     market = evaluate_live_sim_order_plan_eligibility(connection, order_plan_id, settings)
     connection.execute(
+        """
+        UPDATE order_plan_drafts
+        SET evidence_json = ?
+        WHERE order_plan_id = ?
+        """,
+        (json.dumps({"order_type": "LIMIT"}), order_plan_id),
+    )
+    connection.execute(
+        """
+        UPDATE order_plan_drafts_latest
+        SET evidence_json = ?
+        WHERE order_plan_id = ?
+        """,
+        (json.dumps({"order_type": "LIMIT"}), order_plan_id),
+    )
+    limit_with_market_flag_settings = _pilot_settings()
+    object.__setattr__(
+        limit_with_market_flag_settings,
+        "live_sim_order_plan_allow_market_order",
+        True,
+    )
+    limit_with_market_flag = evaluate_live_sim_order_plan_eligibility(
+        connection,
+        order_plan_id,
+        settings=limit_with_market_flag_settings,
+    )
+    connection.execute(
         "UPDATE market_ticks_latest SET price = 98000 WHERE code = '005930'"
     )
     drift = evaluate_live_sim_order_plan_eligibility(connection, order_plan_id, settings)
@@ -214,6 +241,11 @@ def test_order_plan_rejects_plan_state_price_tick_strategy_risk_and_dry_run_mode
     assert LiveSimReasonCode.ORDER_PLAN_NOT_READY.value in not_ready.reason_codes
     assert LiveSimReasonCode.ORDER_PLAN_EXPIRED.value in expired.reason_codes
     assert LiveSimReasonCode.ORDER_PLAN_MARKET_ORDER_NOT_ALLOWED.value in market.reason_codes
+    assert limit_with_market_flag.eligible is True
+    assert (
+        LiveSimReasonCode.ORDER_PLAN_MARKET_ORDER_NOT_ALLOWED.value
+        not in limit_with_market_flag.reason_codes
+    )
     assert LiveSimReasonCode.ORDER_PLAN_PRICE_DRIFT_EXCEEDED.value in drift.reason_codes
     assert LiveSimReasonCode.ORDER_PLAN_LATEST_TICK_STALE.value in stale.reason_codes
     assert LiveSimReasonCode.ORDER_PLAN_STRATEGY_NOT_MATCHED.value in strategy.reason_codes

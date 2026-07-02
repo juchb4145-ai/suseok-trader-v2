@@ -7,7 +7,7 @@ from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
 from domain.live_sim.status import LiveSimIntentStatus, LiveSimOrderStatus
 from gateway.command_handlers import GatewayCommandHandler
-from services.config import Settings, TradingMode
+from services.config import Settings, TradingMode, TradingProfile
 from services.live_sim.live_sim_service import (
     create_live_sim_intent,
     evaluate_live_sim_eligibility,
@@ -125,6 +125,32 @@ def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     assert execution_result["handled"] is True
     assert filled_order["status"] == LiveSimOrderStatus.FILLED.value
     assert snapshot.status == "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT"
+
+
+def test_live_sim_pilot_can_create_dry_run_evidence_and_intent_same_profile(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-shadow-dry-run.sqlite3")
+    settings = _live_sim_settings(
+        trading_profile=TradingProfile.LIVE_SIM_PILOT,
+        dry_run_oms_enabled=True,
+        dry_run_intent_creation_enabled=True,
+        dry_run_allow_without_safety_draft_for_tests=True,
+        dry_run_stale_tick_sec=999_999_999,
+    )
+    _mark_gateway_ready(connection)
+
+    dry_run = create_dry_run_intent(connection, candidate_id, settings=settings)
+    eligibility = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert dry_run.status.value == "CREATED"
+    assert eligibility.eligible is True
+    assert LiveSimReasonCode.DRY_RUN_EVIDENCE_MISSING.value not in eligibility.reason_codes
+    assert intent.status is LiveSimIntentStatus.CREATED
+    assert command_count == 0
 
 
 def test_live_sim_partial_fill_idempotent_and_position_accounting(tmp_path) -> None:

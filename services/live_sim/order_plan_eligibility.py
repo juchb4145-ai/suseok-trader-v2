@@ -157,7 +157,9 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_EXPIRED.value)
     if str(order_plan["side"]).upper() != "BUY":
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_NOT_BUY.value)
-    if order_type != "LIMIT" or resolved_settings.live_sim_order_plan_allow_market_order:
+    if order_type == "MARKET" and not resolved_settings.live_sim_order_plan_allow_market_order:
+        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_MARKET_ORDER_NOT_ALLOWED.value)
+    elif order_type not in {"LIMIT", "MARKET"}:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_MARKET_ORDER_NOT_ALLOWED.value)
     if _float(order_plan["current_price"]) <= 0 or _float(order_plan["limit_price"]) <= 0:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_INVALID_PRICE.value)
