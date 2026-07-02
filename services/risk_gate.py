@@ -34,6 +34,27 @@ from services.runtime.evaluation_run_guard import (
     runtime_execution_lock,
 )
 
+ACTIVE_DRY_RUN_INTENT_STATUSES = ("CREATED",)
+ACTIVE_DRY_RUN_ORDER_STATUSES = (
+    "CREATED",
+    "SIMULATED_SUBMITTED",
+    "SIMULATED_PARTIALLY_FILLED",
+)
+ACTIVE_DRY_RUN_POSITION_STATUSES = ("OPEN",)
+ACTIVE_LIVE_SIM_ORDER_STATUSES = (
+    "INTENT_CREATED",
+    "COMMAND_QUEUED",
+    "COMMAND_DISPATCHED",
+    "BROKER_ACKED",
+    "PARTIALLY_FILLED",
+    "CANCEL_REQUESTED",
+    "CANCEL_COMMAND_QUEUED",
+    "EXIT_REQUESTED",
+    "EXIT_COMMAND_QUEUED",
+)
+ACTIVE_LIVE_SIM_POSITION_STATUSES = ("OPEN", "CLOSING", "RECONCILE_MISMATCH")
+LIVE_SIM_POSITION_ORDER_STATUSES = ("PARTIALLY_FILLED", "FILLED")
+
 
 @dataclass(frozen=True, kw_only=True)
 class RiskEvaluationRunResult:
@@ -831,6 +852,405 @@ def check_portfolio_placeholder(
     )
 
 
+def check_account_limits(
+    connection: sqlite3.Connection,
+    context: RiskInputContext,
+    settings: Settings,
+) -> RiskCheckObservation:
+    reasons: list[str] = []
+    evidence = {
+        "portfolio_service_available": True,
+        "trade_date": context.trade_date,
+        "code": context.code,
+        "price": context.price,
+        "dry_run": _dry_run_account_limit_evidence(connection, context, settings),
+        "live_sim": _live_sim_account_limit_evidence(connection, context, settings),
+        "observe_only": True,
+        "not_order_approval": True,
+    }
+
+    dry_run = evidence["dry_run"]
+    if dry_run["estimated_order_notional"] > dry_run["max_position_notional"]:
+        reasons.append(RiskReasonCode.MAX_ORDER_NOTIONAL_EXCEEDED.value)
+    if dry_run["daily_intent_count"] >= dry_run["max_daily_intents"]:
+        reasons.append(RiskReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value)
+    if dry_run["active_position_count"] >= dry_run["max_active_positions"]:
+        reasons.append(RiskReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value)
+    if dry_run["code_open_position_count"] > 0:
+        reasons.append(RiskReasonCode.CODE_CONCENTRATION_LIMIT_EXCEEDED.value)
+    if dry_run["projected_total_exposure"] > dry_run["max_total_exposure"]:
+        reasons.append(RiskReasonCode.TOTAL_EXPOSURE_LIMIT_EXCEEDED.value)
+
+    live_sim = evidence["live_sim"]
+    if live_sim["kill_switch_applicable"] and live_sim["kill_switch_active"]:
+        reasons.append(RiskReasonCode.ACCOUNT_KILL_SWITCH_ACTIVE.value)
+    if live_sim["estimated_order_notional"] > live_sim["max_order_notional"]:
+        reasons.append(RiskReasonCode.MAX_ORDER_NOTIONAL_EXCEEDED.value)
+    if live_sim["daily_order_count"] >= live_sim["max_daily_order_count"]:
+        reasons.append(RiskReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value)
+    if live_sim["projected_daily_notional"] > live_sim["max_daily_notional"]:
+        reasons.append(RiskReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value)
+    if live_sim["active_order_count"] >= live_sim["max_active_orders"]:
+        reasons.append(RiskReasonCode.ACTIVE_ORDER_LIMIT_EXCEEDED.value)
+    if live_sim["active_position_count"] >= live_sim["max_active_positions"]:
+        reasons.append(RiskReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value)
+    if live_sim["code_open_position_count"] > 0 and not live_sim["scale_in_allowed"]:
+        reasons.append(RiskReasonCode.CODE_CONCENTRATION_LIMIT_EXCEEDED.value)
+    if live_sim["projected_total_exposure"] > live_sim["max_total_exposure"]:
+        reasons.append(RiskReasonCode.TOTAL_EXPOSURE_LIMIT_EXCEEDED.value)
+
+    reasons = _merge_reasons(reasons)
+    if not reasons:
+        return _check(
+            RiskCategory.ACCOUNT_LIMITS,
+            RiskCheckStatus.PASS_OBSERVED,
+            RiskSeverity.INFO,
+            [RiskReasonCode.OBSERVE_ONLY],
+            "Account-level limits observed.",
+            evidence,
+        )
+
+    severity = (
+        RiskSeverity.CRITICAL
+        if RiskReasonCode.ACCOUNT_KILL_SWITCH_ACTIVE.value in reasons
+        else RiskSeverity.HIGH
+    )
+    return _check(
+        RiskCategory.ACCOUNT_LIMITS,
+        RiskCheckStatus.BLOCK_OBSERVED,
+        severity,
+        reasons,
+        "Account-level limit breach observed.",
+        evidence,
+    )
+
+
+def _dry_run_account_limit_evidence(
+    connection: sqlite3.Connection,
+    context: RiskInputContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    estimated_notional = _estimated_notional(
+        context.price,
+        target_notional=settings.dry_run_default_position_notional,
+        max_notional=settings.dry_run_max_position_notional,
+        min_quantity=settings.dry_run_min_quantity,
+    )
+    active_position_count = _count_rows_where(
+        connection,
+        "dry_run_positions",
+        "status IN ({statuses})",
+        statuses=ACTIVE_DRY_RUN_POSITION_STATUSES,
+    )
+    code_open_position_count = _count_rows_where(
+        connection,
+        "dry_run_positions",
+        "trade_date = ? AND code = ? AND status IN ({statuses})",
+        context.trade_date,
+        context.code,
+        statuses=ACTIVE_DRY_RUN_POSITION_STATUSES,
+    )
+    exposure = _sum_rows_where(
+        connection,
+        "dry_run_positions",
+        "invested_notional",
+        "status IN ({statuses})",
+        statuses=ACTIVE_DRY_RUN_POSITION_STATUSES,
+    )
+    realized_pnl = _sum_rows_where(
+        connection,
+        "dry_run_positions",
+        "realized_pnl",
+        "status IN ({statuses})",
+        statuses=ACTIVE_DRY_RUN_POSITION_STATUSES,
+    )
+    unrealized_pnl = _sum_rows_where(
+        connection,
+        "dry_run_positions",
+        "unrealized_pnl",
+        "status IN ({statuses})",
+        statuses=ACTIVE_DRY_RUN_POSITION_STATUSES,
+    )
+    max_total_exposure = (
+        settings.dry_run_max_active_positions * settings.dry_run_max_position_notional
+    )
+    return {
+        "enabled": settings.dry_run_oms_enabled,
+        "intent_creation_enabled": settings.dry_run_intent_creation_enabled,
+        "estimated_order_notional": estimated_notional,
+        "max_position_notional": settings.dry_run_max_position_notional,
+        "daily_intent_count": _count_rows_where(
+            connection,
+            "dry_run_intents",
+            "trade_date = ?",
+            context.trade_date,
+        ),
+        "max_daily_intents": settings.dry_run_max_daily_intents,
+        "active_intent_count": _count_rows_where(
+            connection,
+            "dry_run_intents",
+            "status IN ({statuses})",
+            statuses=ACTIVE_DRY_RUN_INTENT_STATUSES,
+        ),
+        "active_order_count": _count_rows_where(
+            connection,
+            "dry_run_orders",
+            "status IN ({statuses})",
+            statuses=ACTIVE_DRY_RUN_ORDER_STATUSES,
+        ),
+        "active_position_count": active_position_count,
+        "max_active_positions": settings.dry_run_max_active_positions,
+        "code_open_position_count": code_open_position_count,
+        "current_total_exposure": exposure,
+        "projected_total_exposure": exposure + estimated_notional,
+        "max_total_exposure": max_total_exposure,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+    }
+
+
+def _live_sim_account_limit_evidence(
+    connection: sqlite3.Connection,
+    context: RiskInputContext,
+    settings: Settings,
+) -> dict[str, Any]:
+    dry_run_notional = _latest_dry_run_notional(connection, context.candidate_instance_id)
+    target_notional = settings.live_sim_max_order_notional
+    if dry_run_notional is not None:
+        target_notional = min(target_notional, dry_run_notional)
+    estimated_notional = _estimated_notional(
+        context.price,
+        target_notional=target_notional,
+        max_notional=settings.live_sim_max_order_notional,
+        min_quantity=1,
+    )
+    active_position_count = _live_sim_active_position_count(connection)
+    code_open_position_count = _live_sim_open_position_count_for_code(connection, context.code)
+    active_order_count = _count_rows_where(
+        connection,
+        "live_sim_orders",
+        "status IN ({statuses})",
+        statuses=ACTIVE_LIVE_SIM_ORDER_STATUSES,
+    )
+    daily_notional = _sum_rows_where(
+        connection,
+        "live_sim_orders",
+        "notional",
+        "trade_date = ?",
+        context.trade_date,
+    )
+    exposure = _live_sim_total_exposure(connection)
+    realized_pnl = _sum_rows_where(
+        connection,
+        "live_sim_positions",
+        "realized_pnl",
+        "status IN ({statuses}) AND quantity > 0",
+        statuses=ACTIVE_LIVE_SIM_POSITION_STATUSES,
+    )
+    unrealized_pnl = _sum_rows_where(
+        connection,
+        "live_sim_positions",
+        "unrealized_pnl",
+        "status IN ({statuses}) AND quantity > 0",
+        statuses=ACTIVE_LIVE_SIM_POSITION_STATUSES,
+    )
+    live_sim_rows_present = bool(
+        active_order_count
+        or active_position_count
+        or _count_rows_where(connection, "live_sim_orders", "trade_date = ?", context.trade_date)
+    )
+    kill_switch_applicable = bool(
+        settings.live_sim_enabled
+        or settings.live_sim_allowed
+        or settings.trading_mode.value == "LIVE_SIM"
+        or live_sim_rows_present
+    )
+    max_total_exposure = (
+        settings.live_sim_max_active_positions * settings.live_sim_max_order_notional
+    )
+    return {
+        "enabled": settings.live_sim_enabled,
+        "allowed": settings.live_sim_allowed,
+        "trading_mode": settings.trading_mode.value,
+        "kill_switch_active": settings.live_sim_kill_switch,
+        "kill_switch_applicable": kill_switch_applicable,
+        "scale_in_allowed": settings.live_sim_position_allow_scale_in,
+        "dry_run_notional": dry_run_notional,
+        "estimated_order_notional": estimated_notional,
+        "max_order_notional": settings.live_sim_max_order_notional,
+        "daily_order_count": _count_rows_where(
+            connection,
+            "live_sim_orders",
+            "trade_date = ?",
+            context.trade_date,
+        ),
+        "max_daily_order_count": settings.live_sim_max_daily_order_count,
+        "daily_notional": daily_notional,
+        "projected_daily_notional": daily_notional + estimated_notional,
+        "max_daily_notional": settings.live_sim_max_daily_notional,
+        "active_order_count": active_order_count,
+        "max_active_orders": settings.live_sim_max_active_orders,
+        "active_position_count": active_position_count,
+        "max_active_positions": settings.live_sim_max_active_positions,
+        "code_open_position_count": code_open_position_count,
+        "current_total_exposure": exposure,
+        "projected_total_exposure": exposure + estimated_notional,
+        "max_total_exposure": max_total_exposure,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+    }
+
+
+def _estimated_notional(
+    price: float | None,
+    *,
+    target_notional: float,
+    max_notional: float,
+    min_quantity: int,
+) -> float:
+    if price is None or price <= 0:
+        return 0.0
+    bounded_target = min(float(target_notional), float(max_notional))
+    quantity = int(bounded_target // float(price))
+    if quantity < min_quantity:
+        return float(price * quantity)
+    notional = float(price * quantity)
+    if notional > max_notional:
+        quantity = int(float(max_notional) // float(price))
+        notional = float(price * quantity)
+    return notional
+
+
+def _latest_dry_run_notional(
+    connection: sqlite3.Connection,
+    candidate_instance_id: str,
+) -> float | None:
+    row = connection.execute(
+        """
+        SELECT notional
+        FROM dry_run_intents
+        WHERE candidate_instance_id = ?
+        ORDER BY created_at DESC, dry_run_intent_id DESC
+        LIMIT 1
+        """,
+        (candidate_instance_id,),
+    ).fetchone()
+    if row is None or row["notional"] is None:
+        return None
+    return float(row["notional"])
+
+
+def _live_sim_active_position_count(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        f"""
+        SELECT COUNT(DISTINCT code) AS count
+        FROM (
+            SELECT code
+            FROM live_sim_positions
+            WHERE status IN ({_placeholders(ACTIVE_LIVE_SIM_POSITION_STATUSES)})
+                AND quantity > 0
+            UNION
+            SELECT code
+            FROM live_sim_orders
+            WHERE side = 'BUY'
+                AND status IN ({_placeholders(LIVE_SIM_POSITION_ORDER_STATUSES)})
+        )
+        """,
+        (*ACTIVE_LIVE_SIM_POSITION_STATUSES, *LIVE_SIM_POSITION_ORDER_STATUSES),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _live_sim_open_position_count_for_code(
+    connection: sqlite3.Connection,
+    code: str,
+) -> int:
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM (
+            SELECT position_id AS id
+            FROM live_sim_positions
+            WHERE code = ?
+                AND status IN ({_placeholders(ACTIVE_LIVE_SIM_POSITION_STATUSES)})
+                AND quantity > 0
+            UNION
+            SELECT live_sim_order_id AS id
+            FROM live_sim_orders
+            WHERE code = ?
+                AND side = 'BUY'
+                AND status IN ({_placeholders(LIVE_SIM_POSITION_ORDER_STATUSES)})
+        )
+        """,
+        (
+            context_code := validate_stock_code(code),
+            *ACTIVE_LIVE_SIM_POSITION_STATUSES,
+            context_code,
+            *LIVE_SIM_POSITION_ORDER_STATUSES,
+        ),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _live_sim_total_exposure(connection: sqlite3.Connection) -> float:
+    position_total = _sum_rows_where(
+        connection,
+        "live_sim_positions",
+        "total_entry_notional",
+        "status IN ({statuses}) AND quantity > 0",
+        statuses=ACTIVE_LIVE_SIM_POSITION_STATUSES,
+    )
+    filled_order_total = _sum_rows_where(
+        connection,
+        "live_sim_orders",
+        "notional",
+        "side = 'BUY' AND status IN ({statuses})",
+        statuses=LIVE_SIM_POSITION_ORDER_STATUSES,
+    )
+    return position_total + filled_order_total
+
+
+def _count_rows_where(
+    connection: sqlite3.Connection,
+    table_name: str,
+    where_sql: str,
+    *params: Any,
+    statuses: Sequence[str] = (),
+) -> int:
+    row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM {table_name}
+        WHERE {where_sql.format(statuses=_placeholders(statuses))}
+        """,
+        (*params, *statuses),
+    ).fetchone()
+    return int(row["count"] or 0)
+
+
+def _sum_rows_where(
+    connection: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    where_sql: str,
+    *params: Any,
+    statuses: Sequence[str] = (),
+) -> float:
+    row = connection.execute(
+        f"""
+        SELECT COALESCE(SUM({column_name}), 0) AS total
+        FROM {table_name}
+        WHERE {where_sql.format(statuses=_placeholders(statuses))}
+        """,
+        (*params, *statuses),
+    ).fetchone()
+    return float(row["total"] or 0.0)
+
+
+def _placeholders(values: Sequence[str]) -> str:
+    return ",".join("?" for _ in values)
+
+
 def _intraday_shock_observed(context: RiskInputContext, settings: Settings) -> bool:
     return (
         context.primary_index_return_5m is not None
@@ -1352,7 +1772,7 @@ def _evaluate_context(
         check_chase_overheat(context, settings),
         check_liquidity_spread(context, settings),
         check_duplicate_cooldown(connection, context, settings),
-        check_portfolio_placeholder(context, settings),
+        check_account_limits(connection, context, settings),
     ]
     blocked_count = sum(1 for check in checks if check.status is RiskCheckStatus.BLOCK_OBSERVED)
     caution_count = sum(1 for check in checks if check.status is RiskCheckStatus.CAUTION_OBSERVED)
@@ -1386,6 +1806,7 @@ def _evaluate_context(
             "strategy_status": context.strategy_status,
             "candidate_state": context.candidate_state,
             "market_regime": context.raw_context.get("market_regime", {}),
+            "account_limits": _check_evidence(checks, RiskCategory.ACCOUNT_LIMITS),
             "config_version": settings.risk_gate_config_version,
         },
         config_version=settings.risk_gate_config_version,
@@ -1770,6 +2191,16 @@ def _check(
         message=message,
         evidence_json={**dict(evidence), "observe_only": True},
     )
+
+
+def _check_evidence(
+    checks: Sequence[RiskCheckObservation],
+    category: RiskCategory,
+) -> dict[str, Any]:
+    for check in checks:
+        if check.category is category:
+            return dict(check.evidence_json)
+    return {}
 
 
 def _insert_run(

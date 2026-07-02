@@ -4314,6 +4314,7 @@ def _risk_evidence(row: sqlite3.Row) -> dict[str, Any]:
         "risk_observation_id": row["risk_observation_id"],
         "strategy_observation_id": row["strategy_observation_id"],
         "overall_status": row["overall_status"],
+        "reason_codes": _json_array(row["reason_codes_json"]),
         "evaluated_at": row["evaluated_at"],
         "observe_only": bool(row["observe_only"]),
     }

@@ -277,6 +277,26 @@ def test_duplicate_cooldown_observes_without_mutating_candidate_or_strategy(tmp_
     assert second_state == CandidateState.CONTEXT_READY.value
 
 
+def test_account_limits_block_when_dry_run_position_capacity_is_exhausted(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_account_limits.sqlite3")
+    settings = _settings(dry_run_max_active_positions=1)
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    _insert_dry_run_position(connection, candidate_id=candidate_id)
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    check = _check_by_category(observation, RiskCategory.ACCOUNT_LIMITS.value)
+    connection.close()
+
+    assert check.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert observation.overall_status is RiskObservationStatus.OBSERVE_BLOCK
+    assert RiskReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value in check.reason_codes
+    assert RiskReasonCode.CODE_CONCENTRATION_LIMIT_EXCEEDED.value in check.reason_codes
+    assert check.evidence_json["dry_run"]["active_position_count"] == 1
+    assert check.evidence_json["dry_run"]["code_open_position_count"] == 1
+
+
 def test_batch_evaluation_records_counts_and_errors(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_batch.sqlite3")
     settings = _settings()
@@ -415,3 +435,41 @@ def _check_by_category(observation, category: str):
         if check.category.value == category:
             return check
     raise AssertionError(f"check category not found: {category}")
+
+
+def _insert_dry_run_position(connection, *, candidate_id: str) -> None:
+    row = connection.execute(
+        """
+        SELECT trade_date, code, name
+        FROM candidates
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO dry_run_positions (
+            dry_run_position_id,
+            trade_date,
+            code,
+            name,
+            quantity,
+            avg_price,
+            invested_notional,
+            status,
+            opened_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, 97000, 97000, 'OPEN', ?, ?)
+        """,
+        (
+            f"dry-position-{row['code']}",
+            row["trade_date"],
+            row["code"],
+            row["name"],
+            now,
+            now,
+        ),
+    )
+    connection.commit()
