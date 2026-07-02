@@ -34,6 +34,21 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert 'queue_commands = "true"' not in script.lower()
 
 
+def test_start_theme_refresh_loop_uses_market_scan_interval_and_order_guard() -> None:
+    script = (ROOT_DIR / "tools" / "start_theme_refresh_loop.ps1").read_text(encoding="utf-8")
+
+    assert "/api/themes/refresh-cycle/run-once" in script
+    assert "MARKET_SCAN_INTERVAL_SEC" in script
+    assert '"09:00:00"' in script
+    assert '"15:30:00"' in script
+    assert "queue_market_scan_commands" in script
+    assert "queue_realtime_commands" in script
+    assert "order_command_delta" in script
+    assert "no_order_side_effects" in script
+    assert "Start-Sleep" in script
+    assert "X-Core-Token" in script
+
+
 def test_stop_core_gateway_script_targets_core_gateway_processes_only() -> None:
     script = (ROOT_DIR / "tools" / "stop_core_gateway.ps1").read_text(encoding="utf-8")
     lowered = script.lower()
