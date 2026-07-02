@@ -16,6 +16,10 @@ from services.realtime_subscription import (
     run_realtime_subscription_once,
 )
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.incremental_evaluation import (
+    get_incremental_evaluation_status,
+    process_incremental_evaluation_batch,
+)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
@@ -167,6 +171,39 @@ def operator_observe_cycle_run_latest() -> dict[str, Any]:
         "observe_only": True,
         "no_order_controls": True,
     }
+
+
+@router.get("/incremental-evaluation/status")
+def operator_incremental_evaluation_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_incremental_evaluation_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.post("/incremental-evaluation/run-once", dependencies=[Depends(require_local_token)])
+def operator_incremental_evaluation_run_once(
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            result = process_incremental_evaluation_batch(
+                connection,
+                settings=settings,
+                limit=limit,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
+        return result.to_dict()
+    finally:
+        connection.close()
 
 
 @router.get("/realtime-subscriptions/plan")

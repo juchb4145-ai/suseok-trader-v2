@@ -154,6 +154,11 @@ class Settings:
     condition_fusion_event_incremental_enabled: bool = True
     condition_fusion_sweep_enabled: bool = True
     condition_fusion_sweep_interval_sec: int = 60
+    incremental_evaluation_enabled: bool = True
+    incremental_evaluation_worker_enabled: bool = True
+    incremental_evaluation_worker_interval_sec: float = 1.0
+    incremental_evaluation_batch_size: int = 20
+    incremental_evaluation_retry_limit: int = 3
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -462,6 +467,14 @@ class Settings:
             raise ValueError("REALTIME_SUBSCRIPTION_EXCHANGE must be one of KRX, NXT, ALL")
         if self.condition_fusion_sweep_interval_sec < 1:
             raise ValueError("CONDITION_FUSION_SWEEP_INTERVAL_SEC must be >= 1")
+        if self.incremental_evaluation_worker_interval_sec <= 0:
+            raise ValueError("INCREMENTAL_EVALUATION_WORKER_INTERVAL_SEC must be > 0")
+        for field_name in (
+            "incremental_evaluation_batch_size",
+            "incremental_evaluation_retry_limit",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -1476,6 +1489,27 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         condition_fusion_sweep_interval_sec=_parse_int(
             env.get("CONDITION_FUSION_SWEEP_INTERVAL_SEC", "60"),
             "CONDITION_FUSION_SWEEP_INTERVAL_SEC",
+            min_value=1,
+        ),
+        incremental_evaluation_enabled=_parse_bool(
+            env.get("INCREMENTAL_EVALUATION_ENABLED", "true")
+        ),
+        incremental_evaluation_worker_enabled=_parse_bool(
+            env.get("INCREMENTAL_EVALUATION_WORKER_ENABLED", "true")
+        ),
+        incremental_evaluation_worker_interval_sec=_parse_float(
+            env.get("INCREMENTAL_EVALUATION_WORKER_INTERVAL_SEC", "1.0"),
+            "INCREMENTAL_EVALUATION_WORKER_INTERVAL_SEC",
+            min_value=0.1,
+        ),
+        incremental_evaluation_batch_size=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_BATCH_SIZE", "20"),
+            "INCREMENTAL_EVALUATION_BATCH_SIZE",
+            min_value=1,
+        ),
+        incremental_evaluation_retry_limit=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_RETRY_LIMIT", "3"),
+            "INCREMENTAL_EVALUATION_RETRY_LIMIT",
             min_value=1,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),

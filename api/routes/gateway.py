@@ -21,6 +21,7 @@ from services.market_regime_service import (
     rebuild_market_regime_snapshot,
     should_rebuild_market_regime_snapshot,
 )
+from services.runtime.incremental_evaluation import enqueue_incremental_evaluation_for_event
 from storage.event_store import (
     append_gateway_event,
     count_recent_gateway_events,
@@ -64,6 +65,14 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                 projection_result = process_gateway_event(connection, event, settings=settings)
                 projection_status = projection_result.status
                 projection_statuses["market_data"] = projection_result.status
+                if event_type == "price_tick" and projection_result.status == "APPLIED":
+                    projection_statuses["incremental_evaluation"] = (
+                        _enqueue_incremental_evaluation_for_price_tick(
+                            connection,
+                            event,
+                            settings=settings,
+                        )
+                    )
                 if (
                     event_type == "condition_event"
                     and projection_result.status == "APPLIED"
@@ -115,6 +124,24 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     if projection_statuses:
         response["projection_statuses"] = projection_statuses
     return response
+
+
+def _enqueue_incremental_evaluation_for_price_tick(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+) -> str:
+    try:
+        result = enqueue_incremental_evaluation_for_event(
+            connection,
+            event,
+            settings=settings,
+        )
+    except Exception:
+        logger.exception("incremental evaluation enqueue failed")
+        return "ERROR"
+    return result.status
 
 
 def _refresh_condition_fusion_for_condition_event(

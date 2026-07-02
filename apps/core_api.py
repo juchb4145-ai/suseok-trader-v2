@@ -34,6 +34,8 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from services.condition_fusion import rebuild_condition_fusion
 from services.config import Settings, load_settings
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
 from storage.sqlite import initialize_database
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -52,6 +54,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.condition_fusion_sweep_enabled
         else None
     )
+    incremental_evaluation_task = (
+        asyncio.create_task(_incremental_evaluation_loop(settings))
+        if settings.incremental_evaluation_enabled
+        and settings.incremental_evaluation_worker_enabled
+        else None
+    )
     try:
         yield
     finally:
@@ -59,6 +67,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             condition_fusion_sweep_task.cancel()
             with suppress(asyncio.CancelledError):
                 await condition_fusion_sweep_task
+        if incremental_evaluation_task is not None:
+            incremental_evaluation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await incremental_evaluation_task
 
 
 async def _condition_fusion_sweep_loop(settings: Settings) -> None:
@@ -75,6 +87,26 @@ def _run_condition_fusion_sweep_once(settings: Settings) -> None:
     connection = initialize_database(settings.trading_db_path)
     try:
         rebuild_condition_fusion(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+async def _incremental_evaluation_loop(settings: Settings) -> None:
+    interval_sec = max(float(settings.incremental_evaluation_worker_interval_sec), 0.1)
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await asyncio.to_thread(_run_incremental_evaluation_once, settings)
+        except EvaluationRunLockError:
+            logger.debug("incremental evaluation skipped because evaluation lock is held")
+        except Exception:
+            logger.exception("incremental evaluation worker failed")
+
+
+def _run_incremental_evaluation_once(settings: Settings) -> None:
+    connection = initialize_database(settings.trading_db_path)
+    try:
+        process_incremental_evaluation_batch(connection, settings=settings)
     finally:
         connection.close()
 

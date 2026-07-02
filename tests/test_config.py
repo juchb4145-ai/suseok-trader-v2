@@ -92,6 +92,11 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.condition_fusion_event_incremental_enabled is True
     assert settings.condition_fusion_sweep_enabled is True
     assert settings.condition_fusion_sweep_interval_sec == 60
+    assert settings.incremental_evaluation_enabled is True
+    assert settings.incremental_evaluation_worker_enabled is True
+    assert settings.incremental_evaluation_worker_interval_sec == 1.0
+    assert settings.incremental_evaluation_batch_size == 20
+    assert settings.incremental_evaluation_retry_limit == 3
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
