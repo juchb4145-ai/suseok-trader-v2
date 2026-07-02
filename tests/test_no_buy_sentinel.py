@@ -157,6 +157,8 @@ def test_stage_funnel_records_pipeline_survival_counts(tmp_path) -> None:
         "LIVE_SIM_INTENT_NOT_CREATED": 1
     }
     assert "005930" in stages["order_plan_ready"]["sample_codes"]
+    assert snapshot["top_near_miss"][0]["admission_trace"]["policy"] == "live_sim_order_plan"
+    assert snapshot["top_near_miss"][0]["admission_trace"]["reason_codes"] == []
     assert json.loads(stored["stage_funnel_json"])["version"] == 1
 
 

@@ -101,8 +101,13 @@ def test_eligibility_requires_strategy_risk_candidate_tick_and_saves_check(tmp_p
     connection.close()
 
     assert eligible.eligible is True
+    assert eligible.evidence_json["admission_trace"]["policy"] == "dry_run_shadow"
+    assert eligible.evidence_json["admission_trace"]["reason_codes"] == []
     assert strategy_blocked.eligible is False
     assert DryRunRejectionReason.STRATEGY_NOT_MATCHED.value in strategy_blocked.reason_codes
+    assert strategy_blocked.evidence_json["admission_trace"]["reason_codes"] == [
+        DryRunRejectionReason.STRATEGY_NOT_MATCHED.value
+    ]
     assert risk_blocked.eligible is False
     assert DryRunRejectionReason.RISK_NOT_OBSERVE_PASS.value in risk_blocked.reason_codes
     assert candidate_blocked.eligible is False
