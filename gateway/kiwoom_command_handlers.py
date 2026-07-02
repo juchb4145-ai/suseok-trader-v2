@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
@@ -22,6 +24,7 @@ from gateway.kiwoom_client import (
     normalize_code,
 )
 from gateway.kiwoom_tr import KiwoomTrRunner
+from gateway.order_pre_ack_journal import OrderPreAckJournal
 
 OrderAckCallback = Callable[[GatewayCommand, KiwoomOrderRequest, KiwoomOrderResult], None]
 
@@ -46,6 +49,98 @@ FORBIDDEN_KIWOOM_COMMAND_TYPES = {
 }
 
 
+@dataclass(frozen=True, kw_only=True)
+class RateLimitDecision:
+    allowed: bool
+    wait_time_sec: float = 0.0
+    reason: str = ""
+
+
+class KiwoomRateLimitGovernor:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        global_per_second: float = 5.0,
+        hourly_limit: float = 900.0,
+        min_interval_sec: Mapping[str, float] | None = None,
+        type_weights: Mapping[str, float] | None = None,
+    ) -> None:
+        self.clock = clock
+        self.global_per_second = max(float(global_per_second), 0.1)
+        self.hourly_limit = max(float(hourly_limit), 1.0)
+        self.min_interval_sec = {
+            "request_tr": 1.0,
+            "load_conditions": 1.0,
+            "send_condition": 0.2,
+            "send_order": 0.2,
+            "cancel_order": 0.2,
+            **dict(min_interval_sec or {}),
+        }
+        self.type_weights = {
+            "heartbeat_request": 0.0,
+            "register_realtime": 1.0,
+            "remove_realtime": 1.0,
+            "request_tr": 1.0,
+            "load_conditions": 1.0,
+            "send_condition": 1.0,
+            "stop_condition": 1.0,
+            "send_order": 1.0,
+            "cancel_order": 1.0,
+            **dict(type_weights or {}),
+        }
+        self._last_call_at: dict[str, float] = {}
+        self._second_calls: deque[tuple[float, float]] = deque()
+        self._hourly_calls: deque[tuple[float, float]] = deque()
+
+    def check(self, command_type: str) -> RateLimitDecision:
+        normalized = command_type.strip().lower()
+        weight = max(float(self.type_weights.get(normalized, 1.0)), 0.0)
+        if weight <= 0:
+            return RateLimitDecision(allowed=True)
+
+        now = self.clock()
+        self._trim(now)
+        waits: list[tuple[float, str]] = []
+        interval = max(float(self.min_interval_sec.get(normalized, 0.0)), 0.0)
+        last_at = self._last_call_at.get(normalized)
+        if interval > 0 and last_at is not None:
+            wait = interval - (now - last_at)
+            if wait > 0:
+                waits.append((wait, "type_min_interval"))
+
+        second_used = sum(call_weight for _, call_weight in self._second_calls)
+        if second_used + weight > self.global_per_second and self._second_calls:
+            waits.append((self._second_calls[0][0] + 1.0 - now, "global_per_second"))
+
+        hourly_used = sum(call_weight for _, call_weight in self._hourly_calls)
+        if hourly_used + weight > self.hourly_limit and self._hourly_calls:
+            waits.append((self._hourly_calls[0][0] + 3600.0 - now, "hourly_rolling_limit"))
+
+        waits = [(max(wait, 0.001), reason) for wait, reason in waits if wait > 0]
+        if not waits:
+            return RateLimitDecision(allowed=True)
+        wait_time, reason = max(waits, key=lambda item: item[0])
+        return RateLimitDecision(allowed=False, wait_time_sec=wait_time, reason=reason)
+
+    def record(self, command_type: str) -> None:
+        normalized = command_type.strip().lower()
+        weight = max(float(self.type_weights.get(normalized, 1.0)), 0.0)
+        if weight <= 0:
+            return
+        now = self.clock()
+        self._trim(now)
+        self._last_call_at[normalized] = now
+        self._second_calls.append((now, weight))
+        self._hourly_calls.append((now, weight))
+
+    def _trim(self, now: float) -> None:
+        while self._second_calls and self._second_calls[0][0] <= now - 1.0:
+            self._second_calls.popleft()
+        while self._hourly_calls and self._hourly_calls[0][0] <= now - 3600.0:
+            self._hourly_calls.popleft()
+
+
 class KiwoomGatewayCommandHandler:
     def __init__(
         self,
@@ -54,22 +149,18 @@ class KiwoomGatewayCommandHandler:
         source: str = "kiwoom_gateway",
         tr_runner: KiwoomTrRunner | None = None,
         on_order_ack: OrderAckCallback | None = None,
+        order_journal: OrderPreAckJournal | None = None,
+        rate_limit_governor: KiwoomRateLimitGovernor | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.client = client
         self.source = source
         self.tr_runner = tr_runner or KiwoomTrRunner(client)
         self.on_order_ack = on_order_ack
+        self.order_journal = order_journal
         self.clock = clock
         self.subscriptions: set[str] = set()
-        self._last_call_at: dict[str, float] = {}
-        self._min_interval_sec = {
-            "request_tr": 1.0,
-            "load_conditions": 1.0,
-            "send_condition": 0.2,
-            "send_order": 0.2,
-            "cancel_order": 0.2,
-        }
+        self.rate_limit_governor = rate_limit_governor or KiwoomRateLimitGovernor(clock=clock)
 
     def handle(self, command: GatewayCommand) -> list[GatewayEvent]:
         command_type = command.command_type.strip().lower()
@@ -97,16 +188,9 @@ class KiwoomGatewayCommandHandler:
             return self._handle_cancel_order(command)
 
         events = [make_command_started_event(command, source=self.source)]
-        wait_time = self._rate_limit_wait_time(command_type)
-        if wait_time > 0:
-            events.append(self._rate_limited_event(command, wait_time))
-            events.append(
-                make_command_failed_event(
-                    command,
-                    f"Kiwoom command rate limited: wait {wait_time:.3f}s",
-                    source=self.source,
-                )
-            )
+        decision = self.rate_limit_governor.check(command_type)
+        if not decision.allowed:
+            events.append(self._rate_limited_event(command, decision))
             return events
         try:
             events.extend(self._handle_non_order(command_type, command))
@@ -292,16 +376,11 @@ class KiwoomGatewayCommandHandler:
                     source=self.source,
                 )
             ]
-        wait_time = self._rate_limit_wait_time("send_order")
-        if wait_time > 0:
+        decision = self.rate_limit_governor.check("send_order")
+        if not decision.allowed:
             return [
                 make_command_started_event(command, source=self.source),
-                self._rate_limited_event(command, wait_time),
-                make_command_failed_event(
-                    command,
-                    f"Kiwoom send_order rate limited: wait {wait_time:.3f}s",
-                    source=self.source,
-                ),
+                self._rate_limited_event(command, decision),
             ]
 
         payload = command.payload
@@ -319,10 +398,23 @@ class KiwoomGatewayCommandHandler:
             metadata=_mapping_value(payload, "metadata"),
         )
         events = [make_command_started_event(command, source=self.source)]
+        if self.order_journal is not None:
+            events.append(
+                self.order_journal.record_pre_ack(
+                    command,
+                    request,
+                    broker_env=actual_broker_env,
+                    source=self.source,
+                )
+            )
         try:
             result = self.client.send_order(request)
             self._record_rate_limit("send_order")
+            if self.order_journal is not None:
+                self.order_journal.mark_broker_result(command, result)
         except Exception as exc:
+            if self.order_journal is not None:
+                self.order_journal.mark_failed(command, str(exc))
             events.append(make_command_failed_event(command, str(exc), source=self.source))
             return events
 
@@ -373,16 +465,11 @@ class KiwoomGatewayCommandHandler:
                     source=self.source,
                 )
             ]
-        wait_time = self._rate_limit_wait_time("cancel_order")
-        if wait_time > 0:
+        decision = self.rate_limit_governor.check("cancel_order")
+        if not decision.allowed:
             return [
                 make_command_started_event(command, source=self.source),
-                self._rate_limited_event(command, wait_time),
-                make_command_failed_event(
-                    command,
-                    f"Kiwoom cancel_order rate limited: wait {wait_time:.3f}s",
-                    source=self.source,
-                ),
+                self._rate_limited_event(command, decision),
             ]
 
         payload = command.payload
@@ -401,10 +488,23 @@ class KiwoomGatewayCommandHandler:
             metadata=_mapping_value(payload, "metadata"),
         )
         events = [make_command_started_event(command, source=self.source)]
+        if self.order_journal is not None:
+            events.append(
+                self.order_journal.record_pre_ack(
+                    command,
+                    request,
+                    broker_env=actual_broker_env,
+                    source=self.source,
+                )
+            )
         try:
             result = self.client.send_order(request)
             self._record_rate_limit("cancel_order")
+            if self.order_journal is not None:
+                self.order_journal.mark_broker_result(command, result)
         except Exception as exc:
+            if self.order_journal is not None:
+                self.order_journal.mark_failed(command, str(exc))
             events.append(make_command_failed_event(command, str(exc), source=self.source))
             return events
 
@@ -448,18 +548,17 @@ class KiwoomGatewayCommandHandler:
             return "UNKNOWN"
 
     def _rate_limit_wait_time(self, command_type: str) -> float:
-        interval = self._min_interval_sec.get(command_type, 0.0)
-        if interval <= 0:
-            return 0.0
-        last_at = self._last_call_at.get(command_type)
-        if last_at is None:
-            return 0.0
-        return max(0.0, interval - (self.clock() - last_at))
+        decision = self.rate_limit_governor.check(command_type)
+        return 0.0 if decision.allowed else decision.wait_time_sec
 
     def _record_rate_limit(self, command_type: str) -> None:
-        self._last_call_at[command_type] = self.clock()
+        self.rate_limit_governor.record(command_type)
 
-    def _rate_limited_event(self, command: GatewayCommand, wait_time: float) -> GatewayEvent:
+    def _rate_limited_event(
+        self,
+        command: GatewayCommand,
+        decision: RateLimitDecision,
+    ) -> GatewayEvent:
         return GatewayEvent(
             event_type="rate_limited",
             source=self.source,
@@ -468,7 +567,9 @@ class KiwoomGatewayCommandHandler:
             payload={
                 "command_id": command.command_id,
                 "command_type": command.command_type,
-                "wait_time_sec": round(wait_time, 3),
+                "wait_time_sec": round(decision.wait_time_sec, 3),
+                "next_available_in_sec": round(decision.wait_time_sec, 3),
+                "reason": decision.reason,
                 "status": "rate_limited",
             },
         )

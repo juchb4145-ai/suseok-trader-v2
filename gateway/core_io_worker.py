@@ -278,6 +278,7 @@ _DROP_PROTECTED_EVENT_TYPES = {
     "command_ack",
     "command_failed",
     "execution_event",
+    "order_pre_ack",
 }
 
 

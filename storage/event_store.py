@@ -35,6 +35,7 @@ SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
         "condition_loaded",
         "tr_response",
         "execution_event",
+        "order_pre_ack",
         "command_started",
         "command_ack",
         "command_failed",
@@ -183,7 +184,18 @@ def append_gateway_event(
             if _heartbeat_is_fresh(connection, event_ts):
                 _upsert_gateway_status(connection, "last_heartbeat_at", event_ts)
                 _upsert_heartbeat_status(connection, event.payload)
-        if event_type in {"command_started", "command_ack", "command_failed"} and event.command_id:
+        if (
+            event_type
+            in {
+                "command_started",
+                "command_ack",
+                "command_failed",
+                "rate_limited",
+                "execution_event",
+                "order_pre_ack",
+            }
+            and event.command_id
+        ):
             record_command_event(
                 connection,
                 command_id=event.command_id,

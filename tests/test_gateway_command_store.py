@@ -34,6 +34,38 @@ def make_command(
     )
 
 
+def make_live_sim_order_command(command_id: str) -> GatewayCommand:
+    idempotency_key = f"idem-{command_id}"
+    return GatewayCommand(
+        command_id=command_id,
+        command_type="send_order",
+        source="live_sim",
+        idempotency_key=idempotency_key,
+        payload={
+            "account_id": "1234567890",
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "server_mode": "SIMULATION",
+            "code": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "price": 70000,
+            "mode": "LIVE_SIM",
+            "live_mode": "LIVE_SIM",
+            "live_sim_intent_id": "intent-1",
+            "idempotency_key": idempotency_key,
+            "metadata": {
+                "source": "live_sim",
+                "live_sim_only": True,
+                "live_real_allowed": False,
+                "live_sim_intent_id": "intent-1",
+                "idempotency_key": idempotency_key,
+            },
+        },
+        ts=TS,
+    )
+
+
 def test_enqueue_command_then_poll_dispatches_and_increments_attempts(tmp_path) -> None:
     connection = initialize_database(tmp_path / "commands.sqlite3")
 
@@ -133,6 +165,41 @@ def test_command_failed_event_marks_command_failed(tmp_path) -> None:
     assert row["last_error"] == "TR rejected"
 
 
+def test_rate_limited_event_requeues_command_with_available_at(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    enqueue_command(connection, make_command("cmd_rate_limited"))
+    poll_commands(connection)
+
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_id="evt_rate_limited",
+            event_type="rate_limited",
+            source="test-gateway",
+            command_id="cmd_rate_limited",
+            payload={"wait_time_sec": 60, "reason": "global_per_second"},
+            ts=TS,
+        ),
+    )
+
+    commands = poll_commands(connection, wait_sec=0)
+    row = connection.execute(
+        """
+        SELECT status, available_at, attempts, completed_at, last_error
+        FROM gateway_commands
+        WHERE command_id = 'cmd_rate_limited'
+        """
+    ).fetchone()
+    connection.close()
+
+    assert commands == []
+    assert row["status"] == GatewayCommandStatus.QUEUED.value
+    assert row["available_at"] is not None
+    assert row["attempts"] == 1
+    assert row["completed_at"] is None
+    assert row["last_error"] is None
+
+
 def test_expired_command_is_not_polled(tmp_path) -> None:
     connection = initialize_database(tmp_path / "commands.sqlite3")
     enqueue_command(
@@ -195,6 +262,86 @@ def test_stale_dispatched_command_is_failed_and_queue_health_refreshed(tmp_path)
     assert row["completed_at"] is not None
     assert "timed out" in row["last_error"]
     assert status["value"] == "true"
+
+
+def test_stale_dispatched_order_becomes_unconfirmed(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    enqueue_command(connection, make_live_sim_order_command("cmd_stale_order"))
+    poll_commands(connection)
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET dispatched_at = ?
+        WHERE command_id = 'cmd_stale_order'
+        """,
+        (datetime_to_wire(utc_now() - timedelta(seconds=180)),),
+    )
+    connection.commit()
+
+    result = expire_stale_gateway_commands(connection, dispatched_timeout_sec=120)
+    counts = get_command_status_counts(connection)
+    row = connection.execute(
+        """
+        SELECT status, completed_at, last_error
+        FROM gateway_commands
+        WHERE command_id = 'cmd_stale_order'
+        """
+    ).fetchone()
+    connection.close()
+
+    assert result["timed_out_dispatched_count"] == 0
+    assert result["unconfirmed_order_count"] == 1
+    assert counts[GatewayCommandStatus.UNCONFIRMED.value] == 1
+    assert row["status"] == GatewayCommandStatus.UNCONFIRMED.value
+    assert row["completed_at"] is None
+    assert "reconciliation required" in row["last_error"]
+
+
+def test_execution_event_reconciles_unconfirmed_order(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    enqueue_command(connection, make_live_sim_order_command("cmd_reconciled_order"))
+    poll_commands(connection)
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?, completed_at = NULL
+        WHERE command_id = 'cmd_reconciled_order'
+        """,
+        (GatewayCommandStatus.UNCONFIRMED.value,),
+    )
+    connection.commit()
+
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_id="evt_execution_reconcile",
+            event_type="execution_event",
+            source="test-gateway",
+            command_id="cmd_reconciled_order",
+            payload={
+                "execution_id": "exec-1",
+                "broker_order_id": "broker-1",
+                "code": "005930",
+                "side": "BUY",
+                "quantity": 1,
+                "price": 70000,
+                "executed_at": datetime_to_wire(TS),
+            },
+            ts=TS,
+        ),
+    )
+
+    row = connection.execute(
+        """
+        SELECT status, completed_at
+        FROM gateway_commands
+        WHERE command_id = 'cmd_reconciled_order'
+        """
+    ).fetchone()
+    connection.close()
+
+    assert row["status"] == GatewayCommandStatus.ACKED.value
+    assert row["completed_at"] is not None
 
 
 def test_forbidden_order_command_type_is_rejected(tmp_path) -> None:
