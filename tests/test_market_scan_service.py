@@ -35,12 +35,19 @@ def test_market_scan_queues_request_tr_and_projects_mock_gateway_response(tmp_pa
         """
     ).fetchone()["count"]
     latest = get_latest_market_scan(connection, "005930")
+    command_payloads = [
+        command.payload
+        for command in commands
+        if command.command_type == "request_tr"
+    ]
     connection.close()
 
     assert result.status == "QUEUED"
     assert result.command_count == 4
     assert len(commands) == 4
     assert {row["command_type"] for row in command_rows} == {"request_tr"}
+    assert all(payload["fields"] for payload in command_payloads)
+    assert {"종목코드", "종목명", "현재가"}.issubset(set(command_payloads[0]["fields"]))
     assert order_count == 0
     assert projection.status == "APPLIED"
     assert latest is not None
@@ -80,6 +87,49 @@ def test_market_scan_parses_korean_rows_and_latest_projection(tmp_path) -> None:
     assert latest["price"] == 70000
     assert latest["change_rate"] == 2.5
     assert latest["trade_value"] == 1_200_000_000
+
+
+def test_market_scan_accepts_alphanumeric_krx_short_codes(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-scan-alnum.sqlite3")
+    settings = Settings(market_scan_enabled=True)
+    event = make_tr_response_event(
+        request_id="market_scan:CHANGE_RATE:KOSPI:run1",
+        tr_code="OPT10027",
+        request_name="market_scan_change_rate_kospi",
+        rows=[
+            {
+                "종목코드": "0197X0",
+                "종목명": "SOL SK하이닉스선물단일종목인버스2X",
+                "현재가": "+10545",
+                "등락률": "+34.67",
+                "현재거래량": "228934477",
+            },
+            {
+                "종목코드": "A00279K",
+                "종목명": "아모레퍼시픽홀딩스3우C",
+                "현재가": "+20100",
+                "등락률": "+3.08",
+                "현재거래량": "30787",
+            },
+        ],
+        source="mock_gateway",
+    )
+
+    result = process_market_scan_event(connection, event, settings=settings)
+    latest_etf = get_latest_market_scan(connection, "0197X0")
+    latest_preferred = get_latest_market_scan(connection, "A00279K")
+    errors = list_market_scan_errors(connection)
+    connection.close()
+
+    assert result.status == "APPLIED"
+    assert result.applied_count == 2
+    assert result.error_count == 0
+    assert errors == []
+    assert latest_etf is not None
+    assert latest_etf["code"] == "0197X0"
+    assert latest_etf["change_rate"] == 34.67
+    assert latest_preferred is not None
+    assert latest_preferred["code"] == "00279K"
 
 
 def test_market_scan_records_row_parse_errors_with_reason_code(tmp_path) -> None:

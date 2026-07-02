@@ -30,6 +30,30 @@ SCAN_TYPE_TRADE_VALUE = "TRADE_VALUE"
 SCAN_TYPE_CHANGE_RATE = "CHANGE_RATE"
 SUPPORTED_SCAN_TYPES = (SCAN_TYPE_TRADE_VALUE, SCAN_TYPE_CHANGE_RATE)
 SCAN_EVENT_TYPES = frozenset({"tr_response"})
+_MARKET_SCAN_CODE_RE = re.compile(r"[0-9A-Z]{6}")
+MARKET_SCAN_TR_FIELDS: dict[str, tuple[str, ...]] = {
+    SCAN_TYPE_TRADE_VALUE: (
+        "종목코드",
+        "종목명",
+        "현재순위",
+        "순위",
+        "현재가",
+        "등락률",
+        "거래대금",
+        "현재거래량",
+        "거래량",
+    ),
+    SCAN_TYPE_CHANGE_RATE: (
+        "종목코드",
+        "종목명",
+        "순위",
+        "현재가",
+        "등락률",
+        "거래량",
+        "거래대금",
+        "현재거래량",
+    ),
+}
 
 QueueCommand = Callable[[GatewayCommand], Any]
 
@@ -330,7 +354,7 @@ def get_latest_market_scan(
     connection: sqlite3.Connection,
     code: str,
 ) -> dict[str, Any] | None:
-    normalized_code = validate_stock_code(code)
+    normalized_code = _normalize_market_scan_code(code)
     row = connection.execute(
         """
         SELECT *
@@ -423,6 +447,7 @@ def _build_scan_command(
         "tr_code": tr_code,
         "request_name": f"market_scan_{normalized_scan_type.lower()}_{normalized_market.lower()}",
         "screen_no": settings.market_scan_screen_no,
+        "fields": list(MARKET_SCAN_TR_FIELDS[normalized_scan_type]),
         "params": {
             "시장구분": settings.market_scan_market_codes[normalized_market],
             "market": normalized_market,
@@ -539,14 +564,14 @@ def _parse_scan_row(
 ) -> dict[str, Any]:
     normalized = normalize_payload(row)
     try:
-        code = validate_stock_code(_first_value(normalized, "code", "stock_code", "종목코드"))
+        code = _normalize_market_scan_code(_first_value(normalized, "code", "stock_code", "종목코드"))
     except Exception as exc:
         raise _RowParseError("MARKET_SCAN_CODE_PARSE_FAILED", str(exc)) from exc
     name = _string_or_default(
         _first_value(normalized, "name", "stock_name", "종목명", "종목명 ".strip()),
         code,
     )
-    rank = _int_or_default(_first_value(normalized, "rank", "순위"), fallback_rank)
+    rank = _int_or_default(_first_value(normalized, "rank", "순위", "현재순위"), fallback_rank)
     price = _float_or_none(
         _first_value(normalized, "price", "current_price", "현재가"),
         absolute=True,
@@ -566,7 +591,7 @@ def _parse_scan_row(
         min_value=0.0,
     )
     volume = _int_or_none(
-        _first_value(normalized, "volume", "cum_volume", "거래량"),
+        _first_value(normalized, "volume", "cum_volume", "거래량", "현재거래량"),
         min_value=0,
     )
     metadata = {
@@ -593,6 +618,15 @@ def _parse_scan_row(
         "source": source,
         "metadata": metadata,
     }
+
+
+def _normalize_market_scan_code(value: object) -> str:
+    code = require_non_empty_str(value, "code").upper()
+    if code.startswith("A") and len(code) == 7:
+        code = code[1:]
+    if not _MARKET_SCAN_CODE_RE.fullmatch(code):
+        raise ValueError("code must be a 6-character KRX short code")
+    return code
 
 
 def _insert_scan_snapshot(connection: sqlite3.Connection, item: Mapping[str, Any]) -> None:

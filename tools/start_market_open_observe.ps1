@@ -14,6 +14,7 @@ param(
     [string]$MarketIndexCodes = $(if ($env:KIWOOM_MARKET_INDEX_CODES) { $env:KIWOOM_MARKET_INDEX_CODES } else { "KOSPI,KOSDAQ" }),
     [string]$MarketIndexScreenNo = $(if ($env:KIWOOM_MARKET_INDEX_SCREEN_NO) { $env:KIWOOM_MARKET_INDEX_SCREEN_NO } else { "5700" }),
     [string]$MarketIndexPollSec = $(if ($env:KIWOOM_MARKET_INDEX_POLL_SEC) { $env:KIWOOM_MARKET_INDEX_POLL_SEC } else { "60.0" }),
+    [string]$ThemeRefreshTradingSession = $(if ($env:THEME_REFRESH_TRADING_SESSION) { $env:THEME_REFRESH_TRADING_SESSION } else { "NXT" }),
     [string]$ThemeRefreshQueueMarketScanCommands = $(if ($env:THEME_REFRESH_QUEUE_MARKET_SCAN_COMMANDS) { $env:THEME_REFRESH_QUEUE_MARKET_SCAN_COMMANDS } else { "true" }),
     [string]$ThemeRefreshQueueRealtimeCommands = $(if ($env:THEME_REFRESH_QUEUE_REALTIME_COMMANDS) { $env:THEME_REFRESH_QUEUE_REALTIME_COMMANDS } else { "" }),
     [int]$ThemeRefreshRequestTimeoutSec = 120,
@@ -157,56 +158,57 @@ function Wait-CoreHealth {
 
 function Start-KiwoomGatewayDetached {
     $GatewayScript = Join-Path $PSScriptRoot "start_kiwoom_gateway_visible.ps1"
-    $Args = @(
-        "-CoreUrl", $CoreUrl,
-        "-Token", $Token,
-        "-RealtimeExchange", $RealtimeExchange,
-        "-MarketIndexEnabled", $env:KIWOOM_MARKET_INDEX_ENABLED,
-        "-MarketIndexRealtimeEnabled", $env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED,
-        "-MarketIndexTrBootstrapEnabled", $env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED,
-        "-MarketIndexCodes", $MarketIndexCodes,
-        "-MarketIndexScreenNo", $MarketIndexScreenNo,
-        "-MarketIndexPollSec", $MarketIndexPollSec,
-        "-Detached",
-        "-Log",
-        "-WaitSeconds", [string]$GatewayWaitSeconds
-    )
+    $GatewayScriptParams = @{
+        CoreUrl = $CoreUrl
+        Token = $Token
+        RealtimeExchange = $RealtimeExchange
+        MarketIndexEnabled = $env:KIWOOM_MARKET_INDEX_ENABLED
+        MarketIndexRealtimeEnabled = $env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED
+        MarketIndexTrBootstrapEnabled = $env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED
+        MarketIndexCodes = $MarketIndexCodes
+        MarketIndexScreenNo = $MarketIndexScreenNo
+        MarketIndexPollSec = $MarketIndexPollSec
+        Detached = $true
+        Log = $true
+        WaitSeconds = $GatewayWaitSeconds
+    }
     if (-not [string]::IsNullOrWhiteSpace($ConditionProfilesFile)) {
-        $Args += @("-ConditionProfilesFile", $ConditionProfilesFile)
+        $GatewayScriptParams.ConditionProfilesFile = $ConditionProfilesFile
     } elseif (-not [string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
-        $Args += @("-ConditionProfilesJson", $ConditionProfilesJson)
+        $GatewayScriptParams.ConditionProfilesJson = $ConditionProfilesJson
     } elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
-        $Args += @("-ConditionName", $ConditionName)
+        $GatewayScriptParams.ConditionName = $ConditionName
     }
     if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
-        $Args += @("-RealtimeCodes", $RealtimeCodes)
+        $GatewayScriptParams.RealtimeCodes = $RealtimeCodes
     }
 
-    & $GatewayScript @Args
+    & $GatewayScript @GatewayScriptParams
 }
 
 function Start-ThemeRefreshLoopDetached {
     $LoopScript = Join-Path $PSScriptRoot "start_theme_refresh_loop.ps1"
-    $Args = @(
+    $LoopScriptArgs = @(
         "-NoProfile",
         "-ExecutionPolicy", "Bypass",
         "-File", $LoopScript,
         "-CoreUrl", $CoreUrl,
         "-Token", $Token,
+        "-TradingSession", $ThemeRefreshTradingSession,
         "-QueueMarketScanCommands", $ThemeRefreshQueueMarketScanCommands,
         "-RequestTimeoutSec", [string]$ThemeRefreshRequestTimeoutSec
     )
     if (-not [string]::IsNullOrWhiteSpace($TradeDate)) {
-        $Args += @("-TradeDate", $TradeDate)
+        $LoopScriptArgs += @("-TradeDate", $TradeDate)
     }
     if (-not [string]::IsNullOrWhiteSpace($ThemeRefreshQueueRealtimeCommands)) {
-        $Args += @("-QueueRealtimeCommands", $ThemeRefreshQueueRealtimeCommands)
+        $LoopScriptArgs += @("-QueueRealtimeCommands", $ThemeRefreshQueueRealtimeCommands)
     }
 
     Start-DetachedRuntimeProcess `
         -Label "theme_refresh_loop" `
         -FilePath "powershell.exe" `
-        -Arguments $Args `
+        -Arguments $LoopScriptArgs `
         -Hidden $true | Out-Null
 }
 
@@ -365,7 +367,7 @@ Write-Host "One-shot launcher command:"
 Write-Host "  .\tools\start_market_open_observe.ps1 -RunAll"
 Write-Host ""
 Write-Host "Theme refresh loop command:"
-Write-Host "  .\tools\start_theme_refresh_loop.ps1 -CoreUrl $CoreUrl -Token `$env:TRADING_CORE_TOKEN"
+Write-Host "  .\tools\start_theme_refresh_loop.ps1 -CoreUrl $CoreUrl -Token `$env:TRADING_CORE_TOKEN -TradingSession $ThemeRefreshTradingSession"
 Write-Host ""
 Write-Host "Read-only check endpoints after Core/Gateway start:"
 Write-Host "  $CoreUrl/health"
@@ -376,11 +378,11 @@ Write-Host "  $CoreUrl/api/market-data/status"
 Write-Host "  $CoreUrl/api/dashboard/snapshot"
 
 if ($RunObserveCycle) {
-    $Args = @("-m", "tools.run_market_open_observe_cycle")
+    $ObserveCycleArgs = @("-m", "tools.run_market_open_observe_cycle")
     if (-not [string]::IsNullOrWhiteSpace($TradeDate)) {
-        $Args += @("--trade-date", $TradeDate)
+        $ObserveCycleArgs += @("--trade-date", $TradeDate)
     }
-    & $Python64 @Args
+    & $Python64 @ObserveCycleArgs
 }
 
 if ($RunCoreRequested) {

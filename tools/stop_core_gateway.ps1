@@ -2,13 +2,15 @@
 param(
     [switch]$CoreOnly,
     [switch]$GatewayOnly,
+    [switch]$ThemeRefreshOnly,
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 
-if ($CoreOnly -and $GatewayOnly) {
-    throw "Use either -CoreOnly or -GatewayOnly, not both."
+$OnlySwitchCount = @($CoreOnly, $GatewayOnly, $ThemeRefreshOnly).Where({ $_ }).Count
+if ($OnlySwitchCount -gt 1) {
+    throw "Use only one of -CoreOnly, -GatewayOnly, or -ThemeRefreshOnly."
 }
 
 $OriginalWhatIfPreference = $WhatIfPreference
@@ -35,17 +37,35 @@ function Get-TargetLabel {
     }
 
     $Normalized = $CommandLine.ToLowerInvariant()
-    if (-not $GatewayOnly -and $Normalized -match "apps\.core_api:app") {
+    if ((Test-TargetFilter -Label "core") -and $Normalized -match "apps\.core_api:app") {
         return "core"
     }
-    if (-not $CoreOnly -and $Normalized -match "apps\.mock_gateway") {
+    if ((Test-TargetFilter -Label "mock_gateway") -and $Normalized -match "apps\.mock_gateway") {
         return "mock_gateway"
     }
-    if (-not $CoreOnly -and $Normalized -match "apps\.kiwoom_gateway") {
+    if ((Test-TargetFilter -Label "kiwoom_gateway") -and $Normalized -match "apps\.kiwoom_gateway") {
         return "kiwoom_gateway"
+    }
+    if ((Test-TargetFilter -Label "theme_refresh_loop") -and $Normalized -match "start_theme_refresh_loop\.ps1") {
+        return "theme_refresh_loop"
     }
 
     return $null
+}
+
+function Test-TargetFilter {
+    param([string]$Label)
+
+    if ($CoreOnly) {
+        return $Label -eq "core"
+    }
+    if ($GatewayOnly) {
+        return @("mock_gateway", "kiwoom_gateway") -contains $Label
+    }
+    if ($ThemeRefreshOnly) {
+        return $Label -eq "theme_refresh_loop"
+    }
+    return $true
 }
 
 function Format-CommandLine {
@@ -120,11 +140,11 @@ $Targets = @(
 )
 
 if ($Targets.Count -eq 0) {
-    Write-Host "No running Core/Gateway process found."
+    Write-Host "No running Core/Gateway/theme refresh loop process found."
     return
 }
 
-Write-Host "Core/Gateway processes to stop:"
+Write-Host "Core/Gateway/theme refresh loop processes to stop:"
 foreach ($Target in $Targets) {
     $Process = $Target.Process
     Write-Host ("- {0}: PID={1}, PPID={2}, Name={3}" -f $Target.Label, $Process.ProcessId, $Process.ParentProcessId, $Process.Name)

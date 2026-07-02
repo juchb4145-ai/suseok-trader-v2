@@ -4,6 +4,7 @@ param(
     [int]$IntervalSec = 0,
     [string]$MarketOpenTime = "",
     [string]$MarketCloseTime = "",
+    [string]$TradingSession = "",
     [string]$TradeDate = "",
     [string]$QueueMarketScanCommands = "",
     [string]$QueueRealtimeCommands = "",
@@ -134,6 +135,31 @@ function Resolve-TimeOfDay {
     } catch {
         throw "$Name must be a time value such as 09:00:00. Got: $Value"
     }
+}
+
+function Resolve-TradingSession {
+    param([string]$Value)
+
+    $Normalized = $Value.Trim().ToUpperInvariant()
+    if (@("KRX", "NXT", "CUSTOM") -contains $Normalized) {
+        return $Normalized
+    }
+
+    throw "TradingSession must be one of KRX, NXT, or CUSTOM. Got: $Value"
+}
+
+function Get-DefaultSessionWindow {
+    param([string]$Session)
+
+    if ($Session -eq "KRX") {
+        return @{ Open = "09:00:00"; Close = "15:30:00" }
+    }
+    if ($Session -eq "NXT") {
+        # NXT extends the coarse observation window from pre-market through after-market.
+        return @{ Open = "08:00:00"; Close = "20:00:00" }
+    }
+
+    return @{ Open = ""; Close = "" }
 }
 
 function New-RefreshCycleUri {
@@ -270,14 +296,21 @@ $ResolvedIntervalSec = Resolve-PositiveIntSetting `
     -Value $IntervalSec `
     -EnvNames @("MARKET_SCAN_INTERVAL_SEC") `
     -Default 120
+$ResolvedTradingSession = Resolve-TradingSession -Value (
+    Resolve-StringSetting `
+        -Value $TradingSession `
+        -EnvNames @("THEME_REFRESH_TRADING_SESSION") `
+        -Default "NXT"
+)
+$DefaultSessionWindow = Get-DefaultSessionWindow -Session $ResolvedTradingSession
 $ResolvedOpenText = Resolve-StringSetting `
     -Value $MarketOpenTime `
     -EnvNames @("THEME_REFRESH_MARKET_OPEN_TIME") `
-    -Default "09:00:00"
+    -Default $DefaultSessionWindow.Open
 $ResolvedCloseText = Resolve-StringSetting `
     -Value $MarketCloseTime `
     -EnvNames @("THEME_REFRESH_MARKET_CLOSE_TIME") `
-    -Default "15:30:00"
+    -Default $DefaultSessionWindow.Close
 $ResolvedQueueMarketScan = Resolve-BoolSetting `
     -Name "QueueMarketScanCommands" `
     -Value $QueueMarketScanCommands `
@@ -317,6 +350,7 @@ if ($env:MARKET_SCAN_ENABLED -and ([string]$env:MARKET_SCAN_ENABLED).Trim().ToLo
 
 Write-Host "Theme refresh loop is ready."
 Write-Host "Core URL: $ResolvedCoreUrl"
+Write-Host "Trading session: $ResolvedTradingSession"
 Write-Host "Market window: $ResolvedOpenText~$ResolvedCloseText"
 Write-Host "Interval: $ResolvedIntervalSec sec"
 Write-Host "Queue market scan commands: $ResolvedQueueMarketScan"
