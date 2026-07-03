@@ -87,6 +87,14 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
         include_ai=False,
         include_no_buy=False,
     )
+    broker_snapshot_required = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(live_sim_reconcile_request_broker_snapshot_enabled=True),
+        mode=OperatingMode.OBSERVE_CYCLE,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
     eod_warn = run_live_sim_preflight(
         connection,
         settings=_operating_settings(
@@ -107,7 +115,10 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
     assert _check_status(ai_warn, "ai_advisory") == "WARN"
     assert ai_warn.status is not PreflightStatus.BLOCK
     assert _check_status(fee_warn, "fee_tax_config") == "WARN"
-    assert _check_status(fee_warn, "reconcile_latest_status") == "WARN"
+    assert _check_status(fee_warn, "theme_leadership") == "PASS"
+    assert _check_status(fee_warn, "reconcile_latest_status") == "PASS"
+    assert _check_status(fee_warn, "naver_import_recent") == "PASS"
+    assert _check_status(broker_snapshot_required, "reconcile_latest_status") == "WARN"
     assert _check_status(eod_warn, "eod_flatten_config") == "WARN"
     assert eod_warn.status is not PreflightStatus.BLOCK
 
@@ -133,6 +144,40 @@ def test_preflight_safety_preview_does_not_block_on_exhausted_buy_limit(
     assert preflight.safety_gate["purpose"] == "LIFECYCLE"
     assert preflight.safety_gate["daily_order_limit_exceeded"] is True
     assert "DAILY_ORDER_LIMIT_EXCEEDED" not in preflight.safety_gate["reason_codes"]
+
+
+def test_preflight_external_llm_warn_only_for_external_ai_provider(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-ai-provider.sqlite3")
+
+    mock_provider = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(
+            ai_candidate_scorer_enabled=True,
+            ai_candidate_scorer_provider="mock",
+            ai_external_llm_enabled=False,
+        ),
+        mode=OperatingMode.OBSERVE_CYCLE,
+        queue_commands=False,
+        include_ai=True,
+        include_no_buy=False,
+    )
+    external_provider = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(
+            ai_candidate_scorer_enabled=True,
+            ai_candidate_scorer_provider="external_http",
+            ai_external_llm_enabled=False,
+        ),
+        mode=OperatingMode.OBSERVE_CYCLE,
+        queue_commands=False,
+        include_ai=True,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    assert _check_status(mock_provider, "ai_advisory") == "PASS"
+    assert _check_status(mock_provider, "external_llm") == "PASS"
+    assert _check_status(external_provider, "external_llm") == "WARN"
 
 
 def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:

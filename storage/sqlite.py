@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2978,6 +2978,13 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "live_sim_positions",
+        {
+            "lowest_price": "REAL",
+        },
     )
     connection.execute(
         """

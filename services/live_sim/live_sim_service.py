@@ -2926,6 +2926,8 @@ def _apply_sell_fill(
     new_quantity = int(position["quantity"]) - quantity
     new_available = available - quantity
     new_entry_notional = avg_price * new_quantity
+    highest_price = max(float(position["highest_price"] or price), price)
+    lowest_price = min(float(position["lowest_price"] or price), price)
     unrealized_pnl = _net_unrealized_pnl(
         quantity=new_quantity,
         avg_entry_price=avg_price,
@@ -2942,6 +2944,8 @@ def _apply_sell_fill(
             total_entry_notional = ?,
             realized_pnl = ?,
             unrealized_pnl = ?,
+            highest_price = ?,
+            lowest_price = ?,
             last_price = ?,
             last_price_at = ?,
             status = ?,
@@ -2955,6 +2959,8 @@ def _apply_sell_fill(
             new_entry_notional,
             cumulative_realized,
             unrealized_pnl,
+            highest_price,
+            lowest_price,
             price,
             executed_at,
             status,
@@ -2964,6 +2970,12 @@ def _apply_sell_fill(
         ),
     )
     event_type = "POSITION_CLOSED" if new_quantity == 0 else "POSITION_REDUCED"
+    excursion = _position_excursion_metrics(
+        entry_price=avg_price,
+        highest_price=highest_price,
+        lowest_price=lowest_price,
+    )
+    close_evidence = excursion if new_quantity == 0 else {}
     _insert_position_event(
         connection,
         position_id=str(position["position_id"]),
@@ -2980,6 +2992,7 @@ def _apply_sell_fill(
             "fee": fee,
             "tax": tax,
             "remaining_quantity": new_quantity,
+            **close_evidence,
         },
     )
     return {
@@ -2988,6 +3001,7 @@ def _apply_sell_fill(
         "realized_pnl": realized_pnl,
         "remaining_quantity": new_quantity,
         "status": status,
+        **close_evidence,
     }
 
 
@@ -3461,6 +3475,35 @@ def _net_unrealized_pnl(
     estimated_sell_fee = exit_notional * settings.live_sim_fee_rate
     estimated_sell_tax = exit_notional * settings.live_sim_tax_rate
     return gross - estimated_sell_fee - estimated_sell_tax
+
+
+def _position_excursion_metrics(
+    *,
+    entry_price: float,
+    highest_price: float,
+    lowest_price: float,
+) -> dict[str, float]:
+    if entry_price <= 0:
+        return {
+            "entry_price": entry_price,
+            "highest_price": highest_price,
+            "lowest_price": lowest_price,
+            "mfe": 0.0,
+            "mae": 0.0,
+            "mfe_pct": 0.0,
+            "mae_pct": 0.0,
+        }
+    mfe = (highest_price - entry_price) / entry_price
+    mae = (lowest_price - entry_price) / entry_price
+    return {
+        "entry_price": entry_price,
+        "highest_price": highest_price,
+        "lowest_price": lowest_price,
+        "mfe": mfe,
+        "mae": mae,
+        "mfe_pct": mfe * 100,
+        "mae_pct": mae * 100,
+    }
 
 
 def _is_eod_flatten_time(settings: Settings) -> bool:

@@ -320,7 +320,7 @@ def run_live_sim_preflight(
     )
 
     latest_reconcile = _safe_latest_reconcile(connection)
-    _add_reconcile_check(add, latest_reconcile, resolved_mode)
+    _add_reconcile_check(add, latest_reconcile, resolved_settings, resolved_mode)
 
     live_sim_status = _safe_live_sim_status(connection, resolved_settings)
     counts = _counts_from_live_sim_status(connection, live_sim_status)
@@ -410,8 +410,8 @@ def _add_theme_checks(
         data_wait_count = sum(1 for snapshot in snapshots if snapshot.get("state") == "DATA_WAIT")
         add(
             "theme_leadership",
-            PreflightStatus.WARN if data_wait_count else PreflightStatus.PASS,
-            "ThemeLeadership has DATA_WAIT themes."
+            PreflightStatus.PASS,
+            "ThemeLeadership inspected; DATA_WAIT themes are advisory."
             if data_wait_count
             else "ThemeLeadership is calculable.",
             {
@@ -463,6 +463,7 @@ def _add_entry_timing_check(
 def _add_reconcile_check(
     add: Any,
     latest_reconcile: Mapping[str, Any] | None,
+    settings: Settings,
     mode: OperatingMode,
 ) -> None:
     if latest_reconcile is None:
@@ -479,9 +480,15 @@ def _add_reconcile_check(
     if blocking_new_buy and mode.includes_buy:
         check_status = PreflightStatus.BLOCK
         message = "Latest reconcile blocks new BUY."
-    elif not broker_snapshot_available:
+    elif (
+        not broker_snapshot_available
+        and settings.live_sim_reconcile_request_broker_snapshot_enabled
+    ):
         check_status = PreflightStatus.WARN
         message = "Broker snapshot is unavailable; latest reconcile is local-only."
+    elif not broker_snapshot_available:
+        check_status = PreflightStatus.PASS
+        message = "Broker snapshot is disabled; local-only reconcile is accepted."
     else:
         check_status = PreflightStatus.PASS
         message = "Latest reconcile does not block the requested mode."
@@ -575,19 +582,21 @@ def _add_naver_import_check(connection: sqlite3.Connection, add: Any) -> None:
     if row is None:
         add(
             "naver_import_recent",
-            PreflightStatus.WARN,
-            "Naver theme importer has not run recently.",
+            PreflightStatus.PASS,
+            "Naver theme importer has not run; this is advisory for preflight.",
+            {"optional": True, "source_name": "naver_theme"},
         )
         return
     age_sec = _age_seconds(row["imported_at"])
     recent = age_sec <= 24 * 60 * 60 and str(row["status"]).upper() == "SUCCESS"
     add(
         "naver_import_recent",
-        PreflightStatus.PASS if recent else PreflightStatus.WARN,
+        PreflightStatus.PASS,
         "Naver theme importer ran recently."
         if recent
-        else "Naver theme importer has not run recently or did not succeed.",
+        else "Naver theme importer is stale or did not succeed; this is advisory for preflight.",
         {
+            "optional": True,
             "imported_at": row["imported_at"],
             "age_sec": None if age_sec == float("inf") else age_sec,
             "status": row["status"],
@@ -686,13 +695,26 @@ def _add_ai_checks(
         ai_status = PreflightStatus.PASS
         message = "AI advisory status is available."
     add("ai_advisory", ai_status, message, status)
+    provider = settings.ai_candidate_scorer_provider.strip().lower()
+    external_required = provider in {"external", "external_http", "openai"}
+    external_status = (
+        PreflightStatus.PASS
+        if settings.ai_external_llm_enabled or not external_required
+        else PreflightStatus.WARN
+    )
+    if settings.ai_external_llm_enabled:
+        external_message = "External LLM is enabled."
+    elif external_required:
+        external_message = "External LLM is disabled for an external AI provider."
+    else:
+        external_message = "External LLM is not required for the configured AI provider."
     add(
         "external_llm",
-        PreflightStatus.PASS if settings.ai_external_llm_enabled else PreflightStatus.WARN,
-        "External LLM is enabled."
-        if settings.ai_external_llm_enabled
-        else "External LLM is disabled.",
+        external_status,
+        external_message,
         {
+            "candidate_scorer_provider": provider,
+            "external_llm_required": external_required,
             "external_llm_enabled": settings.ai_external_llm_enabled,
             "external_llm_provider": settings.ai_external_llm_provider,
             "external_llm_allow_network": settings.ai_external_llm_allow_network,

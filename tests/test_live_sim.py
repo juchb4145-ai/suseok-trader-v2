@@ -702,7 +702,15 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
     handle_live_sim_gateway_event(connection, sell_fill, settings=settings)
     positions = list_live_sim_positions(connection)
     signals = list_live_sim_exit_signals(connection)
+    close_event = connection.execute(
+        """
+        SELECT evidence_json
+        FROM live_sim_position_events
+        WHERE event_type = 'POSITION_CLOSED'
+        """
+    ).fetchone()
     connection.close()
+    close_evidence = json.loads(close_event["evidence_json"])
 
     assert result.command_count == 1
     assert payload["side"] == "SELL"
@@ -712,6 +720,10 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
     assert positions[0]["status"] == "CLOSED"
     assert positions[0]["quantity"] == 0
     assert positions[0]["realized_pnl"] == -4_000
+    assert positions[0]["lowest_price"] == 96_000
+    assert close_evidence["mfe"] == 0
+    assert close_evidence["mae"] == -0.04
+    assert close_evidence["mae_pct"] == -4
 
 
 def test_live_sim_entry_window_does_not_block_exit_sell_close_only(

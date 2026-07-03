@@ -1,3 +1,5 @@
+import sqlite3
+
 from storage.sqlite import APP_NAME, SCHEMA_VERSION, initialize_database
 
 
@@ -544,3 +546,49 @@ def test_sqlite_initialization_creates_dry_run_exit_tables(tmp_path) -> None:
         "strategy_observations_latest",
         "gateway_commands",
     }
+
+
+def test_sqlite_initialization_migrates_live_sim_lowest_price(tmp_path) -> None:
+    db_path = tmp_path / "legacy-live-sim.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE live_sim_positions (
+            position_id TEXT PRIMARY KEY,
+            account_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            side TEXT NOT NULL DEFAULT 'LONG',
+            quantity INTEGER NOT NULL DEFAULT 0,
+            available_quantity INTEGER NOT NULL DEFAULT 0,
+            avg_entry_price REAL NOT NULL DEFAULT 0,
+            total_entry_notional REAL NOT NULL DEFAULT 0,
+            realized_pnl REAL NOT NULL DEFAULT 0,
+            unrealized_pnl REAL NOT NULL DEFAULT 0,
+            highest_price REAL,
+            trailing_stop_price REAL,
+            opened_at TEXT NOT NULL,
+            closed_at TEXT,
+            last_price REAL,
+            last_price_at TEXT,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            source_live_sim_order_id TEXT,
+            source_live_sim_intent_id TEXT,
+            live_sim_only INTEGER NOT NULL DEFAULT 1,
+            live_real_allowed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    legacy.commit()
+    legacy.close()
+
+    connection = initialize_database(db_path)
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(live_sim_positions)")
+    }
+    connection.close()
+
+    assert "lowest_price" in columns
