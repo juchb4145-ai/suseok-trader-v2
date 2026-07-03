@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
+import domain.broker.utils as broker_utils
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -168,6 +170,87 @@ def test_live_sim_daily_loss_blocks_buy_intent_and_command(tmp_path) -> None:
     assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in rejected_intent.reason_codes
     assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in queue_error
     assert command_count == 0
+
+
+def test_live_sim_entry_window_blocks_buy_and_records_rejection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-entry-window.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_entry_window_start="09:05:00",
+        live_sim_entry_window_end="14:30:00",
+        live_sim_exit_eod_flatten_time="15:15:00",
+    )
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 0, 4, 59, tzinfo=UTC),
+    )
+
+    eligibility = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    rejection = connection.execute(
+        """
+        SELECT reason_codes_json, evidence_json
+        FROM live_sim_rejections
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    connection.close()
+
+    assert eligibility.eligible is False
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in eligibility.reason_codes
+    assert intent.status is LiveSimIntentStatus.REJECTED
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in intent.reason_codes
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in json.loads(
+        rejection["reason_codes_json"]
+    )
+    evidence = json.loads(rejection["evidence_json"])
+    assert evidence["entry_window"]["current_time"] == "09:04:59"
+    assert evidence["entry_window"]["open"] is False
+
+
+def test_live_sim_entry_window_allows_boundaries_and_blocks_after_end(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-entry-boundary.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_entry_window_start="09:05:00",
+        live_sim_entry_window_end="14:30:00",
+        live_sim_exit_eod_flatten_time="15:15:00",
+    )
+
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 0, 5, 0, tzinfo=UTC),
+    )
+    at_start = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 5, 30, 0, tzinfo=UTC),
+    )
+    at_end = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 5, 30, 1, tzinfo=UTC),
+    )
+    after_end = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    connection.close()
+
+    assert at_start.eligible is True
+    assert at_end.eligible is True
+    assert after_end.eligible is False
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in after_end.reason_codes
 
 
 def test_live_sim_pilot_can_create_dry_run_evidence_and_intent_same_profile(tmp_path) -> None:
@@ -391,6 +474,50 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
     assert positions[0]["realized_pnl"] == -4_000
 
 
+def test_live_sim_entry_window_does_not_block_exit_sell_close_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, _ = _prepared_connection(tmp_path / "live-sim-exit-window.sqlite3")
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_entry_window_start="09:05:00",
+        live_sim_entry_window_end="14:30:00",
+        live_sim_exit_eod_flatten_time="15:15:00",
+        live_sim_exit_engine_enabled=True,
+        live_sim_exit_order_creation_enabled=True,
+        live_sim_exit_gateway_command_enabled=True,
+        live_sim_exit_stop_loss_pct=3.0,
+    )
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="OPEN",
+        quantity=1,
+        realized_pnl=0,
+    )
+    connection.execute("UPDATE market_ticks_latest SET price = 90000 WHERE code = '005930'")
+    connection.commit()
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 5, 31, 0, tzinfo=UTC),
+    )
+
+    result = run_live_sim_exit_once(connection, settings=settings, queue_commands=True)
+    exit_command = connection.execute(
+        "SELECT payload_json FROM gateway_commands WHERE command_type = 'send_order'"
+    ).fetchone()
+    exit_intent = connection.execute("SELECT status FROM live_sim_exit_intents").fetchone()
+    connection.close()
+
+    payload = json.loads(exit_command["payload_json"])
+    assert result.command_count == 1
+    assert payload["side"] == "SELL"
+    assert payload["close_only"] is True
+    assert exit_intent["status"] == "COMMAND_QUEUED"
+
+
 def test_live_sim_default_disabled_creates_rejection_no_command(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-disabled.sqlite3")
 
@@ -473,6 +600,9 @@ def _live_sim_settings(**overrides) -> Settings:
         "live_sim_account_id": "SIM-12345678",
         "live_sim_kill_switch": False,
         "live_sim_stale_tick_sec": 999_999_999,
+        "live_sim_entry_window_start": "00:00:00",
+        "live_sim_entry_window_end": "23:59:58",
+        "live_sim_exit_eod_flatten_time": "23:59:59",
         "live_sim_max_order_notional": 100_000,
         "live_sim_max_daily_notional": 300_000,
     }

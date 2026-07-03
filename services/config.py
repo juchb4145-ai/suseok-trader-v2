@@ -387,6 +387,8 @@ class Settings:
     live_sim_require_candidate_context_ready: bool = True
     live_sim_require_fresh_tick: bool = True
     live_sim_stale_tick_sec: int = 15
+    live_sim_entry_window_start: str = "09:05:00"
+    live_sim_entry_window_end: str = "14:30:00"
     live_sim_allow_buy: bool = True
     live_sim_allow_sell: bool = False
     live_sim_allow_exit_sell: bool = False
@@ -844,6 +846,24 @@ class Settings:
             raise ValueError("LIVE_SIM_PRICE_OFFSET_TICKS must be >= 0")
         object.__setattr__(
             self,
+            "live_sim_entry_window_start",
+            _validate_time_string(
+                self.live_sim_entry_window_start,
+                "LIVE_SIM_ENTRY_WINDOW_START",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_entry_window_end",
+            _validate_time_string(
+                self.live_sim_entry_window_end,
+                "LIVE_SIM_ENTRY_WINDOW_END",
+            ),
+        )
+        if self.live_sim_entry_window_start >= self.live_sim_entry_window_end:
+            raise ValueError("LIVE_SIM_ENTRY_WINDOW_START must be < LIVE_SIM_ENTRY_WINDOW_END")
+        object.__setattr__(
+            self,
             "live_sim_account_mode",
             _normalize_non_empty(self.live_sim_account_mode),
         )
@@ -934,6 +954,18 @@ class Settings:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
         if self.live_sim_exit_min_hold_sec < 0:
             raise ValueError("LIVE_SIM_EXIT_MIN_HOLD_SEC must be >= 0")
+        object.__setattr__(
+            self,
+            "live_sim_exit_eod_flatten_time",
+            _validate_time_string(
+                self.live_sim_exit_eod_flatten_time,
+                "LIVE_SIM_EXIT_EOD_FLATTEN_TIME",
+            ),
+        )
+        if self.live_sim_entry_window_end >= self.live_sim_exit_eod_flatten_time:
+            raise ValueError(
+                "LIVE_SIM_ENTRY_WINDOW_END must be < LIVE_SIM_EXIT_EOD_FLATTEN_TIME"
+            )
         for field_name in (
             "live_sim_exit_stop_loss_pct",
             "live_sim_exit_take_profit_pct",
@@ -2229,6 +2261,14 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("LIVE_SIM_STALE_TICK_SEC", "15"),
             "LIVE_SIM_STALE_TICK_SEC",
             min_value=1,
+        ),
+        live_sim_entry_window_start=env.get(
+            "LIVE_SIM_ENTRY_WINDOW_START",
+            "09:05:00",
+        ),
+        live_sim_entry_window_end=env.get(
+            "LIVE_SIM_ENTRY_WINDOW_END",
+            "14:30:00",
         ),
         live_sim_allow_buy=_parse_bool(env.get("LIVE_SIM_ALLOW_BUY", "true")),
         live_sim_allow_sell=_parse_bool(env.get("LIVE_SIM_ALLOW_SELL", "false")),

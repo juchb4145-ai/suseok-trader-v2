@@ -177,6 +177,7 @@ def evaluate_live_sim_order_plan_eligibility(
         connection,
         resolved_settings,
         enforce_daily_loss_limit=True,
+        enforce_entry_window=str(order_plan["side"]).upper() == "BUY",
         trade_date=str(order_plan["trade_date"]),
     )
     if not safety_gate.passed:
@@ -190,6 +191,7 @@ def evaluate_live_sim_order_plan_eligibility(
     candidate_id = str(order_plan["candidate_instance_id"])
     code = validate_stock_code(order_plan["code"])
     name = str(order_plan["name"])
+    side = str(order_plan["side"]).upper()
     order_plan_reasons = _json_array(order_plan.get("reason_codes"))
     evidence_json = _json_object(order_plan.get("evidence_json"))
     order_type = str(evidence_json.get("order_type", "LIMIT")).upper()
@@ -202,7 +204,7 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_NOT_READY.value)
     if _is_expired(order_plan["expires_at"]):
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_EXPIRED.value)
-    if str(order_plan["side"]).upper() != "BUY":
+    if side != "BUY":
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_NOT_BUY.value)
     if order_type == "MARKET" and not resolved_settings.live_sim_order_plan_allow_market_order:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_MARKET_ORDER_NOT_ALLOWED.value)
@@ -352,6 +354,7 @@ def evaluate_live_sim_order_plan_eligibility(
         "latest_tick": latest_tick_evidence,
         "dry_run": dry_run_evidence,
         "sizing": sizing,
+        "entry_window": safety_gate.to_dict().get("entry_window", {}),
         "reason_categories": {
             reason: _reason_category(reason) for reason in reason_codes
         },
@@ -673,6 +676,8 @@ def _reason_category(reason: str) -> str:
         return "RISK"
     if "TICK" in normalized or "STALE" in normalized or "DATA" in normalized:
         return "DATA"
+    if "WINDOW" in normalized or "SESSION" in normalized:
+        return "SESSION"
     if "DISABLED" in normalized or "ROUTING" in normalized or "AUTO_QUEUE" in normalized:
         return "CONFIG"
     if (

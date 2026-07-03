@@ -200,6 +200,7 @@ def evaluate_live_sim_eligibility(
         connection,
         resolved_settings,
         enforce_daily_loss_limit=True,
+        enforce_entry_window=True,
         trade_date=admission.trade_date,
     )
 
@@ -216,6 +217,9 @@ def evaluate_live_sim_eligibility(
         "ai_artifacts_used": False,
     }
     evidence.update(admission.to_evidence())
+    safety_gate_evidence = safety_gate.to_dict()
+    evidence["safety_gate"] = safety_gate_evidence
+    evidence["entry_window"] = safety_gate_evidence.get("entry_window", {})
     if not safety_gate.passed:
         reason_codes.extend(safety_gate.reason_codes)
     trade_date = admission.trade_date
@@ -441,6 +445,7 @@ def queue_live_sim_order_command(
         connection,
         resolved_settings,
         enforce_daily_loss_limit=intent_row["side"] == LiveSimSide.BUY.value,
+        enforce_entry_window=intent_row["side"] == LiveSimSide.BUY.value,
         trade_date=intent_row["trade_date"],
     )
     queue_reasons = list(safety_gate.reason_codes)

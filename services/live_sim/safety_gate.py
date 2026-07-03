@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from domain.broker.utils import market_today, parse_timestamp, utc_now
+from domain.broker.utils import market_time_str, market_today, parse_timestamp, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
 from storage.gateway_command_store import get_command_status_counts
 
@@ -45,6 +45,9 @@ class LiveSimSafetyGateResult:
     dashboard_order_controls_unavailable: bool = True
     daily_loss_limit_exceeded: bool = False
     daily_loss_evidence: Mapping[str, Any] = field(default_factory=dict)
+    entry_window_enforced: bool = False
+    entry_window_open: bool = True
+    entry_window: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +78,9 @@ class LiveSimSafetyGateResult:
             "dashboard_order_controls_unavailable": self.dashboard_order_controls_unavailable,
             "daily_loss_limit_exceeded": self.daily_loss_limit_exceeded,
             "daily_loss_evidence": dict(self.daily_loss_evidence),
+            "entry_window_enforced": self.entry_window_enforced,
+            "entry_window_open": self.entry_window_open,
+            "entry_window": dict(self.entry_window),
         }
 
 
@@ -83,6 +89,7 @@ def check_live_sim_safety_gate(
     settings: Settings | None = None,
     *,
     enforce_daily_loss_limit: bool = False,
+    enforce_entry_window: bool = False,
     trade_date: str | None = None,
 ) -> LiveSimSafetyGateResult:
     resolved_settings = settings or load_settings()
@@ -132,6 +139,7 @@ def check_live_sim_safety_gate(
     )
     command_counts = get_command_status_counts(connection)
     queue_healthy = _bool_status(gateway_values, "command_queue_healthy", default=True)
+    entry_window = live_sim_entry_window_state(resolved_settings)
 
     if not trading_mode_ok or not live_sim_enabled:
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_DISABLED.value)
@@ -162,6 +170,8 @@ def check_live_sim_safety_gate(
         or resolved_settings.ai_sidecar_order_tools_enabled
     ):
         reason_codes.append(LiveSimReasonCode.AI_ORDER_TOOLS_ENABLED.value)
+    if enforce_entry_window and not bool(entry_window["open"]):
+        reason_codes.append(LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value)
     if command_counts.get("FAILED", 0) or command_counts.get("REJECTED", 0):
         warnings.append(
             "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
@@ -210,11 +220,27 @@ def check_live_sim_safety_gate(
             daily_loss_evidence.get("daily_loss_limit_exceeded", False)
         ),
         daily_loss_evidence=daily_loss_evidence,
+        entry_window_enforced=bool(enforce_entry_window),
+        entry_window_open=bool(entry_window["open"]),
+        entry_window=entry_window,
     )
 
 
 def is_simulation_like(value: str | None) -> bool:
     return _is_simulation_like(value)
+
+
+def live_sim_entry_window_state(settings: Settings) -> dict[str, Any]:
+    current_time = market_time_str()
+    start = settings.live_sim_entry_window_start
+    end = settings.live_sim_entry_window_end
+    return {
+        "timezone": "Asia/Seoul",
+        "current_time": current_time,
+        "start": start,
+        "end": end,
+        "open": start <= current_time <= end,
+    }
 
 
 def _gateway_status_values(connection: sqlite3.Connection) -> dict[str, str]:

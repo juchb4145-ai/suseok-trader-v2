@@ -245,6 +245,9 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_order_plan_max_notional == 100_000
     assert settings.live_sim_order_plan_allow_market_order is False
     assert settings.live_sim_order_plan_allowed_side == "BUY"
+    assert settings.live_sim_entry_window_start == "09:05:00"
+    assert settings.live_sim_entry_window_end == "14:30:00"
+    assert settings.live_sim_exit_eod_flatten_time == "15:15:00"
     assert settings.live_sim_operating_loop_enabled is False
     assert settings.live_sim_operating_loop_interval_sec == 20
     assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
@@ -599,6 +602,50 @@ def test_live_sim_daily_loss_settings_are_validated() -> None:
             assert key in str(exc)
         else:
             raise AssertionError(f"expected invalid LIVE_SIM daily loss setting: {key}")
+
+
+def test_live_sim_entry_window_settings_are_validated() -> None:
+    normalized = load_settings(
+        {
+            "LIVE_SIM_ENTRY_WINDOW_START": "9:5:0",
+            "LIVE_SIM_ENTRY_WINDOW_END": "14:30:00",
+        }
+    )
+    assert normalized.live_sim_entry_window_start == "09:05:00"
+
+    invalid_cases = {
+        "LIVE_SIM_ENTRY_WINDOW_START": "090500",
+        "LIVE_SIM_ENTRY_WINDOW_END": "25:00:00",
+        "LIVE_SIM_EXIT_EOD_FLATTEN_TIME": "151500",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid LIVE_SIM time setting: {key}")
+
+    for env in (
+        {
+            "LIVE_SIM_ENTRY_WINDOW_START": "14:30:00",
+            "LIVE_SIM_ENTRY_WINDOW_END": "09:05:00",
+        },
+        {
+            "LIVE_SIM_ENTRY_WINDOW_END": "15:15:00",
+            "LIVE_SIM_EXIT_EOD_FLATTEN_TIME": "15:15:00",
+        },
+        {
+            "LIVE_SIM_ENTRY_WINDOW_END": "15:20:00",
+            "LIVE_SIM_EXIT_EOD_FLATTEN_TIME": "15:15:00",
+        },
+    ):
+        try:
+            load_settings(env)
+        except ValueError as exc:
+            assert "LIVE_SIM_ENTRY_WINDOW" in str(exc)
+        else:
+            raise AssertionError("expected invalid LIVE_SIM entry window relationship")
 
 
 def test_live_sim_operating_loop_settings_are_validated() -> None:

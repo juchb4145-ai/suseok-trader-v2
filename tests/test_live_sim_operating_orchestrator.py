@@ -87,6 +87,17 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
         include_ai=False,
         include_no_buy=False,
     )
+    eod_warn = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(
+            live_sim_exit_engine_enabled=True,
+            live_sim_exit_eod_flatten_enabled=False,
+        ),
+        mode=OperatingMode.PROTECT_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
     connection.close()
 
     assert reconcile_block.status is PreflightStatus.BLOCK
@@ -97,6 +108,8 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
     assert ai_warn.status is not PreflightStatus.BLOCK
     assert _check_status(fee_warn, "fee_tax_config") == "WARN"
     assert _check_status(fee_warn, "reconcile_latest_status") == "WARN"
+    assert _check_status(eod_warn, "eod_flatten_config") == "WARN"
+    assert eod_warn.status is not PreflightStatus.BLOCK
 
 
 def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:

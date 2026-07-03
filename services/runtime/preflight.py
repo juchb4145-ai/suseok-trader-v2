@@ -328,6 +328,7 @@ def run_live_sim_preflight(
 
     _add_naver_import_check(connection, add)
     _add_fee_tax_check(add, resolved_settings)
+    _add_eod_flatten_check(add, resolved_settings)
     if resolved_mode is OperatingMode.PILOT_FULL_LIFECYCLE:
         _add_full_lifecycle_flag_warnings(add, resolved_settings)
 
@@ -605,6 +606,22 @@ def _add_fee_tax_check(add: Any, settings: Settings) -> None:
         if fee_tax_zero
         else "LIVE_SIM fee/tax values are configured.",
         {"fee_rate": settings.live_sim_fee_rate, "tax_rate": settings.live_sim_tax_rate},
+    )
+
+
+def _add_eod_flatten_check(add: Any, settings: Settings) -> None:
+    warn = settings.live_sim_exit_engine_enabled and not settings.live_sim_exit_eod_flatten_enabled
+    add(
+        "eod_flatten_config",
+        PreflightStatus.WARN if warn else PreflightStatus.PASS,
+        "LIVE_SIM exit engine is enabled but EOD flatten is disabled."
+        if warn
+        else "LIVE_SIM EOD flatten setting is compatible with the exit engine.",
+        {
+            "exit_engine_enabled": settings.live_sim_exit_engine_enabled,
+            "eod_flatten_enabled": settings.live_sim_exit_eod_flatten_enabled,
+            "eod_flatten_time": settings.live_sim_exit_eod_flatten_time,
+        },
     )
 
 

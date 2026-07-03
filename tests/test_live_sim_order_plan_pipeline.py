@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 
+import domain.broker.utils as broker_utils
 from apps.core_api import app
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -310,6 +311,53 @@ def test_order_plan_rejects_kill_switch_live_real_and_limits(tmp_path) -> None:
     assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in daily_loss.reason_codes
 
 
+def test_order_plan_entry_window_blocks_buy_and_records_rejection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "plan-entry-window.sqlite3"
+    )
+    settings = _pilot_settings(
+        live_sim_entry_window_start="09:05:00",
+        live_sim_entry_window_end="14:30:00",
+        live_sim_exit_eod_flatten_time="15:15:00",
+    )
+    monkeypatch.setattr(
+        broker_utils,
+        "utc_now",
+        lambda: datetime(2026, 7, 1, 5, 30, 1, tzinfo=UTC),
+    )
+
+    eligibility = evaluate_live_sim_order_plan_eligibility(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    rejection = connection.execute(
+        """
+        SELECT reason_codes_json
+        FROM live_sim_rejections
+        ORDER BY created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    connection.close()
+
+    assert eligibility.eligible is False
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in eligibility.reason_codes
+    assert eligibility.evidence_json["entry_window"]["current_time"] == "14:30:01"
+    assert intent.status is LiveSimIntentStatus.REJECTED
+    assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in json.loads(
+        rejection["reason_codes_json"]
+    )
+
+
 def test_live_sim_order_plan_api_routes(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "plan-api.sqlite3"
     connection, order_plan_id = _prepared_order_plan_connection(db_path)
@@ -366,6 +414,9 @@ def _pilot_settings(**overrides) -> Settings:
         "live_sim_account_id": "SIM-12345678",
         "live_sim_kill_switch": False,
         "live_sim_stale_tick_sec": 999_999_999,
+        "live_sim_entry_window_start": "00:00:00",
+        "live_sim_entry_window_end": "23:59:58",
+        "live_sim_exit_eod_flatten_time": "23:59:59",
         "live_sim_max_order_notional": 100_000,
         "live_sim_max_daily_notional": 300_000,
         "live_sim_pilot_pipeline_enabled": True,
