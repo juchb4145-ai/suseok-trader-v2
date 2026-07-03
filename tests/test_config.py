@@ -257,6 +257,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_exit_eod_flatten_time == "15:15:00"
     assert settings.live_sim_reconcile_notional_tolerance == 1.0
     assert settings.live_sim_operating_loop_enabled is False
+    assert settings.live_sim_operating_loop_queue_commands is False
     assert settings.live_sim_operating_loop_interval_sec == 20
     assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
     assert settings.live_sim_operating_loop_market_close_time == "15:20:00"
@@ -712,6 +713,7 @@ def test_live_sim_operating_loop_settings_are_validated() -> None:
     settings = load_settings(
         {
             "LIVE_SIM_OPERATING_LOOP_ENABLED": "true",
+            "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS": "true",
             "LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC": "5",
             "LIVE_SIM_OPERATING_LOOP_MARKET_OPEN_TIME": "9:5:0",
             "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME": "15:20:00",
@@ -719,6 +721,7 @@ def test_live_sim_operating_loop_settings_are_validated() -> None:
     )
 
     assert settings.live_sim_operating_loop_enabled is True
+    assert settings.live_sim_operating_loop_queue_commands is True
     assert settings.live_sim_operating_loop_interval_sec == 5
     assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
     assert settings.live_sim_operating_loop_market_close_time == "15:20:00"

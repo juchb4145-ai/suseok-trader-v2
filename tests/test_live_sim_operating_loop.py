@@ -28,6 +28,8 @@ def test_live_sim_operating_loop_disabled_does_not_create_task(monkeypatch) -> N
 
 def test_live_sim_operating_cycle_skips_outside_market_time(tmp_path, monkeypatch) -> None:
     settings = Settings(trading_db_path=tmp_path / "outside-market.sqlite3")
+    monkeypatch.setattr(core_api, "load_settings", lambda: settings)
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "08:59:59")
 
     def fail_initialize_database(*args: Any, **kwargs: Any) -> None:
@@ -52,6 +54,8 @@ def test_live_sim_operating_cycle_uses_default_mode_and_never_upgrades_queue(
     )
     captured: dict[str, Any] = {}
     connection = _FakeConnection()
+    monkeypatch.setattr(core_api, "load_settings", lambda: settings)
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
     monkeypatch.setattr(core_api, "initialize_database", lambda path: connection)
 
@@ -68,6 +72,78 @@ def test_live_sim_operating_cycle_uses_default_mode_and_never_upgrades_queue(
     assert captured["kwargs"]["mode"] is None
     assert captured["kwargs"]["queue_commands"] is False
     assert connection.closed is True
+
+
+def test_live_sim_operating_cycle_uses_fresh_queue_command_setting(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    startup_settings = Settings(
+        trading_db_path=tmp_path / "startup.sqlite3",
+        live_sim_operating_loop_queue_commands=False,
+    )
+    fresh_settings = Settings(
+        trading_db_path=tmp_path / "fresh.sqlite3",
+        live_sim_operating_loop_queue_commands=True,
+    )
+    captured: dict[str, Any] = {}
+    connection = _FakeConnection()
+    monkeypatch.setattr(core_api, "load_settings", lambda: fresh_settings)
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
+    monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
+    monkeypatch.setattr(core_api, "initialize_database", lambda path: connection)
+
+    def operating_cycle(*args: Any, **kwargs: Any) -> None:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", operating_cycle)
+
+    core_api._run_live_sim_operating_cycle_once(startup_settings)
+
+    assert captured["args"] == (connection,)
+    assert captured["kwargs"]["settings"] is fresh_settings
+    assert captured["kwargs"]["mode"] is None
+    assert captured["kwargs"]["queue_commands"] is True
+    assert connection.closed is True
+
+
+def test_live_sim_operating_cycle_reloads_settings_each_tick(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    captured_settings: list[Settings] = []
+    captured_queue_commands: list[bool] = []
+    opened_paths: list[object] = []
+    connections = [_FakeConnection(), _FakeConnection()]
+
+    def initialize(path: object) -> _FakeConnection:
+        opened_paths.append(path)
+        return connections[len(opened_paths) - 1]
+
+    def operating_cycle(*args: Any, **kwargs: Any) -> None:
+        captured_settings.append(kwargs["settings"])
+        captured_queue_commands.append(kwargs["queue_commands"])
+
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
+    monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
+    monkeypatch.setattr(core_api, "initialize_database", initialize)
+    monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", operating_cycle)
+
+    startup_settings = Settings(trading_db_path=tmp_path / "startup.sqlite3")
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "first.sqlite3"))
+    monkeypatch.setenv("LIVE_SIM_KILL_SWITCH", "false")
+    monkeypatch.setenv("LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS", "true")
+    core_api._run_live_sim_operating_cycle_once(startup_settings)
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "second.sqlite3"))
+    monkeypatch.setenv("LIVE_SIM_KILL_SWITCH", "true")
+    monkeypatch.setenv("LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS", "false")
+    core_api._run_live_sim_operating_cycle_once(startup_settings)
+
+    assert [settings.live_sim_kill_switch for settings in captured_settings] == [False, True]
+    assert captured_queue_commands == [True, False]
+    assert opened_paths == [tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"]
+    assert all(connection.closed for connection in connections)
 
 
 def test_live_sim_operating_cycle_tick_skips_lock_conflict(

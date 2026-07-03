@@ -30,11 +30,11 @@ from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
 from api.routes.theme_leadership import router as theme_leadership_router
 from api.routes.themes import router as themes_router
-from domain.broker.utils import market_time_str
+from domain.broker.utils import market_is_weekday, market_time_str
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from services.condition_fusion import rebuild_condition_fusion
-from services.config import Settings, load_settings
+from services.config import Settings, clear_settings_cache, load_settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
 from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
@@ -150,24 +150,28 @@ async def _live_sim_operating_cycle_tick(settings: Settings) -> None:
         logger.exception("LIVE_SIM operating cycle worker failed")
 
 
-def _run_live_sim_operating_cycle_once(settings: Settings) -> None:
-    if not _is_live_sim_operating_market_time(settings):
+def _run_live_sim_operating_cycle_once(_startup_settings: Settings) -> None:
+    clear_settings_cache()
+    fresh_settings = load_settings()
+    if not _is_live_sim_operating_market_time(fresh_settings):
         logger.debug("LIVE_SIM operating cycle skipped outside market hours")
         return
 
-    connection = initialize_database(settings.trading_db_path)
+    connection = initialize_database(fresh_settings.trading_db_path)
     try:
         run_live_sim_operating_cycle_once(
             connection,
-            settings=settings,
+            settings=fresh_settings,
             mode=None,
-            queue_commands=False,
+            queue_commands=fresh_settings.live_sim_operating_loop_queue_commands,
         )
     finally:
         connection.close()
 
 
 def _is_live_sim_operating_market_time(settings: Settings) -> bool:
+    if not market_is_weekday():
+        return False
     current_time = market_time_str()
     return (
         settings.live_sim_operating_loop_market_open_time

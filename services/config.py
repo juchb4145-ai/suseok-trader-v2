@@ -467,6 +467,7 @@ class Settings:
     live_sim_operating_include_no_buy: bool = True
     live_sim_operating_write_runs: bool = True
     live_sim_operating_loop_enabled: bool = False
+    live_sim_operating_loop_queue_commands: bool = False
     live_sim_operating_loop_interval_sec: int = 20
     live_sim_operating_loop_market_open_time: str = "09:05:00"
     live_sim_operating_loop_market_close_time: str = "15:20:00"
@@ -2559,6 +2560,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         live_sim_operating_loop_enabled=_parse_bool(
             env.get("LIVE_SIM_OPERATING_LOOP_ENABLED", "false")
+        ),
+        live_sim_operating_loop_queue_commands=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS", "false")
         ),
         live_sim_operating_loop_interval_sec=_parse_int(
             env.get("LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC", "20"),

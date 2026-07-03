@@ -59,6 +59,12 @@ def market_time_str() -> str:
     return market_now().strftime("%H:%M:%S")
 
 
+def market_is_weekday() -> bool:
+    """Return whether today is a weekday in the KRX market timezone."""
+
+    return market_now().weekday() < 5
+
+
 def timestamp() -> str:
     """Return the current UTC timestamp in wire format."""
 
