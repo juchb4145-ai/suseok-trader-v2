@@ -207,6 +207,23 @@ preflight/status만 읽습니다. `queue_commands=false` 기본값을 바꾸지 
 자세한 단계별 확인 순서는
 [docs/runbook_market_open_observe_stepwise_ko.md](docs/runbook_market_open_observe_stepwise_ko.md)를 참고하세요.
 
+event-store replay observe 평가:
+
+```powershell
+python -m tools.replay_observe_pipeline `
+  --trade-date 2026-06-29 `
+  --db-path storage\replay\suseok-trader-v2-2026-06-29.sqlite3 `
+  --speed 0
+```
+
+`--db-path`는 replay용 sqlite 복사본이어야 하며, 현재 설정된 운영 DB와 같은 경로면
+실행을 거부합니다. 도구는 event store의 `price_tick`/`condition_event`를 시간순으로
+재생해 Theme→Candidate→Strategy→Risk→EntryTiming을 평가하고
+`reports/replay/<trade_date>/summary.md`를 씁니다. `GatewayCommand`,
+`LIVE_SIM`, `DRY_RUN` 계열 테이블은 SQLite authorizer로 쓰기를 차단하며 summary에
+전후 row count delta를 남깁니다. `--speed 0`은 최대속도이고, 양수는 이벤트 간격을
+해당 배율로 재생합니다.
+
 ## Dashboard 확인 방법
 
 Core 실행 후 브라우저에서 확인합니다.
