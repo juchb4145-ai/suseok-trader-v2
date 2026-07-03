@@ -103,8 +103,25 @@ $env:LIVE_SIM_ENABLED = "true"
 $env:LIVE_SIM_ORDER_ROUTING_ENABLED = "true"
 $env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "true"
 $env:LIVE_SIM_ACCOUNT_ID = "SIM-ACCOUNT-ID"
+$env:LIVE_SIM_ORDER_EXCHANGE = "KRX"
+$env:LIVE_SIM_NXT_SUPPORT_CONFIRMED = "false"
 $env:LIVE_SIM_KILL_SWITCH = "false"
 ```
+
+## Order Exchange
+
+`LIVE_SIM_ORDER_EXCHANGE`는 LIVE_SIM command payload의 `order_exchange`를 정한다. 기본값은 `KRX`이며, 기본 동작은 기존과 같다.
+
+- 허용값: `KRX`, `NXT`, `SOR`
+- `KRX`: Kiwoom 주문 종목코드 suffix 없음
+- `NXT`: Kiwoom 주문 종목코드 suffix `_NX`
+- `SOR`: Kiwoom 주문 종목코드 suffix `_AL`
+- `LIVE_SIM_NXT_SUPPORT_CONFIRMED=false`이면 `NXT` 또는 `SOR` 설정 시 preflight의 `nxt_order_support_verified`가 `BLOCK`이고 safety gate도 command 생성을 막는다.
+- `LIVE_SIM_NXT_SUPPORT_CONFIRMED=true`는 Kiwoom mock/모의투자 NXT 주문 지원을 운영자가 별도로 확인한 뒤에만 켠다.
+
+이 설정은 주문 라우팅 준비용이며 애프터마켓 매매를 열지 않는다. `order_exchange=NXT` 또는 `SOR`여도 `LIVE_SIM_ENTRY_WINDOW_START`/`LIVE_SIM_ENTRY_WINDOW_END`는 그대로 적용된다. 호가 코드는 새로 만들지 않으며 기존 `LIVE_SIM_DEFAULT_HOGA` 경로를 그대로 사용한다. simulation server 확인도 유지되므로 Kiwoom `GetServerGubun`이 REAL이면 Gateway adapter가 command를 거부한다.
+
+`MATCHED_OBSERVATION`은 여전히 매수 신호가 아니고 `OBSERVE_PASS`는 주문 승인이 아니다. NXT 관찰 데이터가 있어도 LIVE_SIM 라우팅은 별도의 safety gate와 preflight를 통과해야 한다.
 
 ## PR-5 Execution Lifecycle
 
@@ -241,6 +258,8 @@ $env:LIVE_SIM_EXIT_ENGINE_ENABLED = "false"
 $env:LIVE_SIM_EXIT_ORDER_CREATION_ENABLED = "false"
 $env:LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED = "false"
 $env:LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND = "false"
+$env:LIVE_SIM_NXT_SUPPORT_CONFIRMED = "false"
+$env:LIVE_SIM_ORDER_EXCHANGE = "KRX"
 $env:LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED = "false"
 $env:LIVE_SIM_PILOT_PIPELINE_ENABLED = "false"
 $env:LIVE_SIM_ORDER_ROUTING_ENABLED = "false"

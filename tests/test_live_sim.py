@@ -64,6 +64,8 @@ def test_live_sim_schema_and_config_defaults(tmp_path) -> None:
     assert settings.live_sim_cancel_enabled is False
     assert settings.live_sim_exit_engine_enabled is False
     assert settings.live_sim_kill_switch is True
+    assert settings.live_sim_order_exchange == "KRX"
+    assert settings.live_sim_nxt_support_confirmed is False
     assert settings.live_real_allowed is False
 
 
@@ -84,8 +86,38 @@ def test_live_sim_safety_gate_defaults_and_simulation_pass(tmp_path) -> None:
     assert LiveSimReasonCode.LIVE_SIM_KILL_SWITCH_ACTIVE.value in blocked.reason_codes
     assert passed.passed is True
     assert passed.live_real_disabled is True
+    assert passed.order_exchange == "KRX"
+    assert passed.nxt_order_support_verified is True
     assert live_real.passed is False
     assert LiveSimReasonCode.LIVE_REAL_NOT_ALLOWED.value in live_real.reason_codes
+
+
+def test_live_sim_safety_gate_blocks_nxt_until_order_support_confirmed(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-nxt-order-support.sqlite3")
+    _mark_gateway_ready(connection)
+
+    blocked = check_live_sim_safety_gate(
+        connection,
+        _live_sim_settings(live_sim_order_exchange="NXT"),
+    )
+    confirmed = check_live_sim_safety_gate(
+        connection,
+        _live_sim_settings(
+            live_sim_order_exchange="SOR",
+            live_sim_nxt_support_confirmed=True,
+        ),
+    )
+    connection.close()
+
+    assert blocked.passed is False
+    assert blocked.order_exchange == "NXT"
+    assert blocked.nxt_order_support_confirmed is False
+    assert blocked.nxt_order_support_verified is False
+    assert LiveSimReasonCode.NXT_ORDER_SUPPORT_UNCONFIRMED.value in blocked.reason_codes
+    assert confirmed.passed is True
+    assert confirmed.order_exchange == "SOR"
+    assert confirmed.nxt_order_support_confirmed is True
+    assert confirmed.nxt_order_support_verified is True
 
 
 def test_live_sim_safety_gate_daily_order_limit_blocks_new_buy_only(tmp_path) -> None:
@@ -206,6 +238,8 @@ def test_live_sim_entry_window_blocks_buy_and_records_rejection(
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
     _mark_gateway_ready(connection)
     settings = _live_sim_settings(
+        live_sim_order_exchange="NXT",
+        live_sim_nxt_support_confirmed=True,
         live_sim_entry_window_start="09:05:00",
         live_sim_entry_window_end="14:30:00",
         live_sim_exit_eod_flatten_time="15:15:00",
@@ -229,6 +263,7 @@ def test_live_sim_entry_window_blocks_buy_and_records_rejection(
     connection.close()
 
     assert eligibility.eligible is False
+    assert eligibility.evidence_json["order_exchange"] == "NXT"
     assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in eligibility.reason_codes
     assert intent.status is LiveSimIntentStatus.REJECTED
     assert LiveSimReasonCode.ENTRY_WINDOW_CLOSED.value in intent.reason_codes
@@ -236,6 +271,7 @@ def test_live_sim_entry_window_blocks_buy_and_records_rejection(
         rejection["reason_codes_json"]
     )
     evidence = json.loads(rejection["evidence_json"])
+    assert evidence["order_exchange"] == "NXT"
     assert evidence["entry_window"]["current_time"] == "09:04:59"
     assert evidence["entry_window"]["open"] is False
 
@@ -326,7 +362,32 @@ def test_live_sim_buy_limit_price_uses_krx_tick_offset(tmp_path) -> None:
     assert intent.notional == 97_100
     assert order.limit_price == 97_100
     assert payload["price"] == 97_100
+    assert payload["order_exchange"] == "KRX"
+    assert payload["metadata"]["order_exchange"] == "KRX"
     assert intent.evidence_json["price_policy"]["buy_price_offset_ticks"] == 1
+
+
+def test_live_sim_order_payload_uses_confirmed_nxt_exchange(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-nxt-payload.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_order_exchange="NXT",
+        live_sim_nxt_support_confirmed=True,
+    )
+
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    command_row = connection.execute(
+        "SELECT payload_json FROM gateway_commands WHERE command_type = 'send_order'"
+    ).fetchone()
+    connection.close()
+
+    payload = json.loads(command_row["payload_json"])
+    assert order.status is LiveSimOrderStatus.COMMAND_QUEUED
+    assert payload["order_exchange"] == "NXT"
+    assert payload["metadata"]["order_exchange"] == "NXT"
+    assert intent.evidence_json["order_exchange"] == "NXT"
 
 
 def test_live_sim_runtime_status_heartbeat_is_ignored_without_error(tmp_path) -> None:

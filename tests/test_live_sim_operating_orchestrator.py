@@ -245,6 +245,46 @@ def test_preflight_safety_preview_does_not_block_on_exhausted_buy_limit(
     assert "DAILY_ORDER_LIMIT_EXCEEDED" not in preflight.safety_gate["reason_codes"]
 
 
+def test_preflight_blocks_nxt_exchange_without_operator_confirmation(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-nxt-order.sqlite3")
+
+    blocked = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(live_sim_order_exchange="NXT"),
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=True,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    confirmed = run_live_sim_preflight(
+        connection,
+        settings=_operating_settings(
+            live_sim_order_exchange="SOR",
+            live_sim_nxt_support_confirmed=True,
+        ),
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=True,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    blocked_check = _check(blocked, "nxt_order_support_verified")
+    confirmed_check = _check(confirmed, "nxt_order_support_verified")
+    assert blocked.status is PreflightStatus.BLOCK
+    assert blocked_check.status is PreflightStatus.BLOCK
+    assert blocked_check.details["order_exchange"] == "NXT"
+    assert blocked_check.details["nxt_order_support_confirmed"] is False
+    assert blocked_check.details["simulation_server_check_preserved"] is True
+    assert blocked.safety_gate["nxt_order_support_verified"] is False
+    assert "NXT_ORDER_SUPPORT_UNCONFIRMED" in blocked.safety_gate["reason_codes"]
+    assert any("nxt_order_support_verified" in reason for reason in blocked.blocking_reasons)
+    assert confirmed_check.status is PreflightStatus.PASS
+    assert confirmed_check.details["order_exchange"] == "SOR"
+    assert confirmed_check.details["nxt_order_support_confirmed"] is True
+    assert confirmed.safety_gate["nxt_order_support_verified"] is True
+
+
 def test_preflight_external_llm_warn_only_for_external_ai_provider(tmp_path) -> None:
     connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-ai-provider.sqlite3")
 
@@ -651,9 +691,13 @@ def _save_ai_timeout(connection) -> None:
 
 
 def _check_status(preflight: LiveSimPreflightResult, name: str) -> str:
+    return _check(preflight, name).status.value
+
+
+def _check(preflight: LiveSimPreflightResult, name: str) -> Any:
     for check in preflight.checks:
         if check.name == name:
-            return check.status.value
+            return check
     raise AssertionError(f"missing preflight check: {name}")
 
 

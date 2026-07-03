@@ -378,6 +378,8 @@ class Settings:
     live_sim_account_mode: str = "SIMULATION"
     live_sim_broker_env: str = "SIMULATION"
     live_sim_server_mode: str = "SIMULATION"
+    live_sim_order_exchange: str = "KRX"
+    live_sim_nxt_support_confirmed: bool = False
     live_sim_kill_switch: bool = True
     live_sim_max_order_notional: float = 100_000
     live_sim_max_daily_order_count: int = 3
@@ -897,6 +899,11 @@ class Settings:
             self,
             "live_sim_server_mode",
             _normalize_non_empty(self.live_sim_server_mode),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_order_exchange",
+            _normalize_live_sim_order_exchange(self.live_sim_order_exchange),
         )
         object.__setattr__(
             self,
@@ -2246,6 +2253,10 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         live_sim_account_mode=env.get("LIVE_SIM_ACCOUNT_MODE", "SIMULATION"),
         live_sim_broker_env=env.get("LIVE_SIM_BROKER_ENV", "SIMULATION"),
         live_sim_server_mode=env.get("LIVE_SIM_SERVER_MODE", "SIMULATION"),
+        live_sim_order_exchange=env.get("LIVE_SIM_ORDER_EXCHANGE", "KRX"),
+        live_sim_nxt_support_confirmed=_parse_bool(
+            env.get("LIVE_SIM_NXT_SUPPORT_CONFIRMED", "false")
+        ),
         live_sim_kill_switch=_parse_bool(env.get("LIVE_SIM_KILL_SWITCH", "true")),
         live_sim_max_order_notional=_parse_float(
             env.get("LIVE_SIM_MAX_ORDER_NOTIONAL", "100000"),
@@ -2793,6 +2804,29 @@ def _require_non_empty_config(value: str) -> str:
 
 def _normalize_non_empty(value: str) -> str:
     return _require_non_empty_config(value).upper()
+
+
+def _normalize_live_sim_order_exchange(value: object) -> str:
+    text = str(value or "KRX").strip().upper()
+    aliases = {
+        "": "KRX",
+        "K": "KRX",
+        "KRX": "KRX",
+        "N": "NXT",
+        "NX": "NXT",
+        "NXT": "NXT",
+        "S": "SOR",
+        "SO": "SOR",
+        "SOR": "SOR",
+        "A": "SOR",
+        "AL": "SOR",
+        "ALL": "SOR",
+        "INTEGRATED": "SOR",
+    }
+    exchange = aliases.get(text)
+    if exchange not in {"KRX", "NXT", "SOR"}:
+        raise ValueError("LIVE_SIM_ORDER_EXCHANGE must be one of KRX, NXT, SOR")
+    return exchange
 
 
 def _normalize_list_values(values: tuple[str, ...]) -> tuple[str, ...]:

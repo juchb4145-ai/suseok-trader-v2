@@ -51,6 +51,7 @@ from gateway.kiwoom_client import (
     is_quote_real_type,
     market_index_realtime_fid_string,
     normalize_market_index_code,
+    normalize_order_exchange,
     parse_market_index_tick_from_fids,
     parse_price_tick_from_fids,
     parse_quote_from_fids,
@@ -890,6 +891,30 @@ def test_runtime_nxt_realtime_exchange_registers_suffixed_kiwoom_codes() -> None
     assert payload["realtime_exchange"] == "NXT"
     assert payload["realtime_registered_codes"] == ["000660", "005930"]
     assert payload["realtime_registered_kiwoom_codes"] == ["000660_NX", "005930_NX"]
+
+
+def test_kiwoom_order_request_exchange_suffix_contract() -> None:
+    request = KiwoomOrderRequest(
+        account="1234567890",
+        code="A005930",
+        quantity=1,
+        price=70000,
+        side="BUY",
+        tag="cmd_order_sor",
+        command_id="cmd_order_sor",
+        idempotency_key="idem-sor",
+        order_exchange="SOR",
+    )
+
+    payload = request.to_dict()
+
+    assert normalize_order_exchange("ALL") == "SOR"
+    assert realtime_code_for_exchange("A005930", "KRX") == "005930"
+    assert realtime_code_for_exchange("005930", "NXT") == "005930_NX"
+    assert realtime_code_for_exchange("005930", "SOR") == "005930_AL"
+    assert payload["code"] == "005930"
+    assert payload["order_exchange"] == "SOR"
+    assert payload["kiwoom_code"] == "005930_AL"
 
 
 def test_runtime_realtime_registration_dedupes_already_registered() -> None:
@@ -2095,6 +2120,23 @@ def test_kiwoom_handler_live_sim_send_order_requires_safety_metadata() -> None:
     assert [event.event_type for event in accepted] == ["command_started", "command_ack"]
     assert len(client.orders) == 1
     assert client.orders[0].code == "005930"
+    assert client.orders[0].order_exchange == "KRX"
+    assert accepted[-1].payload["details"]["order_exchange"] == "KRX"
+
+
+def test_kiwoom_handler_live_sim_send_order_forwards_nxt_exchange() -> None:
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(client)
+
+    accepted = handler.handle(
+        _live_sim_order_command(command_id="cmd_live_sim_nxt", order_exchange="NXT")
+    )
+
+    assert [event.event_type for event in accepted] == ["command_started", "command_ack"]
+    assert len(client.orders) == 1
+    assert client.orders[0].order_exchange == "NXT"
+    assert client.orders[0].to_dict()["kiwoom_code"] == "005930_NX"
+    assert accepted[-1].payload["details"]["order_exchange"] == "NXT"
 
 
 def test_kiwoom_handler_rate_limit_delays_without_failure_event() -> None:
@@ -2223,7 +2265,9 @@ def test_kiwoom_handler_rejects_live_real_and_cancel_modify() -> None:
     real_handler = KiwoomGatewayCommandHandler(real_client)
     mock_handler = KiwoomGatewayCommandHandler(MockKiwoomClient())
 
-    real_rejected = real_handler.handle(_live_sim_order_command(command_id="cmd_real"))
+    real_rejected = real_handler.handle(
+        _live_sim_order_command(command_id="cmd_real", order_exchange="NXT")
+    )
     cancel_rejected = mock_handler.handle(
         GatewayCommand(
             command_id="cmd_cancel",
@@ -2243,6 +2287,7 @@ def test_kiwoom_handler_rejects_live_real_and_cancel_modify() -> None:
 
     assert real_rejected[0].event_type == "command_failed"
     assert "simulation server" in real_rejected[0].payload["error_message"]
+    assert real_client.orders == []
     assert cancel_rejected[0].event_type == "command_failed"
     assert modify_rejected[0].event_type == "command_failed"
 
@@ -2261,7 +2306,11 @@ def _drain_worker_once(runtime: KiwoomGatewayRuntime) -> bool:
     return False
 
 
-def _live_sim_order_command(command_id: str = "cmd_live_sim") -> GatewayCommand:
+def _live_sim_order_command(
+    command_id: str = "cmd_live_sim",
+    *,
+    order_exchange: str = "KRX",
+) -> GatewayCommand:
     idempotency_key = f"idem-{command_id}"
     return GatewayCommand(
         command_id=command_id,
@@ -2281,6 +2330,7 @@ def _live_sim_order_command(command_id: str = "cmd_live_sim") -> GatewayCommand:
             "limit_price": 70000,
             "order_type": "LIMIT",
             "hoga": "00",
+            "order_exchange": order_exchange,
             "mode": "LIVE_SIM",
             "live_mode": "LIVE_SIM",
             "live_sim_intent_id": "live_sim_intent_1",
@@ -2291,6 +2341,7 @@ def _live_sim_order_command(command_id: str = "cmd_live_sim") -> GatewayCommand:
                 "live_real_allowed": False,
                 "live_sim_intent_id": "live_sim_intent_1",
                 "idempotency_key": idempotency_key,
+                "order_exchange": order_exchange,
             },
         },
     )

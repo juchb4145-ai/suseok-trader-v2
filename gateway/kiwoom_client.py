@@ -230,12 +230,16 @@ class KiwoomOrderRequest:
     original_order_no: str = ""
     command_id: str = ""
     idempotency_key: str = ""
+    order_exchange: str = "KRX"
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
+        order_exchange = normalize_order_exchange(self.order_exchange)
         return {
             "account": self.account,
             "code": normalize_code(self.code),
+            "order_exchange": order_exchange,
+            "kiwoom_code": realtime_code_for_exchange(self.code, order_exchange),
             "quantity": int(self.quantity),
             "price": int(self.price),
             "side": self.side,
@@ -713,7 +717,7 @@ class KiwoomClient:
                     "0101",
                     request.account,
                     int(request.order_type),
-                    normalize_code(request.code),
+                    realtime_code_for_exchange(request.code, request.order_exchange),
                     int(request.quantity),
                     int(request.price),
                     request.hoga,
@@ -1479,6 +1483,29 @@ def normalize_realtime_exchange(value: object) -> str:
     exchange = aliases.get(text)
     if exchange is None:
         raise ValueError(f"unsupported realtime exchange: {value}")
+    return exchange
+
+
+def normalize_order_exchange(value: object) -> str:
+    text = str(value or "KRX").strip().upper()
+    aliases = {
+        "": "KRX",
+        "K": "KRX",
+        "KRX": "KRX",
+        "N": "NXT",
+        "NX": "NXT",
+        "NXT": "NXT",
+        "S": "SOR",
+        "SO": "SOR",
+        "SOR": "SOR",
+        "A": "SOR",
+        "AL": "SOR",
+        "ALL": "SOR",
+        "INTEGRATED": "SOR",
+    }
+    exchange = aliases.get(text)
+    if exchange not in {"KRX", "NXT", "SOR"}:
+        raise ValueError(f"unsupported order exchange: {value}")
     return exchange
 
 

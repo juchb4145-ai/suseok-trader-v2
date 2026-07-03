@@ -31,6 +31,9 @@ class LiveSimSafetyGateResult:
     account_mode: str
     broker_env: str
     server_mode: str
+    order_exchange: str
+    nxt_order_support_confirmed: bool
+    nxt_order_support_verified: bool
     gateway_heartbeat_ok: bool
     gateway_orderable: bool
     simulation_account_confirmed: bool
@@ -71,6 +74,9 @@ class LiveSimSafetyGateResult:
             "account_mode": self.account_mode,
             "broker_env": self.broker_env,
             "server_mode": self.server_mode,
+            "order_exchange": self.order_exchange,
+            "nxt_order_support_confirmed": self.nxt_order_support_confirmed,
+            "nxt_order_support_verified": self.nxt_order_support_verified,
             "gateway_heartbeat_ok": self.gateway_heartbeat_ok,
             "gateway_orderable": self.gateway_orderable,
             "simulation_account_confirmed": self.simulation_account_confirmed,
@@ -158,6 +164,10 @@ def check_live_sim_safety_gate(
     command_counts = get_command_status_counts(connection)
     queue_healthy = _bool_status(gateway_values, "command_queue_healthy", default=True)
     entry_window = live_sim_entry_window_state(resolved_settings)
+    order_exchange = resolved_settings.live_sim_order_exchange
+    nxt_order_support_verified = (
+        order_exchange == "KRX" or resolved_settings.live_sim_nxt_support_confirmed
+    )
 
     if not trading_mode_ok or not live_sim_enabled:
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_DISABLED.value)
@@ -183,6 +193,8 @@ def check_live_sim_safety_gate(
         reason_codes.append(LiveSimReasonCode.SERVER_MODE_NOT_SIMULATION.value)
     if not queue_healthy:
         reason_codes.append(LiveSimReasonCode.GATEWAY_COMMAND_QUEUE_UNHEALTHY.value)
+    if not nxt_order_support_verified:
+        reason_codes.append(LiveSimReasonCode.NXT_ORDER_SUPPORT_UNCONFIRMED.value)
     if (
         resolved_settings.ai_sidecar_tools_enabled
         or resolved_settings.ai_sidecar_order_tools_enabled
@@ -241,6 +253,9 @@ def check_live_sim_safety_gate(
         account_mode=account_mode,
         broker_env=broker_env,
         server_mode=server_mode,
+        order_exchange=order_exchange,
+        nxt_order_support_confirmed=resolved_settings.live_sim_nxt_support_confirmed,
+        nxt_order_support_verified=nxt_order_support_verified,
         gateway_heartbeat_ok=gateway_heartbeat_ok,
         gateway_orderable=gateway_orderable,
         simulation_account_confirmed=simulation_account_confirmed,

@@ -22,6 +22,7 @@ from gateway.kiwoom_client import (
     KiwoomOrderResult,
     broker_env_from_server_gubun,
     normalize_code,
+    normalize_order_exchange,
 )
 from gateway.kiwoom_tr import KiwoomTrRunner
 from gateway.order_pre_ack_journal import OrderPreAckJournal
@@ -438,6 +439,7 @@ class KiwoomGatewayCommandHandler:
             hoga=_kiwoom_hoga(payload),
             command_id=command.command_id,
             idempotency_key=command.idempotency_key or "",
+            order_exchange=normalize_order_exchange(payload.get("order_exchange", "KRX")),
             metadata=_mapping_value(payload, "metadata"),
         )
         events = [make_command_started_event(command, source=self.source)]
@@ -472,6 +474,7 @@ class KiwoomGatewayCommandHandler:
             "broker_env": actual_broker_env,
             "account_mode": actual_broker_env,
             "server_mode": actual_broker_env,
+            "order_exchange": request.order_exchange,
         }
         if result.order_no:
             details["broker_order_no"] = result.order_no
@@ -528,6 +531,7 @@ class KiwoomGatewayCommandHandler:
             original_order_no=_string_value(payload, "original_order_no", ""),
             command_id=command.command_id,
             idempotency_key=command.idempotency_key or "",
+            order_exchange=normalize_order_exchange(payload.get("order_exchange", "KRX")),
             metadata=_mapping_value(payload, "metadata"),
         )
         events = [make_command_started_event(command, source=self.source)]
@@ -561,6 +565,7 @@ class KiwoomGatewayCommandHandler:
             "broker_env": actual_broker_env,
             "account_mode": actual_broker_env,
             "server_mode": actual_broker_env,
+            "order_exchange": request.order_exchange,
         }
         if result.ok:
             events.append(

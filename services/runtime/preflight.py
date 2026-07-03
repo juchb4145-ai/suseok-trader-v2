@@ -249,6 +249,27 @@ def run_live_sim_preflight(
         },
     )
 
+    order_exchange = resolved_settings.live_sim_order_exchange
+    nxt_order_support_verified = (
+        order_exchange == "KRX" or resolved_settings.live_sim_nxt_support_confirmed
+    )
+    add(
+        "nxt_order_support_verified",
+        PreflightStatus.PASS if nxt_order_support_verified else PreflightStatus.BLOCK,
+        "LIVE_SIM order exchange is KRX or NXT/SOR support is operator-confirmed."
+        if nxt_order_support_verified
+        else "LIVE_SIM NXT/SOR order support is not operator-confirmed.",
+        {
+            "order_exchange": order_exchange,
+            "nxt_order_support_confirmed": (
+                resolved_settings.live_sim_nxt_support_confirmed
+            ),
+            "nxt_order_support_verified": nxt_order_support_verified,
+            "simulation_server_check_preserved": simulation_like,
+            "confirmation_flag": "LIVE_SIM_NXT_SUPPORT_CONFIRMED",
+        },
+    )
+
     kill_switch = bool(resolved_settings.live_sim_kill_switch)
     add(
         "live_sim_kill_switch",

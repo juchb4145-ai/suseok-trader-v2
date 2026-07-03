@@ -234,6 +234,8 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dry_run_exit_config_version == "exit_dry_run_v1"
     assert settings.live_sim_max_daily_loss == 0.0
     assert settings.live_sim_max_daily_loss_pct == 0.0
+    assert settings.live_sim_order_exchange == "KRX"
+    assert settings.live_sim_nxt_support_confirmed is False
     assert settings.live_sim_pilot_pipeline_enabled is False
     assert settings.live_sim_pilot_auto_queue_command is False
     assert settings.live_sim_order_plan_routing_enabled is False
@@ -625,6 +627,28 @@ def test_live_sim_order_plan_settings_are_validated() -> None:
         assert "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid LIVE_SIM order plan default/max notional")
+
+
+def test_live_sim_order_exchange_settings_are_validated() -> None:
+    nxt = load_settings({"LIVE_SIM_ORDER_EXCHANGE": "nxt"})
+    sor = load_settings(
+        {
+            "LIVE_SIM_ORDER_EXCHANGE": "all",
+            "LIVE_SIM_NXT_SUPPORT_CONFIRMED": "true",
+        }
+    )
+
+    assert nxt.live_sim_order_exchange == "NXT"
+    assert nxt.live_sim_nxt_support_confirmed is False
+    assert sor.live_sim_order_exchange == "SOR"
+    assert sor.live_sim_nxt_support_confirmed is True
+
+    try:
+        load_settings({"LIVE_SIM_ORDER_EXCHANGE": "ATS"})
+    except ValueError as exc:
+        assert "LIVE_SIM_ORDER_EXCHANGE" in str(exc)
+    else:
+        raise AssertionError("expected invalid LIVE_SIM order exchange setting")
 
 
 def test_live_sim_buy_reprice_and_reconcile_settings_are_validated() -> None:
