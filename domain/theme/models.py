@@ -245,6 +245,9 @@ class ThemeSnapshot:
     observed_member_count: int
     fresh_member_count: int
     fresh_coverage_ratio: float
+    observable_member_count: int = 0
+    observable_fresh_member_count: int = 0
+    observable_fresh_coverage_ratio: float = 0.0
     scan_coverage_ratio: float = 0.0
     realtime_coverage_ratio: float = 0.0
     rising_member_count: int
@@ -286,6 +289,8 @@ class ThemeSnapshot:
             "active_member_count",
             "observed_member_count",
             "fresh_member_count",
+            "observable_member_count",
+            "observable_fresh_member_count",
             "rising_member_count",
             "flow_rank_inflow_count",
         ):
@@ -296,6 +301,7 @@ class ThemeSnapshot:
             )
         for field_name in (
             "fresh_coverage_ratio",
+            "observable_fresh_coverage_ratio",
             "scan_coverage_ratio",
             "realtime_coverage_ratio",
             "rising_ratio",
@@ -355,6 +361,9 @@ class ThemeSnapshot:
             "observed_member_count": self.observed_member_count,
             "fresh_member_count": self.fresh_member_count,
             "fresh_coverage_ratio": self.fresh_coverage_ratio,
+            "observable_member_count": self.observable_member_count,
+            "observable_fresh_member_count": self.observable_fresh_member_count,
+            "observable_fresh_coverage_ratio": self.observable_fresh_coverage_ratio,
             "scan_coverage_ratio": self.scan_coverage_ratio,
             "realtime_coverage_ratio": self.realtime_coverage_ratio,
             "rising_member_count": self.rising_member_count,

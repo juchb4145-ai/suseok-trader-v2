@@ -23,7 +23,10 @@ from storage.sqlite import initialize_database
 
 def test_large_theme_diagnostic_marks_reference_coverage_impossible(tmp_path) -> None:
     connection = initialize_database(tmp_path / "theme-diagnostics.sqlite3")
-    settings = _settings(realtime_subscription_max_per_theme=5)
+    settings = _settings(
+        realtime_subscription_max_per_theme=5,
+        theme_observable_coverage_enabled=False,
+    )
     members = _large_theme_members()
     import_theme_memberships(connection, _theme_payload(members))
     _project_observable_ticks(connection, members[:5], settings)
@@ -41,27 +44,52 @@ def test_large_theme_diagnostic_marks_reference_coverage_impossible(tmp_path) ->
     assert diagnostics["subscription_capacity"]["coverage_impossible_theme_count"] == 1
 
 
-def test_observable_universe_allows_theme_leadership_without_changing_legacy_snapshot(
+def test_observable_coverage_allows_theme_snapshot_to_exit_data_wait(
     tmp_path,
 ) -> None:
-    connection = initialize_database(tmp_path / "observable-leadership.sqlite3")
+    connection = initialize_database(tmp_path / "observable-theme-snapshot.sqlite3")
     settings = _settings(realtime_subscription_max_per_theme=5)
     members = _large_theme_members()
     import_theme_memberships(connection, _theme_payload(members))
     _project_observable_ticks(connection, members[:5], settings)
-    legacy = calculate_theme_snapshot(connection, "large_theme", settings=settings)
+    snapshot = calculate_theme_snapshot(connection, "large_theme", settings=settings)
 
     result = rebuild_theme_leadership(connection, settings=settings)
-    snapshot = result.snapshots[0]
+    leadership_snapshot = result.snapshots[0]
     connection.close()
 
-    assert legacy.state.value == "DATA_WAIT"
-    assert snapshot.state is ThemeState.SPREADING
+    assert snapshot.state.value == "LEADING"
+    assert "THEME_OBSERVABLE_COVERAGE_USED" in snapshot.reason_codes
     assert snapshot.observable_member_count == 5
-    assert snapshot.valid_member_count == 5
-    assert snapshot.fresh_member_count == 3
-    assert snapshot.full_member_count == 30
-    assert snapshot.full_fresh_coverage_ratio < settings.theme_min_fresh_coverage_ratio
+    assert snapshot.observable_fresh_member_count == 3
+    assert snapshot.observable_fresh_coverage_ratio == 0.6
+    assert snapshot.fresh_coverage_ratio < settings.theme_min_fresh_coverage_ratio
+    assert snapshot.metadata["coverage"]["basis"] == "OBSERVABLE"
+    assert leadership_snapshot.state is ThemeState.SPREADING
+    assert leadership_snapshot.observable_member_count == 5
+    assert leadership_snapshot.valid_member_count == 5
+    assert leadership_snapshot.fresh_member_count == 3
+    assert leadership_snapshot.full_member_count == 30
+    assert (
+        leadership_snapshot.full_fresh_coverage_ratio
+        < settings.theme_min_fresh_coverage_ratio
+    )
+
+
+def test_theme_snapshot_keeps_data_wait_when_observable_minimum_not_met(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "observable-theme-min.sqlite3")
+    settings = _settings(realtime_subscription_max_per_theme=5)
+    members = _large_theme_members()
+    import_theme_memberships(connection, _theme_payload(members))
+    _project_observable_ticks(connection, members[:2], settings)
+
+    snapshot = calculate_theme_snapshot(connection, "large_theme", settings=settings)
+    connection.close()
+
+    assert snapshot.state.value == "DATA_WAIT"
+    assert snapshot.quality_status.value == "PARTIAL"
+    assert snapshot.observable_member_count == 2
+    assert "INSUFFICIENT_OBSERVABLE_MEMBERS" in snapshot.reason_codes
 
 
 def test_theme_leadership_keeps_data_wait_when_observable_min_valid_not_met(tmp_path) -> None:
@@ -94,6 +122,7 @@ def test_rt_tls_candidate_payload_and_strategy_fallback_when_legacy_data_wait(tm
     settings = _settings(
         realtime_subscription_max_per_theme=5,
         theme_leadership_write_candidate_sources=True,
+        theme_observable_coverage_enabled=False,
     )
     trade_date = _trade_date(settings)
     members = _large_theme_members()

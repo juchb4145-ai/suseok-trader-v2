@@ -9,6 +9,7 @@ def test_theme_api_import_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "theme_api.sqlite3"))
     monkeypatch.setenv("MARKET_DATA_TICK_STALE_SEC", "999999999")
     monkeypatch.setenv("MARKET_DATA_DEGRADED_TICK_STALE_SEC", "999999999")
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "2")
 
     with TestClient(app) as client:
         headers = {"X-Local-Token": "test-token"}

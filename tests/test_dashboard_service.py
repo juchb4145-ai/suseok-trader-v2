@@ -258,6 +258,7 @@ def test_dashboard_exposes_leadership_when_legacy_db_theme_is_data_wait(tmp_path
         candidate_source_stale_sec=999_999_999,
         candidate_tick_stale_sec=999_999_999,
         candidate_episode_ttl_sec=999_999_999,
+        theme_observable_coverage_enabled=False,
     )
     members = [(f"{100000 + index:06d}", f"종목{index:02d}") for index in range(30)]
     import_theme_memberships(

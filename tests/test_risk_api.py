@@ -87,6 +87,7 @@ def test_risk_integration_flow_stays_observe_only(tmp_path, monkeypatch) -> None
     monkeypatch.setenv("RISK_GATE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("RISK_GATE_STRATEGY_STALE_SEC", "999999999")
     monkeypatch.setenv("THEME_MIN_ACTIVE_MEMBERS", "1")
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "1")
 
     with TestClient(app) as client:
         headers = {"X-Local-Token": "test-token"}

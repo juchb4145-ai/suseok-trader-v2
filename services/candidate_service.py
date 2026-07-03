@@ -465,13 +465,20 @@ def rebuild_candidates_from_observations(
 
     refresh_total = _MutableRefreshResult()
     for candidate in _list_active_candidate_rows(connection, trade_date=target_trade_date):
-        refresh_total.add(
-            refresh_candidate_context(
+        for _ in range(2):
+            refresh_result = refresh_candidate_context(
                 connection,
                 candidate["candidate_instance_id"],
                 settings=resolved_settings,
             )
-        )
+            refresh_total.add(refresh_result)
+            if (
+                refresh_result.transition_count == 0
+                or refresh_result.stale_count
+                or refresh_result.closed_count
+                or refresh_result.error_count
+            ):
+                break
     after_transition_count = _count_rows(connection, "candidate_state_transitions")
     transition_count = after_transition_count - before_transition_count
     error_count = (
@@ -1277,6 +1284,9 @@ def _build_theme_context(
             l.leading_code,
             l.leading_name,
             l.fresh_coverage_ratio,
+            l.observable_member_count,
+            l.observable_fresh_member_count,
+            l.observable_fresh_coverage_ratio,
             l.rising_ratio,
             m.code,
             m.name,
@@ -1339,6 +1349,9 @@ def _build_theme_context(
         "leading_code": primary.get("leading_code"),
         "leading_name": primary.get("leading_name"),
         "fresh_coverage_ratio": primary.get("fresh_coverage_ratio"),
+        "observable_member_count": primary.get("observable_member_count"),
+        "observable_fresh_member_count": primary.get("observable_fresh_member_count"),
+        "observable_fresh_coverage_ratio": primary.get("observable_fresh_coverage_ratio"),
         "rising_ratio": primary.get("rising_ratio"),
         "sources": sources,
         "theme_leadership_source_contexts": source_contexts,
@@ -1492,6 +1505,11 @@ def _fsm_context(
         tick_age_sec is not None and float(tick_age_sec) > settings.candidate_tick_stale_sec
     )
     ttl_expired = _age_seconds(candidate["detected_at"]) > settings.candidate_episode_ttl_sec
+    reason_codes = merge_reason_codes(
+        _readiness_reason_codes(readiness),
+        fusion_reasons,
+        [CandidateReasonCode.SOURCE_STALE.value] if source_stale else [],
+    )
     return {
         "active_source_count": len(active_sources),
         "has_latest_tick": readiness.get("has_latest_tick"),
@@ -1499,6 +1517,7 @@ def _fsm_context(
         "tick_age_sec": tick_age_sec,
         "tick_stale": tick_stale,
         "source_stale": source_stale,
+        "candidate_stale_requires_tick_stale": settings.candidate_stale_requires_tick_stale,
         "ttl_expired": ttl_expired,
         "vwap_ready": readiness.get("vwap_ready"),
         "bar_1m_ready": readiness.get("has_1m_bar"),
@@ -1512,7 +1531,7 @@ def _fsm_context(
         "condition_source": condition_source,
         "condition_signal_present": condition_source,
         "observation_blocked": observation_blocked,
-        "reason_codes": merge_reason_codes(_readiness_reason_codes(readiness), fusion_reasons),
+        "reason_codes": reason_codes,
     }
 
 

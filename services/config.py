@@ -213,6 +213,8 @@ class Settings:
     theme_service_enabled: bool = True
     theme_min_active_members: int = 2
     theme_min_fresh_coverage_ratio: float = 0.3
+    theme_observable_coverage_enabled: bool = True
+    theme_min_observable_members: int = 3
     theme_leading_rising_ratio: float = 0.5
     theme_spreading_rising_ratio: float = 0.35
     theme_min_total_trade_value: float = 0.0
@@ -249,7 +251,8 @@ class Settings:
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
-    candidate_tick_stale_sec: int = 30
+    candidate_tick_stale_sec: int = 90
+    candidate_stale_requires_tick_stale: bool = True
     candidate_episode_ttl_sec: int = 1800
     candidate_context_require_1m_bar: bool = True
     candidate_context_require_vwap: bool = False
@@ -537,6 +540,8 @@ class Settings:
             _validate_ratio(getattr(self, field_name), field_name.upper())
         if self.theme_min_active_members < 1:
             raise ValueError("THEME_MIN_ACTIVE_MEMBERS must be >= 1")
+        if self.theme_min_observable_members < 1:
+            raise ValueError("THEME_MIN_OBSERVABLE_MEMBERS must be >= 1")
         if self.theme_snapshot_max_members < 1:
             raise ValueError("THEME_SNAPSHOT_MAX_MEMBERS must be >= 1")
         if self.theme_snapshot_stale_sec < 1:
@@ -1648,6 +1653,14 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("THEME_MIN_FRESH_COVERAGE_RATIO", "0.3"),
             "THEME_MIN_FRESH_COVERAGE_RATIO",
         ),
+        theme_observable_coverage_enabled=_parse_bool(
+            env.get("THEME_OBSERVABLE_COVERAGE_ENABLED", "true")
+        ),
+        theme_min_observable_members=_parse_int(
+            env.get("THEME_MIN_OBSERVABLE_MEMBERS", "3"),
+            "THEME_MIN_OBSERVABLE_MEMBERS",
+            min_value=1,
+        ),
         theme_leading_rising_ratio=_parse_float(
             env.get("THEME_LEADING_RISING_RATIO", "0.5"),
             "THEME_LEADING_RISING_RATIO",
@@ -1789,9 +1802,12 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             min_value=1,
         ),
         candidate_tick_stale_sec=_parse_int(
-            env.get("CANDIDATE_TICK_STALE_SEC", "30"),
+            env.get("CANDIDATE_TICK_STALE_SEC", "90"),
             "CANDIDATE_TICK_STALE_SEC",
             min_value=1,
+        ),
+        candidate_stale_requires_tick_stale=_parse_bool(
+            env.get("CANDIDATE_STALE_REQUIRES_TICK_STALE", "true")
         ),
         candidate_episode_ttl_sec=_parse_int(
             env.get("CANDIDATE_EPISODE_TTL_SEC", "1800"),

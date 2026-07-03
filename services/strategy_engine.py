@@ -798,6 +798,9 @@ def _theme_context_row(
             l.leading_code,
             l.leading_name,
             l.fresh_coverage_ratio,
+            l.observable_member_count,
+            l.observable_fresh_member_count,
+            l.observable_fresh_coverage_ratio,
             l.rising_ratio,
             l.total_trade_value,
             l.trade_value_delta_1m AS theme_trade_value_delta_1m,
@@ -838,6 +841,9 @@ def _theme_context_row(
         "leading_code",
         "leading_name",
         "fresh_coverage_ratio",
+        "observable_member_count",
+        "observable_fresh_member_count",
+        "observable_fresh_coverage_ratio",
         "rising_ratio",
         "total_trade_value",
         "theme_trade_value_delta_1m",
@@ -966,9 +972,16 @@ def _resolve_theme_context(
             "theme_name": _first_text(latest_snapshot.get("theme_name"), candidate["theme_name"]),
             "theme_state": _first_text(legacy_state, candidate["theme_state"]),
             "theme_role": _first_text(legacy_role, candidate["theme_role"]),
-            "fresh_coverage_ratio": latest_snapshot.get("fresh_coverage_ratio"),
-            "rising_ratio": latest_snapshot.get("rising_ratio"),
-            "total_trade_value": latest_snapshot.get("total_trade_value"),
+                "fresh_coverage_ratio": latest_snapshot.get("fresh_coverage_ratio"),
+                "observable_member_count": latest_snapshot.get("observable_member_count"),
+                "observable_fresh_member_count": latest_snapshot.get(
+                    "observable_fresh_member_count"
+                ),
+                "observable_fresh_coverage_ratio": latest_snapshot.get(
+                    "observable_fresh_coverage_ratio"
+                ),
+                "rising_ratio": latest_snapshot.get("rising_ratio"),
+                "total_trade_value": latest_snapshot.get("total_trade_value"),
         },
         reasons,
     )

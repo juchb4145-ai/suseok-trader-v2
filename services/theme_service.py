@@ -497,10 +497,16 @@ def calculate_theme_snapshot(
             )
 
     observed_members = [member for member in member_snapshots if member.price is not None]
+    observable_members = [
+        member for member in member_snapshots if _is_observable_member_snapshot(member)
+    ]
     fresh_members = [
         member
         for member in member_snapshots
         if member.price is not None and member.readiness_status == "FRESH"
+    ]
+    observable_fresh_members = [
+        member for member in observable_members if member.readiness_status == "FRESH"
     ]
     scan_observed_members = [
         member for member in member_snapshots if member.observation_source == "MARKET_SCAN"
@@ -515,6 +521,10 @@ def calculate_theme_snapshot(
     ]
     active_member_count = len(members)
     fresh_coverage_ratio = _ratio(len(fresh_members), active_member_count)
+    observable_fresh_coverage_ratio = _ratio(
+        len(observable_fresh_members),
+        len(observable_members),
+    )
     scan_coverage_ratio = _ratio(len(scan_observed_members), active_member_count)
     realtime_coverage_ratio = _ratio(len(realtime_observed_members), active_member_count)
     rising_ratio = _ratio(len(rising_members), max(len(observed_members), 1))
@@ -560,6 +570,8 @@ def calculate_theme_snapshot(
         active_member_count=active_member_count,
         observed_member_count=len(observed_members),
         fresh_coverage_ratio=fresh_coverage_ratio,
+        observable_member_count=len(observable_members),
+        observable_fresh_coverage_ratio=observable_fresh_coverage_ratio,
         scan_coverage_ratio=scan_coverage_ratio,
         rising_ratio=rising_ratio,
         leading_member=leader,
@@ -579,6 +591,9 @@ def calculate_theme_snapshot(
         observed_member_count=len(observed_members),
         fresh_member_count=len(fresh_members),
         fresh_coverage_ratio=fresh_coverage_ratio,
+        observable_member_count=len(observable_members),
+        observable_fresh_member_count=len(observable_fresh_members),
+        observable_fresh_coverage_ratio=observable_fresh_coverage_ratio,
         scan_coverage_ratio=scan_coverage_ratio,
         realtime_coverage_ratio=realtime_coverage_ratio,
         rising_member_count=len(rising_members),
@@ -605,6 +620,26 @@ def calculate_theme_snapshot(
             "observe_only": True,
             "no_order_side_effects": True,
             "member_error_count": member_error_count,
+            "coverage": {
+                "basis": (
+                    "OBSERVABLE"
+                    if (
+                        resolved_settings.theme_observable_coverage_enabled
+                        and len(observable_members)
+                        >= resolved_settings.theme_min_observable_members
+                    )
+                    else "FULL"
+                ),
+                "fresh_member_count": len(fresh_members),
+                "active_member_count": active_member_count,
+                "fresh_coverage_ratio": fresh_coverage_ratio,
+                "observable_member_count": len(observable_members),
+                "observable_fresh_member_count": len(observable_fresh_members),
+                "observable_fresh_coverage_ratio": observable_fresh_coverage_ratio,
+                "theme_min_observable_members": (
+                    resolved_settings.theme_min_observable_members
+                ),
+            },
             "score_formula": "change_rate*100 + delta1m/1e6 + delta3m/3e6 "
             "+ cumulative_trade_value/1e9 + execution_strength/100, stale members half score",
             "flow_score_formula": flow_metrics["flow_score_formula"],
@@ -668,6 +703,8 @@ def get_theme_status(
         "import_error_count": _count_rows(connection, "theme_import_errors"),
         "projection_error_count": _count_rows(connection, "theme_projection_errors"),
         "min_fresh_coverage_ratio": resolved_settings.theme_min_fresh_coverage_ratio,
+        "observable_coverage_enabled": resolved_settings.theme_observable_coverage_enabled,
+        "min_observable_members": resolved_settings.theme_min_observable_members,
         "leading_rising_ratio": resolved_settings.theme_leading_rising_ratio,
         "spreading_rising_ratio": resolved_settings.theme_spreading_rising_ratio,
         "min_active_members": resolved_settings.theme_min_active_members,
@@ -965,6 +1002,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             observed_member_count,
             fresh_member_count,
             fresh_coverage_ratio,
+            observable_member_count,
+            observable_fresh_member_count,
+            observable_fresh_coverage_ratio,
             scan_coverage_ratio,
             realtime_coverage_ratio,
             rising_member_count,
@@ -990,7 +1030,8 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
         VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?
         )
         ON CONFLICT(snapshot_id) DO UPDATE SET
             theme_name = excluded.theme_name,
@@ -1000,6 +1041,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             observed_member_count = excluded.observed_member_count,
             fresh_member_count = excluded.fresh_member_count,
             fresh_coverage_ratio = excluded.fresh_coverage_ratio,
+            observable_member_count = excluded.observable_member_count,
+            observable_fresh_member_count = excluded.observable_fresh_member_count,
+            observable_fresh_coverage_ratio = excluded.observable_fresh_coverage_ratio,
             scan_coverage_ratio = excluded.scan_coverage_ratio,
             realtime_coverage_ratio = excluded.realtime_coverage_ratio,
             rising_member_count = excluded.rising_member_count,
@@ -1032,6 +1076,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             data["observed_member_count"],
             data["fresh_member_count"],
             data["fresh_coverage_ratio"],
+            data["observable_member_count"],
+            data["observable_fresh_member_count"],
+            data["observable_fresh_coverage_ratio"],
             data["scan_coverage_ratio"],
             data["realtime_coverage_ratio"],
             data["rising_member_count"],
@@ -1069,6 +1116,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             leading_code,
             leading_name,
             fresh_coverage_ratio,
+            observable_member_count,
+            observable_fresh_member_count,
+            observable_fresh_coverage_ratio,
             scan_coverage_ratio,
             realtime_coverage_ratio,
             rising_ratio,
@@ -1080,7 +1130,7 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             flow_rank_inflow_count,
             flow_score
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(theme_id) DO UPDATE SET
             snapshot_id = excluded.snapshot_id,
             theme_name = excluded.theme_name,
@@ -1090,6 +1140,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             leading_code = excluded.leading_code,
             leading_name = excluded.leading_name,
             fresh_coverage_ratio = excluded.fresh_coverage_ratio,
+            observable_member_count = excluded.observable_member_count,
+            observable_fresh_member_count = excluded.observable_fresh_member_count,
+            observable_fresh_coverage_ratio = excluded.observable_fresh_coverage_ratio,
             scan_coverage_ratio = excluded.scan_coverage_ratio,
             realtime_coverage_ratio = excluded.realtime_coverage_ratio,
             rising_ratio = excluded.rising_ratio,
@@ -1111,6 +1164,9 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             data["leading_code"],
             data["leading_name"],
             data["fresh_coverage_ratio"],
+            data["observable_member_count"],
+            data["observable_fresh_member_count"],
+            data["observable_fresh_coverage_ratio"],
             data["scan_coverage_ratio"],
             data["realtime_coverage_ratio"],
             data["rising_ratio"],
@@ -1189,6 +1245,8 @@ def _classify_theme_snapshot(
     active_member_count: int,
     observed_member_count: int,
     fresh_coverage_ratio: float,
+    observable_member_count: int,
+    observable_fresh_coverage_ratio: float,
     scan_coverage_ratio: float,
     rising_ratio: float,
     leading_member: ThemeMemberSnapshot | None,
@@ -1203,13 +1261,27 @@ def _classify_theme_snapshot(
         )
     if observed_member_count == 0:
         return ThemeState.DATA_WAIT, ThemeSnapshotQuality.DATA_WAIT, ["NO_OBSERVED_MEMBERS"]
-    coverage_for_state = (
-        scan_coverage_ratio if settings.market_scan_enabled else fresh_coverage_ratio
-    )
-    if coverage_for_state < settings.theme_min_fresh_coverage_ratio:
-        return ThemeState.DATA_WAIT, ThemeSnapshotQuality.PARTIAL, ["LOW_FRESH_COVERAGE"]
-
     reasons: list[str] = []
+    if settings.theme_observable_coverage_enabled:
+        if observable_member_count < settings.theme_min_observable_members:
+            return (
+                ThemeState.DATA_WAIT,
+                ThemeSnapshotQuality.PARTIAL,
+                ["INSUFFICIENT_OBSERVABLE_MEMBERS"],
+            )
+        coverage_for_state = observable_fresh_coverage_ratio
+        reasons.append("THEME_OBSERVABLE_COVERAGE_USED")
+    else:
+        coverage_for_state = (
+            scan_coverage_ratio if settings.market_scan_enabled else fresh_coverage_ratio
+        )
+    if coverage_for_state < settings.theme_min_fresh_coverage_ratio:
+        return (
+            ThemeState.DATA_WAIT,
+            ThemeSnapshotQuality.PARTIAL,
+            [*reasons, "LOW_FRESH_COVERAGE"],
+        )
+
     if total_trade_value < settings.theme_min_total_trade_value:
         reasons.append("LOW_TOTAL_TRADE_VALUE")
     leader_change_rate = leading_member.change_rate if leading_member is not None else None
@@ -1288,6 +1360,12 @@ def _base_member_role(
     if readiness["quality_status"] != "FRESH":
         return ThemeMemberRole.STALE
     return ThemeMemberRole.LAGGARD
+
+
+def _is_observable_member_snapshot(member: ThemeMemberSnapshot) -> bool:
+    if member.price is None:
+        return False
+    return member.observation_source in {"REALTIME_TICK", "MARKET_SCAN"}
 
 
 def _select_leader(

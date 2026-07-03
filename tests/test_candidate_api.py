@@ -12,6 +12,7 @@ def test_candidate_api_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("CANDIDATE_SOURCE_STALE_SEC", "999999999")
     monkeypatch.setenv("CANDIDATE_TICK_STALE_SEC", "999999999")
     monkeypatch.setenv("CANDIDATE_EPISODE_TTL_SEC", "999999999")
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "1")
 
     with TestClient(app) as client:
         headers = {"X-Local-Token": "test-token"}
@@ -70,7 +71,7 @@ def test_candidate_api_rebuild_and_read_paths(tmp_path, monkeypatch) -> None:
     assert sources.status_code == 200
     assert len(sources.json()["sources"]) == 2
     assert transitions.status_code == 200
-    assert transitions.json()["transitions"][-1]["to_state"] == "WATCHING"
+    assert transitions.json()["transitions"][-1]["to_state"] == "CONTEXT_READY"
     assert by_code.status_code == 200
     assert by_code.json()["candidates"][0]["candidate_instance_id"] == candidate_id
     assert errors.status_code == 200

@@ -91,6 +91,8 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.theme_service_enabled is True
     assert settings.theme_min_active_members == 2
     assert settings.theme_min_fresh_coverage_ratio == 0.3
+    assert settings.theme_observable_coverage_enabled is True
+    assert settings.theme_min_observable_members == 3
     assert settings.theme_leading_rising_ratio == 0.5
     assert settings.theme_spreading_rising_ratio == 0.35
     assert settings.theme_import_allow_replace is False
@@ -113,7 +115,8 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
-    assert settings.candidate_tick_stale_sec == 30
+    assert settings.candidate_tick_stale_sec == 90
+    assert settings.candidate_stale_requires_tick_stale is True
     assert settings.candidate_episode_ttl_sec == 1800
     assert settings.candidate_context_require_1m_bar is True
     assert settings.candidate_context_require_vwap is False
@@ -393,6 +396,29 @@ def test_theme_ratio_settings_are_validated() -> None:
         assert "ratio between 0 and 1" in str(exc)
     else:
         raise AssertionError("expected invalid theme ratio configuration")
+
+    try:
+        load_settings({"THEME_MIN_OBSERVABLE_MEMBERS": "0"})
+    except ValueError as exc:
+        assert "THEME_MIN_OBSERVABLE_MEMBERS" in str(exc)
+    else:
+        raise AssertionError("expected invalid observable member minimum")
+
+
+def test_observable_coverage_and_candidate_stale_settings_parse_env() -> None:
+    settings = load_settings(
+        {
+            "THEME_OBSERVABLE_COVERAGE_ENABLED": "false",
+            "THEME_MIN_OBSERVABLE_MEMBERS": "5",
+            "CANDIDATE_TICK_STALE_SEC": "120",
+            "CANDIDATE_STALE_REQUIRES_TICK_STALE": "false",
+        }
+    )
+
+    assert settings.theme_observable_coverage_enabled is False
+    assert settings.theme_min_observable_members == 5
+    assert settings.candidate_tick_stale_sec == 120
+    assert settings.candidate_stale_requires_tick_stale is False
 
 
 def test_market_scan_settings_are_validated() -> None:

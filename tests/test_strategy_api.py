@@ -73,6 +73,7 @@ def test_strategy_integration_flow_stays_observe_only(tmp_path, monkeypatch) -> 
     monkeypatch.setenv("CANDIDATE_EPISODE_TTL_SEC", "999999999")
     monkeypatch.setenv("STRATEGY_ENGINE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("THEME_MIN_ACTIVE_MEMBERS", "1")
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "1")
 
     with TestClient(app) as client:
         headers = {"X-Local-Token": "test-token"}

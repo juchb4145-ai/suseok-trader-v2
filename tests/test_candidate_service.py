@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
-from domain.broker.utils import utc_now
+from domain.broker.utils import datetime_to_wire, utc_now
 from domain.candidate.state import CandidateState
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.candidate_service import (
@@ -152,7 +152,7 @@ def test_theme_sources_create_leader_co_leader_and_follower_candidates(tmp_path)
 
 def test_theme_sources_skip_non_source_theme_states(tmp_path) -> None:
     connection = initialize_database(tmp_path / "candidate_theme_watch.sqlite3")
-    settings = _candidate_settings()
+    settings = _candidate_settings(theme_min_observable_members=2)
     trade_date = _trade_date(settings)
     import_theme_memberships(
         connection,
@@ -325,6 +325,54 @@ def test_candidate_refresh_marks_stale_tick_without_order_like_side_effects(tmp_
     assert candidate["state"] == CandidateState.STALE.value
     assert "TICK_STALE" in candidate["reason_codes"]
     assert command_count == 0
+
+
+def test_candidate_tick_between_30_and_90_seconds_is_not_stale(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "candidate_60s_tick.sqlite3")
+    settings = _candidate_settings(candidate_tick_stale_sec=90)
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    _append_and_project(connection, _old_price_tick_event(), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate_id = list_candidates(connection, trade_date=trade_date)[0]["candidate_instance_id"]
+
+    refresh = refresh_candidate_context(connection, candidate_id, settings=settings)
+    candidate = get_candidate(connection, candidate_id)
+    connection.close()
+
+    assert refresh.stale_count == 0
+    assert candidate is not None
+    assert candidate["state"] != CandidateState.STALE.value
+    assert "TICK_STALE" not in candidate["reason_codes"]
+
+
+def test_source_stale_without_tick_stale_does_not_mark_candidate_stale(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "candidate_source_stale_info.sqlite3")
+    settings = _candidate_settings(
+        candidate_source_stale_sec=1,
+        candidate_tick_stale_sec=90,
+    )
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    _append_and_project(connection, _old_price_tick_event(), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate_id = list_candidates(connection, trade_date=trade_date)[0]["candidate_instance_id"]
+    old_seen_at = datetime_to_wire(utc_now() - timedelta(seconds=10))
+    connection.execute(
+        "UPDATE candidate_sources_latest SET last_seen_at = ? WHERE candidate_instance_id = ?",
+        (old_seen_at, candidate_id),
+    )
+    connection.commit()
+
+    refresh = refresh_candidate_context(connection, candidate_id, settings=settings)
+    candidate = get_candidate(connection, candidate_id)
+    connection.close()
+
+    assert refresh.stale_count == 0
+    assert candidate is not None
+    assert candidate["state"] != CandidateState.STALE.value
+    assert "SOURCE_STALE" in candidate["reason_codes"]
+    assert "TICK_STALE" not in candidate["reason_codes"]
 
 
 def _candidate_settings(**overrides) -> Settings:

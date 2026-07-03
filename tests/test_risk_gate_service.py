@@ -49,6 +49,35 @@ def test_load_risk_input_context_reads_strategy_candidate_market_and_theme(tmp_p
     assert context.raw_context["context_hash"]
 
 
+def test_theme_context_uses_observable_coverage_for_risk_gate(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_observable_theme.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+    connection.execute(
+        """
+        UPDATE theme_latest_snapshots
+        SET fresh_coverage_ratio = 0.1,
+            observable_member_count = 5,
+            observable_fresh_member_count = 3,
+            observable_fresh_coverage_ratio = 0.6
+        WHERE theme_id = 'theme-005930'
+        """
+    )
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+
+    context = load_risk_input_context(connection, candidate_id, settings=settings)
+    check = check_theme_context(context, settings)
+    connection.close()
+
+    assert context.theme_fresh_coverage_ratio == 0.6
+    assert check.status is RiskCheckStatus.PASS_OBSERVED
+    assert RiskReasonCode.THEME_FRESH_COVERAGE_LOW.value not in check.reason_codes
+    assert check.evidence_json["coverage_basis"] == "OBSERVABLE"
+    assert check.evidence_json["full_fresh_coverage_ratio"] == 0.1
+    assert check.evidence_json["observable_member_count"] == 5
+
+
 def test_risk_observation_persistence_latest_and_checks_stays_observe_only(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_persistence.sqlite3")
     settings = _settings()

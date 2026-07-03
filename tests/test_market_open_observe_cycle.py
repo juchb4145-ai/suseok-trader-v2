@@ -3,13 +3,19 @@ from __future__ import annotations
 from datetime import timedelta
 
 from apps.core_api import app
+from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
+from services.config import Settings
 from services.config import candidate_timezone
+from services.market_index_service import process_market_index_event
+from services.market_reference_service import process_market_symbols_event
 from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK
+from storage.event_store import append_gateway_event
 from storage.gateway_command_store import canonical_json
 from storage.sqlite import initialize_database, open_connection
+from tests.test_market_index_service import index_tick_event
 from tools.run_market_open_observe_cycle import write_observe_cycle_report
 
 
@@ -21,6 +27,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     monkeypatch.setenv("CANDIDATE_SOURCE_STALE_SEC", "999999999")
     monkeypatch.setenv("CANDIDATE_TICK_STALE_SEC", "999999999")
     monkeypatch.setenv("CANDIDATE_EPISODE_TTL_SEC", "999999999")
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "1")
     monkeypatch.setenv("STRATEGY_ENGINE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("RISK_GATE_STALE_TICK_SEC", "999999999")
     monkeypatch.setenv("RISK_GATE_STRATEGY_STALE_SEC", "999999999")
@@ -57,6 +64,7 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
         )
         latest_ticks = client.get("/api/market-data/ticks/latest")
         theme_import = client.post("/api/themes/import", json=_theme_payload(), headers=headers)
+        _insert_fresh_market_inputs(db_path)
         result = client.post(
             f"/api/operator/observe-cycle/run-once?trade_date={trade_date}",
             headers=headers,
@@ -82,6 +90,9 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     assert stages["Strategy"]["counts"]["evaluated_count"] >= 0
     assert stages["Risk"]["counts"]["evaluated_count"] >= 0
     assert stages["EntryTiming"]["counts"]["evaluated_count"] >= 1
+    assert stages["Strategy"]["counts"]["matched_observation_count"] >= 1
+    assert stages["Risk"]["counts"]["observe_pass_count"] >= 1
+    assert stages["EntryTiming"]["counts"]["order_plan_draft_count"] >= 1
     assert stages["CommandSafety"]["status"] == "PASS"
     assert payload["send_order_delta"] == 0
     assert payload["queue_commands"] is False
@@ -93,9 +104,41 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
         send_order_count = connection.execute(
             "SELECT COUNT(*) AS count FROM gateway_commands WHERE command_type = 'send_order'"
         ).fetchone()["count"]
+        matched_strategy_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM strategy_observations
+            WHERE overall_status = 'MATCHED_OBSERVATION'
+            """
+        ).fetchone()["count"]
+        risk_pass_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM risk_observations
+            WHERE overall_status = 'OBSERVE_PASS'
+            """
+        ).fetchone()["count"]
+        entry_timing_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM entry_timing_evaluations"
+        ).fetchone()["count"]
+        order_plan_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM order_plan_drafts"
+        ).fetchone()["count"]
+        unsafe_plan_count = connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM order_plan_drafts
+            WHERE observe_only != 1 OR not_order_intent != 1
+            """
+        ).fetchone()["count"]
     finally:
         connection.close()
     assert send_order_count == 0
+    assert matched_strategy_count >= 1
+    assert risk_pass_count >= 1
+    assert entry_timing_count >= 1
+    assert order_plan_count >= 1
+    assert unsafe_plan_count == 0
 
 
 def test_observe_cycle_requires_token_when_configured(tmp_path, monkeypatch) -> None:
@@ -236,6 +279,62 @@ def _condition_profile_metadata(role: str, condition_name: str, priority: int) -
             "reason_codes": ["TEST"],
         },
     }
+
+
+def _insert_fresh_market_inputs(db_path) -> None:
+    connection = open_connection(db_path)
+    try:
+        now = utc_now()
+        symbols = GatewayEvent(
+            event_id="evt_market_symbols_observe_cycle",
+            event_type="market_symbols",
+            source="test-gateway",
+            payload={
+                "KOSPI": [{"code": "005930", "name": "삼성전자"}],
+                "KOSDAQ": [{"code": "035420", "name": "NAVER"}],
+            },
+            ts=now,
+        )
+        append_gateway_event(connection, symbols)
+        assert process_market_symbols_event(connection, symbols).status == "APPLIED"
+        settings = Settings(market_index_stale_sec=999_999_999)
+        for event in (
+            index_tick_event(
+                "evt_kospi_prev_observe_cycle",
+                index_code="KOSPI",
+                price=2800.0,
+                ts=now - timedelta(minutes=5),
+            ),
+            index_tick_event(
+                "evt_kospi_now_observe_cycle",
+                index_code="KOSPI",
+                price=2806.0,
+                change_rate=0.21,
+                change_value=6.0,
+                ts=now,
+            ),
+            index_tick_event(
+                "evt_kosdaq_prev_observe_cycle",
+                index_code="KOSDAQ",
+                price=1000.0,
+                ts=now - timedelta(minutes=5),
+            ),
+            index_tick_event(
+                "evt_kosdaq_now_observe_cycle",
+                index_code="KOSDAQ",
+                price=1002.0,
+                change_rate=0.2,
+                change_value=2.0,
+                ts=now,
+            ),
+        ):
+            append_gateway_event(connection, event)
+            assert process_market_index_event(connection, event, settings=settings).status == (
+                "APPLIED"
+            )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _theme_payload() -> dict[str, object]:

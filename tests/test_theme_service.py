@@ -187,7 +187,7 @@ def test_theme_snapshot_state_rules_cover_wait_watch_spreading_and_low_coverage(
     tmp_path,
 ) -> None:
     connection = initialize_database(tmp_path / "theme.sqlite3")
-    settings = _fresh_settings()
+    settings = _fresh_settings(theme_min_observable_members=1)
     import_theme_memberships(
         connection,
         _theme_payload(
@@ -226,6 +226,7 @@ def test_theme_snapshot_state_rules_cover_wait_watch_spreading_and_low_coverage(
             market_data_tick_stale_sec=999_999_999,
             market_data_degraded_tick_stale_sec=999_999_999,
             theme_min_fresh_coverage_ratio=0.8,
+            theme_observable_coverage_enabled=False,
         ),
     )
     watch = calculate_theme_snapshot(
@@ -304,11 +305,13 @@ def _theme_payload(members: list[dict[str, str]]) -> dict[str, object]:
     }
 
 
-def _fresh_settings() -> Settings:
-    return Settings(
+def _fresh_settings(**overrides) -> Settings:
+    values = dict(
         market_data_tick_stale_sec=999_999_999,
         market_data_degraded_tick_stale_sec=999_999_999,
     )
+    values.update(overrides)
+    return Settings(**values)
 
 
 def _price_tick_event(
@@ -403,6 +406,7 @@ def test_scan_only_theme_exits_data_wait_and_marks_observation_source(tmp_path) 
     connection = initialize_database(tmp_path / "theme-scan-only.sqlite3")
     settings = Settings(
         market_scan_enabled=True,
+        theme_min_observable_members=2,
         market_data_tick_stale_sec=999_999_999,
         market_data_degraded_tick_stale_sec=999_999_999,
     )
@@ -432,7 +436,7 @@ def test_scan_only_theme_exits_data_wait_and_marks_observation_source(tmp_path) 
     assert snapshot.state == "LEADING"
     assert snapshot.scan_coverage_ratio == 1.0
     assert snapshot.realtime_coverage_ratio == 0.0
-    assert snapshot.reason_codes == []
+    assert snapshot.reason_codes == ["THEME_OBSERVABLE_COVERAGE_USED"]
     assert {row["observation_source"] for row in member_rows} == {"MARKET_SCAN"}
 
 

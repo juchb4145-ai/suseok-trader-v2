@@ -148,9 +148,15 @@ def should_mark_stale(
     context: Mapping[str, Any],
 ) -> tuple[str, ...]:
     reasons: list[str] = []
-    if _bool(context.get("source_stale")):
+    source_stale = _bool(context.get("source_stale"))
+    tick_stale = _bool(context.get("tick_stale"))
+    requires_tick_stale = _bool(
+        context.get("candidate_stale_requires_tick_stale"),
+        default=True,
+    )
+    if source_stale and (tick_stale or not requires_tick_stale):
         reasons.append(CandidateReasonCode.SOURCE_STALE.value)
-    if _bool(context.get("tick_stale")):
+    if tick_stale:
         reasons.append(CandidateReasonCode.TICK_STALE.value)
     return tuple(merge_reason_codes(reasons))
 

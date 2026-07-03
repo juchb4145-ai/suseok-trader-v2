@@ -157,6 +157,12 @@ def load_risk_input_context(
     latest_3m = _row_to_dict(bars[180]) if bars[180] is not None else {}
     theme_member = theme.get("member", {})
     latest_snapshot = theme.get("latest_snapshot", {})
+    candidate_theme_context = _dict_or_empty(candidate_context.get("theme_context"))
+    theme_coverage = _resolve_theme_coverage(
+        latest_snapshot,
+        candidate_theme_context,
+        settings=resolved_settings,
+    )
 
     price = _first_number(tick_source.get("price"), theme_member.get("price"))
     vwap = _first_number(latest_1m.get("vwap"), theme_member.get("vwap"))
@@ -187,6 +193,7 @@ def load_risk_input_context(
         },
         "theme_latest_snapshot": latest_snapshot,
         "theme_snapshot_member": theme_member,
+        "theme_coverage": theme_coverage,
         "settings": {
             "config_version": resolved_settings.risk_gate_config_version,
             "observe_only": True,
@@ -224,13 +231,10 @@ def load_risk_input_context(
             theme_member.get("member_role"),
             candidate["theme_role"] if candidate else None,
         ),
-        theme_fresh_coverage_ratio=_first_number(
-            latest_snapshot.get("fresh_coverage_ratio"),
-            _dict_or_empty(candidate_context.get("theme_context")).get("fresh_coverage_ratio"),
-        ),
+        theme_fresh_coverage_ratio=_first_number(theme_coverage.get("fresh_coverage_ratio")),
         theme_rising_ratio=_first_number(
             latest_snapshot.get("rising_ratio"),
-            _dict_or_empty(candidate_context.get("theme_context")).get("rising_ratio"),
+            candidate_theme_context.get("rising_ratio"),
         ),
         market_readiness_status=_first_text(
             candidate["market_readiness_status"] if candidate is not None else None,
@@ -539,13 +543,96 @@ def check_strategy_context(context: RiskInputContext, settings: Settings) -> Ris
     )
 
 
+def _resolve_theme_coverage(
+    latest_snapshot: Mapping[str, Any],
+    candidate_theme_context: Mapping[str, Any],
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    full_ratio = _first_number(
+        latest_snapshot.get("fresh_coverage_ratio"),
+        candidate_theme_context.get("fresh_coverage_ratio"),
+    )
+    full_fresh_count = _first_int(
+        latest_snapshot.get("fresh_member_count"),
+        candidate_theme_context.get("fresh_member_count"),
+    )
+    active_count = _first_int(
+        latest_snapshot.get("active_member_count"),
+        candidate_theme_context.get("active_member_count"),
+    )
+    observable_ratio = _first_number(
+        latest_snapshot.get("observable_fresh_coverage_ratio"),
+        candidate_theme_context.get("observable_fresh_coverage_ratio"),
+    )
+    observable_fresh_count = _first_int(
+        latest_snapshot.get("observable_fresh_member_count"),
+        candidate_theme_context.get("observable_fresh_member_count"),
+    )
+    observable_count = _first_int(
+        latest_snapshot.get("observable_member_count"),
+        candidate_theme_context.get("observable_member_count"),
+    )
+    use_observable = (
+        settings.theme_observable_coverage_enabled
+        and observable_ratio is not None
+        and (observable_count or 0) >= settings.theme_min_observable_members
+    )
+    if use_observable:
+        return {
+            "basis": "OBSERVABLE",
+            "fresh_coverage_ratio": observable_ratio,
+            "numerator": observable_fresh_count,
+            "denominator": observable_count,
+            "full_fresh_coverage_ratio": full_ratio,
+            "full_fresh_member_count": full_fresh_count,
+            "active_member_count": active_count,
+            "observable_fresh_coverage_ratio": observable_ratio,
+            "observable_fresh_member_count": observable_fresh_count,
+            "observable_member_count": observable_count,
+            "theme_min_observable_members": settings.theme_min_observable_members,
+            "reason_codes": ["THEME_OBSERVABLE_COVERAGE_USED"],
+        }
+    return {
+        "basis": "FULL",
+        "fresh_coverage_ratio": full_ratio,
+        "numerator": full_fresh_count,
+        "denominator": active_count,
+        "full_fresh_coverage_ratio": full_ratio,
+        "full_fresh_member_count": full_fresh_count,
+        "active_member_count": active_count,
+        "observable_fresh_coverage_ratio": observable_ratio,
+        "observable_fresh_member_count": observable_fresh_count,
+        "observable_member_count": observable_count,
+        "theme_min_observable_members": settings.theme_min_observable_members,
+        "reason_codes": [],
+    }
+
+
 def check_theme_context(context: RiskInputContext, settings: Settings) -> RiskCheckObservation:
+    theme_coverage = _dict_or_empty(context.raw_context.get("theme_coverage"))
     evidence = {
         "theme_id": context.theme_id,
         "theme_state": context.theme_state,
         "theme_role": context.theme_role,
         "fresh_coverage_ratio": context.theme_fresh_coverage_ratio,
         "fresh_coverage_threshold": settings.risk_gate_min_theme_fresh_coverage_ratio,
+        "coverage_basis": theme_coverage.get("basis", "FULL"),
+        "coverage_numerator": theme_coverage.get("numerator"),
+        "coverage_denominator": theme_coverage.get("denominator"),
+        "full_fresh_coverage_ratio": theme_coverage.get("full_fresh_coverage_ratio"),
+        "full_fresh_member_count": theme_coverage.get("full_fresh_member_count"),
+        "active_member_count": theme_coverage.get("active_member_count"),
+        "observable_fresh_coverage_ratio": theme_coverage.get(
+            "observable_fresh_coverage_ratio"
+        ),
+        "observable_fresh_member_count": theme_coverage.get(
+            "observable_fresh_member_count"
+        ),
+        "observable_member_count": theme_coverage.get("observable_member_count"),
+        "theme_min_observable_members": theme_coverage.get(
+            "theme_min_observable_members"
+        ),
         "rising_ratio": context.theme_rising_ratio,
         "rising_ratio_threshold": settings.risk_gate_min_theme_rising_ratio,
         "leading_code": context.raw_context.get("theme_latest_snapshot", {}).get("leading_code"),
@@ -2022,6 +2109,11 @@ def _theme_context_row(
             l.leading_code,
             l.leading_name,
             l.fresh_coverage_ratio,
+            s.active_member_count,
+            s.fresh_member_count,
+            l.observable_member_count,
+            l.observable_fresh_member_count,
+            l.observable_fresh_coverage_ratio,
             l.rising_ratio,
             l.total_trade_value,
             l.trade_value_delta_1m AS theme_trade_value_delta_1m,
@@ -2044,6 +2136,7 @@ def _theme_context_row(
             m.event_ts,
             m.metadata_json
         FROM theme_latest_snapshots AS l
+        LEFT JOIN theme_snapshots AS s ON s.snapshot_id = l.snapshot_id
         LEFT JOIN theme_snapshot_members AS m
             ON m.snapshot_id = l.snapshot_id AND m.code = ?
         WHERE l.theme_id = ?
@@ -2063,6 +2156,11 @@ def _theme_context_row(
         "leading_code",
         "leading_name",
         "fresh_coverage_ratio",
+        "active_member_count",
+        "fresh_member_count",
+        "observable_member_count",
+        "observable_fresh_member_count",
+        "observable_fresh_coverage_ratio",
         "rising_ratio",
         "total_trade_value",
         "theme_trade_value_delta_1m",

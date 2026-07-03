@@ -21,6 +21,7 @@ def test_replay_observe_pipeline_writes_summary_without_forbidden_table_changes(
     operational_db_path = tmp_path / "operational.sqlite3"
     replay_db_path = tmp_path / "replay.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(operational_db_path))
+    monkeypatch.setenv("THEME_MIN_OBSERVABLE_MEMBERS", "2")
     initialize_database(operational_db_path).close()
     connection = initialize_database(replay_db_path)
     try:

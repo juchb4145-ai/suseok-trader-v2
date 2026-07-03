@@ -282,6 +282,7 @@ def test_market_scan_flow_uses_observed_universe_for_watchset(tmp_path) -> None:
     settings = _settings(
         market_scan_enabled=True,
         theme_leadership_write_candidate_sources=True,
+        theme_observable_coverage_enabled=False,
     )
     members = [(f"{100000 + index:06d}", f"스캔종목{index:02d}") for index in range(30)]
     import_theme_memberships(
