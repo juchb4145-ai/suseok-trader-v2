@@ -296,7 +296,17 @@ def get_gateway_status() -> dict[str, Any]:
         "latest_market_index_registration_result": _json_value(
             status_values.get("latest_market_index_registration_result")
         ),
+        "latest_market_index_registration_at": status_values.get(
+            "latest_market_index_registration_at"
+        ),
         "market_index_adapter_health": status_values.get("market_index_adapter_health"),
+        "market_index_recover_count": _json_value(
+            status_values.get("market_index_recover_count")
+        ),
+        "latest_market_index_recover_at": status_values.get(
+            "latest_market_index_recover_at"
+        ),
+        "market_index_recover_error": status_values.get("market_index_recover_error"),
         "latest_realtime_registration_at": status_values.get(
             "latest_realtime_registration_at"
         ),

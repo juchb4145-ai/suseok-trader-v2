@@ -822,6 +822,13 @@ def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dic
             "latest_market_index_registration_result"
         )
         or {},
+        "latest_registration_at": gateway_status.get(
+            "latest_market_index_registration_at"
+        )
+        or "",
+        "recover_count": gateway_status.get("market_index_recover_count") or 0,
+        "latest_recover_at": gateway_status.get("latest_market_index_recover_at") or "",
+        "recover_error": gateway_status.get("market_index_recover_error") or "",
         "health": gateway_status.get("market_index_adapter_health") or "DISABLED",
     }
 
@@ -862,7 +869,11 @@ _GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
     "latest_market_index_tick_at",
     "latest_market_index_parse_error",
     "latest_market_index_registration_result",
+    "latest_market_index_registration_at",
     "market_index_adapter_health",
+    "market_index_recover_count",
+    "latest_market_index_recover_at",
+    "market_index_recover_error",
     "latest_realtime_registration_at",
     "latest_realtime_registration_result",
     "latest_realtime_callback_at",
@@ -987,10 +998,20 @@ def _gateway_status_section(
             "latest_market_index_registration_result"
         )
         or {},
+        "latest_market_index_registration_at": heartbeat_payload.get(
+            "latest_market_index_registration_at"
+        ),
         "market_index_adapter_health": heartbeat_payload.get(
             "market_index_adapter_health"
         )
         or "DISABLED",
+        "market_index_recover_count": heartbeat_payload.get("market_index_recover_count"),
+        "latest_market_index_recover_at": heartbeat_payload.get(
+            "latest_market_index_recover_at"
+        ),
+        "market_index_recover_error": heartbeat_payload.get(
+            "market_index_recover_error"
+        ),
         "latest_realtime_registration_at": heartbeat_payload.get(
             "latest_realtime_registration_at"
         ),

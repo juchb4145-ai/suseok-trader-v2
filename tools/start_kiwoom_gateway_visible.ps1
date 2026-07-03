@@ -300,6 +300,7 @@ try {
             ArgumentList = ($GatewayArgs | ForEach-Object { Quote-CommandArgument $_ }) -join " "
             WorkingDirectory = $Root
             PassThru = $true
+            WindowStyle = "Hidden"
         }
         if ($Log) {
             $LogDir = Join-Path $Root "logs\runtime"

@@ -615,7 +615,7 @@ def _market_index_sanity_warnings(connection: sqlite3.Connection) -> list[str]:
 
 
 def _index_implausible_reason(tick: BrokerMarketIndexTick) -> str | None:
-    if tick.index_code == "KOSPI" and (tick.price < 1000 or tick.price > 6000):
+    if tick.index_code == "KOSPI" and (tick.price < 1000 or tick.price > 15000):
         return "INDEX_IMPLAUSIBLE:KOSPI_PRICE_OUT_OF_RANGE"
     if abs(float(tick.change_rate)) > 15.0:
         return "INDEX_IMPLAUSIBLE:CHANGE_RATE_OUT_OF_RANGE"

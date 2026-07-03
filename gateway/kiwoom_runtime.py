@@ -302,6 +302,10 @@ class KiwoomGatewayRuntime:
         self._latest_market_index_tick_at: datetime | None = None
         self._latest_market_index_parse_error: dict[str, Any] = {}
         self._latest_market_index_registration_result: dict[str, Any] = {}
+        self._last_market_index_registration_at: datetime | None = None
+        self._last_market_index_recover_at: datetime | None = None
+        self._market_index_recover_count = 0
+        self._market_index_recover_error = ""
         self._raw_callback_counts: dict[str, int] = {}
         self._latest_callback_at_by_method: dict[str, str] = {}
         self._active_x_thread_audit: deque[dict[str, Any]] = deque(maxlen=50)
@@ -338,6 +342,7 @@ class KiwoomGatewayRuntime:
         self._finish_pending_login_if_connected()
         self._check_login_reconnect()
         self._recover_realtime_if_stalled()
+        self._recover_market_index_if_waiting_callback()
         payload = self.heartbeat_payload()
         payload["sequence"] = self._heartbeat_sequence
         self.emit("heartbeat", payload)
@@ -609,7 +614,15 @@ class KiwoomGatewayRuntime:
             "latest_market_index_registration_result": dict(
                 self._latest_market_index_registration_result
             ),
+            "latest_market_index_registration_at": _datetime_or_empty(
+                self._last_market_index_registration_at
+            ),
             "market_index_adapter_health": self._market_index_adapter_health(),
+            "market_index_recover_count": self._market_index_recover_count,
+            "latest_market_index_recover_at": _datetime_or_empty(
+                self._last_market_index_recover_at
+            ),
+            "market_index_recover_error": self._market_index_recover_error,
             "realtime_subscription_health": self._realtime_subscription_health(),
             "realtime_recover_count": self._realtime_recover_count,
             "realtime_recover_error": self._realtime_recover_error,
@@ -873,6 +886,7 @@ class KiwoomGatewayRuntime:
         if str(normalized.get("registration_type") or "") == "market_index":
             self._latest_market_index_registration_result = normalized
             if normalized.get("success") is True:
+                self._last_market_index_registration_at = utc_now()
                 for index_code in normalized.get("index_codes") or normalized.get("codes") or []:
                     self._market_index_registered_codes.add(
                         normalize_market_index_code(index_code)
@@ -1598,6 +1612,85 @@ class KiwoomGatewayRuntime:
             )
             return
         self._market_index_registered_codes.update(codes)
+        self._last_market_index_registration_at = utc_now()
+
+    def _recover_market_index_if_waiting_callback(self) -> None:
+        if not self.config.market_index_enabled or not self.config.market_index_realtime_enabled:
+            return
+        if not self.kiwoom_logged_in():
+            return
+        if self._market_index_adapter_health() != "REGISTERED_WAITING_CALLBACK":
+            return
+        if self._last_realtime_callback_at is None or self._realtime_callback_count <= 0:
+            return
+        now = utc_now()
+        if (now - self._last_realtime_callback_at).total_seconds() > max(
+            float(self.config.realtime_callback_timeout_sec),
+            1.0,
+        ):
+            return
+        baseline = self._last_market_index_registration_at
+        if baseline is None:
+            baseline = now
+            self._last_market_index_registration_at = baseline
+        wait_sec = max(float(self.config.market_index_poll_sec), 1.0)
+        if (now - baseline).total_seconds() < wait_sec:
+            return
+        if (
+            self._last_market_index_recover_at is not None
+            and (now - self._last_market_index_recover_at).total_seconds() < wait_sec
+        ):
+            return
+
+        codes = _ordered_unique_market_index_runtime_codes(
+            self._market_index_registered_codes or self.config.market_index_codes
+        )
+        if not codes:
+            return
+        screen_no = str(self.config.market_index_screen_no or "5700")
+        remove = getattr(self.client, "remove_market_index_realtime", None)
+        register = getattr(self.client, "register_market_index_realtime", None)
+        if not callable(remove) or not callable(register):
+            return
+
+        self._last_market_index_recover_at = now
+        try:
+            remove(codes, screen_no=screen_no)
+            self._market_index_registered_codes.difference_update(codes)
+            register(codes, screen_no=screen_no)
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._market_index_recover_error = str(exc)
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "MARKET_INDEX_REALTIME_RECOVER_FAILED",
+                    "index_codes": list(codes),
+                    "screen_no": screen_no,
+                    "error": str(exc),
+                },
+            )
+            return
+
+        self._market_index_recover_count += 1
+        self._market_index_recover_error = ""
+        self._last_market_index_registration_at = now
+        self.emit(
+            "gateway_log",
+            {
+                "message": "market index realtime reset after waiting callback",
+                "index_codes": list(codes),
+                "screen_no": screen_no,
+                "market_index_poll_sec": wait_sec,
+                "latest_realtime_callback_at": _datetime_or_empty(
+                    self._last_realtime_callback_at
+                ),
+                "realtime_callback_count": self._realtime_callback_count,
+                "market_index_callback_count": self._market_index_callback_count,
+                "parsed_market_index_tick_count": self._parsed_market_index_tick_count,
+                "market_index_recover_count": self._market_index_recover_count,
+            },
+        )
 
     def _emit_market_symbols(self) -> None:
         markets = []

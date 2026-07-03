@@ -181,3 +181,26 @@ def test_market_index_records_unverified_and_implausible_guard(tmp_path) -> None
     assert latest["unverified"] is True
     assert result.status == "ERROR"
     assert error["reason_code"] == "INDEX_IMPLAUSIBLE"
+
+
+def test_market_index_accepts_high_kospi_level_after_2026_rally(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-index-high-kospi.sqlite3")
+    settings = Settings(market_index_stale_sec=999_999_999)
+    event = index_tick_event(
+        "evt_kospi_high_2026",
+        index_code="KOSPI",
+        price=7700.0,
+        ts=TS,
+    )
+
+    result = append_and_project(connection, event, settings)
+    latest = get_latest_market_index_tick(connection, "KOSPI")
+    error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_index_projection_errors"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result.status == "APPLIED"
+    assert latest is not None
+    assert latest["price"] == 7700.0
+    assert error_count == 0
