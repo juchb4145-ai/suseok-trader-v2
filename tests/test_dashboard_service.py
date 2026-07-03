@@ -72,6 +72,9 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["market_indexes"]["status"]["enabled"] is True
     assert snapshot["market_indexes"]["gateway_adapter"]["enabled"] is False
     assert snapshot["market_indexes"]["gateway_adapter"]["health"] == "DISABLED"
+    assert snapshot["market_data"]["cross_exchange"]["read_only"] is True
+    assert snapshot["market_data"]["cross_exchange"]["enabled"] is False
+    assert snapshot["market_data"]["cross_exchange"]["latest_observations"] == []
 
 
 def test_dashboard_gateway_stage_warns_on_stale_heartbeat(tmp_path) -> None:

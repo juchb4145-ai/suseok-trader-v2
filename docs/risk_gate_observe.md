@@ -22,6 +22,7 @@ Risk Gate는 PR7 `StrategyObservation`과 Candidate, Market Data, Theme Snapshot
 - `candidate_context_latest`
 - `market_ticks_latest`
 - `market_minute_bars`
+- `market_cross_exchange_observations` (`RISK_CROSS_EXCHANGE_DIVERGENCE_BP > 0`일 때만)
 - `theme_latest_snapshots`
 - `theme_snapshot_members`
 
@@ -59,6 +60,7 @@ Risk Gate는 PR7 `StrategyObservation`과 Candidate, Market Data, Theme Snapshot
 - `THEME_CONTEXT`: weak theme state, low fresh coverage, weak rising ratio를 관찰한다.
 - `CANDIDATE_CONTEXT`: non-`CONTEXT_READY`, stale/closed/data-wait, active source 부족을 관찰한다.
 - `STRATEGY_CONTEXT`: `MATCHED_OBSERVATION` 여부를 읽지만 주문 승인으로 바꾸지 않는다.
+- `MARKET_CONTEXT`: opt-in cross-exchange 가격 괴리를 관찰할 수 있다. 임계치 미설정 시 기존 Risk 동작을 유지한다.
 - `CHASE_OVERHEAT`: 과열/추격 위험처럼 보이는 관측치를 기록한다.
 - `LIQUIDITY_SPREAD`: 거래대금, spread, execution strength 부족을 관찰한다.
 - `DUPLICATE_COOLDOWN`: 같은 code의 중복 active candidate나 최근 observation을 관찰한다.
@@ -67,6 +69,12 @@ Risk Gate는 PR7 `StrategyObservation`과 Candidate, Market Data, Theme Snapshot
 ## PR10 DRY_RUN 연결
 
 PR10 DRY_RUN은 latest `OBSERVE_PASS`를 eligibility input 중 하나로 읽을 수 있다. 그래도 live order approval이 아니다. Candidate state, Strategy status, fresh tick, duplicate check, limit, explicit DRY_RUN settings, PR10 safety gate가 모두 필요하며 결과는 내부 `DryRunIntent` simulation record뿐이다.
+
+## Cross-Exchange Divergence
+
+`RISK_CROSS_EXCHANGE_DIVERGENCE_BP` 기본값은 `0`이며 disabled다. 0보다 큰 값으로 설정하면 latest KRX/NXT regular 1분 관측치의 `abs(divergence_bp)`가 임계치를 초과할 때 `CROSS_EXCHANGE_DIVERGENCE` CAUTION을 기록한다.
+
+이 CAUTION은 관찰 기록이다. 주문 차단, 주문 승인, routing 변경이 아니며 `OBSERVE_PASS`와 `MATCHED_OBSERVATION`의 의미를 바꾸지 않는다. 한쪽 시장만 있어 `divergence_bp=null`이면 cross-exchange check는 평가 불가로 남는다.
 
 AI Sidecar, RCA, Codex Prompt Draft는 review-only이며 Risk나 OMS 자동 입력이 아니다.
 

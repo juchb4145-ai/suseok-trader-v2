@@ -166,6 +166,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.risk_gate_near_day_high_pct == 1.0
     assert settings.risk_gate_min_theme_fresh_coverage_ratio == 0.3
     assert settings.risk_gate_min_theme_rising_ratio == 0.35
+    assert settings.risk_cross_exchange_divergence_bp == 0
     assert settings.risk_gate_duplicate_active_candidate_limit == 1
     assert settings.risk_gate_observation_cooldown_sec == 60
     assert settings.risk_gate_config_version == "observe_v1"
@@ -533,6 +534,13 @@ def test_risk_gate_settings_are_validated() -> None:
         assert "RISK_GATE_MAX_CHANGE_RATE" in str(exc)
     else:
         raise AssertionError("expected invalid risk negative setting")
+
+    try:
+        load_settings({"RISK_CROSS_EXCHANGE_DIVERGENCE_BP": "-1"})
+    except ValueError as exc:
+        assert "RISK_CROSS_EXCHANGE_DIVERGENCE_BP" in str(exc)
+    else:
+        raise AssertionError("expected invalid cross-exchange risk threshold")
 
 
 def test_entry_timing_settings_are_validated() -> None:

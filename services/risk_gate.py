@@ -29,6 +29,7 @@ from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
 from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
+from services.market_data_service import get_latest_cross_exchange_observation
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -142,6 +143,11 @@ def load_risk_input_context(
         connection,
         strategy["strategy_observation_id"] if strategy else None,
     )
+    cross_exchange = (
+        get_latest_cross_exchange_observation(connection, normalized_code)
+        if resolved_settings.risk_cross_exchange_divergence_bp > 0
+        else None
+    )
 
     readiness = candidate_context.get("readiness", {}) if candidate_context else {}
     market_context = candidate_context.get("market_context", {}) if candidate_context else {}
@@ -199,6 +205,14 @@ def load_risk_input_context(
             "observe_only": True,
         },
     }
+    if resolved_settings.risk_cross_exchange_divergence_bp > 0:
+        raw_context["cross_exchange"] = cross_exchange or {}
+        raw_context["settings"] = {
+            **raw_context["settings"],
+            "cross_exchange_divergence_bp": (
+                resolved_settings.risk_cross_exchange_divergence_bp
+            ),
+        }
     raw_context["context_hash"] = _context_hash(raw_context)
 
     return RiskInputContext(
@@ -921,6 +935,58 @@ def check_market_regime(
         severity,
         reasons,
         "Market regime risk observed.",
+        evidence,
+    )
+
+
+def check_cross_exchange_observation(
+    context: RiskInputContext,
+    settings: Settings,
+) -> RiskCheckObservation:
+    threshold_bp = float(settings.risk_cross_exchange_divergence_bp)
+    cross_exchange = _dict_or_empty(context.raw_context.get("cross_exchange"))
+    divergence_bp = _first_number(cross_exchange.get("divergence_bp"))
+    evidence = {
+        "cross_exchange": cross_exchange,
+        "divergence_bp": divergence_bp,
+        "threshold_bp": threshold_bp,
+        "observe_only": True,
+        "not_order_approval": True,
+        "not_order_signal": True,
+    }
+    if threshold_bp <= 0:
+        return _check(
+            RiskCategory.MARKET_CONTEXT,
+            RiskCheckStatus.NOT_EVALUATED,
+            RiskSeverity.INFO,
+            [RiskReasonCode.OBSERVE_ONLY],
+            "Cross-exchange divergence threshold is disabled.",
+            evidence,
+        )
+    if not cross_exchange or divergence_bp is None:
+        return _check(
+            RiskCategory.MARKET_CONTEXT,
+            RiskCheckStatus.NOT_EVALUATED,
+            RiskSeverity.INFO,
+            [RiskReasonCode.MARKET_CONTEXT_UNAVAILABLE],
+            "Cross-exchange divergence is unavailable for this observation.",
+            evidence,
+        )
+    if abs(divergence_bp) > threshold_bp:
+        return _check(
+            RiskCategory.MARKET_CONTEXT,
+            RiskCheckStatus.CAUTION_OBSERVED,
+            RiskSeverity.LOW,
+            [RiskReasonCode.CROSS_EXCHANGE_DIVERGENCE],
+            "Cross-exchange divergence exceeded the observe-only threshold.",
+            evidence,
+        )
+    return _check(
+        RiskCategory.MARKET_CONTEXT,
+        RiskCheckStatus.PASS_OBSERVED,
+        RiskSeverity.INFO,
+        [RiskReasonCode.OBSERVE_ONLY],
+        "Cross-exchange divergence is within the observe-only threshold.",
         evidence,
     )
 
@@ -1662,6 +1728,12 @@ def get_risk_status(
         "error_count": _count_rows(connection, "risk_evaluation_errors"),
         "stale_tick_sec": resolved_settings.risk_gate_stale_tick_sec,
         "strategy_stale_sec": resolved_settings.risk_gate_strategy_stale_sec,
+        "cross_exchange_divergence_bp": (
+            resolved_settings.risk_cross_exchange_divergence_bp
+        ),
+        "cross_exchange_observables_enabled": (
+            resolved_settings.risk_cross_exchange_divergence_bp > 0
+        ),
         "order_routing_enabled": False,
     }
 
@@ -1858,14 +1930,20 @@ def _evaluate_context(
     checks = [
         check_data_quality(context, settings),
         check_market_regime(context, settings),
-        check_theme_context(context, settings),
-        check_candidate_context(context, settings),
-        check_strategy_context(context, settings),
-        check_chase_overheat(context, settings),
-        check_liquidity_spread(context, settings),
-        check_duplicate_cooldown(connection, context, settings),
-        check_account_limits(connection, context, settings),
     ]
+    if settings.risk_cross_exchange_divergence_bp > 0:
+        checks.append(check_cross_exchange_observation(context, settings))
+    checks.extend(
+        [
+            check_theme_context(context, settings),
+            check_candidate_context(context, settings),
+            check_strategy_context(context, settings),
+            check_chase_overheat(context, settings),
+            check_liquidity_spread(context, settings),
+            check_duplicate_cooldown(connection, context, settings),
+            check_account_limits(connection, context, settings),
+        ]
+    )
     blocked_count = sum(1 for check in checks if check.status is RiskCheckStatus.BLOCK_OBSERVED)
     caution_count = sum(1 for check in checks if check.status is RiskCheckStatus.CAUTION_OBSERVED)
     pass_count = sum(1 for check in checks if check.status is RiskCheckStatus.PASS_OBSERVED)
@@ -1898,6 +1976,7 @@ def _evaluate_context(
             "strategy_status": context.strategy_status,
             "candidate_state": context.candidate_state,
             "market_regime": context.raw_context.get("market_regime", {}),
+            "cross_exchange": context.raw_context.get("cross_exchange", {}),
             "account_limits": _check_evidence(checks, RiskCategory.ACCOUNT_LIMITS),
             "config_version": settings.risk_gate_config_version,
         },

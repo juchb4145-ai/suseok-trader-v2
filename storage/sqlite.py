@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 35
 APP_NAME = "suseok-trader-v2"
 
 
@@ -1381,6 +1381,27 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE TABLE IF NOT EXISTS market_cross_exchange_observations (
+            code TEXT NOT NULL,
+            bucket_start TEXT NOT NULL,
+            krx_last_price INTEGER,
+            nxt_last_price INTEGER,
+            divergence_bp REAL,
+            krx_volume INTEGER NOT NULL DEFAULT 0,
+            nxt_volume INTEGER NOT NULL DEFAULT 0,
+            krx_volume_share REAL,
+            nxt_volume_share REAL,
+            krx_tick_count INTEGER NOT NULL DEFAULT 0,
+            nxt_tick_count INTEGER NOT NULL DEFAULT 0,
+            total_tick_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (code, bucket_start)
+        )
+        """
+    )
+    connection.execute(
+        """
         CREATE TABLE IF NOT EXISTS market_condition_signals (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id TEXT NOT NULL UNIQUE,
@@ -1472,6 +1493,18 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_premarket_snapshots_trade_gap
         ON market_premarket_snapshots (trade_date, premarket_gap_pct DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_cross_exchange_code_bucket
+        ON market_cross_exchange_observations (code, bucket_start DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_cross_exchange_divergence
+        ON market_cross_exchange_observations (divergence_bp)
         """
     )
     connection.execute(

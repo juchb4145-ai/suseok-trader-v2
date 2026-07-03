@@ -92,6 +92,7 @@ from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
     list_projection_errors,
+    list_recent_cross_exchange_observations,
 )
 from services.market_index_service import (
     get_market_index_status,
@@ -255,6 +256,10 @@ def build_dashboard_snapshot(
     ).to_dict()
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
+    latest_cross_exchange = list_recent_cross_exchange_observations(
+        connection,
+        limit=min(bounded_limit, 10),
+    )
     latest_market_index_ticks = list_latest_market_index_ticks(
         connection,
         limit=bounded_limit,
@@ -425,6 +430,12 @@ def build_dashboard_snapshot(
         "market_data": {
             "status": market_data_status,
             "latest_ticks": latest_ticks,
+            "cross_exchange": {
+                "read_only": True,
+                "enabled": settings.risk_cross_exchange_divergence_bp > 0,
+                "threshold_bp": settings.risk_cross_exchange_divergence_bp,
+                "latest_observations": latest_cross_exchange,
+            },
         },
         "market_indexes": {
             "status": market_index_status,

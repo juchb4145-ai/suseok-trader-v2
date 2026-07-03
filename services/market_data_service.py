@@ -41,6 +41,7 @@ MARKET_PROJECTION_TABLES: tuple[str, ...] = (
     "market_tick_samples",
     "market_minute_bars",
     "market_premarket_snapshots",
+    "market_cross_exchange_observations",
     "market_condition_signals",
     "market_condition_latest",
     "market_tr_snapshots",
@@ -377,6 +378,61 @@ def get_premarket_snapshot(
     return None if row is None else _premarket_snapshot_row_to_dict(row)
 
 
+def list_cross_exchange_observations(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    normalized_code = validate_stock_code(code)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM market_cross_exchange_observations
+        WHERE code = ?
+        ORDER BY bucket_start DESC
+        LIMIT ?
+        """,
+        (normalized_code, _bounded_limit(limit)),
+    ).fetchall()
+    return [_cross_exchange_observation_row_to_dict(row) for row in rows]
+
+
+def get_latest_cross_exchange_observation(
+    connection: sqlite3.Connection,
+    code: str,
+) -> dict[str, Any] | None:
+    normalized_code = validate_stock_code(code)
+    row = connection.execute(
+        """
+        SELECT *
+        FROM market_cross_exchange_observations
+        WHERE code = ?
+        ORDER BY bucket_start DESC
+        LIMIT 1
+        """,
+        (normalized_code,),
+    ).fetchone()
+    return None if row is None else _cross_exchange_observation_row_to_dict(row)
+
+
+def list_recent_cross_exchange_observations(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM market_cross_exchange_observations
+        ORDER BY updated_at DESC, bucket_start DESC, code ASC
+        LIMIT ?
+        """,
+        (_bounded_limit(limit),),
+    ).fetchall()
+    return [_cross_exchange_observation_row_to_dict(row) for row in rows]
+
+
 def get_market_data_readiness(
     connection: sqlite3.Connection,
     code: str,
@@ -512,6 +568,10 @@ def get_market_data_status(
         "bar_count": _count_rows(connection, "market_minute_bars"),
         "premarket_snapshot_count": _count_rows(connection, "market_premarket_snapshots"),
         "premarket_snapshot_enabled": resolved_settings.market_data_premarket_snapshot_enabled,
+        "cross_exchange_observation_count": _count_rows(
+            connection,
+            "market_cross_exchange_observations",
+        ),
         "condition_signal_count": _count_rows(connection, "market_condition_signals"),
         "tr_snapshot_count": _count_rows(connection, "market_tr_snapshots"),
         "projection_error_count": _count_rows(connection, "market_projection_errors"),
@@ -769,7 +829,18 @@ def _process_price_tick(
         trade_value_delta=trade_value_delta,
         settings=settings,
     )
-    return 1 + len(settings.market_data_bar_intervals_sec) + premarket_count
+    cross_exchange_count = _upsert_cross_exchange_observation_if_needed(
+        connection,
+        tick=tick,
+        exchange=exchange,
+        session=session,
+    )
+    return (
+        1
+        + len(settings.market_data_bar_intervals_sec)
+        + premarket_count
+        + cross_exchange_count
+    )
 
 
 def _process_condition_event(connection: sqlite3.Connection, event: GatewayEvent) -> int:
@@ -1081,6 +1152,104 @@ def _upsert_premarket_snapshot_if_needed(
             trade_value,
             tick_count,
             now,
+            canonical_json(metadata),
+        ),
+    )
+    return 1
+
+
+def _upsert_cross_exchange_observation_if_needed(
+    connection: sqlite3.Connection,
+    *,
+    tick: BrokerPriceTick,
+    exchange: str,
+    session: str,
+) -> int:
+    if exchange not in {"KRX", "NXT"} or session != "REGULAR":
+        return 0
+
+    bucket_start = datetime_to_wire(bucket_start_for(tick.trade_time, 60))
+    rows = connection.execute(
+        """
+        SELECT exchange, close, volume_delta, tick_count
+        FROM market_minute_bars
+        WHERE code = ?
+            AND session = 'REGULAR'
+            AND interval_sec = 60
+            AND bucket_start = ?
+            AND exchange IN ('KRX', 'NXT')
+        """,
+        (tick.code, bucket_start),
+    ).fetchall()
+    if not rows:
+        return 0
+    by_exchange = {str(row["exchange"]): row for row in rows}
+    krx = by_exchange.get("KRX")
+    nxt = by_exchange.get("NXT")
+    krx_last_price = int(krx["close"]) if krx is not None else None
+    nxt_last_price = int(nxt["close"]) if nxt is not None else None
+    krx_volume = int(krx["volume_delta"]) if krx is not None else 0
+    nxt_volume = int(nxt["volume_delta"]) if nxt is not None else 0
+    krx_tick_count = int(krx["tick_count"]) if krx is not None else 0
+    nxt_tick_count = int(nxt["tick_count"]) if nxt is not None else 0
+    total_volume = krx_volume + nxt_volume
+    total_tick_count = krx_tick_count + nxt_tick_count
+    metadata = {
+        "observe_only": True,
+        "not_order_signal": True,
+        "no_order_side_effects": True,
+        "source": "KRX_NXT_REGULAR_MINUTE",
+        "session": session,
+        "bucket_interval_sec": 60,
+        "both_markets_present": krx is not None and nxt is not None,
+    }
+    connection.execute(
+        """
+        INSERT INTO market_cross_exchange_observations (
+            code,
+            bucket_start,
+            krx_last_price,
+            nxt_last_price,
+            divergence_bp,
+            krx_volume,
+            nxt_volume,
+            krx_volume_share,
+            nxt_volume_share,
+            krx_tick_count,
+            nxt_tick_count,
+            total_tick_count,
+            updated_at,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, bucket_start) DO UPDATE SET
+            krx_last_price = excluded.krx_last_price,
+            nxt_last_price = excluded.nxt_last_price,
+            divergence_bp = excluded.divergence_bp,
+            krx_volume = excluded.krx_volume,
+            nxt_volume = excluded.nxt_volume,
+            krx_volume_share = excluded.krx_volume_share,
+            nxt_volume_share = excluded.nxt_volume_share,
+            krx_tick_count = excluded.krx_tick_count,
+            nxt_tick_count = excluded.nxt_tick_count,
+            total_tick_count = excluded.total_tick_count,
+            updated_at = excluded.updated_at,
+            metadata_json = excluded.metadata_json
+        """,
+        (
+            tick.code,
+            bucket_start,
+            krx_last_price,
+            nxt_last_price,
+            _cross_exchange_divergence_bp(krx_last_price, nxt_last_price),
+            krx_volume,
+            nxt_volume,
+            _share(krx_volume, total_volume),
+            _share(nxt_volume, total_volume),
+            krx_tick_count,
+            nxt_tick_count,
+            total_tick_count,
+            datetime_to_wire(utc_now()),
             canonical_json(metadata),
         ),
     )
@@ -1423,6 +1592,12 @@ def _premarket_snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
+def _cross_exchange_observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    data["metadata"] = json.loads(data.pop("metadata_json"))
+    return data
+
+
 def _condition_signal_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = json.loads(data.pop("metadata_json"))
@@ -1504,6 +1679,21 @@ def _gap_pct(price: int, prev_close: int | None) -> float | None:
     if prev_close is None or prev_close <= 0:
         return None
     return (float(price) - float(prev_close)) / float(prev_close) * 100.0
+
+
+def _cross_exchange_divergence_bp(
+    krx_last_price: int | None,
+    nxt_last_price: int | None,
+) -> float | None:
+    if krx_last_price is None or nxt_last_price is None or krx_last_price <= 0:
+        return None
+    return (float(nxt_last_price) - float(krx_last_price)) / float(krx_last_price) * 10000.0
+
+
+def _share(value: int, total: int) -> float | None:
+    if total <= 0:
+        return None
+    return float(value) / float(total)
 
 
 def _seoul_timezone():

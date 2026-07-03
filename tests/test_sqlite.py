@@ -144,6 +144,7 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
                 'market_tick_samples',
                 'market_minute_bars',
                 'market_premarket_snapshots',
+                'market_cross_exchange_observations',
                 'market_condition_signals',
                 'market_condition_latest',
                 'market_tr_snapshots',
@@ -172,6 +173,7 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
         "market_tick_samples",
         "market_minute_bars",
         "market_premarket_snapshots",
+        "market_cross_exchange_observations",
         "market_condition_signals",
         "market_condition_latest",
         "market_tr_snapshots",
@@ -195,6 +197,10 @@ def test_sqlite_market_data_tables_are_exchange_aware(tmp_path) -> None:
     sample_columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(market_tick_samples)")
     }
+    cross_columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(market_cross_exchange_observations)")
+    }
     connection.close()
 
     latest_pk = [
@@ -210,6 +216,7 @@ def test_sqlite_market_data_tables_are_exchange_aware(tmp_path) -> None:
     assert latest_pk == ["code", "exchange"]
     assert {"exchange", "session"}.issubset({row["name"] for row in latest_info})
     assert {"exchange", "session"}.issubset(sample_columns)
+    assert {"krx_last_price", "nxt_last_price", "divergence_bp"}.issubset(cross_columns)
     assert bar_pk == ["code", "exchange", "session", "interval_sec", "bucket_start"]
 
 

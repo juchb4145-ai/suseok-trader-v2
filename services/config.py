@@ -304,6 +304,7 @@ class Settings:
     risk_gate_near_day_high_pct: float = 1.0
     risk_gate_min_theme_fresh_coverage_ratio: float = 0.3
     risk_gate_min_theme_rising_ratio: float = 0.35
+    risk_cross_exchange_divergence_bp: float = 0.0
     risk_gate_duplicate_active_candidate_limit: int = 1
     risk_gate_observation_cooldown_sec: int = 60
     risk_gate_config_version: str = "observe_v1"
@@ -719,6 +720,7 @@ class Settings:
             "risk_gate_max_change_rate",
             "risk_gate_max_vwap_extension_pct",
             "risk_gate_near_day_high_pct",
+            "risk_cross_exchange_divergence_bp",
         ):
             if getattr(self, field_name) < 0:
                 raise ValueError(f"{field_name.upper()} must be >= 0")
@@ -1979,6 +1981,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         risk_gate_min_theme_rising_ratio=_parse_float(
             env.get("RISK_GATE_MIN_THEME_RISING_RATIO", "0.35"),
             "RISK_GATE_MIN_THEME_RISING_RATIO",
+        ),
+        risk_cross_exchange_divergence_bp=_parse_float(
+            env.get("RISK_CROSS_EXCHANGE_DIVERGENCE_BP", "0"),
+            "RISK_CROSS_EXCHANGE_DIVERGENCE_BP",
+            min_value=0.0,
         ),
         risk_gate_duplicate_active_candidate_limit=_parse_int(
             env.get("RISK_GATE_DUPLICATE_ACTIVE_CANDIDATE_LIMIT", "1"),

@@ -15,6 +15,7 @@ from services.market_data_service import (
     get_market_data_readiness,
     get_market_data_status,
     list_bars,
+    list_cross_exchange_observations,
     list_latest_ticks,
     list_latest_ticks_for_code,
     list_premarket_snapshots,
@@ -180,6 +181,92 @@ def test_price_tick_projection_splits_same_code_by_exchange(tmp_path) -> None:
     assert len(all_bars) == 2
     assert krx_bars[0]["close"] == 70000
     assert nxt_bars[0]["close"] == 70200
+
+
+def test_cross_exchange_observation_calculates_divergence_and_volume_share(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    settings = Settings(market_data_bar_intervals_sec=(60,))
+    kst = timezone(timedelta(hours=9))
+    regular_time = datetime(2026, 6, 26, 9, 1, tzinfo=kst)
+
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_cross_krx",
+            price=10_000,
+            volume=100,
+            trade_value=1_000_000,
+            ts=regular_time,
+            trade_time=regular_time,
+        ),
+        settings,
+    )
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_cross_nxt",
+            price=10_100,
+            volume=40,
+            trade_value=404_000,
+            ts=regular_time + timedelta(seconds=5),
+            trade_time=regular_time + timedelta(seconds=5),
+            exchange="NXT",
+        ),
+        settings,
+    )
+
+    observations = list_cross_exchange_observations(connection, "005930")
+    connection.close()
+
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation["krx_last_price"] == 10_000
+    assert observation["nxt_last_price"] == 10_100
+    assert observation["divergence_bp"] == 100.0
+    assert observation["krx_volume"] == 100
+    assert observation["nxt_volume"] == 40
+    assert round(observation["krx_volume_share"], 4) == round(100 / 140, 4)
+    assert round(observation["nxt_volume_share"], 4) == round(40 / 140, 4)
+    assert observation["krx_tick_count"] == 1
+    assert observation["nxt_tick_count"] == 1
+    assert observation["total_tick_count"] == 2
+    assert observation["metadata"]["both_markets_present"] is True
+
+
+def test_cross_exchange_observation_records_null_divergence_for_single_market(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    settings = Settings(market_data_bar_intervals_sec=(60,))
+    kst = timezone(timedelta(hours=9))
+    regular_time = datetime(2026, 6, 26, 9, 1, tzinfo=kst)
+
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_cross_krx_only",
+            price=10_000,
+            volume=100,
+            trade_value=1_000_000,
+            ts=regular_time,
+            trade_time=regular_time,
+        ),
+        settings,
+    )
+
+    observations = list_cross_exchange_observations(connection, "005930")
+    connection.close()
+
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation["krx_last_price"] == 10_000
+    assert observation["nxt_last_price"] is None
+    assert observation["divergence_bp"] is None
+    assert observation["krx_tick_count"] == 1
+    assert observation["nxt_tick_count"] == 0
+    assert observation["metadata"]["both_markets_present"] is False
 
 
 def test_nxt_session_boundary_prevents_bar_merge(tmp_path) -> None:

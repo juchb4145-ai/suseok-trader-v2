@@ -11,6 +11,7 @@ from services.market_data_service import (
     get_market_data_readiness,
     get_market_data_status,
     list_bars,
+    list_cross_exchange_observations,
     list_latest_ticks,
     list_latest_ticks_for_code,
     list_premarket_snapshots,
@@ -171,6 +172,25 @@ def market_data_premarket_snapshots(
     finally:
         connection.close()
     return {"trade_date": normalized_trade_date, "snapshots": snapshots}
+
+
+@router.get("/cross-exchange/{code}")
+def market_data_cross_exchange_observations(
+    code: str,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    normalized_code = _normalize_code_or_422(code)
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        observations = list_cross_exchange_observations(
+            connection,
+            normalized_code,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"code": normalized_code, "observations": observations}
 
 
 @router.get("/conditions/recent")

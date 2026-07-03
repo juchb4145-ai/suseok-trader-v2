@@ -104,6 +104,31 @@ def test_risk_observation_persistence_latest_and_checks_stays_observe_only(tmp_p
     assert command_count == 0
 
 
+def test_cross_exchange_divergence_is_opt_in_caution_only(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_cross_exchange.sqlite3")
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=_settings())
+    save_strategy_observation(connection, strategy)
+    _insert_cross_exchange_observation(connection, divergence_bp=120.0)
+
+    disabled = evaluate_risk_for_candidate(connection, candidate_id, settings=_settings())
+    enabled = evaluate_risk_for_candidate(
+        connection,
+        candidate_id,
+        settings=_settings(risk_cross_exchange_divergence_bp=50.0),
+    )
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert disabled.overall_status is RiskObservationStatus.OBSERVE_PASS
+    assert RiskReasonCode.CROSS_EXCHANGE_DIVERGENCE.value not in disabled.reason_codes
+    assert enabled.overall_status is RiskObservationStatus.OBSERVE_CAUTION
+    assert RiskReasonCode.CROSS_EXCHANGE_DIVERGENCE.value in enabled.reason_codes
+    assert command_count == 0
+
+
 def test_data_quality_missing_tick_is_data_wait_with_block_check(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_missing_tick.sqlite3")
     settings = _settings()
@@ -553,6 +578,43 @@ def _check_by_category(observation, category: str):
         if check.category.value == category:
             return check
     raise AssertionError(f"check category not found: {category}")
+
+
+def _insert_cross_exchange_observation(
+    connection,
+    *,
+    code: str = "005930",
+    divergence_bp: float = 120.0,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO market_cross_exchange_observations (
+            code,
+            bucket_start,
+            krx_last_price,
+            nxt_last_price,
+            divergence_bp,
+            krx_volume,
+            nxt_volume,
+            krx_volume_share,
+            nxt_volume_share,
+            krx_tick_count,
+            nxt_tick_count,
+            total_tick_count,
+            updated_at,
+            metadata_json
+        )
+        VALUES (?, ?, 10000, 10120, ?, 100, 40, 0.7142857, 0.2857143, 1, 1, 2, ?, ?)
+        """,
+        (
+            code,
+            now,
+            divergence_bp,
+            now,
+            json.dumps({"observe_only": True, "not_order_signal": True}),
+        ),
+    )
 
 
 def _insert_dry_run_position(connection, *, candidate_id: str) -> None:

@@ -188,6 +188,52 @@ def test_market_data_api_returns_premarket_snapshots(tmp_path, monkeypatch) -> N
     assert response.json()["snapshots"][0]["premarket_gap_pct"] == 5.0
 
 
+def test_market_data_api_returns_cross_exchange_observations(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
+    kst = timezone(timedelta(hours=9))
+    regular_time = datetime(2026, 6, 26, 9, 1, tzinfo=kst)
+
+    with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
+        client.post(
+            "/api/gateway/events",
+            json=_price_tick_event(
+                "evt_api_cross_krx",
+                price=10_000,
+                volume=100,
+                trade_value=1_000_000,
+                ts=regular_time,
+                trade_time=regular_time,
+            ).to_dict(),
+            headers=headers,
+        )
+        client.post(
+            "/api/gateway/events",
+            json=_price_tick_event(
+                "evt_api_cross_nxt",
+                price=10_100,
+                volume=40,
+                trade_value=404_000,
+                ts=regular_time + timedelta(seconds=5),
+                trade_time=regular_time + timedelta(seconds=5),
+                exchange="NXT",
+            ).to_dict(),
+            headers=headers,
+        )
+        response = client.get("/api/market-data/cross-exchange/005930")
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "005930"
+    assert len(response.json()["observations"]) == 1
+    observation = response.json()["observations"][0]
+    assert observation["krx_last_price"] == 10_000
+    assert observation["nxt_last_price"] == 10_100
+    assert observation["divergence_bp"] == 100.0
+
+
 def test_invalid_price_tick_rejected_without_projection(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
 

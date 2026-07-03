@@ -102,6 +102,11 @@ const number = (value) => {
   return Number.isFinite(parsed) ? parsed.toLocaleString("ko-KR") : "-";
 };
 
+const basisPoints = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? `${parsed.toFixed(1)}bp` : "-";
+};
+
 const indexTickText = (tick) => {
   if (!tick) {
     return "-";
@@ -348,6 +353,45 @@ const renderMarketTheme = (snapshot) => {
           leadershipWatchset: leadershipWatchsetCount,
         }),
       );
+};
+
+const renderCrossExchange = (snapshot) => {
+  const marketData = snapshot.market_data || {};
+  const cross = marketData.cross_exchange || {};
+  const rows = cross.latest_observations || [];
+  const divergences = rows
+    .map((row) => Number(row.divergence_bp))
+    .filter((value) => Number.isFinite(value));
+  const maxAbsDivergence = divergences.length
+    ? Math.max(...divergences.map((value) => Math.abs(value)))
+    : null;
+  const latest = rows[0] || {};
+  document.getElementById("cross-exchange-badges").innerHTML = [
+    badge("OBSERVE", "read only"),
+    badge(cross.enabled ? "ENABLED" : "OBSERVE", `risk threshold ${text(cross.enabled)}`),
+    badge(divergences.length ? "OBSERVE" : "DATA_WAIT", `priced ${divergences.length}`),
+  ].join("");
+  document.getElementById("cross-exchange-status").innerHTML = [
+    metric("Recent rows", rows.length),
+    metric("Threshold", basisPoints(cross.threshold_bp)),
+    metric("Max abs divergence", basisPoints(maxAbsDivergence)),
+    metric("Latest bucket", latest.bucket_start),
+    metric("Latest code", latest.code),
+    metric("Total ticks", latest.total_tick_count || 0),
+  ].join("");
+  document.getElementById("cross-exchange-table").innerHTML = rows.length
+    ? table(
+        ["bucket", "종목", "KRX/NXT last", "괴리", "volume share", "ticks"],
+        rows.slice(0, 8).map((row) => [
+          text(row.bucket_start),
+          text(row.code),
+          `${number(row.krx_last_price)} / ${number(row.nxt_last_price)}`,
+          basisPoints(row.divergence_bp),
+          `${pct(row.krx_volume_share)} / ${pct(row.nxt_volume_share)}`,
+          `${number(row.krx_tick_count)} / ${number(row.nxt_tick_count)}`,
+        ]),
+      )
+    : emptyState("KRX/NXT cross-exchange 관측 row가 없습니다.");
 };
 
 const renderCandidatePlan = (snapshot) => {
@@ -711,6 +755,7 @@ const renderSnapshot = (snapshot) => {
   renderRealtimeSubscription(snapshot);
   renderConditionFusion(snapshot);
   renderMarketTheme(snapshot);
+  renderCrossExchange(snapshot);
   renderCandidatePlan(snapshot);
   renderLiveSimOps(snapshot);
   renderAiAdvisory(snapshot);
