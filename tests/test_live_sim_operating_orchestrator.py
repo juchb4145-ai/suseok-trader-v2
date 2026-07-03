@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.core_api import app
-from domain.broker.utils import datetime_to_wire, utc_now
+from domain.broker.utils import datetime_to_wire, market_today, utc_now
 from fastapi.testclient import TestClient
 from services.ai_advisory.storage import save_scoring_run
 from services.config import Settings
@@ -110,6 +110,29 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
     assert _check_status(fee_warn, "reconcile_latest_status") == "WARN"
     assert _check_status(eod_warn, "eod_flatten_config") == "WARN"
     assert eod_warn.status is not PreflightStatus.BLOCK
+
+
+def test_preflight_safety_preview_does_not_block_on_exhausted_buy_limit(
+    tmp_path,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-buy-limit.sqlite3")
+    settings = _operating_settings(live_sim_max_daily_order_count=1)
+    _insert_today_buy_order(connection)
+
+    preflight = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PROTECT_ONLY,
+        queue_commands=True,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    assert _check_status(preflight, "live_sim_safety_gate_preview") == "PASS"
+    assert preflight.safety_gate["purpose"] == "LIFECYCLE"
+    assert preflight.safety_gate["daily_order_limit_exceeded"] is True
+    assert "DAILY_ORDER_LIMIT_EXCEEDED" not in preflight.safety_gate["reason_codes"]
 
 
 def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:
@@ -488,6 +511,37 @@ def _check_status(preflight: LiveSimPreflightResult, name: str) -> str:
         if check.name == name:
             return check.status.value
     raise AssertionError(f"missing preflight check: {name}")
+
+
+def _insert_today_buy_order(connection) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_orders (
+            live_sim_order_id,
+            live_sim_intent_id,
+            trade_date,
+            account_id,
+            code,
+            name,
+            side,
+            order_type,
+            quantity,
+            limit_price,
+            notional,
+            status,
+            filled_quantity,
+            remaining_quantity,
+            idempotency_key,
+            created_at
+        )
+        VALUES ('preflight-buy-limit', 'preflight-buy-intent', ?, 'SIM-12345678',
+            '005930', '삼성전자', 'BUY', 'LIMIT', 1, 97000, 97000, 'FILLED',
+            1, 0, 'preflight-buy-limit-key', ?)
+        """,
+        (market_today(), now),
+    )
+    connection.commit()
 
 
 def _count(connection, table_name: str) -> int:

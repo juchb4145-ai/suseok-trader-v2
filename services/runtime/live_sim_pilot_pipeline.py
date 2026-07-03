@@ -89,7 +89,11 @@ def run_live_sim_pilot_pipeline_once(
     run_id = new_message_id("live_sim_pilot_run")
     started_at = datetime_to_wire(utc_now())
     _insert_pilot_run(connection, run_id=run_id, trade_date=trade_date, started_at=started_at)
-    safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
+    safety_gate = check_live_sim_safety_gate(
+        connection,
+        resolved_settings,
+        purpose="NEW_BUY",
+    )
     ai_advisory_summary = _latest_ai_advisory_summary(connection)
     selected_order_plans: list[dict[str, Any]] = []
     eligibilities: list[dict[str, Any]] = []

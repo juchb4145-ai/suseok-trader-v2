@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from domain.broker.utils import market_time_str, market_today, parse_timestamp, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -14,12 +14,15 @@ from services.config import Settings, TradingMode, load_settings
 from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
 
 SIMULATION_LIKE_MODES = {"SIMULATION", "MOCK", "PAPER", "MOCK_TRADING", "LIVE_SIM"}
+LiveSimSafetyGatePurpose = Literal["NEW_BUY", "LIFECYCLE"]
+_SAFETY_GATE_PURPOSES = {"NEW_BUY", "LIFECYCLE"}
 
 
 @dataclass(frozen=True, kw_only=True)
 class LiveSimSafetyGateResult:
     passed: bool
     status: str
+    purpose: str
     reason_codes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     trading_mode: str
@@ -36,7 +39,13 @@ class LiveSimSafetyGateResult:
     risk_prerequisite_confirmed: bool
     kill_switch_active: bool
     max_notional: float
+    daily_limit_trade_date: str
     daily_limit_remaining: int
+    daily_limit_applies: bool = True
+    daily_order_limit_exceeded: bool = False
+    daily_buy_order_count: int = 0
+    daily_sell_order_count: int = 0
+    daily_cancel_intent_count: int = 0
     no_trading_side_effects: bool = False
     live_real_allowed: bool = False
     gateway_command_queue_healthy: bool = True
@@ -53,6 +62,7 @@ class LiveSimSafetyGateResult:
         return {
             "passed": self.passed,
             "status": self.status,
+            "purpose": self.purpose,
             "reason_codes": list(self.reason_codes),
             "warnings": list(self.warnings),
             "trading_mode": self.trading_mode,
@@ -69,7 +79,13 @@ class LiveSimSafetyGateResult:
             "risk_prerequisite_confirmed": self.risk_prerequisite_confirmed,
             "kill_switch_active": self.kill_switch_active,
             "max_notional": self.max_notional,
+            "daily_limit_trade_date": self.daily_limit_trade_date,
             "daily_limit_remaining": self.daily_limit_remaining,
+            "daily_limit_applies": self.daily_limit_applies,
+            "daily_order_limit_exceeded": self.daily_order_limit_exceeded,
+            "daily_buy_order_count": self.daily_buy_order_count,
+            "daily_sell_order_count": self.daily_sell_order_count,
+            "daily_cancel_intent_count": self.daily_cancel_intent_count,
             "no_trading_side_effects": False,
             "live_real_allowed": False,
             "gateway_command_queue_healthy": self.gateway_command_queue_healthy,
@@ -88,11 +104,13 @@ def check_live_sim_safety_gate(
     connection: sqlite3.Connection,
     settings: Settings | None = None,
     *,
+    purpose: LiveSimSafetyGatePurpose | str = "NEW_BUY",
     enforce_daily_loss_limit: bool = False,
     enforce_entry_window: bool = False,
     trade_date: str | None = None,
 ) -> LiveSimSafetyGateResult:
     resolved_settings = settings or load_settings()
+    resolved_purpose = _normalize_purpose(purpose)
     gateway_values = _gateway_status_values(connection)
     reason_codes: list[str] = []
     warnings: list[str] = []
@@ -185,9 +203,28 @@ def check_live_sim_safety_gate(
         if daily_loss_evidence["daily_loss_limit_exceeded"]:
             reason_codes.append(LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value)
 
-    daily_count = _daily_live_sim_order_count(connection)
-    daily_limit_remaining = max(resolved_settings.live_sim_max_daily_order_count - daily_count, 0)
-    if daily_limit_remaining <= 0:
+    daily_limit_trade_date = trade_date or market_today()
+    daily_buy_order_count = _daily_live_sim_order_count(
+        connection,
+        trade_date=daily_limit_trade_date,
+        side="BUY",
+    )
+    daily_sell_order_count = _daily_live_sim_order_count(
+        connection,
+        trade_date=daily_limit_trade_date,
+        side="SELL",
+    )
+    daily_cancel_intent_count = _daily_live_sim_cancel_intent_count(
+        connection,
+        trade_date=daily_limit_trade_date,
+    )
+    daily_limit_remaining = max(
+        resolved_settings.live_sim_max_daily_order_count - daily_buy_order_count,
+        0,
+    )
+    daily_limit_applies = resolved_purpose == "NEW_BUY"
+    daily_order_limit_exceeded = daily_limit_remaining <= 0
+    if daily_limit_applies and daily_order_limit_exceeded:
         reason_codes.append(LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value)
 
     reason_codes = _merge_reasons(reason_codes)
@@ -195,6 +232,7 @@ def check_live_sim_safety_gate(
     return LiveSimSafetyGateResult(
         passed=passed,
         status="PASSED" if passed else "BLOCKED",
+        purpose=resolved_purpose,
         reason_codes=reason_codes,
         warnings=warnings,
         trading_mode=resolved_settings.trading_mode.value,
@@ -211,7 +249,13 @@ def check_live_sim_safety_gate(
         risk_prerequisite_confirmed=True,
         kill_switch_active=kill_switch_active,
         max_notional=resolved_settings.live_sim_max_order_notional,
+        daily_limit_trade_date=daily_limit_trade_date,
         daily_limit_remaining=daily_limit_remaining,
+        daily_limit_applies=daily_limit_applies,
+        daily_order_limit_exceeded=daily_order_limit_exceeded,
+        daily_buy_order_count=daily_buy_order_count,
+        daily_sell_order_count=daily_sell_order_count,
+        daily_cancel_intent_count=daily_cancel_intent_count,
         gateway_command_queue_healthy=queue_healthy,
         openai_tools_disabled=not resolved_settings.ai_sidecar_tools_enabled,
         order_tools_disabled=not resolved_settings.ai_sidecar_order_tools_enabled,
@@ -287,14 +331,45 @@ def _is_simulation_like(value: str | None) -> bool:
     return value.strip().upper() in SIMULATION_LIKE_MODES
 
 
-def _daily_live_sim_order_count(connection: sqlite3.Connection) -> int:
+def _normalize_purpose(purpose: LiveSimSafetyGatePurpose | str) -> str:
+    normalized = str(purpose).strip().upper()
+    if normalized not in _SAFETY_GATE_PURPOSES:
+        raise ValueError("purpose must be NEW_BUY or LIFECYCLE")
+    return normalized
+
+
+def _daily_live_sim_order_count(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None = None,
+    side: str = "BUY",
+) -> int:
     row = connection.execute(
         """
         SELECT COUNT(*) AS count
         FROM live_sim_orders
         WHERE trade_date = ?
+            AND UPPER(side) = ?
         """,
-        (market_today(),),
+        (trade_date or market_today(), side.strip().upper()),
+    ).fetchone()
+    return int(row["count"])
+
+
+def _daily_live_sim_cancel_intent_count(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None = None,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM live_sim_cancel_intents AS cancel_intent
+        JOIN live_sim_orders AS live_order
+            ON live_order.live_sim_order_id = cancel_intent.live_sim_order_id
+        WHERE live_order.trade_date = ?
+        """,
+        (trade_date or market_today(),),
     ).fetchone()
     return int(row["count"])
 

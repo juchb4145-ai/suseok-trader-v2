@@ -88,6 +88,31 @@ def test_live_sim_safety_gate_defaults_and_simulation_pass(tmp_path) -> None:
     assert LiveSimReasonCode.LIVE_REAL_NOT_ALLOWED.value in live_real.reason_codes
 
 
+def test_live_sim_safety_gate_daily_order_limit_blocks_new_buy_only(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-daily-limit-purpose.sqlite3")
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_max_daily_order_count=1)
+    _insert_live_sim_order_record(connection, order_id="daily-buy-limit", side="BUY")
+    _insert_live_sim_order_record(connection, order_id="daily-sell-evidence", side="SELL")
+    _insert_live_sim_cancel_intent_record(connection, order_id="daily-buy-limit")
+
+    new_buy = check_live_sim_safety_gate(connection, settings, purpose="NEW_BUY")
+    lifecycle = check_live_sim_safety_gate(connection, settings, purpose="LIFECYCLE")
+    connection.close()
+
+    assert new_buy.passed is False
+    assert new_buy.daily_limit_applies is True
+    assert new_buy.daily_order_limit_exceeded is True
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value in new_buy.reason_codes
+    assert lifecycle.passed is True
+    assert lifecycle.daily_limit_applies is False
+    assert lifecycle.daily_order_limit_exceeded is True
+    assert lifecycle.daily_buy_order_count == 1
+    assert lifecycle.daily_sell_order_count == 1
+    assert lifecycle.daily_cancel_intent_count == 1
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in lifecycle.reason_codes
+
+
 def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-flow.sqlite3")
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
@@ -494,6 +519,7 @@ def test_live_sim_cancel_unfilled_ttl_queues_once_and_ack_cancels(tmp_path) -> N
         live_sim_cancel_enabled=True,
         live_sim_cancel_unfilled_enabled=True,
         live_sim_cancel_order_ttl_sec=1,
+        live_sim_max_daily_order_count=1,
     )
     intent = create_live_sim_intent(connection, candidate_id, settings=settings)
     order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
@@ -617,6 +643,7 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
         live_sim_exit_gateway_command_enabled=True,
         live_sim_exit_stop_loss_pct=3.0,
         live_sim_stale_tick_sec=999_999_999,
+        live_sim_max_daily_order_count=1,
         live_sim_max_daily_loss=1,
     )
     intent = create_live_sim_intent(connection, candidate_id, settings=settings)
@@ -797,6 +824,75 @@ def _insert_live_sim_position(
             now,
             status,
             now,
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def _insert_live_sim_order_record(
+    connection,
+    *,
+    order_id: str,
+    side: str,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    side = side.upper()
+    connection.execute(
+        """
+        INSERT INTO live_sim_orders (
+            live_sim_order_id,
+            live_sim_intent_id,
+            trade_date,
+            account_id,
+            code,
+            name,
+            side,
+            order_type,
+            quantity,
+            limit_price,
+            notional,
+            status,
+            filled_quantity,
+            remaining_quantity,
+            idempotency_key,
+            created_at
+        )
+        VALUES (?, ?, ?, 'SIM-12345678', '005930', '삼성전자', ?, 'LIMIT',
+            1, 97000, 97000, 'FILLED', 1, 0, ?, ?)
+        """,
+        (
+            order_id,
+            f"intent-{order_id}",
+            broker_utils.market_today(),
+            side,
+            f"idempotency-{order_id}",
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def _insert_live_sim_cancel_intent_record(connection, *, order_id: str) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_cancel_intents (
+            cancel_intent_id,
+            live_sim_order_id,
+            code,
+            cancel_quantity,
+            reason,
+            status,
+            idempotency_key,
+            created_at
+        )
+        VALUES (?, ?, '005930', 1, 'TEST_CANCEL', 'COMMAND_QUEUED', ?, ?)
+        """,
+        (
+            f"cancel-{order_id}",
+            order_id,
+            f"cancel-idempotency-{order_id}",
             now,
         ),
     )

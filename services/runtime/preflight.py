@@ -743,7 +743,11 @@ def _safe_gateway_status(connection: sqlite3.Connection) -> dict[str, str]:
 
 def _safe_safety_gate(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
     try:
-        return check_live_sim_safety_gate(connection, settings).to_dict()
+        return check_live_sim_safety_gate(
+            connection,
+            settings,
+            purpose="LIFECYCLE",
+        ).to_dict()
     except Exception as exc:
         return {
             "passed": False,

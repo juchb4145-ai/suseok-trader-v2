@@ -148,7 +148,11 @@ def evaluate_live_sim_order_plan_eligibility(
 ) -> LiveSimOrderPlanEligibility:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(order_plan_id, "order_plan_id")
-    safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
+    safety_gate = check_live_sim_safety_gate(
+        connection,
+        resolved_settings,
+        purpose="NEW_BUY",
+    )
     order_plan = _order_plan_row(connection, normalized_id)
     latest_plan = _latest_order_plan_row(connection, normalized_id)
     evaluation = _entry_timing_evaluation_row(connection, normalized_id)
@@ -177,6 +181,7 @@ def evaluate_live_sim_order_plan_eligibility(
     safety_gate = check_live_sim_safety_gate(
         connection,
         resolved_settings,
+        purpose="NEW_BUY",
         enforce_daily_loss_limit=True,
         enforce_entry_window=str(order_plan["side"]).upper() == "BUY",
         trade_date=str(order_plan["trade_date"]),

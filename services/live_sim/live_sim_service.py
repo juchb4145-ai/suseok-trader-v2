@@ -200,6 +200,7 @@ def evaluate_live_sim_eligibility(
     safety_gate = check_live_sim_safety_gate(
         connection,
         resolved_settings,
+        purpose="NEW_BUY",
         enforce_daily_loss_limit=True,
         enforce_entry_window=True,
         trade_date=admission.trade_date,
@@ -462,6 +463,7 @@ def queue_live_sim_order_command(
     safety_gate = check_live_sim_safety_gate(
         connection,
         resolved_settings,
+        purpose="NEW_BUY",
         enforce_daily_loss_limit=intent_row["side"] == LiveSimSide.BUY.value,
         enforce_entry_window=intent_row["side"] == LiveSimSide.BUY.value,
         trade_date=intent_row["trade_date"],
@@ -3094,7 +3096,7 @@ def _cancel_safety_reasons(
     settings: Settings,
 ) -> list[str]:
     reasons: list[str] = []
-    safety_gate = check_live_sim_safety_gate(connection, settings)
+    safety_gate = check_live_sim_safety_gate(connection, settings, purpose="LIFECYCLE")
     if not safety_gate.passed:
         reasons.extend(safety_gate.reason_codes)
     if not settings.live_sim_cancel_enabled:
@@ -3127,7 +3129,7 @@ def _exit_safety_reasons(
     settings: Settings,
 ) -> list[str]:
     reasons: list[str] = []
-    safety_gate = check_live_sim_safety_gate(connection, settings)
+    safety_gate = check_live_sim_safety_gate(connection, settings, purpose="LIFECYCLE")
     if not safety_gate.passed:
         reasons.extend(safety_gate.reason_codes)
     if not settings.live_sim_exit_engine_enabled:
@@ -4074,7 +4076,12 @@ def _recent_active_live_sim_count_for_code(
 
 def _daily_order_count(connection: sqlite3.Connection, trade_date: str) -> int:
     row = connection.execute(
-        "SELECT COUNT(*) AS count FROM live_sim_orders WHERE trade_date = ?",
+        """
+        SELECT COUNT(*) AS count
+        FROM live_sim_orders
+        WHERE trade_date = ?
+            AND UPPER(side) = 'BUY'
+        """,
         (trade_date,),
     ).fetchone()
     return int(row["count"])
