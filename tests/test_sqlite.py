@@ -143,6 +143,7 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
                 'market_ticks_latest',
                 'market_tick_samples',
                 'market_minute_bars',
+                'market_premarket_snapshots',
                 'market_condition_signals',
                 'market_condition_latest',
                 'market_tr_snapshots',
@@ -170,6 +171,7 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
         "market_ticks_latest",
         "market_tick_samples",
         "market_minute_bars",
+        "market_premarket_snapshots",
         "market_condition_signals",
         "market_condition_latest",
         "market_tr_snapshots",
@@ -182,6 +184,33 @@ def test_sqlite_initialization_creates_market_data_tables(tmp_path) -> None:
         "ai_requests",
         "ai_insights",
     }
+
+
+def test_sqlite_market_data_tables_are_exchange_aware(tmp_path) -> None:
+    db_path = tmp_path / "app.sqlite3"
+    connection = initialize_database(db_path)
+
+    latest_info = connection.execute("PRAGMA table_info(market_ticks_latest)").fetchall()
+    bar_info = connection.execute("PRAGMA table_info(market_minute_bars)").fetchall()
+    sample_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(market_tick_samples)")
+    }
+    connection.close()
+
+    latest_pk = [
+        row["name"]
+        for row in sorted(latest_info, key=lambda item: int(item["pk"]))
+        if int(row["pk"]) > 0
+    ]
+    bar_pk = [
+        row["name"]
+        for row in sorted(bar_info, key=lambda item: int(item["pk"]))
+        if int(row["pk"]) > 0
+    ]
+    assert latest_pk == ["code", "exchange"]
+    assert {"exchange", "session"}.issubset({row["name"] for row in latest_info})
+    assert {"exchange", "session"}.issubset(sample_columns)
+    assert bar_pk == ["code", "exchange", "session", "interval_sec", "bucket_start"]
 
 
 def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None:

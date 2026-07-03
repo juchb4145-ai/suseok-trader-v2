@@ -254,7 +254,7 @@ def _risk_latest_row(
 
 def _latest_tick_row(connection: sqlite3.Connection, code: str) -> sqlite3.Row | None:
     return connection.execute(
-        "SELECT * FROM market_ticks_latest WHERE code = ?",
+        "SELECT * FROM market_ticks_latest WHERE code = ? AND exchange = 'KRX'",
         (validate_stock_code(code),),
     ).fetchone()
 

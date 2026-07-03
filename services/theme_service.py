@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any
 
 from domain.broker.utils import (
+    MARKET_TIMEZONE,
     datetime_to_wire,
     new_message_id,
     normalize_payload,
@@ -31,7 +32,11 @@ from domain.theme.state import ThemeMemberRole, ThemeState
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
-from services.market_data_service import get_latest_tick, get_market_data_readiness
+from services.market_data_service import (
+    get_latest_tick,
+    get_market_data_readiness,
+    get_premarket_snapshot,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -464,6 +469,7 @@ def calculate_theme_snapshot(
         raise ValueError(f"theme not found: {normalized_theme_id}")
 
     calculated_at_wire = _timestamp_wire(calculated_at)
+    snapshot_trade_date = _trade_date_for_timestamp(calculated_at_wire)
     snapshot_id = _snapshot_id(normalized_theme_id, calculated_at_wire)
     members = _active_theme_members_for_snapshot(
         connection,
@@ -482,6 +488,7 @@ def calculate_theme_snapshot(
                 theme=theme,
                 member=member,
                 calculated_at=calculated_at_wire,
+                trade_date=snapshot_trade_date,
                 settings=resolved_settings,
             )
             member_snapshots.append(member_snapshot)
@@ -546,6 +553,10 @@ def calculate_theme_snapshot(
         active_member_count=active_member_count,
         rising_ratio=rising_ratio,
         top_n=resolved_settings.market_scan_top_n,
+    )
+    premarket_summary = _theme_premarket_summary(
+        member_snapshots,
+        enabled=resolved_settings.theme_premarket_observables_enabled,
     )
 
     leader = _select_leader(fresh_members, member_scores)
@@ -643,6 +654,7 @@ def calculate_theme_snapshot(
             "score_formula": "change_rate*100 + delta1m/1e6 + delta3m/3e6 "
             "+ cumulative_trade_value/1e9 + execution_strength/100, stale members half score",
             "flow_score_formula": flow_metrics["flow_score_formula"],
+            **({"premarket": premarket_summary} if premarket_summary else {}),
         },
     )
     _save_theme_snapshot(connection, snapshot)
@@ -709,6 +721,7 @@ def get_theme_status(
         "spreading_rising_ratio": resolved_settings.theme_spreading_rising_ratio,
         "min_active_members": resolved_settings.theme_min_active_members,
         "snapshot_max_members": resolved_settings.theme_snapshot_max_members,
+        "premarket_observables_enabled": resolved_settings.theme_premarket_observables_enabled,
         "import_allow_replace": resolved_settings.theme_import_allow_replace,
     }
 
@@ -893,6 +906,7 @@ def _calculate_member_snapshot(
     theme: Mapping[str, Any],
     member: sqlite3.Row,
     calculated_at: str,
+    trade_date: str,
     settings: Settings,
 ) -> tuple[ThemeMemberSnapshot, float]:
     latest_tick = get_latest_tick(connection, member["code"])
@@ -926,6 +940,11 @@ def _calculate_member_snapshot(
     scan_trade_value_delta, scan_previous = _scan_trade_value_delta(
         connection,
         latest_scan,
+    )
+    premarket = (
+        get_premarket_snapshot(connection, trade_date, member["code"])
+        if settings.theme_premarket_observables_enabled
+        else None
     )
     above_vwap = bool(price is not None and vwap is not None and float(price) >= float(vwap))
     snapshot = ThemeMemberSnapshot(
@@ -979,6 +998,11 @@ def _calculate_member_snapshot(
             "condition_latest": _condition_observations(connection, member["code"]),
             "observation_source": observation_source,
             "market_scan": _market_scan_metadata(latest_scan, scan_previous),
+            **(
+                {"premarket": _premarket_member_metadata(premarket)}
+                if premarket is not None
+                else {}
+            ),
         },
     )
     return snapshot, _member_score(snapshot)
@@ -1472,7 +1496,7 @@ def _latest_bar(
         """
         SELECT *
         FROM market_minute_bars
-        WHERE code = ? AND interval_sec = ?
+        WHERE code = ? AND exchange = 'KRX' AND interval_sec = ?
         ORDER BY bucket_start DESC
         LIMIT 1
         """,
@@ -1554,6 +1578,61 @@ def _market_scan_metadata(
     return {
         "current": current,
         "previous": previous,
+    }
+
+
+def _premarket_member_metadata(premarket: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "trade_date": premarket.get("trade_date"),
+        "code": premarket.get("code"),
+        "first_price": premarket.get("first_price"),
+        "last_price": premarket.get("last_price"),
+        "prev_krx_close": premarket.get("prev_krx_close"),
+        "premarket_gap_pct": premarket.get("premarket_gap_pct"),
+        "volume": premarket.get("volume"),
+        "tick_count": premarket.get("tick_count"),
+        "observe_only": True,
+        "not_order_signal": True,
+    }
+
+
+def _theme_premarket_summary(
+    members: Sequence[ThemeMemberSnapshot],
+    *,
+    enabled: bool,
+) -> dict[str, Any] | None:
+    if not enabled:
+        return None
+    snapshots = []
+    for member in members:
+        premarket = member.metadata.get("premarket")
+        if isinstance(premarket, Mapping):
+            snapshots.append((member, premarket))
+    if not snapshots:
+        return None
+
+    gap_items = [
+        (member, float(premarket["premarket_gap_pct"]))
+        for member, premarket in snapshots
+        if premarket.get("premarket_gap_pct") is not None
+    ]
+    leader = max(gap_items, key=lambda item: item[1])[0] if gap_items else None
+    avg_gap = (
+        sum(gap for _, gap in gap_items) / len(gap_items)
+        if gap_items
+        else None
+    )
+    return {
+        "enabled": True,
+        "snapshot_count": len(snapshots),
+        "gap_count": len(gap_items),
+        "avg_gap_pct": avg_gap,
+        "leader_code": leader.code if leader is not None else None,
+        "leader_name": leader.name if leader is not None else None,
+        "observe_only": True,
+        "not_order_signal": True,
+        "MATCHED_OBSERVATION_is_not_buy_signal": True,
+        "OBSERVE_PASS_is_not_order_approval": True,
     }
 
 
@@ -1781,6 +1860,10 @@ def _optional_non_empty(value: object, field_name: str) -> str | None:
 
 def _timestamp_wire(value: datetime | str | None) -> str:
     return datetime_to_wire(parse_timestamp(value or utc_now(), "calculated_at"))
+
+
+def _trade_date_for_timestamp(value: datetime | str) -> str:
+    return parse_timestamp(value, "timestamp").astimezone(MARKET_TIMEZONE).date().isoformat()
 
 
 def _snapshot_id(theme_id: str, calculated_at: str) -> str:

@@ -69,6 +69,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_tick_stale_sec == 10
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
+    assert settings.market_data_premarket_snapshot_enabled is False
     assert settings.event_store_retention_enabled is False
     assert settings.event_store_retention_days == 30
     assert settings.event_store_retention_batch_size == 5000
@@ -96,6 +97,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.theme_leading_rising_ratio == 0.5
     assert settings.theme_spreading_rising_ratio == 0.35
     assert settings.theme_import_allow_replace is False
+    assert settings.theme_premarket_observables_enabled is False
     assert settings.naver_theme_import_enabled is False
     assert settings.naver_theme_import_base_url == "https://finance.naver.com/sise/theme.naver"
     assert settings.naver_theme_import_timeout_seconds == 10
@@ -188,6 +190,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.entry_timing_require_risk_observe_pass is False
     assert settings.entry_timing_require_strategy_matched is False
     assert settings.entry_timing_stale_max_seconds == 60
+    assert settings.entry_timing_premarket_context_enabled is False
     assert settings.entry_timing_config_version == "entry_timing_v1"
     assert settings.dry_run_oms_enabled is False
     assert settings.dry_run_intent_creation_enabled is False

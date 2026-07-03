@@ -336,6 +336,7 @@ def _latest_market_codes(connection: sqlite3.Connection) -> list[str]:
         """
         SELECT code
         FROM market_ticks_latest
+        WHERE exchange = 'KRX'
         ORDER BY updated_at DESC, code ASC
         """
     ).fetchall()

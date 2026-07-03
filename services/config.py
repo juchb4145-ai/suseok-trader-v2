@@ -172,6 +172,7 @@ class Settings:
     market_data_bar_intervals_sec: tuple[int, ...] = (60, 180, 300)
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
+    market_data_premarket_snapshot_enabled: bool = False
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
     event_store_retention_batch_size: int = 5000
@@ -223,6 +224,7 @@ class Settings:
     theme_co_leader_score_ratio: float = 0.8
     theme_snapshot_max_members: int = 200
     theme_snapshot_stale_sec: int = 300
+    theme_premarket_observables_enabled: bool = False
     theme_import_allow_replace: bool = False
     naver_theme_import_enabled: bool = False
     naver_theme_import_base_url: str = "https://finance.naver.com/sise/theme.naver"
@@ -326,6 +328,7 @@ class Settings:
     entry_timing_require_risk_observe_pass: bool = False
     entry_timing_require_strategy_matched: bool = False
     entry_timing_stale_max_seconds: int = 60
+    entry_timing_premarket_context_enabled: bool = False
     entry_timing_config_version: str = "entry_timing_v1"
     dry_run_oms_enabled: bool = False
     dry_run_intent_creation_enabled: bool = False
@@ -1532,6 +1535,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "MARKET_DATA_MAX_RECENT_TICKS",
             min_value=1,
         ),
+        market_data_premarket_snapshot_enabled=_parse_bool(
+            env.get("MARKET_DATA_PREMARKET_SNAPSHOT_ENABLED", "false")
+        ),
         event_store_retention_enabled=_parse_bool(
             env.get("EVENT_STORE_RETENTION_ENABLED", "false")
         ),
@@ -1697,6 +1703,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("THEME_SNAPSHOT_STALE_SEC", "300"),
             "THEME_SNAPSHOT_STALE_SEC",
             min_value=1,
+        ),
+        theme_premarket_observables_enabled=_parse_bool(
+            env.get("THEME_PREMARKET_OBSERVABLES_ENABLED", "false")
         ),
         theme_import_allow_replace=_parse_bool(env.get("THEME_IMPORT_ALLOW_REPLACE", "false")),
         naver_theme_import_enabled=_parse_bool(
@@ -2070,6 +2079,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("ENTRY_TIMING_STALE_MAX_SECONDS", "60"),
             "ENTRY_TIMING_STALE_MAX_SECONDS",
             min_value=1,
+        ),
+        entry_timing_premarket_context_enabled=_parse_bool(
+            env.get("ENTRY_TIMING_PREMARKET_CONTEXT_ENABLED", "false")
         ),
         entry_timing_config_version=env.get(
             "ENTRY_TIMING_CONFIG_VERSION",

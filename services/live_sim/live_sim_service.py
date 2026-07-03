@@ -3994,7 +3994,7 @@ def _latest_tick_row(connection: sqlite3.Connection, code: str | None) -> sqlite
     if code is None:
         return None
     return connection.execute(
-        "SELECT * FROM market_ticks_latest WHERE code = ?",
+        "SELECT * FROM market_ticks_latest WHERE code = ? AND exchange = 'KRX'",
         (validate_stock_code(code),),
     ).fetchone()
 

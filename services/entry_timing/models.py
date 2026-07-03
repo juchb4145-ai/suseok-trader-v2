@@ -129,6 +129,7 @@ class EntryTimingInput:
     condition_fusion_reason_codes: Sequence[str] = field(default_factory=tuple)
     condition_names: Sequence[str] = field(default_factory=tuple)
     condition_latest_hit_at: str | None = None
+    premarket_gap: float | None = None
     observed_at: datetime | str = field(default_factory=datetime.utcnow)
     best_bid: float | None = None
     best_ask: float | None = None
@@ -189,6 +190,7 @@ class EntryTimingInput:
             "strategy_score",
             "strategy_confidence",
             "condition_fusion_priority_score",
+            "premarket_gap",
             "best_bid",
             "best_ask",
             "tick_age_sec",
@@ -203,6 +205,7 @@ class EntryTimingInput:
                         "momentum_1m",
                         "momentum_3m",
                         "momentum_5m",
+                        "premarket_gap",
                     }
                     else None
                 )
@@ -297,6 +300,7 @@ class EntryTimingInput:
             "condition_fusion_reason_codes": list(self.condition_fusion_reason_codes),
             "condition_names": list(self.condition_names),
             "condition_latest_hit_at": self.condition_latest_hit_at,
+            "premarket_gap": self.premarket_gap,
             "observed_at": datetime_to_wire(self.observed_at),
             "best_bid": self.best_bid,
             "best_ask": self.best_ask,

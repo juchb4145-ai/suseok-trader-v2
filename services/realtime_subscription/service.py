@@ -50,9 +50,9 @@ _THEME_ROLE_PRIORITY = {
     "UNKNOWN": 5,
     "STALE": 9,
 }
-_EXCHANGE_SCHEMA_WARNING = (
-    "market_ticks_latest is keyed by code only. Do not mix KRX/NXT in one "
-    "MarketData projection until exchange/session-aware schema support is added."
+_EXCHANGE_SCHEMA_STATUS = (
+    "MarketData projection is exchange/session-aware; KRX and NXT ticks/bars are "
+    "stored separately by (code, exchange)."
 )
 
 
@@ -145,11 +145,11 @@ class RealtimeSubscriptionPlanner:
         reason_counter: Counter[str] = Counter()
         near_miss: list[dict[str, Any]] = []
         excluded: list[dict[str, Any]] = []
-        warnings = [_EXCHANGE_SCHEMA_WARNING]
+        warnings: list[str] = []
         if exchange in {"NXT", "ALL"}:
             warnings.append(
-                "REALTIME_SUBSCRIPTION_EXCHANGE is not KRX; keep KRX/NXT separated "
-                "until MarketData is exchange-aware."
+                "REALTIME_SUBSCRIPTION_EXCHANGE is not KRX; this observe-only plan "
+                "relies on MarketData exchange/session-aware projection."
             )
 
         if not self.settings.realtime_subscription_enabled:
@@ -718,8 +718,15 @@ def _stale_registered_codes(
             SELECT code, name, event_ts, updated_at, quality_status
             FROM market_ticks_latest
             WHERE code = ?
+                AND (? = 'ALL' OR exchange = ?)
+            ORDER BY updated_at DESC
+            LIMIT 1
             """,
-            (code,),
+            (
+                code,
+                settings.realtime_subscription_exchange,
+                settings.realtime_subscription_exchange,
+            ),
         ).fetchone()
         reference_ts = row["event_ts"] if row is not None else None
         age = _age_seconds(reference_ts)
@@ -800,7 +807,9 @@ def _queue_subscription_command(
             "trade_date": trade_date,
             "action": action,
             "source_types": list(target.get("source_types") or []),
-            "market_data_schema_warning": _EXCHANGE_SCHEMA_WARNING,
+            "market_data_schema_status": _EXCHANGE_SCHEMA_STATUS,
+            "preopen_nxt_observe_supported": exchange in {"NXT", "ALL"},
+            "preopen_nxt_not_order_signal": True,
         },
     }
     command = GatewayCommand(
@@ -860,12 +869,11 @@ def _parse_code_list_value(value: object) -> list[str]:
 def _metadata(exchange: str) -> dict[str, Any]:
     return {
         "exchange": exchange,
-        "market_data_projection_key": "code",
-        "market_data_schema_warning": _EXCHANGE_SCHEMA_WARNING,
-        "todo": (
-            "Make MarketData exchange/session-aware before mixed KRX/NXT realtime "
-            "subscriptions are allowed in one projection."
-        ),
+        "market_data_projection_key": "(code, exchange)",
+        "market_data_schema_status": _EXCHANGE_SCHEMA_STATUS,
+        "preopen_nxt_observe_supported": exchange in {"NXT", "ALL"},
+        "preopen_nxt_window": "08:00-08:50 Asia/Seoul",
+        "preopen_nxt_not_order_signal": True,
     }
 
 

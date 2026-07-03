@@ -1613,7 +1613,7 @@ def _latest_tick_row(connection: sqlite3.Connection, code: str | None) -> sqlite
         """
         SELECT *
         FROM market_ticks_latest
-        WHERE code = ?
+        WHERE code = ? AND exchange = 'KRX'
         """,
         (validate_stock_code(code),),
     ).fetchone()

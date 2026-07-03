@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from apps.core_api import app
+from domain.broker.events import GatewayEvent
+from domain.broker.market import BrokerPriceTick
 from fastapi.testclient import TestClient
 from gateway.event_factory import (
     make_condition_event,
@@ -96,6 +100,94 @@ def test_market_data_tick_endpoint_404s_for_missing_code(tmp_path, monkeypatch) 
     assert response.status_code == 404
 
 
+def test_market_data_api_exchange_query_param_filters_ticks_and_bars(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
+
+    with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
+        krx_event = make_price_tick_event(price=70000, volume=1000)
+        nxt_event = make_price_tick_event(price=70200, volume=500)
+        nxt_payload = dict(nxt_event.payload)
+        nxt_payload["metadata"] = {"exchange": "NXT"}
+        nxt_event = type(nxt_event)(
+            event_id=nxt_event.event_id,
+            event_type=nxt_event.event_type,
+            source=nxt_event.source,
+            payload=nxt_payload,
+            ts=nxt_event.ts,
+        )
+
+        client.post("/api/gateway/events", json=krx_event.to_dict(), headers=headers)
+        client.post("/api/gateway/events", json=nxt_event.to_dict(), headers=headers)
+
+        latest_default = client.get("/api/market-data/ticks/005930")
+        latest_nxt = client.get("/api/market-data/ticks/005930?exchange=NXT")
+        latest_all = client.get("/api/market-data/ticks/005930?exchange=ALL")
+        bars_nxt = client.get("/api/market-data/bars/005930?exchange=NXT&interval_sec=60")
+        readiness_all = client.get("/api/market-data/readiness/005930?exchange=ALL")
+
+    assert latest_default.status_code == 200
+    assert latest_default.json()["tick"]["exchange"] == "KRX"
+    assert latest_default.json()["tick"]["price"] == 70000
+    assert latest_nxt.status_code == 200
+    assert latest_nxt.json()["tick"]["exchange"] == "NXT"
+    assert latest_nxt.json()["tick"]["price"] == 70200
+    assert latest_all.status_code == 200
+    assert {tick["exchange"] for tick in latest_all.json()["ticks"]} == {"KRX", "NXT"}
+    assert bars_nxt.status_code == 200
+    assert bars_nxt.json()["exchange"] == "NXT"
+    assert bars_nxt.json()["bars"][0]["exchange"] == "NXT"
+    assert readiness_all.status_code == 200
+    assert {
+        item["exchange"] for item in readiness_all.json()["readiness"]
+    } == {"KRX", "NXT"}
+
+
+def test_market_data_api_returns_premarket_snapshots(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
+    monkeypatch.setenv("MARKET_DATA_PREMARKET_SNAPSHOT_ENABLED", "true")
+    kst = timezone(timedelta(hours=9))
+    previous_close_time = datetime(2026, 6, 25, 15, 19, tzinfo=kst)
+    premarket_time = datetime(2026, 6, 26, 8, 10, tzinfo=kst)
+
+    with TestClient(app) as client:
+        headers = {"X-Local-Token": "test-token"}
+        client.post(
+            "/api/gateway/events",
+            json=_price_tick_event(
+                "evt_api_prev_close",
+                price=10_000,
+                volume=100,
+                trade_value=1_000_000,
+                ts=previous_close_time,
+                trade_time=previous_close_time,
+            ).to_dict(),
+            headers=headers,
+        )
+        client.post(
+            "/api/gateway/events",
+            json=_price_tick_event(
+                "evt_api_premarket",
+                price=10_500,
+                volume=10,
+                trade_value=105_000,
+                ts=premarket_time,
+                trade_time=premarket_time,
+                exchange="NXT",
+            ).to_dict(),
+            headers=headers,
+        )
+        response = client.get("/api/market-data/premarket/2026-06-26")
+
+    assert response.status_code == 200
+    assert response.json()["trade_date"] == "2026-06-26"
+    assert len(response.json()["snapshots"]) == 1
+    assert response.json()["snapshots"][0]["premarket_gap_pct"] == 5.0
+
+
 def test_invalid_price_tick_rejected_without_projection(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api.sqlite3"))
 
@@ -115,3 +207,41 @@ def test_invalid_price_tick_rejected_without_projection(tmp_path, monkeypatch) -
     assert response.status_code == 422
     assert status.json()["latest_tick_count"] == 0
     assert status.json()["sample_count"] == 0
+
+
+def _price_tick_event(
+    event_id: str,
+    *,
+    price: int,
+    volume: int,
+    trade_value: int,
+    ts: datetime,
+    trade_time: datetime,
+    exchange: str | None = None,
+) -> GatewayEvent:
+    tick = BrokerPriceTick(
+        code="005930",
+        name="삼성전자",
+        price=price,
+        change_rate=0.0,
+        volume=volume,
+        trade_value=trade_value,
+        execution_strength=100.0,
+        best_bid=max(price - 100, 1),
+        best_ask=price,
+        spread_ticks=1,
+        day_high=price,
+        day_low=price,
+        trade_time=trade_time,
+        ts=ts,
+    )
+    payload = tick.to_dict()
+    if exchange is not None:
+        payload["metadata"] = {"exchange": exchange}
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="price_tick",
+        source="test-gateway",
+        payload=payload,
+        ts=ts,
+    )

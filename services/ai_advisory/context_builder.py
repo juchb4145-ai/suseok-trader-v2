@@ -212,7 +212,7 @@ def _candidate_context(
     )
     tick = _row_dict_or_empty(
         connection.execute(
-            "SELECT * FROM market_ticks_latest WHERE code = ?",
+            "SELECT * FROM market_ticks_latest WHERE code = ? AND exchange = 'KRX'",
             (code,),
         ).fetchone()
     )

@@ -323,7 +323,7 @@ def _active_member_tick_rows(connection: sqlite3.Connection) -> list[sqlite3.Row
             mt.quality_status
         FROM theme_members AS m
         JOIN themes AS t ON t.theme_id = m.theme_id
-        LEFT JOIN market_ticks_latest AS mt ON mt.code = m.code
+        LEFT JOIN market_ticks_latest AS mt ON mt.code = m.code AND mt.exchange = 'KRX'
         WHERE t.active = 1 AND m.active = 1
         ORDER BY t.theme_name ASC, t.theme_id ASC, m.code ASC
         """
@@ -335,7 +335,7 @@ def _codes_with_bar(connection: sqlite3.Connection, *, interval_sec: int) -> set
         """
         SELECT DISTINCT code
         FROM market_minute_bars
-        WHERE interval_sec = ?
+        WHERE exchange = 'KRX' AND interval_sec = ?
         """,
         (interval_sec,),
     ).fetchall()
@@ -347,7 +347,7 @@ def _codes_with_vwap(connection: sqlite3.Connection) -> set[str]:
         """
         SELECT DISTINCT code
         FROM market_minute_bars
-        WHERE vwap IS NOT NULL
+        WHERE exchange = 'KRX' AND vwap IS NOT NULL
         """
     ).fetchall()
     return {str(row["code"]) for row in rows}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
@@ -15,6 +15,10 @@ from services.market_data_service import (
     get_market_data_readiness,
     get_market_data_status,
     list_bars,
+    list_latest_ticks,
+    list_latest_ticks_for_code,
+    list_premarket_snapshots,
+    market_session_for_tick,
     process_gateway_event,
     rebuild_market_data_projection,
 )
@@ -32,6 +36,7 @@ def price_tick_event(
     trade_value: int | None = None,
     ts: datetime = TS,
     trade_time: datetime = TS,
+    exchange: str | None = None,
 ) -> GatewayEvent:
     tick = BrokerPriceTick(
         code="005930",
@@ -49,11 +54,14 @@ def price_tick_event(
         trade_time=trade_time,
         ts=ts,
     )
+    payload = tick.to_dict()
+    if exchange is not None:
+        payload["metadata"] = {"exchange": exchange}
     return GatewayEvent(
         event_id=event_id,
         event_type="price_tick",
         source="test-gateway",
-        payload=tick.to_dict(),
+        payload=payload,
         ts=ts,
     )
 
@@ -109,6 +117,240 @@ def test_price_tick_projection_updates_latest_samples_bars_and_deltas(tmp_path) 
     assert bars_60[0]["vwap"] is not None
     assert len(bars_180) == 1
     assert len(bars_300) == 1
+
+
+def test_price_tick_projection_splits_same_code_by_exchange(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    settings = Settings()
+    kst = timezone(timedelta(hours=9))
+    regular_time = datetime(2026, 6, 26, 9, 1, tzinfo=kst)
+    krx = price_tick_event(
+        "evt_tick_krx",
+        price=70000,
+        volume=1000,
+        trade_value=70_000_000,
+        ts=regular_time,
+        trade_time=regular_time,
+    )
+    nxt = price_tick_event(
+        "evt_tick_nxt",
+        price=70200,
+        volume=500,
+        trade_value=35_100_000,
+        ts=regular_time + timedelta(seconds=5),
+        trade_time=regular_time + timedelta(seconds=5),
+        exchange="NXT",
+    )
+
+    append_and_project(connection, krx, settings)
+    append_and_project(connection, nxt, settings)
+
+    krx_latest = get_latest_tick(connection, "005930")
+    nxt_latest = get_latest_tick(connection, "005930", exchange="NXT")
+    all_latest = list_latest_ticks_for_code(connection, "005930", exchange="ALL")
+    latest_list_all = list_latest_ticks(connection, exchange="ALL")
+    samples = connection.execute(
+        """
+        SELECT event_id, exchange, volume_delta, trade_value_delta
+        FROM market_tick_samples
+        ORDER BY event_ts
+        """
+    ).fetchall()
+    krx_bars = list_bars(connection, "005930", interval_sec=60)
+    nxt_bars = list_bars(connection, "005930", exchange="NXT", interval_sec=60)
+    all_bars = list_bars(connection, "005930", exchange="ALL", interval_sec=60)
+    connection.close()
+
+    assert krx_latest is not None
+    assert krx_latest["exchange"] == "KRX"
+    assert krx_latest["session"] == "REGULAR"
+    assert krx_latest["price"] == 70000
+    assert nxt_latest is not None
+    assert nxt_latest["exchange"] == "NXT"
+    assert nxt_latest["price"] == 70200
+    assert {tick["exchange"] for tick in all_latest} == {"KRX", "NXT"}
+    assert {tick["exchange"] for tick in latest_list_all} == {"KRX", "NXT"}
+    assert [(row["exchange"], row["volume_delta"]) for row in samples] == [
+        ("KRX", 1000),
+        ("NXT", 500),
+    ]
+    assert samples[1]["trade_value_delta"] == 35_100_000
+    assert len(krx_bars) == 1
+    assert len(nxt_bars) == 1
+    assert len(all_bars) == 2
+    assert krx_bars[0]["close"] == 70000
+    assert nxt_bars[0]["close"] == 70200
+
+
+def test_nxt_session_boundary_prevents_bar_merge(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    kst = timezone(timedelta(hours=9))
+    premarket_time = datetime(2026, 6, 26, 8, 49, tzinfo=kst)
+    off_hours_time = datetime(2026, 6, 26, 8, 50, tzinfo=kst)
+    premarket = price_tick_event(
+        "evt_nxt_premarket",
+        price=10000,
+        volume=100,
+        trade_value=1_000_000,
+        ts=premarket_time,
+        trade_time=premarket_time,
+        exchange="NXT",
+    )
+    off_hours = price_tick_event(
+        "evt_nxt_off_hours",
+        price=10010,
+        volume=110,
+        trade_value=1_101_100,
+        ts=off_hours_time,
+        trade_time=off_hours_time,
+        exchange="NXT",
+    )
+
+    append_and_project(
+        connection,
+        premarket,
+        Settings(market_data_bar_intervals_sec=(180,)),
+    )
+    append_and_project(
+        connection,
+        off_hours,
+        Settings(market_data_bar_intervals_sec=(180,)),
+    )
+
+    bars = list_bars(connection, "005930", exchange="NXT", interval_sec=180)
+    latest = get_latest_tick(connection, "005930", exchange="NXT")
+    connection.close()
+
+    assert market_session_for_tick(premarket_time, "NXT") == "PREMARKET_NXT"
+    assert market_session_for_tick(off_hours_time, "NXT") == "OFF_HOURS"
+    assert len(bars) == 2
+    assert {bar["session"] for bar in bars} == {"PREMARKET_NXT", "OFF_HOURS"}
+    assert all(bar["tick_count"] == 1 for bar in bars)
+    assert latest is not None
+    assert latest["session"] == "OFF_HOURS"
+
+
+def test_nxt_premarket_snapshot_uses_previous_krx_close_and_session_boundary(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "market.sqlite3")
+    settings = Settings(market_data_premarket_snapshot_enabled=True)
+    kst = timezone(timedelta(hours=9))
+    previous_close_time = datetime(2026, 6, 25, 15, 19, tzinfo=kst)
+    first_time = datetime(2026, 6, 26, 8, 0, tzinfo=kst)
+    last_time = datetime(2026, 6, 26, 8, 49, tzinfo=kst)
+    boundary_time = datetime(2026, 6, 26, 8, 50, tzinfo=kst)
+
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_krx_previous_close",
+            price=10_000,
+            volume=100,
+            trade_value=1_000_000,
+            ts=previous_close_time,
+            trade_time=previous_close_time,
+        ),
+        settings,
+    )
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_nxt_premarket_first",
+            price=10_500,
+            volume=10,
+            trade_value=105_000,
+            ts=first_time,
+            trade_time=first_time,
+            exchange="NXT",
+        ),
+        settings,
+    )
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_nxt_premarket_last",
+            price=10_600,
+            volume=30,
+            trade_value=318_000,
+            ts=last_time,
+            trade_time=last_time,
+            exchange="NXT",
+        ),
+        settings,
+    )
+    append_and_project(
+        connection,
+        price_tick_event(
+            "evt_nxt_boundary_excluded",
+            price=10_700,
+            volume=40,
+            trade_value=428_000,
+            ts=boundary_time,
+            trade_time=boundary_time,
+            exchange="NXT",
+        ),
+        settings,
+    )
+
+    snapshots = list_premarket_snapshots(connection, "2026-06-26")
+    connection.close()
+
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert snapshot["trade_date"] == "2026-06-26"
+    assert snapshot["code"] == "005930"
+    assert snapshot["first_price"] == 10_500
+    assert snapshot["last_price"] == 10_600
+    assert snapshot["prev_krx_close"] == 10_000
+    assert snapshot["premarket_gap_pct"] == 6.0
+    assert snapshot["volume"] == 30
+    assert snapshot["tick_count"] == 2
+    assert snapshot["last_event_id"] == "evt_nxt_premarket_last"
+    assert snapshot["metadata"]["premarket_observation_is_not_buy_signal"] is True
+
+
+def test_premarket_snapshot_is_opt_in_and_gap_skips_without_previous_close(tmp_path) -> None:
+    kst = timezone(timedelta(hours=9))
+    premarket_time = datetime(2026, 6, 26, 8, 10, tzinfo=kst)
+    disabled_connection = initialize_database(tmp_path / "disabled.sqlite3")
+    append_and_project(
+        disabled_connection,
+        price_tick_event(
+            "evt_nxt_disabled",
+            price=10_500,
+            volume=10,
+            trade_value=105_000,
+            ts=premarket_time,
+            trade_time=premarket_time,
+            exchange="NXT",
+        ),
+        Settings(),
+    )
+    disabled = list_premarket_snapshots(disabled_connection, "2026-06-26")
+    disabled_connection.close()
+
+    enabled_connection = initialize_database(tmp_path / "enabled.sqlite3")
+    append_and_project(
+        enabled_connection,
+        price_tick_event(
+            "evt_nxt_no_prev_close",
+            price=10_500,
+            volume=10,
+            trade_value=105_000,
+            ts=premarket_time,
+            trade_time=premarket_time,
+            exchange="NXT",
+        ),
+        Settings(market_data_premarket_snapshot_enabled=True),
+    )
+    enabled = list_premarket_snapshots(enabled_connection, "2026-06-26")
+    enabled_connection.close()
+
+    assert disabled == []
+    assert len(enabled) == 1
+    assert enabled[0]["prev_krx_close"] is None
+    assert enabled[0]["premarket_gap_pct"] is None
 
 
 def test_price_tick_duplicate_and_negative_delta_are_not_double_counted(tmp_path) -> None:

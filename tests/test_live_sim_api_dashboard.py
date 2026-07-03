@@ -108,3 +108,6 @@ def _set_live_sim_api_env(monkeypatch, db_path) -> None:
     monkeypatch.setenv("LIVE_SIM_ACCOUNT_ID", "SIM-12345678")
     monkeypatch.setenv("LIVE_SIM_KILL_SWITCH", "false")
     monkeypatch.setenv("LIVE_SIM_STALE_TICK_SEC", "999999999")
+    monkeypatch.setenv("LIVE_SIM_ENTRY_WINDOW_START", "00:00:00")
+    monkeypatch.setenv("LIVE_SIM_ENTRY_WINDOW_END", "23:59:58")
+    monkeypatch.setenv("LIVE_SIM_EXIT_EOD_FLATTEN_TIME", "23:59:59")

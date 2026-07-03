@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 34
 APP_NAME = "suseok-trader-v2"
 
 
@@ -919,6 +919,227 @@ def _ensure_columns(
             connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
 
 
+def _ensure_market_data_exchange_schema(connection: sqlite3.Connection) -> None:
+    _ensure_columns(
+        connection,
+        "market_tick_samples",
+        {
+            "exchange": "TEXT NOT NULL DEFAULT 'KRX'",
+            "session": "TEXT NOT NULL DEFAULT 'REGULAR'",
+        },
+    )
+    if _primary_key_columns(connection, "market_ticks_latest") != ["code", "exchange"]:
+        _rebuild_market_ticks_latest_for_exchange(connection)
+    else:
+        _ensure_columns(
+            connection,
+            "market_ticks_latest",
+            {
+                "exchange": "TEXT NOT NULL DEFAULT 'KRX'",
+                "session": "TEXT NOT NULL DEFAULT 'REGULAR'",
+            },
+        )
+    if _primary_key_columns(connection, "market_minute_bars") != [
+        "code",
+        "exchange",
+        "session",
+        "interval_sec",
+        "bucket_start",
+    ]:
+        _rebuild_market_minute_bars_for_exchange(connection)
+    else:
+        _ensure_columns(
+            connection,
+            "market_minute_bars",
+            {
+                "exchange": "TEXT NOT NULL DEFAULT 'KRX'",
+                "session": "TEXT NOT NULL DEFAULT 'REGULAR'",
+            },
+        )
+
+
+def _primary_key_columns(connection: sqlite3.Connection, table_name: str) -> list[str]:
+    rows = connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    keyed = sorted(
+        ((int(row["pk"]), str(row["name"])) for row in rows if int(row["pk"] or 0) > 0),
+        key=lambda item: item[0],
+    )
+    return [name for _, name in keyed]
+
+
+def _rebuild_market_ticks_latest_for_exchange(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT * FROM market_ticks_latest").fetchall()
+    connection.execute("DROP TABLE IF EXISTS market_ticks_latest__exchange_migration")
+    connection.execute(
+        "ALTER TABLE market_ticks_latest RENAME TO market_ticks_latest__exchange_migration"
+    )
+    connection.execute(
+        """
+        CREATE TABLE market_ticks_latest (
+            code TEXT NOT NULL,
+            exchange TEXT NOT NULL DEFAULT 'KRX',
+            session TEXT NOT NULL DEFAULT 'REGULAR',
+            name TEXT NOT NULL,
+            price INTEGER NOT NULL,
+            change_rate REAL NOT NULL,
+            cumulative_volume INTEGER NOT NULL,
+            cumulative_trade_value REAL NOT NULL,
+            execution_strength REAL NOT NULL,
+            best_bid INTEGER NOT NULL,
+            best_ask INTEGER NOT NULL,
+            spread_ticks INTEGER NOT NULL,
+            day_high INTEGER NOT NULL,
+            day_low INTEGER NOT NULL,
+            trade_time TEXT NOT NULL,
+            event_ts TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            source TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (code, exchange)
+        )
+        """
+    )
+    for row in rows:
+        data = {key: row[key] for key in row.keys()}
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO market_ticks_latest (
+                code,
+                exchange,
+                session,
+                name,
+                price,
+                change_rate,
+                cumulative_volume,
+                cumulative_trade_value,
+                execution_strength,
+                best_bid,
+                best_ask,
+                spread_ticks,
+                day_high,
+                day_low,
+                trade_time,
+                event_ts,
+                received_at,
+                source,
+                event_id,
+                quality_status,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["code"],
+                _market_exchange_value(data.get("exchange")),
+                _market_session_value(data.get("session")),
+                data["name"],
+                data["price"],
+                data["change_rate"],
+                data["cumulative_volume"],
+                data["cumulative_trade_value"],
+                data["execution_strength"],
+                data["best_bid"],
+                data["best_ask"],
+                data["spread_ticks"],
+                data["day_high"],
+                data["day_low"],
+                data["trade_time"],
+                data["event_ts"],
+                data["received_at"],
+                data["source"],
+                data["event_id"],
+                data["quality_status"],
+                data["updated_at"],
+            ),
+        )
+    connection.execute("DROP TABLE market_ticks_latest__exchange_migration")
+
+
+def _rebuild_market_minute_bars_for_exchange(connection: sqlite3.Connection) -> None:
+    rows = connection.execute("SELECT * FROM market_minute_bars").fetchall()
+    connection.execute("DROP TABLE IF EXISTS market_minute_bars__exchange_migration")
+    connection.execute(
+        "ALTER TABLE market_minute_bars RENAME TO market_minute_bars__exchange_migration"
+    )
+    connection.execute(
+        """
+        CREATE TABLE market_minute_bars (
+            code TEXT NOT NULL,
+            exchange TEXT NOT NULL DEFAULT 'KRX',
+            session TEXT NOT NULL DEFAULT 'REGULAR',
+            interval_sec INTEGER NOT NULL,
+            bucket_start TEXT NOT NULL,
+            open INTEGER NOT NULL,
+            high INTEGER NOT NULL,
+            low INTEGER NOT NULL,
+            close INTEGER NOT NULL,
+            volume_delta INTEGER NOT NULL,
+            trade_value_delta REAL NOT NULL,
+            tick_count INTEGER NOT NULL,
+            vwap REAL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (code, exchange, session, interval_sec, bucket_start)
+        )
+        """
+    )
+    for row in rows:
+        data = {key: row[key] for key in row.keys()}
+        connection.execute(
+            """
+            INSERT OR REPLACE INTO market_minute_bars (
+                code,
+                exchange,
+                session,
+                interval_sec,
+                bucket_start,
+                open,
+                high,
+                low,
+                close,
+                volume_delta,
+                trade_value_delta,
+                tick_count,
+                vwap,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                data["code"],
+                _market_exchange_value(data.get("exchange")),
+                _market_session_value(data.get("session")),
+                data["interval_sec"],
+                data["bucket_start"],
+                data["open"],
+                data["high"],
+                data["low"],
+                data["close"],
+                data["volume_delta"],
+                data["trade_value_delta"],
+                data["tick_count"],
+                data.get("vwap"),
+                data["updated_at"],
+            ),
+        )
+    connection.execute("DROP TABLE market_minute_bars__exchange_migration")
+
+
+def _market_exchange_value(value: object) -> str:
+    text = str(value or "KRX").strip().upper()
+    return text if text in {"KRX", "NXT"} else "KRX"
+
+
+def _market_session_value(value: object) -> str:
+    text = str(value or "REGULAR").strip().upper()
+    return (
+        text
+        if text in {"PREMARKET_NXT", "REGULAR", "AFTERMARKET_NXT", "OFF_HOURS"}
+        else "REGULAR"
+    )
+
+
 def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -1070,7 +1291,9 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS market_ticks_latest (
-            code TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            exchange TEXT NOT NULL DEFAULT 'KRX',
+            session TEXT NOT NULL DEFAULT 'REGULAR',
             name TEXT NOT NULL,
             price INTEGER NOT NULL,
             change_rate REAL NOT NULL,
@@ -1088,7 +1311,8 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
             source TEXT NOT NULL,
             event_id TEXT NOT NULL,
             quality_status TEXT NOT NULL,
-            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            PRIMARY KEY (code, exchange)
         )
         """
     )
@@ -1097,6 +1321,8 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS market_tick_samples (
             event_id TEXT PRIMARY KEY,
             code TEXT NOT NULL,
+            exchange TEXT NOT NULL DEFAULT 'KRX',
+            session TEXT NOT NULL DEFAULT 'REGULAR',
             price INTEGER NOT NULL,
             cumulative_volume INTEGER NOT NULL,
             cumulative_trade_value REAL NOT NULL,
@@ -1113,6 +1339,8 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS market_minute_bars (
             code TEXT NOT NULL,
+            exchange TEXT NOT NULL DEFAULT 'KRX',
+            session TEXT NOT NULL DEFAULT 'REGULAR',
             interval_sec INTEGER NOT NULL,
             bucket_start TEXT NOT NULL,
             open INTEGER NOT NULL,
@@ -1124,7 +1352,30 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
             tick_count INTEGER NOT NULL,
             vwap REAL,
             updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-            PRIMARY KEY (code, interval_sec, bucket_start)
+            PRIMARY KEY (code, exchange, session, interval_sec, bucket_start)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_premarket_snapshots (
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            name TEXT NOT NULL,
+            first_price INTEGER NOT NULL,
+            first_trade_time TEXT NOT NULL,
+            first_event_id TEXT NOT NULL,
+            last_price INTEGER NOT NULL,
+            last_trade_time TEXT NOT NULL,
+            last_event_id TEXT NOT NULL,
+            prev_krx_close INTEGER,
+            premarket_gap_pct REAL,
+            volume INTEGER NOT NULL DEFAULT 0,
+            trade_value REAL NOT NULL DEFAULT 0,
+            tick_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (trade_date, code)
         )
         """
     )
@@ -1201,8 +1452,26 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_market_tick_samples_code_exchange_event_ts
+        ON market_tick_samples (code, exchange, event_ts)
+        """
+    )
+    connection.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_market_minute_bars_code_interval_bucket
         ON market_minute_bars (code, interval_sec, bucket_start)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_minute_bars_code_exchange_interval_bucket
+        ON market_minute_bars (code, exchange, interval_sec, bucket_start)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_premarket_snapshots_trade_gap
+        ON market_premarket_snapshots (trade_date, premarket_gap_pct DESC)
         """
     )
     connection.execute(
@@ -1221,6 +1490,19 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_projection_errors_created_at
         ON market_projection_errors (created_at)
+        """
+    )
+    _ensure_market_data_exchange_schema(connection)
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_tick_samples_code_exchange_event_ts
+        ON market_tick_samples (code, exchange, event_ts)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_minute_bars_code_exchange_interval_bucket
+        ON market_minute_bars (code, exchange, interval_sec, bucket_start)
         """
     )
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
@@ -183,6 +185,95 @@ def test_theme_snapshot_calculates_leader_roles_state_and_persistence(tmp_path) 
     assert member_rows[0]["metadata"]["condition_latest"][0]["action"] == "ENTER"
 
 
+def test_theme_snapshot_adds_opt_in_premarket_observables(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "theme-premarket.sqlite3")
+    settings = _fresh_settings(
+        market_data_premarket_snapshot_enabled=True,
+        theme_premarket_observables_enabled=True,
+    )
+    kst = timezone(timedelta(hours=9))
+    previous_time = datetime(2026, 6, 25, 15, 19, tzinfo=kst)
+    premarket_time = datetime(2026, 6, 26, 8, 20, tzinfo=kst)
+    regular_time = datetime(2026, 6, 26, 9, 5, tzinfo=kst)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": "005930", "name": "삼성전자"},
+                {"code": "000660", "name": "SK하이닉스"},
+            ]
+        ),
+    )
+    for code, name, prev_close, premarket_price, regular_price in (
+        ("005930", "삼성전자", 10_000, 11_000, 11_100),
+        ("000660", "SK하이닉스", 20_000, 21_000, 21_100),
+    ):
+        _append_and_project(
+            connection,
+            _price_tick_event(
+                f"evt_prev_{code}",
+                code=code,
+                name=name,
+                price=prev_close,
+                change_rate=0.0,
+                volume=100,
+                trade_value=prev_close * 100,
+                ts=previous_time,
+                trade_time=previous_time,
+            ),
+            settings,
+        )
+        _append_and_project(
+            connection,
+            _price_tick_event(
+                f"evt_pre_{code}",
+                code=code,
+                name=name,
+                price=premarket_price,
+                change_rate=0.0,
+                volume=10,
+                trade_value=premarket_price * 10,
+                ts=premarket_time,
+                trade_time=premarket_time,
+                exchange="NXT",
+            ),
+            settings,
+        )
+        _append_and_project(
+            connection,
+            _price_tick_event(
+                f"evt_regular_{code}",
+                code=code,
+                name=name,
+                price=regular_price,
+                change_rate=1.0,
+                volume=200,
+                trade_value=regular_price * 200,
+                ts=regular_time,
+                trade_time=regular_time,
+            ),
+            settings,
+        )
+
+    snapshot = calculate_theme_snapshot(
+        connection,
+        "semiconductor",
+        calculated_at=regular_time,
+        settings=settings,
+    )
+    member_rows = list_theme_snapshot_members(connection, snapshot.snapshot_id)
+    connection.close()
+
+    assert snapshot.metadata["premarket"]["snapshot_count"] == 2
+    assert snapshot.metadata["premarket"]["gap_count"] == 2
+    assert snapshot.metadata["premarket"]["avg_gap_pct"] == 7.5
+    assert snapshot.metadata["premarket"]["leader_code"] == "005930"
+    assert snapshot.metadata["premarket"]["not_order_signal"] is True
+    assert {
+        row["metadata"]["premarket"]["premarket_gap_pct"] for row in member_rows
+    } == {10.0, 5.0}
+
+
 def test_theme_snapshot_state_rules_cover_wait_watch_spreading_and_low_coverage(
     tmp_path,
 ) -> None:
@@ -323,8 +414,12 @@ def _price_tick_event(
     change_rate: float,
     volume: int,
     trade_value: int,
+    ts=None,
+    trade_time=None,
+    exchange: str | None = None,
 ) -> GatewayEvent:
-    now = utc_now()
+    now = ts or utc_now()
+    resolved_trade_time = trade_time or now
     tick = BrokerPriceTick(
         code=code,
         name=name,
@@ -338,14 +433,17 @@ def _price_tick_event(
         spread_ticks=1,
         day_high=price + 1000,
         day_low=max(price - 1000, 1),
-        trade_time=now,
+        trade_time=resolved_trade_time,
         ts=now,
     )
+    payload = tick.to_dict()
+    if exchange is not None:
+        payload["metadata"] = {"exchange": exchange}
     return GatewayEvent(
         event_id=event_id,
         event_type="price_tick",
         source="test-gateway",
-        payload=tick.to_dict(),
+        payload=payload,
         ts=now,
     )
 

@@ -103,6 +103,38 @@ def test_queue_true_creates_only_register_realtime_commands(tmp_path) -> None:
     assert all('"observe_only":true' in row["payload_json"] for row in rows)
 
 
+def test_nxt_realtime_subscription_queues_nxt_observe_payload(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "rt-nxt.sqlite3")
+    settings = _settings(
+        realtime_subscription_exchange="NXT",
+        realtime_subscription_max_total=10,
+        realtime_subscription_queue_commands=True,
+    )
+    _insert_candidate(connection, "035720", "카카오", state="DATA_WAIT")
+
+    plan = run_realtime_subscription_once(
+        connection,
+        settings=settings,
+        trade_date=TRADE_DATE,
+        registered_codes=["005930", "000660"],
+        queue_commands=True,
+    ).to_dict()
+    row = connection.execute(
+        "SELECT command_type, payload_json FROM gateway_commands"
+    ).fetchone()
+    connection.close()
+
+    payload = json.loads(row["payload_json"])
+    assert plan["exchange"] == "NXT"
+    assert plan["metadata"]["preopen_nxt_observe_supported"] is True
+    assert plan["register_targets"][0]["exchange"] == "NXT"
+    assert row["command_type"] == "register_realtime"
+    assert payload["exchange"] == "NXT"
+    assert payload["observe_only"] is True
+    assert payload["not_order_signal"] is True
+    assert payload["metadata"]["preopen_nxt_observe_supported"] is True
+
+
 def test_max_total_and_max_per_theme_limits_are_applied(tmp_path) -> None:
     connection = initialize_database(tmp_path / "rt-limits.sqlite3")
     settings = _settings(realtime_subscription_max_total=3, realtime_subscription_max_per_theme=1)

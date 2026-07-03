@@ -4,7 +4,9 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
@@ -38,10 +40,16 @@ MARKET_PROJECTION_TABLES: tuple[str, ...] = (
     "market_ticks_latest",
     "market_tick_samples",
     "market_minute_bars",
+    "market_premarket_snapshots",
     "market_condition_signals",
     "market_condition_latest",
     "market_tr_snapshots",
     "market_projection_errors",
+)
+MARKET_DATA_EXCHANGES: frozenset[str] = frozenset({"KRX", "NXT"})
+MARKET_DATA_EXCHANGE_FILTERS: frozenset[str] = frozenset({"KRX", "NXT", "ALL"})
+MARKET_DATA_SESSIONS: frozenset[str] = frozenset(
+    {"PREMARKET_NXT", "REGULAR", "AFTERMARKET_NXT", "OFF_HOURS"}
 )
 INVALID_PRICE_TICK_REASON_CODES: frozenset[str] = frozenset({"PRICE_MISSING"})
 QUOTE_ONLY_REAL_TYPES: frozenset[str] = frozenset({"주식우선호가"})
@@ -78,6 +86,47 @@ class MarketDataRebuildResult:
             "from_event_rowid": self.from_event_rowid,
             "last_event_rowid": self.last_event_rowid,
         }
+
+
+def normalize_market_data_exchange_filter(value: object = "KRX") -> str:
+    text = str(value or "KRX").strip().upper()
+    aliases = {
+        "": "KRX",
+        "K": "KRX",
+        "KR": "KRX",
+        "KRX": "KRX",
+        "N": "NXT",
+        "NX": "NXT",
+        "NXT": "NXT",
+        "A": "ALL",
+        "AL": "ALL",
+        "ALL": "ALL",
+        "SOR": "ALL",
+        "INTEGRATED": "ALL",
+    }
+    exchange = aliases.get(text)
+    if exchange not in MARKET_DATA_EXCHANGE_FILTERS:
+        raise ValueError(f"unsupported market data exchange: {value}")
+    return exchange
+
+
+def normalize_market_data_exchange(value: object = "KRX") -> str:
+    exchange = normalize_market_data_exchange_filter(value)
+    if exchange == "ALL":
+        return "KRX"
+    return exchange
+
+
+def market_session_for_tick(trade_time: datetime, exchange: object = "KRX") -> str:
+    normalized_exchange = normalize_market_data_exchange(exchange)
+    local_time = parse_timestamp(trade_time, "trade_time").astimezone(_seoul_timezone()).time()
+    if time(9, 0) <= local_time < time(15, 30):
+        return "REGULAR"
+    if normalized_exchange == "NXT" and time(8, 0) <= local_time < time(8, 50):
+        return "PREMARKET_NXT"
+    if normalized_exchange == "NXT" and time(15, 30) <= local_time < time(20, 0):
+        return "AFTERMARKET_NXT"
+    return "OFF_HOURS"
 
 
 def process_gateway_event(
@@ -166,36 +215,87 @@ def process_gateway_event(
     )
 
 
-def get_latest_tick(connection: sqlite3.Connection, code: str) -> dict[str, Any] | None:
+def get_latest_tick(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    exchange: object = "KRX",
+) -> dict[str, Any] | None:
     normalized_code = validate_stock_code(code)
+    normalized_exchange = normalize_market_data_exchange(exchange)
     row = connection.execute(
         """
         SELECT *
         FROM market_ticks_latest
-        WHERE code = ?
+        WHERE code = ? AND exchange = ?
         """,
-        (normalized_code,),
+        (normalized_code, normalized_exchange),
     ).fetchone()
     if row is None:
         return None
     return _latest_tick_row_to_dict(row)
 
 
+def list_latest_ticks_for_code(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    exchange: object = "KRX",
+) -> list[dict[str, Any]]:
+    normalized_code = validate_stock_code(code)
+    normalized_exchange = normalize_market_data_exchange_filter(exchange)
+    if normalized_exchange == "ALL":
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_ticks_latest
+            WHERE code = ?
+            ORDER BY exchange ASC
+            """,
+            (normalized_code,),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_ticks_latest
+            WHERE code = ? AND exchange = ?
+            ORDER BY exchange ASC
+            """,
+            (normalized_code, normalized_exchange),
+        ).fetchall()
+    return [_latest_tick_row_to_dict(row) for row in rows]
+
+
 def list_latest_ticks(
     connection: sqlite3.Connection,
     *,
     limit: int = 100,
+    exchange: object = "KRX",
 ) -> list[dict[str, Any]]:
     bounded_limit = _bounded_limit(limit)
-    rows = connection.execute(
-        """
-        SELECT *
-        FROM market_ticks_latest
-        ORDER BY updated_at DESC, code ASC
-        LIMIT ?
-        """,
-        (bounded_limit,),
-    ).fetchall()
+    normalized_exchange = normalize_market_data_exchange_filter(exchange)
+    if normalized_exchange == "ALL":
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_ticks_latest
+            ORDER BY updated_at DESC, code ASC, exchange ASC
+            LIMIT ?
+            """,
+            (bounded_limit,),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_ticks_latest
+            WHERE exchange = ?
+            ORDER BY updated_at DESC, code ASC
+            LIMIT ?
+            """,
+            (normalized_exchange, bounded_limit),
+        ).fetchall()
     return [_latest_tick_row_to_dict(row) for row in rows]
 
 
@@ -203,33 +303,91 @@ def list_bars(
     connection: sqlite3.Connection,
     code: str,
     *,
+    exchange: object = "KRX",
     interval_sec: int = 60,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     normalized_code = validate_stock_code(code)
+    normalized_exchange = normalize_market_data_exchange_filter(exchange)
     bounded_limit = _bounded_limit(limit)
+    if normalized_exchange == "ALL":
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_minute_bars
+            WHERE code = ? AND interval_sec = ?
+            ORDER BY bucket_start DESC, exchange ASC, session ASC
+            LIMIT ?
+            """,
+            (normalized_code, int(interval_sec), bounded_limit),
+        ).fetchall()
+    else:
+        rows = connection.execute(
+            """
+            SELECT *
+            FROM market_minute_bars
+            WHERE code = ? AND exchange = ? AND interval_sec = ?
+            ORDER BY bucket_start DESC, session ASC
+            LIMIT ?
+            """,
+            (normalized_code, normalized_exchange, int(interval_sec), bounded_limit),
+        ).fetchall()
+    return [_bar_row_to_dict(row) for row in rows]
+
+
+def list_premarket_snapshots(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    normalized_trade_date = _normalize_trade_date(trade_date)
     rows = connection.execute(
         """
         SELECT *
-        FROM market_minute_bars
-        WHERE code = ? AND interval_sec = ?
-        ORDER BY bucket_start DESC
+        FROM market_premarket_snapshots
+        WHERE trade_date = ?
+        ORDER BY
+            CASE WHEN premarket_gap_pct IS NULL THEN 1 ELSE 0 END,
+            premarket_gap_pct DESC,
+            tick_count DESC,
+            code ASC
         LIMIT ?
         """,
-        (normalized_code, int(interval_sec), bounded_limit),
+        (normalized_trade_date, _bounded_limit(limit)),
     ).fetchall()
-    return [_bar_row_to_dict(row) for row in rows]
+    return [_premarket_snapshot_row_to_dict(row) for row in rows]
+
+
+def get_premarket_snapshot(
+    connection: sqlite3.Connection,
+    trade_date: str,
+    code: str,
+) -> dict[str, Any] | None:
+    normalized_trade_date = _normalize_trade_date(trade_date)
+    normalized_code = validate_stock_code(code)
+    row = connection.execute(
+        """
+        SELECT *
+        FROM market_premarket_snapshots
+        WHERE trade_date = ? AND code = ?
+        """,
+        (normalized_trade_date, normalized_code),
+    ).fetchone()
+    return None if row is None else _premarket_snapshot_row_to_dict(row)
 
 
 def get_market_data_readiness(
     connection: sqlite3.Connection,
     code: str,
     *,
+    exchange: object = "KRX",
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
     normalized_code = validate_stock_code(code)
-    latest = get_latest_tick(connection, normalized_code)
+    normalized_exchange = normalize_market_data_exchange(exchange)
+    latest = get_latest_tick(connection, normalized_code, exchange=normalized_exchange)
     reason_codes: list[str] = []
     tick_age_sec: float | None = None
     quality_status = MarketDataQualityStatus.MISSING
@@ -252,7 +410,7 @@ def get_market_data_readiness(
         elif quality_status is MarketDataQualityStatus.INVALID:
             reason_codes.append("TICK_INVALID")
 
-    bar_presence = _bar_presence(connection, normalized_code)
+    bar_presence = _bar_presence(connection, normalized_code, exchange=normalized_exchange)
     has_1m_bar = bar_presence.get(60, False)
     has_3m_bar = bar_presence.get(180, False)
     has_5m_bar = bar_presence.get(300, False)
@@ -263,12 +421,13 @@ def get_market_data_readiness(
                 reason_codes.append("BAR_MISSING")
             reason_codes.append(f"BAR_MISSING_{interval_sec}")
 
-    vwap_ready = _has_vwap(connection, normalized_code)
+    vwap_ready = _has_vwap(connection, normalized_code, exchange=normalized_exchange)
     if not vwap_ready:
         reason_codes.append("VWAP_MISSING")
 
     return {
         "code": normalized_code,
+        "exchange": normalized_exchange,
         "quality_status": quality_status.value,
         "has_latest_tick": latest is not None,
         "tick_age_sec": tick_age_sec,
@@ -351,6 +510,8 @@ def get_market_data_status(
         ),
         "sample_count": _count_rows(connection, "market_tick_samples"),
         "bar_count": _count_rows(connection, "market_minute_bars"),
+        "premarket_snapshot_count": _count_rows(connection, "market_premarket_snapshots"),
+        "premarket_snapshot_enabled": resolved_settings.market_data_premarket_snapshot_enabled,
         "condition_signal_count": _count_rows(connection, "market_condition_signals"),
         "tr_snapshot_count": _count_rows(connection, "market_tr_snapshots"),
         "projection_error_count": _count_rows(connection, "market_projection_errors"),
@@ -449,6 +610,8 @@ def _process_price_tick(
     if _price_tick_payload_real_type(event.payload) in QUOTE_ONLY_REAL_TYPES:
         return 0
     tick = BrokerPriceTick.from_dict(event.payload)
+    exchange = _price_tick_payload_exchange(event.payload)
+    session = market_session_for_tick(tick.trade_time, exchange)
     reason_codes = _price_tick_payload_reason_codes(event.payload)
     quality_status = assess_price_tick_quality(tick)
     invalid_reasons = sorted(
@@ -467,9 +630,9 @@ def _process_price_tick(
         """
         SELECT cumulative_volume, cumulative_trade_value
         FROM market_ticks_latest
-        WHERE code = ?
+        WHERE code = ? AND exchange = ?
         """,
-        (tick.code,),
+        (tick.code, exchange),
     ).fetchone()
     if previous is None:
         volume_delta = tick.volume
@@ -484,6 +647,8 @@ def _process_price_tick(
         """
         INSERT INTO market_ticks_latest (
             code,
+            exchange,
+            session,
             name,
             price,
             change_rate,
@@ -503,8 +668,9 @@ def _process_price_tick(
             quality_status,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(code) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, exchange) DO UPDATE SET
+            session = excluded.session,
             name = excluded.name,
             price = excluded.price,
             change_rate = excluded.change_rate,
@@ -526,6 +692,8 @@ def _process_price_tick(
         """,
         (
             tick.code,
+            exchange,
+            session,
             tick.name,
             tick.price,
             tick.change_rate,
@@ -551,6 +719,8 @@ def _process_price_tick(
         INSERT INTO market_tick_samples (
             event_id,
             code,
+            exchange,
+            session,
             price,
             cumulative_volume,
             cumulative_trade_value,
@@ -561,11 +731,13 @@ def _process_price_tick(
             received_at,
             source
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.event_id,
             tick.code,
+            exchange,
+            session,
             tick.price,
             tick.volume,
             float(tick.trade_value),
@@ -581,11 +753,23 @@ def _process_price_tick(
         _upsert_minute_bar(
             connection,
             tick=tick,
+            exchange=exchange,
+            session=session,
             interval_sec=interval_sec,
             volume_delta=volume_delta,
             trade_value_delta=trade_value_delta,
         )
-    return 1 + len(settings.market_data_bar_intervals_sec)
+    premarket_count = _upsert_premarket_snapshot_if_needed(
+        connection,
+        tick=tick,
+        exchange=exchange,
+        session=session,
+        event=event,
+        volume_delta=volume_delta,
+        trade_value_delta=trade_value_delta,
+        settings=settings,
+    )
+    return 1 + len(settings.market_data_bar_intervals_sec) + premarket_count
 
 
 def _process_condition_event(connection: sqlite3.Connection, event: GatewayEvent) -> int:
@@ -708,6 +892,8 @@ def _upsert_minute_bar(
     connection: sqlite3.Connection,
     *,
     tick: BrokerPriceTick,
+    exchange: str,
+    session: str,
     interval_sec: int,
     volume_delta: int,
     trade_value_delta: float,
@@ -717,9 +903,9 @@ def _upsert_minute_bar(
         """
         SELECT *
         FROM market_minute_bars
-        WHERE code = ? AND interval_sec = ? AND bucket_start = ?
+        WHERE code = ? AND exchange = ? AND session = ? AND interval_sec = ? AND bucket_start = ?
         """,
-        (tick.code, interval_sec, bucket_start),
+        (tick.code, exchange, session, interval_sec, bucket_start),
     ).fetchone()
     if existing is None:
         bar_open = tick.price
@@ -746,6 +932,8 @@ def _upsert_minute_bar(
         """
         INSERT INTO market_minute_bars (
             code,
+            exchange,
+            session,
             interval_sec,
             bucket_start,
             open,
@@ -758,8 +946,8 @@ def _upsert_minute_bar(
             vwap,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(code, interval_sec, bucket_start) DO UPDATE SET
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(code, exchange, session, interval_sec, bucket_start) DO UPDATE SET
             open = excluded.open,
             high = excluded.high,
             low = excluded.low,
@@ -772,6 +960,8 @@ def _upsert_minute_bar(
         """,
         (
             tick.code,
+            exchange,
+            session,
             interval_sec,
             bucket_start,
             bar_open,
@@ -785,6 +975,145 @@ def _upsert_minute_bar(
             datetime_to_wire(utc_now()),
         ),
     )
+
+
+def _upsert_premarket_snapshot_if_needed(
+    connection: sqlite3.Connection,
+    *,
+    tick: BrokerPriceTick,
+    exchange: str,
+    session: str,
+    event: GatewayEvent,
+    volume_delta: int,
+    trade_value_delta: float,
+    settings: Settings,
+) -> int:
+    if not settings.market_data_premarket_snapshot_enabled:
+        return 0
+    if exchange != "NXT" or session != "PREMARKET_NXT":
+        return 0
+
+    trade_date = _trade_date_for_timestamp(tick.trade_time)
+    prev_close = _previous_krx_close(connection, tick.code, trade_date)
+    gap_pct = _gap_pct(tick.price, prev_close)
+    trade_time = datetime_to_wire(tick.trade_time)
+    now = datetime_to_wire(utc_now())
+    metadata = {
+        "observe_only": True,
+        "not_order_signal": True,
+        "no_order_side_effects": True,
+        "source": "NXT_PREMARKET_TICK",
+        "session": session,
+        "exchange": exchange,
+        "prev_krx_close_available": prev_close is not None,
+        "premarket_observation_is_not_buy_signal": True,
+    }
+    existing = connection.execute(
+        """
+        SELECT volume, trade_value, tick_count, first_price, first_trade_time, first_event_id
+        FROM market_premarket_snapshots
+        WHERE trade_date = ? AND code = ?
+        """,
+        (trade_date, tick.code),
+    ).fetchone()
+    if existing is None:
+        first_price = tick.price
+        first_trade_time = trade_time
+        first_event_id = event.event_id
+        volume = max(int(volume_delta), 0)
+        trade_value = max(float(trade_value_delta), 0.0)
+        tick_count = 1
+    else:
+        first_price = int(existing["first_price"])
+        first_trade_time = str(existing["first_trade_time"])
+        first_event_id = str(existing["first_event_id"])
+        volume = int(existing["volume"]) + max(int(volume_delta), 0)
+        trade_value = float(existing["trade_value"]) + max(float(trade_value_delta), 0.0)
+        tick_count = int(existing["tick_count"]) + 1
+
+    connection.execute(
+        """
+        INSERT INTO market_premarket_snapshots (
+            trade_date,
+            code,
+            name,
+            first_price,
+            first_trade_time,
+            first_event_id,
+            last_price,
+            last_trade_time,
+            last_event_id,
+            prev_krx_close,
+            premarket_gap_pct,
+            volume,
+            trade_value,
+            tick_count,
+            updated_at,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(trade_date, code) DO UPDATE SET
+            name = excluded.name,
+            last_price = excluded.last_price,
+            last_trade_time = excluded.last_trade_time,
+            last_event_id = excluded.last_event_id,
+            prev_krx_close = excluded.prev_krx_close,
+            premarket_gap_pct = excluded.premarket_gap_pct,
+            volume = excluded.volume,
+            trade_value = excluded.trade_value,
+            tick_count = excluded.tick_count,
+            updated_at = excluded.updated_at,
+            metadata_json = excluded.metadata_json
+        """,
+        (
+            trade_date,
+            tick.code,
+            tick.name,
+            first_price,
+            first_trade_time,
+            first_event_id,
+            tick.price,
+            trade_time,
+            event.event_id,
+            prev_close,
+            gap_pct,
+            volume,
+            trade_value,
+            tick_count,
+            now,
+            canonical_json(metadata),
+        ),
+    )
+    return 1
+
+
+def _previous_krx_close(
+    connection: sqlite3.Connection,
+    code: str,
+    trade_date: str,
+) -> int | None:
+    local_start = datetime.combine(
+        date.fromisoformat(_normalize_trade_date(trade_date)),
+        time.min,
+        tzinfo=_seoul_timezone(),
+    )
+    start_wire = datetime_to_wire(local_start)
+    row = connection.execute(
+        """
+        SELECT close
+        FROM market_minute_bars
+        WHERE code = ?
+            AND exchange = 'KRX'
+            AND session = 'REGULAR'
+            AND bucket_start < ?
+        ORDER BY bucket_start DESC
+        LIMIT 1
+        """,
+        (validate_stock_code(code), start_wire),
+    ).fetchone()
+    if row is None:
+        return None
+    return int(row["close"])
 
 
 def _projection_exists(
@@ -845,15 +1174,16 @@ def _is_older_than_latest_price_tick(
         return False
     try:
         code = validate_stock_code(event.payload.get("code"))
+        exchange = _price_tick_payload_exchange(event.payload)
     except ValueError:
         return False
     row = connection.execute(
         """
         SELECT event_ts
         FROM market_ticks_latest
-        WHERE code = ?
+        WHERE code = ? AND exchange = ?
         """,
-        (code,),
+        (code, exchange),
     ).fetchone()
     if row is None:
         return False
@@ -935,6 +1265,15 @@ def _price_tick_payload_real_type(payload: Mapping[str, Any]) -> str:
     if not isinstance(metadata, Mapping):
         return ""
     return str(metadata.get("real_type") or "").strip()
+
+
+def _price_tick_payload_exchange(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("exchange") is not None:
+        return normalize_market_data_exchange(metadata.get("exchange"))
+    if payload.get("exchange") is not None:
+        return normalize_market_data_exchange(payload.get("exchange"))
+    return "KRX"
 
 
 def _latest_tick_freshness_counts(
@@ -1078,6 +1417,12 @@ def _bar_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return _row_to_dict(row)
 
 
+def _premarket_snapshot_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    data = _row_to_dict(row)
+    data["metadata"] = json.loads(data.pop("metadata_json"))
+    return data
+
+
 def _condition_signal_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = json.loads(data.pop("metadata_json"))
@@ -1096,28 +1441,40 @@ def _projection_error_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return data
 
 
-def _bar_presence(connection: sqlite3.Connection, code: str) -> dict[int, bool]:
+def _bar_presence(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    exchange: object = "KRX",
+) -> dict[int, bool]:
+    normalized_exchange = normalize_market_data_exchange(exchange)
     rows = connection.execute(
         """
         SELECT interval_sec, COUNT(*) AS count
         FROM market_minute_bars
-        WHERE code = ?
+        WHERE code = ? AND exchange = ?
         GROUP BY interval_sec
         """,
-        (code,),
+        (code, normalized_exchange),
     ).fetchall()
     return {int(row["interval_sec"]): int(row["count"]) > 0 for row in rows}
 
 
-def _has_vwap(connection: sqlite3.Connection, code: str) -> bool:
+def _has_vwap(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    exchange: object = "KRX",
+) -> bool:
+    normalized_exchange = normalize_market_data_exchange(exchange)
     row = connection.execute(
         """
         SELECT 1
         FROM market_minute_bars
-        WHERE code = ? AND vwap IS NOT NULL
+        WHERE code = ? AND exchange = ? AND vwap IS NOT NULL
         LIMIT 1
         """,
-        (code,),
+        (code, normalized_exchange),
     ).fetchone()
     return row is not None
 
@@ -1129,6 +1486,31 @@ def _count_rows(connection: sqlite3.Connection, table_name: str) -> int:
 
 def _bounded_limit(limit: int) -> int:
     return min(max(int(limit), 1), 500)
+
+
+def _normalize_trade_date(value: object) -> str:
+    text = str(value or "").strip()
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError as exc:
+        raise ValueError("trade_date must be YYYY-MM-DD") from exc
+
+
+def _trade_date_for_timestamp(value: object) -> str:
+    return parse_timestamp(value, "timestamp").astimezone(_seoul_timezone()).date().isoformat()
+
+
+def _gap_pct(price: int, prev_close: int | None) -> float | None:
+    if prev_close is None or prev_close <= 0:
+        return None
+    return (float(price) - float(prev_close)) / float(prev_close) * 100.0
+
+
+def _seoul_timezone():
+    try:
+        return ZoneInfo("Asia/Seoul")
+    except ZoneInfoNotFoundError:
+        return timezone(timedelta(hours=9), name="Asia/Seoul")
 
 
 def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

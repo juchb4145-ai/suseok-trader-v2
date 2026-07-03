@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from pathlib import Path
 
 from domain.broker.utils import datetime_to_wire, utc_now
@@ -26,6 +27,7 @@ from services.entry_timing.service import (
     get_entry_timing_status,
     get_order_plan_draft,
     list_latest_order_plan_drafts,
+    load_entry_timing_input,
 )
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
@@ -342,6 +344,42 @@ def test_service_persists_latest_draft_without_order_side_effects(tmp_path) -> N
     assert strategy.overall_status is StrategyObservationStatus.MATCHED_OBSERVATION
 
 
+def test_load_entry_timing_input_adds_opt_in_premarket_gap_context(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "entry_timing_premarket.sqlite3")
+    candidate_id = _insert_strategy_fixture(connection)
+    _insert_premarket_snapshot(
+        connection,
+        trade_date="2026-06-27",
+        code="005930",
+        name="삼성전자",
+        premarket_gap_pct=-1.5,
+    )
+
+    disabled = load_entry_timing_input(connection, candidate_id, settings=_settings())
+    enabled = load_entry_timing_input(
+        connection,
+        candidate_id,
+        settings=_settings(entry_timing_premarket_context_enabled=True),
+    )
+    enabled_eval = EntryTimingEngine(settings=_settings()).evaluate(enabled)
+    disabled_eval = EntryTimingEngine(settings=_settings()).evaluate(disabled)
+    enabled_draft = OrderPlanDraftBuilder(settings=_settings()).build(enabled, enabled_eval)
+    disabled_draft = OrderPlanDraftBuilder(settings=_settings()).build(disabled, disabled_eval)
+    connection.close()
+
+    assert disabled.premarket_gap is None
+    assert disabled.raw_context["premarket"] == {}
+    assert enabled.premarket_gap == -1.5
+    assert enabled.to_dict()["premarket_gap"] == -1.5
+    assert enabled.raw_context["premarket"]["premarket_gap_pct"] == -1.5
+    assert enabled_eval.entry_timing_state == disabled_eval.entry_timing_state
+    assert enabled_draft is not None
+    assert disabled_draft is not None
+    assert enabled_draft.limit_price == disabled_draft.limit_price
+    assert enabled_draft.idempotency_key == disabled_draft.idempotency_key
+    assert "premarket_gap" not in enabled_draft.to_dict()
+
+
 def test_service_orders_candidates_by_condition_fusion_priority(tmp_path) -> None:
     connection = initialize_database(tmp_path / "entry_timing_condition_priority.sqlite3")
     settings = _settings()
@@ -573,6 +611,60 @@ def _raise_fixture_turnover(connection) -> None:
             execution_strength = 130.0
         WHERE code = '005930'
         """
+    )
+    connection.commit()
+
+
+def _insert_premarket_snapshot(
+    connection,
+    *,
+    trade_date: str,
+    code: str,
+    name: str,
+    premarket_gap_pct: float,
+) -> None:
+    now = utc_now()
+    first_trade_time = datetime_to_wire(now - timedelta(minutes=10))
+    last_trade_time = datetime_to_wire(now)
+    connection.execute(
+        """
+        INSERT INTO market_premarket_snapshots (
+            trade_date,
+            code,
+            name,
+            first_price,
+            first_trade_time,
+            first_event_id,
+            last_price,
+            last_trade_time,
+            last_event_id,
+            prev_krx_close,
+            premarket_gap_pct,
+            volume,
+            trade_value,
+            tick_count,
+            updated_at,
+            metadata_json
+        )
+        VALUES (?, ?, ?, 10000, ?, 'evt-pre-first', 9850, ?, 'evt-pre-last',
+            10000, ?, 10, 98500, 2, ?, ?)
+        """,
+        (
+            trade_date,
+            code,
+            name,
+            first_trade_time,
+            last_trade_time,
+            premarket_gap_pct,
+            datetime_to_wire(now),
+            json.dumps(
+                {
+                    "observe_only": True,
+                    "not_order_signal": True,
+                    "no_order_side_effects": True,
+                }
+            ),
+        ),
     )
     connection.commit()
 

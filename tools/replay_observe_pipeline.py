@@ -730,6 +730,7 @@ def _ticks_by_code(connection: sqlite3.Connection) -> dict[str, list[dict[str, A
         """
         SELECT code, price, event_ts, event_id
         FROM market_tick_samples
+        WHERE exchange = 'KRX'
         ORDER BY event_ts ASC, event_id ASC
         """
     ).fetchall()

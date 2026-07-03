@@ -25,6 +25,7 @@ from services.entry_timing.models import (
     OrderPlanStatus,
 )
 from services.entry_timing.order_plan import OrderPlanDraftBuilder
+from services.market_data_service import get_premarket_snapshot
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -247,6 +248,11 @@ def load_entry_timing_input(
 
     theme_meta = _merge_theme_metadata(source_meta, candidate, context, theme, fallback_watchset)
     market = _merge_market_data(candidate, context, tick, latest_1m, latest_3m, latest_5m, theme)
+    premarket = (
+        get_premarket_snapshot(connection, candidate["trade_date"], code)
+        if resolved_settings.entry_timing_premarket_context_enabled
+        else None
+    )
     reason_codes = _dedupe(
         [
             *_json_array(source_meta.get("reason_codes")),
@@ -318,6 +324,9 @@ def load_entry_timing_input(
         ),
         condition_names=_string_array(condition_fusion.get("condition_names")),
         condition_latest_hit_at=_first_text(condition_fusion.get("condition_latest_hit_at")),
+        premarket_gap=_first_number(
+            premarket["premarket_gap_pct"] if premarket is not None else None
+        ),
         observed_at=_first_text(
             tick["event_ts"] if tick is not None else None,
             context.get("refreshed_at"),
@@ -334,6 +343,7 @@ def load_entry_timing_input(
             "condition_fusion": condition_fusion,
             "source_metadata": source_meta,
             "theme_metadata": theme_meta,
+            "premarket": premarket or {},
             "latest_tick": _row_to_dict(tick) if tick is not None else {},
             "latest_bars": {
                 "60": _row_to_dict(latest_1m) if latest_1m is not None else {},
@@ -538,6 +548,7 @@ def get_entry_timing_status(
         "observe_only": True,
         "not_order_intent": True,
         "config_version": resolved_settings.entry_timing_config_version,
+        "premarket_context_enabled": resolved_settings.entry_timing_premarket_context_enabled,
         "latest_plan_count": _count_rows(connection, "order_plan_drafts_latest"),
         "plan_ready_count": _count_rows(
             connection,
@@ -1076,7 +1087,7 @@ def _condition_fusion_from_table(
 
 def _latest_tick(connection: sqlite3.Connection, code: str) -> sqlite3.Row | None:
     return connection.execute(
-        "SELECT * FROM market_ticks_latest WHERE code = ?",
+        "SELECT * FROM market_ticks_latest WHERE code = ? AND exchange = 'KRX'",
         (validate_stock_code(code),),
     ).fetchone()
 
@@ -1090,7 +1101,7 @@ def _latest_bar(
         """
         SELECT *
         FROM market_minute_bars
-        WHERE code = ? AND interval_sec = ?
+        WHERE code = ? AND exchange = 'KRX' AND interval_sec = ?
         ORDER BY bucket_start DESC
         LIMIT 1
         """,

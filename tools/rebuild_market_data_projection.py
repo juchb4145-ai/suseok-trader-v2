@@ -8,7 +8,12 @@ from storage.sqlite import initialize_database
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Rebuild read-only market data projection tables.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Rebuild read-only market data projection tables, including exchange/session "
+            "metadata from accepted Gateway events."
+        )
+    )
     parser.add_argument(
         "--clear-projection",
         action="store_true",

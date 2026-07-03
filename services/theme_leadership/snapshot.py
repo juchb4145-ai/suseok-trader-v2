@@ -129,7 +129,7 @@ def _latest_tick(connection: sqlite3.Connection, code: str) -> sqlite3.Row | Non
         """
         SELECT *
         FROM market_ticks_latest
-        WHERE code = ?
+        WHERE code = ? AND exchange = 'KRX'
         """,
         (code,),
     ).fetchone()
@@ -140,7 +140,7 @@ def _latest_bar(connection: sqlite3.Connection, code: str, interval_sec: int) ->
         """
         SELECT *
         FROM market_minute_bars
-        WHERE code = ? AND interval_sec = ?
+        WHERE code = ? AND exchange = 'KRX' AND interval_sec = ?
         ORDER BY bucket_start DESC
         LIMIT 1
         """,

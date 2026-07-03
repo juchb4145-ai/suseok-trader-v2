@@ -198,6 +198,7 @@ def _latest_tick_rows(connection: sqlite3.Connection) -> dict[str, dict[str, Any
         """
         SELECT code, event_ts, cumulative_trade_value, change_rate
         FROM market_ticks_latest
+        WHERE exchange = 'KRX'
         """
     ).fetchall()
     return {
