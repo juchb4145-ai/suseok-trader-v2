@@ -455,6 +455,10 @@ class Settings:
     live_sim_operating_include_ai: bool = True
     live_sim_operating_include_no_buy: bool = True
     live_sim_operating_write_runs: bool = True
+    live_sim_operating_loop_enabled: bool = False
+    live_sim_operating_loop_interval_sec: int = 20
+    live_sim_operating_loop_market_open_time: str = "09:05:00"
+    live_sim_operating_loop_market_close_time: str = "15:20:00"
     no_buy_sentinel_enabled: bool = True
     no_buy_sentinel_market_open_time: str = "09:00:00"
     no_buy_sentinel_minutes_after_open: int = 20
@@ -985,6 +989,24 @@ class Settings:
         ):
             if getattr(self, field_name) < 0:
                 raise ValueError(f"{field_name.upper()} must be >= 0")
+        if self.live_sim_operating_loop_interval_sec < 5:
+            raise ValueError("LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC must be >= 5")
+        object.__setattr__(
+            self,
+            "live_sim_operating_loop_market_open_time",
+            _validate_time_string(
+                self.live_sim_operating_loop_market_open_time,
+                "LIVE_SIM_OPERATING_LOOP_MARKET_OPEN_TIME",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "live_sim_operating_loop_market_close_time",
+            _validate_time_string(
+                self.live_sim_operating_loop_market_close_time,
+                "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME",
+            ),
+        )
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -2430,6 +2452,22 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         live_sim_operating_write_runs=_parse_bool(
             env.get("LIVE_SIM_OPERATING_WRITE_RUNS", "true")
+        ),
+        live_sim_operating_loop_enabled=_parse_bool(
+            env.get("LIVE_SIM_OPERATING_LOOP_ENABLED", "false")
+        ),
+        live_sim_operating_loop_interval_sec=_parse_int(
+            env.get("LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC", "20"),
+            "LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC",
+            min_value=5,
+        ),
+        live_sim_operating_loop_market_open_time=env.get(
+            "LIVE_SIM_OPERATING_LOOP_MARKET_OPEN_TIME",
+            "09:05:00",
+        ),
+        live_sim_operating_loop_market_close_time=env.get(
+            "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME",
+            "15:20:00",
         ),
         no_buy_sentinel_enabled=_parse_bool(env.get("NO_BUY_SENTINEL_ENABLED", "true")),
         no_buy_sentinel_market_open_time=env.get(

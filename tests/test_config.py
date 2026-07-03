@@ -243,6 +243,10 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_order_plan_max_notional == 100_000
     assert settings.live_sim_order_plan_allow_market_order is False
     assert settings.live_sim_order_plan_allowed_side == "BUY"
+    assert settings.live_sim_operating_loop_enabled is False
+    assert settings.live_sim_operating_loop_interval_sec == 20
+    assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
+    assert settings.live_sim_operating_loop_market_close_time == "15:20:00"
     assert settings.market_scan_enabled is False
     assert settings.market_scan_interval_sec == 120
     assert settings.market_scan_top_n == 200
@@ -573,6 +577,35 @@ def test_live_sim_order_plan_settings_are_validated() -> None:
         assert "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid LIVE_SIM order plan default/max notional")
+
+
+def test_live_sim_operating_loop_settings_are_validated() -> None:
+    settings = load_settings(
+        {
+            "LIVE_SIM_OPERATING_LOOP_ENABLED": "true",
+            "LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC": "5",
+            "LIVE_SIM_OPERATING_LOOP_MARKET_OPEN_TIME": "9:5:0",
+            "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME": "15:20:00",
+        }
+    )
+
+    assert settings.live_sim_operating_loop_enabled is True
+    assert settings.live_sim_operating_loop_interval_sec == 5
+    assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
+    assert settings.live_sim_operating_loop_market_close_time == "15:20:00"
+
+    invalid_cases = {
+        "LIVE_SIM_OPERATING_LOOP_INTERVAL_SEC": "4",
+        "LIVE_SIM_OPERATING_LOOP_MARKET_OPEN_TIME": "090500",
+        "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME": "25:20:00",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid LIVE_SIM operating loop setting: {key}")
 
 
 def test_dashboard_settings_are_validated() -> None:

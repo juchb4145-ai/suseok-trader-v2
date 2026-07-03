@@ -21,8 +21,8 @@ from services.candidate_service import (
 from services.config import Settings, candidate_timezone, load_settings
 from services.theme_leadership.models import (
     StockRole,
-    ThemeMemberLeadership,
     ThemeLeadershipSnapshot,
+    ThemeMemberLeadership,
     ThemeState,
     WatchsetItem,
     WatchsetResult,
@@ -370,7 +370,13 @@ def _member_flow_score(row: sqlite3.Row, metadata: Mapping[str, Any]) -> float:
     source_bonus = 3.0 if row["observation_source"] == "MARKET_SCAN" else 0.0
     rank = _market_scan_rank(metadata)
     rank_score = 0.0 if rank is None else max(200 - rank, 0) / 20.0
-    return round(math.log1p(delta) / math.log1p(100_000_000) * 30.0 + change * 4.0 + source_bonus + rank_score, 6)
+    score = (
+        math.log1p(delta) / math.log1p(100_000_000) * 30.0
+        + change * 4.0
+        + source_bonus
+        + rank_score
+    )
+    return round(score, 6)
 
 
 def _member_flow_reasons(row: sqlite3.Row, metadata: Mapping[str, Any]) -> list[str]:

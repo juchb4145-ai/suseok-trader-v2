@@ -6,7 +6,7 @@ import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
@@ -19,7 +19,6 @@ from domain.broker.utils import (
     parse_timestamp,
     require_non_empty_str,
     utc_now,
-    validate_stock_code,
 )
 from storage.gateway_command_store import EnqueueCommandResult, canonical_json, enqueue_command
 
@@ -564,7 +563,9 @@ def _parse_scan_row(
 ) -> dict[str, Any]:
     normalized = normalize_payload(row)
     try:
-        code = _normalize_market_scan_code(_first_value(normalized, "code", "stock_code", "종목코드"))
+        code = _normalize_market_scan_code(
+            _first_value(normalized, "code", "stock_code", "종목코드")
+        )
     except Exception as exc:
         raise _RowParseError("MARKET_SCAN_CODE_PARSE_FAILED", str(exc)) from exc
     name = _string_or_default(

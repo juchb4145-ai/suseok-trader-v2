@@ -17,11 +17,11 @@ from services.market_reference_service import (
     MARKET_SYMBOL_EVENT_TYPES,
     process_market_symbols_event,
 )
-from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
 from services.market_regime_service import (
     rebuild_market_regime_snapshot,
     should_rebuild_market_regime_snapshot,
 )
+from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
 from services.runtime.incremental_evaluation import enqueue_incremental_evaluation_for_event
 from storage.event_store import (
     append_gateway_event,

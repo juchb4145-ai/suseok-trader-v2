@@ -30,12 +30,14 @@ from api.routes.risk import router as risk_router
 from api.routes.strategy import router as strategy_router
 from api.routes.theme_leadership import router as theme_leadership_router
 from api.routes.themes import router as themes_router
+from domain.broker.utils import market_time_str
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from services.condition_fusion import rebuild_condition_fusion
 from services.config import Settings, load_settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
+from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
 from storage.event_retention import prune_event_store_events
 from storage.sqlite import initialize_database
 
@@ -61,6 +63,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         and settings.incremental_evaluation_worker_enabled
         else None
     )
+    live_sim_operating_cycle_task = _maybe_create_live_sim_operating_cycle_task(settings)
     event_retention_task = (
         asyncio.create_task(_event_retention_loop(settings))
         if settings.event_store_retention_enabled
@@ -77,6 +80,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             incremental_evaluation_task.cancel()
             with suppress(asyncio.CancelledError):
                 await incremental_evaluation_task
+        if live_sim_operating_cycle_task is not None:
+            live_sim_operating_cycle_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await live_sim_operating_cycle_task
         if event_retention_task is not None:
             event_retention_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -119,6 +126,54 @@ def _run_incremental_evaluation_once(settings: Settings) -> None:
         process_incremental_evaluation_batch(connection, settings=settings)
     finally:
         connection.close()
+
+
+def _maybe_create_live_sim_operating_cycle_task(settings: Settings) -> asyncio.Task[None] | None:
+    if not settings.live_sim_operating_loop_enabled:
+        return None
+    return asyncio.create_task(_live_sim_operating_cycle_loop(settings))
+
+
+async def _live_sim_operating_cycle_loop(settings: Settings) -> None:
+    interval_sec = max(int(settings.live_sim_operating_loop_interval_sec), 5)
+    while True:
+        await asyncio.sleep(interval_sec)
+        await _live_sim_operating_cycle_tick(settings)
+
+
+async def _live_sim_operating_cycle_tick(settings: Settings) -> None:
+    try:
+        await asyncio.to_thread(_run_live_sim_operating_cycle_once, settings)
+    except EvaluationRunLockError:
+        logger.debug("LIVE_SIM operating cycle skipped because evaluation lock is held")
+    except Exception:
+        logger.exception("LIVE_SIM operating cycle worker failed")
+
+
+def _run_live_sim_operating_cycle_once(settings: Settings) -> None:
+    if not _is_live_sim_operating_market_time(settings):
+        logger.debug("LIVE_SIM operating cycle skipped outside market hours")
+        return
+
+    connection = initialize_database(settings.trading_db_path)
+    try:
+        run_live_sim_operating_cycle_once(
+            connection,
+            settings=settings,
+            mode=None,
+            queue_commands=False,
+        )
+    finally:
+        connection.close()
+
+
+def _is_live_sim_operating_market_time(settings: Settings) -> bool:
+    current_time = market_time_str()
+    return (
+        settings.live_sim_operating_loop_market_open_time
+        <= current_time
+        <= settings.live_sim_operating_loop_market_close_time
+    )
 
 
 async def _event_retention_loop(settings: Settings) -> None:

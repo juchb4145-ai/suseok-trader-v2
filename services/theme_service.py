@@ -987,7 +987,11 @@ def _save_theme_snapshot(connection: sqlite3.Connection, snapshot: ThemeSnapshot
             reason_codes_json,
             metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(snapshot_id) DO UPDATE SET
             theme_name = excluded.theme_name,
             calculated_at = excluded.calculated_at,
@@ -1485,7 +1489,9 @@ def _theme_flow_metrics(
     deltas: list[float] = []
     inflow_count = 0
     for member in members:
-        metadata = member.metadata.get("market_scan") if isinstance(member.metadata, Mapping) else None
+        metadata = (
+            member.metadata.get("market_scan") if isinstance(member.metadata, Mapping) else None
+        )
         if not isinstance(metadata, Mapping):
             deltas.append(0.0)
             continue
