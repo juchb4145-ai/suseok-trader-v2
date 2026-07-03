@@ -245,9 +245,14 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_order_plan_max_notional == 100_000
     assert settings.live_sim_order_plan_allow_market_order is False
     assert settings.live_sim_order_plan_allowed_side == "BUY"
+    assert settings.live_sim_price_offset_ticks == 0
+    assert settings.live_sim_buy_price_offset_ticks == 1
+    assert settings.live_sim_reprice_enabled is False
+    assert settings.live_sim_reprice_max_attempts == 1
     assert settings.live_sim_entry_window_start == "09:05:00"
     assert settings.live_sim_entry_window_end == "14:30:00"
     assert settings.live_sim_exit_eod_flatten_time == "15:15:00"
+    assert settings.live_sim_reconcile_notional_tolerance == 1.0
     assert settings.live_sim_operating_loop_enabled is False
     assert settings.live_sim_operating_loop_interval_sec == 20
     assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
@@ -582,6 +587,35 @@ def test_live_sim_order_plan_settings_are_validated() -> None:
         assert "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid LIVE_SIM order plan default/max notional")
+
+
+def test_live_sim_buy_reprice_and_reconcile_settings_are_validated() -> None:
+    settings = load_settings(
+        {
+            "LIVE_SIM_BUY_PRICE_OFFSET_TICKS": "3",
+            "LIVE_SIM_REPRICE_ENABLED": "true",
+            "LIVE_SIM_REPRICE_MAX_ATTEMPTS": "2",
+            "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE": "0.5",
+        }
+    )
+
+    assert settings.live_sim_buy_price_offset_ticks == 3
+    assert settings.live_sim_reprice_enabled is True
+    assert settings.live_sim_reprice_max_attempts == 2
+    assert settings.live_sim_reconcile_notional_tolerance == 0.5
+
+    invalid_cases = {
+        "LIVE_SIM_BUY_PRICE_OFFSET_TICKS": "4",
+        "LIVE_SIM_REPRICE_MAX_ATTEMPTS": "0",
+        "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE": "-0.1",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid LIVE_SIM setting: {key}")
 
 
 def test_live_sim_daily_loss_settings_are_validated() -> None:

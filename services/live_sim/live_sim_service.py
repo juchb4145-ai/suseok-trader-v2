@@ -40,6 +40,7 @@ from storage.gateway_command_store import enqueue_command
 
 from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, load_settings
+from services.entry_timing.tick_size import add_ticks
 from services.live_sim.safety_gate import check_live_sim_safety_gate, is_simulation_like
 
 ACTIVE_LIVE_SIM_INTENT_STATUSES = {
@@ -228,6 +229,7 @@ def evaluate_live_sim_eligibility(
     price = 0.0
     if admission.latest_tick_evidence:
         price = float(admission.latest_tick_evidence["price"])
+    limit_price = _live_sim_buy_limit_price(price, resolved_settings) if price > 0 else 0.0
 
     side = LiveSimSide.BUY
     order_type = LiveSimOrderType(resolved_settings.live_sim_default_order_type)
@@ -241,13 +243,16 @@ def evaluate_live_sim_eligibility(
         reason_codes.append(LiveSimReasonCode.MARKET_ORDER_NOT_ALLOWED.value)
 
     quantity, notional = _calculate_live_sim_quantity_and_notional(
-        price,
+        limit_price,
         resolved_settings,
         dry_run_evidence=dry_run_evidence,
     )
     evidence["sizing"] = {
         "max_order_notional": resolved_settings.live_sim_max_order_notional,
         "dry_run_notional": dry_run_evidence.get("notional") if dry_run_evidence else None,
+        "current_price": price,
+        "limit_price": limit_price,
+        "buy_price_offset_ticks": resolved_settings.live_sim_buy_price_offset_ticks,
         "quantity": quantity,
         "notional": notional,
     }
@@ -313,12 +318,17 @@ def create_live_sim_intent(
     candidate_instance_id: str,
     settings: Settings | None = None,
     source: str = "manual",
+    idempotency_suffix: str | None = None,
+    extra_evidence: Mapping[str, Any] | None = None,
 ) -> LiveSimIntent:
     resolved_settings = settings or load_settings()
     eligibility = evaluate_live_sim_eligibility(
         connection, candidate_instance_id, resolved_settings
     )
-    evidence = dict(eligibility.evidence_json) | {"source": source}
+    evidence = dict(eligibility.evidence_json) | {
+        "source": source,
+        **dict(extra_evidence or {}),
+    }
     candidate = _candidate_row(connection, candidate_instance_id)
     strategy = _strategy_latest_row(connection, candidate_instance_id)
     risk = _risk_latest_row(connection, candidate_instance_id)
@@ -361,6 +371,7 @@ def create_live_sim_intent(
                 candidate_instance_id,
                 eligibility.strategy_observation_id,
                 eligibility.risk_observation_id,
+                suffix=idempotency_suffix,
             ),
             created_at=datetime_to_wire(utc_now()),
         )
@@ -372,12 +383,12 @@ def create_live_sim_intent(
         raise ValueError("eligible LIVE_SIM intent requires latest tick")
 
     price = float(tick["price"])
+    limit_price = _live_sim_buy_limit_price(price, resolved_settings)
     quantity, notional = _calculate_live_sim_quantity_and_notional(
-        price,
+        limit_price,
         resolved_settings,
         dry_run_evidence=_json_object(evidence.get("dry_run")),
     )
-    limit_price = price + _tick_offset_value(resolved_settings.live_sim_price_offset_ticks)
     now = utc_now()
     dry_run_evidence = _json_object(evidence.get("dry_run"))
     intent = LiveSimIntent(
@@ -401,9 +412,15 @@ def create_live_sim_intent(
         evidence_json=evidence
         | {
             "latest_tick_event_ts": tick["event_ts"],
+            "current_price": price,
             "quantity": quantity,
             "notional": notional,
             "limit_price": limit_price,
+            "price_policy": _live_sim_buy_price_policy_evidence(
+                price,
+                limit_price,
+                resolved_settings,
+            ),
         },
         idempotency_key=_idempotency_key(
             str(candidate["trade_date"]),
@@ -411,6 +428,7 @@ def create_live_sim_intent(
             str(candidate["candidate_instance_id"]),
             str(strategy["strategy_observation_id"]),
             str(risk["risk_observation_id"]),
+            suffix=idempotency_suffix,
         ),
         created_at=now,
         expires_at=now + timedelta(seconds=resolved_settings.live_sim_order_ttl_sec),
@@ -686,6 +704,22 @@ def reconcile_live_sim_orders_and_positions(
                     "reason": "negative_position_quantity",
                 }
             )
+        expected_entry_notional = float(position["avg_entry_price"]) * int(position["quantity"])
+        entry_notional_delta = abs(
+            float(position["total_entry_notional"]) - expected_entry_notional
+        )
+        if entry_notional_delta > resolved_settings.live_sim_reconcile_notional_tolerance:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "position": position["position_id"],
+                    "reason": "position_entry_notional_mismatch",
+                    "total_entry_notional": position["total_entry_notional"],
+                    "expected_entry_notional": expected_entry_notional,
+                    "delta": entry_notional_delta,
+                    "tolerance": resolved_settings.live_sim_reconcile_notional_tolerance,
+                }
+            )
         if _active_exit_count_for_code(connection, str(position["code"])) > 0 and str(
             position["status"]
         ).upper() == "OPEN":
@@ -730,6 +764,7 @@ def reconcile_live_sim_orders_and_positions(
             "open_orders": open_orders,
             "positions": positions,
             "mismatches": mismatches,
+            "notional_tolerance": resolved_settings.live_sim_reconcile_notional_tolerance,
             "blocking_new_buy": blocking_new_buy,
             "allow_exit": allow_exit,
             "live_sim_only": True,
@@ -1462,6 +1497,210 @@ def run_live_sim_cancel_unfilled_once(
     return LiveSimLifecycleRunResult(
         run_id=run_id,
         run_type="CANCEL_UNFILLED_ONCE",
+        evaluated_count=len(candidates),
+        intent_count=len(created),
+        command_count=len(queued),
+        skipped_count=len([item for item in candidates if not item["eligible"]]),
+        error_count=len(errors),
+        status="COMPLETED_WITH_ERRORS" if errors else "DRY_RUN" if dry_run else "COMPLETED",
+        details={"candidates": candidates, "created": created, "queued": queued, "errors": errors},
+    )
+
+
+def evaluate_live_sim_reprice_candidates(
+    connection: sqlite3.Connection,
+    settings: Settings | None = None,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    resolved_settings = settings or load_settings()
+    if not resolved_settings.live_sim_reprice_enabled:
+        return []
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_orders
+        WHERE side = 'BUY'
+            AND status IN ('CANCELLED', 'CANCEL_ACKED')
+            AND filled_quantity = 0
+            AND remaining_quantity > 0
+        ORDER BY last_event_at DESC, created_at DESC, live_sim_order_id DESC
+        LIMIT ?
+        """,
+        (_bounded_limit(limit or 500),),
+    ).fetchall()
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        order = _order_row_to_dict(row)
+        intent = get_live_sim_intent(connection, str(order["live_sim_intent_id"]))
+        cancel_intent = _latest_cancel_intent_for_order(
+            connection,
+            str(order["live_sim_order_id"]),
+        )
+        reasons: list[str] = []
+        if intent is None:
+            reasons.append("LIVE_SIM_REPRICE_ORIGINAL_INTENT_MISSING")
+        if not _is_ttl_cancel_ack(cancel_intent):
+            reasons.append("LIVE_SIM_REPRICE_REQUIRES_TTL_CANCEL_ACK")
+        root_order_id = _reprice_root_order_id(order, intent)
+        attempt_count = _reprice_attempt_count_for_root_order(connection, root_order_id)
+        if attempt_count >= resolved_settings.live_sim_reprice_max_attempts:
+            reasons.append("LIVE_SIM_REPRICE_MAX_ATTEMPTS_EXCEEDED")
+        tick = _latest_tick_row(connection, str(order["code"]))
+        if tick is None:
+            reasons.append(LiveSimReasonCode.LATEST_TICK_MISSING.value)
+        item = {
+            "order": order,
+            "original_intent": intent,
+            "cancel_intent": cancel_intent,
+            "root_live_sim_order_id": root_order_id,
+            "attempt_count": attempt_count,
+            "next_attempt": attempt_count + 1,
+            "max_attempts": resolved_settings.live_sim_reprice_max_attempts,
+            "eligible": not reasons,
+            "reason_codes": _merge_reasons(reasons),
+            "latest_tick": _row_to_dict(tick) if tick is not None else None,
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+        }
+        candidates.append(item)
+    return candidates
+
+
+def create_live_sim_reprice_intent(
+    connection: sqlite3.Connection,
+    live_sim_order_id: str,
+    settings: Settings | None = None,
+) -> LiveSimIntent:
+    resolved_settings = settings or load_settings()
+    order = get_live_sim_order(connection, live_sim_order_id)
+    if order is None:
+        raise ValueError(f"LIVE_SIM order not found: {live_sim_order_id}")
+    original_intent = get_live_sim_intent(connection, str(order["live_sim_intent_id"]))
+    if original_intent is None:
+        raise ValueError("LIVE_SIM_REPRICE_ORIGINAL_INTENT_MISSING")
+    cancel_intent = _latest_cancel_intent_for_order(connection, live_sim_order_id)
+    if not _is_ttl_cancel_ack(cancel_intent):
+        raise ValueError("LIVE_SIM_REPRICE_REQUIRES_TTL_CANCEL_ACK")
+    if int(order.get("filled_quantity") or 0) != 0:
+        raise ValueError("LIVE_SIM_REPRICE_REQUIRES_UNFILLED_BUY")
+    if str(order.get("side", "")).upper() != LiveSimSide.BUY.value:
+        raise ValueError("LIVE_SIM_REPRICE_REQUIRES_BUY")
+
+    root_order_id = _reprice_root_order_id(order, original_intent)
+    attempt = _reprice_attempt_count_for_root_order(connection, root_order_id) + 1
+    if attempt > resolved_settings.live_sim_reprice_max_attempts:
+        raise ValueError("LIVE_SIM_REPRICE_MAX_ATTEMPTS_EXCEEDED")
+    reprice_evidence = {
+        "reprice": {
+            "enabled": True,
+            "attempt": attempt,
+            "max_attempts": resolved_settings.live_sim_reprice_max_attempts,
+            "original_live_sim_order_id": live_sim_order_id,
+            "original_live_sim_intent_id": order["live_sim_intent_id"],
+            "root_live_sim_order_id": root_order_id,
+            "cancel_intent_id": (
+                None if cancel_intent is None else cancel_intent["cancel_intent_id"]
+            ),
+            "cancel_reason": None if cancel_intent is None else cancel_intent["reason"],
+            "price_source": "LATEST_TICK",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+        }
+    }
+    intent = create_live_sim_intent(
+        connection,
+        str(original_intent["candidate_instance_id"]),
+        settings=resolved_settings,
+        source="live_sim_reprice",
+        idempotency_suffix=f"reprice:{root_order_id}:{attempt}",
+        extra_evidence=reprice_evidence,
+    )
+    if intent.status is LiveSimIntentStatus.CREATED:
+        _record_lifecycle_event(
+            connection,
+            event_type="REPRICE_INTENT_CREATED",
+            entity_type="LIVE_SIM_INTENT",
+            entity_id=intent.live_sim_intent_id,
+            live_sim_order_id=live_sim_order_id,
+            status=intent.status.value,
+            reason="TTL_CANCEL_REPRICE",
+            evidence=intent.to_dict(),
+        )
+        connection.commit()
+    return intent
+
+
+def run_live_sim_reprice_once(
+    connection: sqlite3.Connection,
+    settings: Settings | None = None,
+    *,
+    dry_run: bool = False,
+    queue_commands: bool = False,
+    limit: int | None = None,
+) -> LiveSimLifecycleRunResult:
+    resolved_settings = settings or load_settings()
+    run_id = new_message_id("live_sim_reprice_run")
+    if not resolved_settings.live_sim_reprice_enabled:
+        return LiveSimLifecycleRunResult(
+            run_id=run_id,
+            run_type="REPRICE_BUY_ONCE",
+            status="SKIPPED",
+            details={"reason": "LIVE_SIM_REPRICE_ENABLED=false"},
+        )
+    candidates = evaluate_live_sim_reprice_candidates(
+        connection,
+        resolved_settings,
+        limit=limit or resolved_settings.live_sim_operating_max_buy_commands_per_cycle,
+    )
+    created: list[dict[str, Any]] = []
+    queued: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    command_limit = _bounded_limit(
+        limit or resolved_settings.live_sim_operating_max_buy_commands_per_cycle
+    )
+    for candidate in candidates:
+        if not candidate["eligible"]:
+            continue
+        if len(created) >= command_limit:
+            break
+        order = candidate["order"]
+        if dry_run:
+            continue
+        try:
+            intent = create_live_sim_reprice_intent(
+                connection,
+                order["live_sim_order_id"],
+                settings=resolved_settings,
+            )
+            created.append(intent.to_dict())
+            if intent.status is not LiveSimIntentStatus.CREATED:
+                continue
+            if queue_commands:
+                queued.append(
+                    queue_live_sim_order_command(
+                        connection,
+                        intent.live_sim_intent_id,
+                        settings=resolved_settings,
+                    ).to_dict()
+                )
+        except Exception as exc:
+            errors.append({"order": order["live_sim_order_id"], "error": str(exc)})
+            _record_error(
+                connection,
+                live_sim_intent_id=order.get("live_sim_intent_id"),
+                live_sim_order_id=order["live_sim_order_id"],
+                code=order.get("code"),
+                error_message=str(exc),
+                payload=candidate,
+                run_id=run_id,
+            )
+            connection.commit()
+    return LiveSimLifecycleRunResult(
+        run_id=run_id,
+        run_type="REPRICE_BUY_ONCE",
         evaluated_count=len(candidates),
         intent_count=len(created),
         command_count=len(queued),
@@ -2273,6 +2512,15 @@ def _handle_cancel_command_event(
                 order["live_sim_order_id"],
             ),
         )
+        if accepted and int(order.get("filled_quantity") or 0) == 0:
+            connection.execute(
+                """
+                UPDATE live_sim_intents
+                SET status = ?
+                WHERE live_sim_intent_id = ?
+                """,
+                (LiveSimIntentStatus.CANCELLED.value, order["live_sim_intent_id"]),
+            )
         _record_lifecycle_event(
             connection,
             event_type="CANCEL_ACK" if accepted else "CANCEL_REJECTED",
@@ -2498,6 +2746,8 @@ def _apply_buy_fill(
     fill_notional = quantity * price
     if position is None:
         position_id = new_message_id("live_sim_position")
+        fee = fill_notional * settings.live_sim_fee_rate
+        entry_cost = fill_notional + fee
         connection.execute(
             """
             INSERT INTO live_sim_positions (
@@ -2534,8 +2784,8 @@ def _apply_buy_fill(
                 order["name"],
                 quantity,
                 quantity,
-                price,
-                fill_notional,
+                entry_cost / quantity,
+                entry_cost,
                 price,
                 price,
                 executed_at,
@@ -2553,7 +2803,9 @@ def _apply_buy_fill(
         old_quantity = int(position["quantity"])
         new_quantity = old_quantity + quantity
         old_notional = float(position["total_entry_notional"] or 0)
-        new_notional = old_notional + fill_notional
+        fee = fill_notional * settings.live_sim_fee_rate
+        entry_cost = fill_notional + fee
+        new_notional = old_notional + entry_cost
         avg_entry_price = new_notional / new_quantity if new_quantity > 0 else 0.0
         highest_price = max(float(position["highest_price"] or price), price)
         lowest_price = min(float(position["lowest_price"] or price), price)
@@ -2596,7 +2848,13 @@ def _apply_buy_fill(
         quantity_delta=quantity,
         price=price,
         realized_pnl=0.0,
-        evidence={"order": order, "fee_rate": settings.live_sim_fee_rate},
+        evidence={
+            "order": order,
+            "gross_entry_notional": fill_notional,
+            "buy_fee": fill_notional * settings.live_sim_fee_rate,
+            "net_entry_cost": fill_notional * (1 + settings.live_sim_fee_rate),
+            "fee_rate": settings.live_sim_fee_rate,
+        },
     )
     return {"position_id": position_id, "event_type": status, "quantity_delta": quantity}
 
@@ -2666,7 +2924,12 @@ def _apply_sell_fill(
     new_quantity = int(position["quantity"]) - quantity
     new_available = available - quantity
     new_entry_notional = avg_price * new_quantity
-    unrealized_pnl = (price - avg_price) * new_quantity
+    unrealized_pnl = _net_unrealized_pnl(
+        quantity=new_quantity,
+        avg_entry_price=avg_price,
+        last_price=price,
+        settings=settings,
+    )
     cumulative_realized = float(position["realized_pnl"] or 0) + realized_pnl
     status = "CLOSED" if new_quantity == 0 else "CLOSING"
     connection.execute(
@@ -3135,7 +3398,12 @@ def _mark_position_to_market(
 ) -> dict[str, Any]:
     quantity = int(position["quantity"])
     avg_entry_price = float(position["avg_entry_price"])
-    unrealized_pnl = (last_price - avg_entry_price) * quantity
+    unrealized_pnl = _net_unrealized_pnl(
+        quantity=quantity,
+        avg_entry_price=avg_entry_price,
+        last_price=last_price,
+        settings=settings,
+    )
     highest_price = max(float(position.get("highest_price") or last_price), last_price)
     lowest_price = min(float(position.get("lowest_price") or last_price), last_price)
     activated = highest_price >= avg_entry_price * (
@@ -3175,6 +3443,22 @@ def _mark_position_to_market(
         "lowest_price": lowest_price,
         "trailing_stop_price": trailing_stop_price,
     }
+
+
+def _net_unrealized_pnl(
+    *,
+    quantity: int,
+    avg_entry_price: float,
+    last_price: float,
+    settings: Settings,
+) -> float:
+    if quantity <= 0:
+        return 0.0
+    gross = (last_price - avg_entry_price) * quantity
+    exit_notional = last_price * quantity
+    estimated_sell_fee = exit_notional * settings.live_sim_fee_rate
+    estimated_sell_tax = exit_notional * settings.live_sim_tax_rate
+    return gross - estimated_sell_fee - estimated_sell_tax
 
 
 def _is_eod_flatten_time(settings: Settings) -> bool:
@@ -3721,6 +4005,24 @@ def _calculate_live_sim_quantity_and_notional(
     return quantity, price * quantity
 
 
+def _live_sim_buy_limit_price(price: float, settings: Settings) -> int:
+    return add_ticks(price, settings.live_sim_buy_price_offset_ticks)
+
+
+def _live_sim_buy_price_policy_evidence(
+    current_price: float,
+    limit_price: float,
+    settings: Settings,
+) -> dict[str, Any]:
+    return {
+        "source": "CURRENT_PRICE_PLUS_KRX_TICKS",
+        "current_price": current_price,
+        "limit_price": limit_price,
+        "buy_price_offset_ticks": settings.live_sim_buy_price_offset_ticks,
+        "legacy_price_offset_ticks": settings.live_sim_price_offset_ticks,
+    }
+
+
 def _tick_offset_value(offset_ticks: int) -> float:
     return float(offset_ticks)
 
@@ -4006,6 +4308,66 @@ def _cancel_intent_by_command_id(
         (require_non_empty_str(command_id, "command_id"),),
     ).fetchone()
     return None if row is None else _cancel_intent_row_to_dict(row)
+
+
+def _latest_cancel_intent_for_order(
+    connection: sqlite3.Connection,
+    live_sim_order_id: str,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_cancel_intents
+        WHERE live_sim_order_id = ?
+        ORDER BY created_at DESC, cancel_intent_id DESC
+        LIMIT 1
+        """,
+        (require_non_empty_str(live_sim_order_id, "live_sim_order_id"),),
+    ).fetchone()
+    return None if row is None else _cancel_intent_row_to_dict(row)
+
+
+def _is_ttl_cancel_ack(cancel_intent: Mapping[str, Any] | None) -> bool:
+    if cancel_intent is None:
+        return False
+    return (
+        str(cancel_intent.get("reason") or "").upper() == "TTL_EXPIRED"
+        and str(cancel_intent.get("status") or "").upper() == "ACKED"
+    )
+
+
+def _reprice_root_order_id(
+    order: Mapping[str, Any],
+    intent: Mapping[str, Any] | None,
+) -> str:
+    evidence = _json_object(None if intent is None else intent.get("evidence_json"))
+    reprice = _json_object(evidence.get("reprice"))
+    return str(
+        reprice.get("root_live_sim_order_id")
+        or reprice.get("original_live_sim_order_id")
+        or order["live_sim_order_id"]
+    )
+
+
+def _reprice_attempt_count_for_root_order(
+    connection: sqlite3.Connection,
+    root_live_sim_order_id: str,
+) -> int:
+    rows = connection.execute(
+        """
+        SELECT evidence_json
+        FROM live_sim_intents
+        ORDER BY created_at DESC, live_sim_intent_id DESC
+        LIMIT 1000
+        """
+    ).fetchall()
+    count = 0
+    for row in rows:
+        evidence = _json_object(row["evidence_json"])
+        reprice = _json_object(evidence.get("reprice"))
+        if str(reprice.get("root_live_sim_order_id") or "") == root_live_sim_order_id:
+            count += 1
+    return count
 
 
 def _exit_intent_by_order_id(
@@ -4346,17 +4708,20 @@ def _idempotency_key(
     candidate_instance_id: str,
     strategy_observation_id: str | None,
     risk_observation_id: str | None,
+    *,
+    suffix: str | None = None,
 ) -> str:
-    return ":".join(
-        [
-            "live_sim",
-            require_non_empty_str(trade_date, "trade_date"),
-            validate_stock_code(code),
-            require_non_empty_str(candidate_instance_id, "candidate_instance_id"),
-            require_non_empty_str(strategy_observation_id or "missing_strategy", "strategy"),
-            require_non_empty_str(risk_observation_id or "missing_risk", "risk"),
-        ]
-    )
+    parts = [
+        "live_sim",
+        require_non_empty_str(trade_date, "trade_date"),
+        validate_stock_code(code),
+        require_non_empty_str(candidate_instance_id, "candidate_instance_id"),
+        require_non_empty_str(strategy_observation_id or "missing_strategy", "strategy"),
+        require_non_empty_str(risk_observation_id or "missing_risk", "risk"),
+    ]
+    if suffix is not None:
+        parts.append(require_non_empty_str(suffix, "idempotency_suffix"))
+    return ":".join(parts)
 
 
 def _today_trade_date() -> str:

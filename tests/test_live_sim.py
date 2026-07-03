@@ -22,6 +22,7 @@ from services.live_sim.live_sim_service import (
     reconcile_live_sim,
     run_live_sim_cancel_unfilled_once,
     run_live_sim_exit_once,
+    run_live_sim_reprice_once,
 )
 from services.live_sim.safety_gate import check_live_sim_safety_gate
 from services.oms.dry_run_service import create_dry_run_intent
@@ -282,6 +283,27 @@ def test_live_sim_pilot_can_create_dry_run_evidence_and_intent_same_profile(tmp_
     assert command_count == 0
 
 
+def test_live_sim_buy_limit_price_uses_krx_tick_offset(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-buy-offset.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_buy_price_offset_ticks=1)
+
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    command_row = connection.execute(
+        "SELECT payload_json FROM gateway_commands WHERE command_type = 'send_order'"
+    ).fetchone()
+    connection.close()
+
+    payload = json.loads(command_row["payload_json"])
+    assert intent.limit_price == 97_100
+    assert intent.notional == 97_100
+    assert order.limit_price == 97_100
+    assert payload["price"] == 97_100
+    assert intent.evidence_json["price_policy"]["buy_price_offset_ticks"] == 1
+
+
 def test_live_sim_partial_fill_idempotent_and_position_accounting(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-position.sqlite3")
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
@@ -335,6 +357,133 @@ def test_live_sim_partial_fill_idempotent_and_position_accounting(tmp_path) -> N
     assert positions[0]["quantity"] == 2
     assert positions[0]["available_quantity"] == 2
     assert positions[0]["avg_entry_price"] == 98_000
+
+
+def test_live_sim_position_pnl_is_net_of_buy_fee_sell_fee_and_tax(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-net-pnl.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_fee_rate=0.0035, live_sim_tax_rate=0.0018)
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    command = poll_commands(connection)[0]
+    for event in GatewayCommandHandler().handle(command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    buy_fill = _execution_event(
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        broker_order_no=stored_order["broker_order_no"],
+        live_sim_intent_id=intent.live_sim_intent_id,
+        account_id=settings.live_sim_account_id,
+        quantity=1,
+        price=100_000,
+        remaining_quantity=0,
+        execution_id="exec-net-buy",
+    )
+    handle_live_sim_gateway_event(connection, buy_fill, settings=settings)
+    position = list_live_sim_positions(connection)[0]
+    connection.execute(
+        """
+        INSERT INTO live_sim_orders (
+            live_sim_order_id,
+            live_sim_intent_id,
+            gateway_command_id,
+            trade_date,
+            account_id,
+            code,
+            name,
+            side,
+            order_type,
+            quantity,
+            limit_price,
+            notional,
+            status,
+            broker_order_no,
+            filled_quantity,
+            remaining_quantity,
+            idempotency_key
+        )
+        VALUES ('sell-net-order', 'sell-net-intent', 'sell-net-command',
+            '2026-06-27', 'SIM-12345678', '005930', '삼성전자', 'SELL', 'LIMIT',
+            1, 110000, 110000, 'BROKER_ACKED', 'SELL-NET-1', 0, 1, 'sell-net-key')
+        """
+    )
+    connection.commit()
+    sell_fill = _execution_event(
+        command_id="sell-net-command",
+        idempotency_key="sell-net-key",
+        broker_order_no="SELL-NET-1",
+        live_sim_intent_id="sell-net-intent",
+        account_id=settings.live_sim_account_id,
+        side="SELL",
+        quantity=1,
+        price=110_000,
+        remaining_quantity=0,
+        execution_id="exec-net-sell",
+        metadata_extra={"position_id": position["position_id"]},
+    )
+    handle_live_sim_gateway_event(connection, sell_fill, settings=settings)
+    closed = list_live_sim_positions(connection, open_only=False)[0]
+    connection.close()
+
+    assert round(position["avg_entry_price"], 6) == 100_350
+    assert closed["status"] == "CLOSED"
+    assert round(closed["realized_pnl"], 6) == 9_067
+
+
+def test_live_sim_reconcile_notional_tolerance_ignores_rounding_noise(tmp_path) -> None:
+    connection, _ = _prepared_connection(tmp_path / "live-sim-reconcile-tolerance.sqlite3")
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="OPEN",
+        quantity=1,
+        realized_pnl=0,
+    )
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_executions (
+            live_sim_execution_id,
+            account_id,
+            code,
+            side,
+            quantity,
+            price,
+            notional,
+            executed_at,
+            raw_event_json
+        )
+        VALUES ('exec-reconcile-tolerance', 'SIM-12345678', '005930', 'BUY',
+            1, 97000, 97000, ?, '{}')
+        """,
+        (now,),
+    )
+    connection.execute(
+        "UPDATE live_sim_positions SET total_entry_notional = 97000.5"
+    )
+    connection.commit()
+
+    tolerated = reconcile_live_sim(
+        connection,
+        settings=_live_sim_settings(live_sim_reconcile_notional_tolerance=1.0),
+    )
+    connection.execute(
+        "UPDATE live_sim_positions SET total_entry_notional = 97002.1"
+    )
+    connection.commit()
+    mismatch = reconcile_live_sim(
+        connection,
+        settings=_live_sim_settings(live_sim_reconcile_notional_tolerance=1.0),
+    )
+    connection.close()
+
+    assert tolerated.mismatch_count == 0
+    assert mismatch.mismatch_count == 1
+    assert mismatch.snapshot_json["mismatches"][0]["reason"] == (
+        "position_entry_notional_mismatch"
+    )
 
 
 def test_live_sim_cancel_unfilled_ttl_queues_once_and_ack_cancels(tmp_path) -> None:
@@ -392,6 +541,70 @@ def test_live_sim_cancel_unfilled_ttl_queues_once_and_ack_cancels(tmp_path) -> N
     assert cancel_command["source"] == "live_sim"
     assert len(cancel_intents) == 1
     assert cancelled["status"] == LiveSimOrderStatus.CANCELLED.value
+
+
+def test_live_sim_reprice_retries_ttl_cancelled_buy_once(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-reprice.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_cancel_enabled=True,
+        live_sim_cancel_unfilled_enabled=True,
+        live_sim_cancel_order_ttl_sec=1,
+        live_sim_reprice_enabled=True,
+        live_sim_reprice_max_attempts=1,
+    )
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    buy_command = poll_commands(connection)[0]
+    for event in GatewayCommandHandler().handle(buy_command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    old = "2020-01-01T00:00:00Z"
+    connection.execute(
+        """
+        UPDATE live_sim_orders
+        SET created_at = ?,
+            remaining_quantity = quantity
+        WHERE live_sim_order_id = ?
+        """,
+        (old, order.live_sim_order_id),
+    )
+    connection.commit()
+    run_live_sim_cancel_unfilled_once(connection, settings=settings, queue_commands=True)
+    cancel_gateway_command = next(
+        command
+        for command in poll_commands(connection, limit=10)
+        if command.command_type == "cancel_order"
+    )
+    for event in GatewayCommandHandler().handle(cancel_gateway_command):
+        handle_live_sim_gateway_event(connection, event, settings=settings)
+    connection.execute("UPDATE market_ticks_latest SET price = 98000 WHERE code = '005930'")
+    connection.commit()
+
+    first = run_live_sim_reprice_once(connection, settings=settings, queue_commands=True)
+    second = run_live_sim_reprice_once(connection, settings=settings, queue_commands=True)
+    commands = connection.execute(
+        """
+        SELECT payload_json
+        FROM gateway_commands
+        WHERE command_type = 'send_order'
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+    intents = connection.execute(
+        "SELECT status, evidence_json FROM live_sim_intents ORDER BY created_at ASC"
+    ).fetchall()
+    connection.close()
+
+    retry_payload = json.loads(commands[-1]["payload_json"])
+    retry_evidence = json.loads(intents[-1]["evidence_json"])
+    assert first.command_count == 1
+    assert second.command_count == 0
+    assert retry_payload["side"] == "BUY"
+    assert retry_payload["price"] == 98_100
+    assert retry_evidence["source"] == "live_sim_reprice"
+    assert retry_evidence["reprice"]["attempt"] == 1
+    assert intents[0]["status"] == LiveSimIntentStatus.CANCELLED.value
 
 
 def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) -> None:

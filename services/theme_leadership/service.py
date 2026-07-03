@@ -19,6 +19,7 @@ from services.candidate_service import (
     create_or_merge_candidate_from_source,
 )
 from services.config import Settings, candidate_timezone, load_settings
+from services.theme_leadership.classifier import ThemeStateClassifier, ThemeStateInput
 from services.theme_leadership.models import (
     StockRole,
     ThemeLeadershipSnapshot,
@@ -98,7 +99,11 @@ class ThemeLeadershipService:
             return ThemeLeadershipRebuildResult(status="DISABLED")
 
         if self.settings.market_scan_enabled:
-            snapshots = _rank_from_theme_flow_snapshots(connection, created_at=utc_now())
+            snapshots = _rank_from_theme_flow_snapshots(
+                connection,
+                created_at=utc_now(),
+                settings=self.settings,
+            )
             if not snapshots:
                 universe = self.universe_builder.build(connection)
                 stock_snapshots = self.snapshot_builder.build_for_universe(connection, universe)
@@ -229,6 +234,7 @@ def _rank_from_theme_flow_snapshots(
     connection: sqlite3.Connection,
     *,
     created_at: datetime,
+    settings: Settings,
 ) -> list[ThemeLeadershipSnapshot]:
     rows = connection.execute(
         """
@@ -246,19 +252,32 @@ def _rank_from_theme_flow_snapshots(
     snapshots = []
     for index, row in enumerate(rows, start=1):
         members = _flow_members(connection, row["snapshot_id"])
-        reasons = _json_array(row["reason_codes_json"])
-        reasons = _dedupe([*reasons, "MARKET_SCAN_FLOW_RANKING"])
+        observed_count = int(row["observed_member_count"] or 0)
+        fresh_count = int(row["fresh_member_count"] or 0)
+        observable_fresh_coverage = _ratio(fresh_count, observed_count)
+        reasons = _flow_reason_codes(
+            row,
+            observable_fresh_coverage=observable_fresh_coverage,
+            settings=settings,
+        )
+        state, reasons = _classify_flow_theme_state(
+            row,
+            members,
+            fresh_coverage_ratio=observable_fresh_coverage,
+            reason_codes=reasons,
+            settings=settings,
+        )
         snapshots.append(
             ThemeLeadershipSnapshot(
                 theme_id=row["theme_id"],
                 theme_name=row["theme_name"],
-                state=_leadership_state(row["state"]),
+                state=state,
                 score=float(row["flow_score"] or 0.0),
                 rank=index,
-                observable_member_count=int(row["observed_member_count"] or 0),
-                valid_member_count=int(row["observed_member_count"] or 0),
-                fresh_member_count=int(row["fresh_member_count"] or 0),
-                fresh_coverage_ratio=float(row["scan_coverage_ratio"] or 0.0),
+                observable_member_count=observed_count,
+                valid_member_count=observed_count,
+                fresh_member_count=fresh_count,
+                fresh_coverage_ratio=observable_fresh_coverage,
                 rising_count=int(row["rising_member_count"] or 0),
                 rising_ratio=float(row["rising_ratio"] or 0.0),
                 leader_count=sum(1 for member in members if member.role is StockRole.LEADER),
@@ -278,19 +297,77 @@ def _rank_from_theme_flow_snapshots(
                 max_change_rate_pct=float(row["max_change_rate"] or 0.0),
                 leader_concentration=0.0,
                 full_member_count=int(row["active_member_count"] or 0),
-                full_observed_count=int(row["observed_member_count"] or 0),
-                full_fresh_member_count=int(row["fresh_member_count"] or 0),
-                full_fresh_coverage_ratio=float(row["scan_coverage_ratio"] or 0.0),
+                full_observed_count=observed_count,
+                full_fresh_member_count=fresh_count,
+                full_fresh_coverage_ratio=float(row["fresh_coverage_ratio"] or 0.0),
                 score_components={
                     "flow_score": float(row["flow_score"] or 0.0),
                     "flow_trade_value_delta": float(row["flow_trade_value_delta"] or 0.0),
                     "flow_rank_inflow_count": float(row["flow_rank_inflow_count"] or 0),
+                    "observable_fresh_coverage_ratio": observable_fresh_coverage,
+                    "full_fresh_coverage_ratio": float(row["fresh_coverage_ratio"] or 0.0),
                     "scan_coverage_ratio": float(row["scan_coverage_ratio"] or 0.0),
                     "realtime_coverage_ratio": float(row["realtime_coverage_ratio"] or 0.0),
                 },
             )
         )
     return snapshots
+
+
+def _classify_flow_theme_state(
+    row: sqlite3.Row,
+    members: Sequence[ThemeMemberLeadership],
+    *,
+    fresh_coverage_ratio: float,
+    reason_codes: Sequence[str],
+    settings: Settings,
+) -> tuple[ThemeState, list[str]]:
+    return ThemeStateClassifier().classify(
+        ThemeStateInput(
+            valid_member_count=int(row["observed_member_count"] or 0),
+            fresh_coverage_ratio=fresh_coverage_ratio,
+            rising_count=int(row["rising_member_count"] or 0),
+            rising_ratio=float(row["rising_ratio"] or 0.0),
+            weighted_return_pct=float(row["avg_change_rate"] or 0.0),
+            total_turnover_krw=float(row["total_trade_value"] or 0.0),
+            leader_score=_flow_leader_score(members),
+            score=float(row["flow_score"] or 0.0),
+            reason_codes=reason_codes,
+            min_valid_members=settings.theme_leadership_min_valid_members,
+            min_fresh_coverage_ratio=settings.theme_leadership_min_fresh_coverage_ratio,
+        )
+    )
+
+
+def _flow_reason_codes(
+    row: sqlite3.Row,
+    *,
+    observable_fresh_coverage: float,
+    settings: Settings,
+) -> list[str]:
+    observed_count = int(row["observed_member_count"] or 0)
+    reasons: list[str] = []
+    for reason in _json_array(row["reason_codes_json"]):
+        if (
+            reason == "LOW_FRESH_COVERAGE"
+            and observed_count > 0
+            and observable_fresh_coverage
+            >= settings.theme_leadership_min_fresh_coverage_ratio
+        ):
+            reasons.append("LOW_FULL_SCAN_COVERAGE")
+            continue
+        if reason == "NO_OBSERVED_MEMBERS" and observed_count > 0:
+            continue
+        reasons.append(reason)
+    reasons.append("MARKET_SCAN_FLOW_RANKING")
+    if observed_count > 0:
+        reasons.append("OBSERVABLE_FLOW_COVERAGE_USED")
+    return _dedupe(reasons)
+
+
+def _flow_leader_score(members: Sequence[ThemeMemberLeadership]) -> float:
+    fresh_scores = [member.member_score for member in members if not member.stale]
+    return max(fresh_scores) if fresh_scores else 0.0
 
 
 def _flow_members(
@@ -344,11 +421,6 @@ def _flow_members(
     return members
 
 
-def _leadership_state(value: object) -> ThemeState:
-    text = str(value or "DATA_WAIT").upper()
-    return ThemeState(text) if text in {item.value for item in ThemeState} else ThemeState.WATCH
-
-
 def _stock_role(role: object, readiness_status: object) -> StockRole:
     if str(readiness_status or "").upper() != "FRESH":
         return StockRole.STALE
@@ -388,6 +460,12 @@ def _member_flow_reasons(row: sqlite3.Row, metadata: Mapping[str, Any]) -> list[
     if _market_scan_rank(metadata) is not None:
         reasons.append("MARKET_SCAN_RANKED")
     return _dedupe(reasons)
+
+
+def _ratio(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return numerator / denominator
 
 
 def _market_scan_rank(metadata: Mapping[str, Any]) -> int | None:

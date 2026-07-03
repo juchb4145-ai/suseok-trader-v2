@@ -397,6 +397,9 @@ class Settings:
     live_sim_default_order_type: str = "LIMIT"
     live_sim_default_hoga: str = "00"
     live_sim_price_offset_ticks: int = 0
+    live_sim_buy_price_offset_ticks: int = 1
+    live_sim_reprice_enabled: bool = False
+    live_sim_reprice_max_attempts: int = 1
     live_sim_config_version: str = "live_sim_v1"
     live_sim_pilot_pipeline_enabled: bool = False
     live_sim_pilot_auto_queue_command: bool = False
@@ -450,6 +453,7 @@ class Settings:
     live_sim_reconcile_block_new_buy_on_mismatch: bool = True
     live_sim_reconcile_allow_exit_on_mismatch: bool = True
     live_sim_reconcile_stale_order_sec: int = 300
+    live_sim_reconcile_notional_tolerance: float = 1.0
     live_sim_operating_cycle_enabled: bool = True
     live_sim_operating_default_mode: str = "OBSERVE_CYCLE"
     live_sim_operating_max_buy_commands_per_cycle: int = 1
@@ -844,6 +848,12 @@ class Settings:
             raise ValueError("LIVE_SIM_MAX_DAILY_NOTIONAL must be >= LIVE_SIM_MAX_ORDER_NOTIONAL")
         if self.live_sim_price_offset_ticks < 0:
             raise ValueError("LIVE_SIM_PRICE_OFFSET_TICKS must be >= 0")
+        if self.live_sim_buy_price_offset_ticks < 0:
+            raise ValueError("LIVE_SIM_BUY_PRICE_OFFSET_TICKS must be >= 0")
+        if self.live_sim_buy_price_offset_ticks > 3:
+            raise ValueError("LIVE_SIM_BUY_PRICE_OFFSET_TICKS must be <= 3")
+        if self.live_sim_reprice_max_attempts < 1:
+            raise ValueError("LIVE_SIM_REPRICE_MAX_ATTEMPTS must be >= 1")
         object.__setattr__(
             self,
             "live_sim_entry_window_start",
@@ -999,6 +1009,8 @@ class Settings:
             )
         if self.live_sim_exit_price_offset_ticks < 0:
             raise ValueError("LIVE_SIM_EXIT_PRICE_OFFSET_TICKS must be >= 0")
+        if self.live_sim_reconcile_notional_tolerance < 0:
+            raise ValueError("LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE must be >= 0")
         if (
             self.live_sim_cancel_allow_without_broker_order_no
             and self.live_sim_cancel_require_broker_order_no
@@ -2282,6 +2294,19 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "LIVE_SIM_PRICE_OFFSET_TICKS",
             min_value=0,
         ),
+        live_sim_buy_price_offset_ticks=_parse_int(
+            env.get("LIVE_SIM_BUY_PRICE_OFFSET_TICKS", "1"),
+            "LIVE_SIM_BUY_PRICE_OFFSET_TICKS",
+            min_value=0,
+        ),
+        live_sim_reprice_enabled=_parse_bool(
+            env.get("LIVE_SIM_REPRICE_ENABLED", "false")
+        ),
+        live_sim_reprice_max_attempts=_parse_int(
+            env.get("LIVE_SIM_REPRICE_MAX_ATTEMPTS", "1"),
+            "LIVE_SIM_REPRICE_MAX_ATTEMPTS",
+            min_value=1,
+        ),
         live_sim_config_version=env.get("LIVE_SIM_CONFIG_VERSION", "live_sim_v1"),
         live_sim_pilot_pipeline_enabled=_parse_bool(
             env.get("LIVE_SIM_PILOT_PIPELINE_ENABLED", "false")
@@ -2476,6 +2501,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("LIVE_SIM_RECONCILE_STALE_ORDER_SEC", "300"),
             "LIVE_SIM_RECONCILE_STALE_ORDER_SEC",
             min_value=1,
+        ),
+        live_sim_reconcile_notional_tolerance=_parse_float(
+            env.get("LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE", "1.0"),
+            "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE",
+            min_value=0.0,
         ),
         live_sim_operating_cycle_enabled=_parse_bool(
             env.get("LIVE_SIM_OPERATING_CYCLE_ENABLED", "true")

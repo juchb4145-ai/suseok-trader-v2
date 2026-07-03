@@ -9,6 +9,7 @@ from domain.broker.utils import utc_now
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.config import Settings, candidate_timezone
 from services.market_data_service import process_gateway_event
+from services.market_scan_service import process_market_scan_event
 from services.theme_leadership import (
     StockRole,
     ThemeLeadershipService,
@@ -29,7 +30,7 @@ from services.theme_leadership.snapshot import RealtimeSnapshotBuilder
 from services.theme_leadership.stock_role import StockRoleClassifier
 from services.theme_leadership.universe import ThemeUniverseBuilder
 from services.theme_leadership.watchset import WatchsetSelector
-from services.theme_service import import_theme_memberships
+from services.theme_service import calculate_theme_snapshot, import_theme_memberships
 from storage.event_store import append_gateway_event
 from storage.sqlite import initialize_database
 
@@ -274,6 +275,53 @@ def test_rebuild_watchset_selection_pool_reports_no_eligible_theme(tmp_path) -> 
     assert result.watchset.items == []
     assert result.warning == "THEME_LEADERSHIP_NO_ELIGIBLE_THEME"
     assert result.watchset.reason_summary["THEME_LEADERSHIP_NO_ELIGIBLE_THEME"] == 1
+
+
+def test_market_scan_flow_uses_observed_universe_for_watchset(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-scan-flow-watchset.sqlite3")
+    settings = _settings(
+        market_scan_enabled=True,
+        theme_leadership_write_candidate_sources=True,
+    )
+    members = [(f"{100000 + index:06d}", f"스캔종목{index:02d}") for index in range(30)]
+    import_theme_memberships(
+        connection,
+        _theme_payload("large_scan_theme", "대형스캔테마", members),
+    )
+    _project_market_scan(
+        connection,
+        "scan-flow",
+        rows=[
+            _scan_row(members[0][0], members[0][1], rank=1, change_rate=3.0),
+            _scan_row(members[1][0], members[1][1], rank=2, change_rate=2.6),
+            _scan_row(members[2][0], members[2][1], rank=3, change_rate=2.2),
+        ],
+        settings=settings,
+    )
+
+    legacy = calculate_theme_snapshot(connection, "large_scan_theme", settings=settings)
+    result = rebuild_theme_leadership(
+        connection,
+        write_candidate_sources=True,
+        settings=settings,
+    )
+    candidate_event_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM candidate_source_events"
+    ).fetchone()["count"]
+    connection.close()
+
+    snapshot = result.snapshots[0]
+    assert legacy.state == "DATA_WAIT"
+    assert "LOW_FRESH_COVERAGE" in legacy.reason_codes
+    assert legacy.scan_coverage_ratio < settings.theme_min_fresh_coverage_ratio
+    assert snapshot.state is ThemeState.SPREADING
+    assert snapshot.observable_member_count == 3
+    assert snapshot.fresh_coverage_ratio == 1.0
+    assert snapshot.full_fresh_coverage_ratio < settings.theme_min_fresh_coverage_ratio
+    assert "LOW_FULL_SCAN_COVERAGE" in snapshot.reason_codes
+    assert "LOW_FRESH_COVERAGE" not in snapshot.reason_codes
+    assert result.watchset.items
+    assert len(result.candidate_source_events) == candidate_event_count
 
 
 def test_watchset_excludes_overheated_late_laggard_and_stale_members(tmp_path) -> None:
@@ -537,6 +585,47 @@ def _old_price_tick_event() -> GatewayEvent:
         payload=tick.to_dict(),
         ts=old_ts,
     )
+
+
+def _project_market_scan(
+    connection,
+    suffix: str,
+    *,
+    rows: list[dict[str, object]],
+    settings: Settings,
+) -> None:
+    event = GatewayEvent(
+        event_id=f"evt_market_scan_{suffix}",
+        event_type="tr_response",
+        source="mock_gateway",
+        payload={
+            "request_id": f"market_scan:TRADE_VALUE:KOSPI:{suffix}",
+            "tr_code": "OPT10032",
+            "request_name": "market_scan_trade_value_kospi",
+            "success": True,
+            "rows": rows,
+        },
+    )
+    result = process_market_scan_event(connection, event, settings=settings)
+    assert result.status == "APPLIED"
+
+
+def _scan_row(
+    code: str,
+    name: str,
+    *,
+    rank: int,
+    change_rate: float,
+) -> dict[str, object]:
+    return {
+        "code": code,
+        "name": name,
+        "rank": rank,
+        "price": 10_000,
+        "change_rate": change_rate,
+        "trade_value": 500_000_000 - rank * 10_000_000,
+        "volume": 100_000 - rank,
+    }
 
 
 def _leadership_snapshot(*, rank: int, state: ThemeState) -> ThemeLeadershipSnapshot:

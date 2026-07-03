@@ -57,6 +57,8 @@ def test_dashboard_static_market_theme_uses_theme_and_index_readiness_sources() 
     assert "top_tradable_themes" in js
     assert "DB Theme snapshots" in js
     assert "Leadership watchset" in js
+    assert "Leadership eligible" in js
+    assert "Leadership watchset ${leadershipWatchset}개" in js
     assert "quality_status" in js
     assert "index core ready" in js
     assert "index core degraded" in js

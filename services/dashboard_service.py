@@ -123,6 +123,7 @@ from services.strategy_engine import (
     list_strategy_errors,
     list_strategy_setup_observations,
 )
+from services.theme_leadership import rebuild_theme_leadership
 from services.theme_service import (
     get_theme_status,
     list_latest_theme_snapshots,
@@ -378,6 +379,11 @@ def build_dashboard_snapshot(
         latest_sample_state_counts=latest_sample_state_counts,
         top_tradable_themes=top_tradable_themes,
     )
+    theme_leadership = rebuild_theme_leadership(
+        connection,
+        write_candidate_sources=False,
+        settings=settings,
+    )
 
     errors = build_dashboard_errors(connection, settings=settings, limit=bounded_limit)
     pipeline_summary = _pipeline_summary(
@@ -441,6 +447,17 @@ def build_dashboard_snapshot(
             "latest_sample_state_counts": latest_sample_state_counts,
             "dashboard_warnings": theme_dashboard_warnings,
             "top_list_source": "state_filtered_strength_query",
+            "leadership": {
+                "status": theme_leadership.status,
+                "top_themes": [
+                    snapshot.to_dict(include_members=False)
+                    for snapshot in theme_leadership.snapshots
+                ],
+                "watchset": theme_leadership.watchset.to_dict(),
+                "eligible_theme_count": theme_leadership.eligible_theme_count,
+                "watchset_selection_source": theme_leadership.watchset_selection_source,
+                "warning": theme_leadership.warning,
+            },
         },
         "candidates": {
             "status": candidate_status,

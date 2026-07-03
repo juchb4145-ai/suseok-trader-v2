@@ -128,6 +128,9 @@ const topThemeEmptyMessage = ({ snapshotCount, tradableCount, warnings, leadersh
   if (snapshotCount <= 0) {
     return "DB theme snapshot 자체가 없습니다.";
   }
+  if (tradableCount <= 0 && leadershipWatchset > 0) {
+    return `DB에는 LEADING/SPREADING 테마가 없지만 Leadership watchset ${leadershipWatchset}개가 생성됐습니다.`;
+  }
   if (tradableCount <= 0) {
     return "DB에는 LEADING/SPREADING 테마가 없습니다.";
   }
@@ -138,6 +141,21 @@ const topThemeEmptyMessage = ({ snapshotCount, tradableCount, warnings, leadersh
     return "Leadership watchset만 0입니다. DB top theme는 존재합니다.";
   }
   return "표시할 top theme가 없습니다.";
+};
+
+const isLeadershipTradableState = (state) =>
+  ["LEADING", "SPREADING", "LEADER_ONLY"].includes(text(state).toUpperCase());
+
+const themeRowSource = (row) => text(row._dashboard_source || "DB");
+
+const themeRowAgeText = (row) => {
+  if (row.age_sec != null) {
+    return `${Math.round(Number(row.age_sec))}s`;
+  }
+  if (row.created_at) {
+    return "runtime";
+  }
+  return "-";
 };
 
 const renderSafety = (snapshot) => {
@@ -239,6 +257,7 @@ const renderMarketTheme = (snapshot) => {
   const themes = snapshot.themes || {};
   const themeStatus = themes.status || {};
   const stateCounts = themes.state_counts || {};
+  const leadership = themes.leadership || {};
   const marketIndexes = snapshot.market_indexes || {};
   const indexStatus = marketIndexes.status || {};
   const indexAdapter = marketIndexes.gateway_adapter || {};
@@ -250,13 +269,24 @@ const renderMarketTheme = (snapshot) => {
     ...(themes.top_leading_themes || []),
     ...(themes.top_spreading_themes || []),
   ];
-  const rows = (topTradable.length ? topTradable : fallbackRows).slice(0, 6);
+  const dbRows = (topTradable.length ? topTradable : fallbackRows).map((row) => ({
+    ...row,
+    _dashboard_source: "DB",
+  }));
+  const leadershipRows = (leadership.top_themes || [])
+    .filter((row) => isLeadershipTradableState(row.state))
+    .map((row) => ({
+      ...row,
+      _dashboard_source: "Leadership",
+    }));
+  const rows = (dbRows.length ? dbRows : leadershipRows).slice(0, 6);
   const dbSnapshotCount = Number(themeStatus.latest_snapshot_count || 0);
   const dbLeadingCount = Number(stateCounts.LEADING || 0);
   const dbSpreadingCount = Number(stateCounts.SPREADING || 0);
   const dbTradableCount = dbLeadingCount + dbSpreadingCount;
   const dbDataWaitCount = Number(stateCounts.DATA_WAIT || 0);
   const leadershipWatchsetCount = Number(themeStage.watchset_count || 0);
+  const leadershipEligibleCount = Number(leadership.eligible_theme_count || 0);
   const coreStatus = indexCoreStatus(indexStatus);
   const indexReasons = [...(coreStatus.reasons || []), ...(indexStatus.sanity_warnings || [])];
   document.getElementById("market-theme-badges").innerHTML = [
@@ -271,6 +301,7 @@ const renderMarketTheme = (snapshot) => {
     metric("DB LEADING/SPREADING", `${dbLeadingCount} / ${dbSpreadingCount}`),
     metric("DB DATA_WAIT", dbDataWaitCount),
     metric("Leadership watchset", leadershipWatchsetCount),
+    metric("Leadership eligible", leadershipEligibleCount),
     metric("Leadership top DATA_WAIT", themeStage.data_wait_count || 0),
     metric("Leadership top snapshots", themeStage.snapshot_count || 0),
     metric("Core index readiness", coreStatus.value),
@@ -282,13 +313,14 @@ const renderMarketTheme = (snapshot) => {
   ].join("");
   document.getElementById("market-theme-table").innerHTML = rows.length
     ? table(
-        ["테마", "상태", "리더", "fresh/rising", "age"],
+        ["소스", "테마", "상태", "리더", "fresh/rising", "age"],
         rows.map((row) => [
+          themeRowSource(row),
           row.theme_name,
           `${badge(row.state)}${row.stale ? badge("STALE") : ""}`,
-          `${text(row.leading_name)} ${text(row.leading_code)}`,
+          `${text(row.leading_name || row.leader_name)} ${text(row.leading_code || row.leader_code)}`,
           `${pct(row.fresh_coverage_ratio)} / ${pct(row.rising_ratio)}`,
-          row.age_sec == null ? "-" : `${Math.round(Number(row.age_sec))}s`,
+          themeRowAgeText(row),
         ]),
       )
     : emptyState(

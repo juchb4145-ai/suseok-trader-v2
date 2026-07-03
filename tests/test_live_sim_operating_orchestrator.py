@@ -265,6 +265,78 @@ def test_full_lifecycle_applies_operating_command_budget(tmp_path, monkeypatch) 
     assert result.exit_command_count == 2
 
 
+def test_reprice_consumes_operating_buy_budget(tmp_path, monkeypatch) -> None:
+    import services.runtime.live_sim_operating_orchestrator as orchestrator
+
+    connection = initialize_database(tmp_path / "reprice-budget.sqlite3")
+    settings = _operating_settings(
+        live_sim_reprice_enabled=True,
+        live_sim_pilot_auto_queue_command=True,
+        live_sim_operating_require_preflight_pass_for_queue=False,
+        live_sim_operating_max_buy_commands_per_cycle=1,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_preflight",
+        lambda *args, **kwargs: LiveSimPreflightResult(
+            status=PreflightStatus.PASS,
+            mode=OperatingMode.PILOT_FULL_LIFECYCLE,
+            queue_commands=True,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_cancel_unfilled_once",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="cancel",
+            run_type="CANCEL",
+            evaluated_count=0,
+            command_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_exit_once",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="exit",
+            run_type="EXIT",
+            evaluated_count=0,
+            command_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_reprice_once",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="reprice",
+            run_type="REPRICE",
+            evaluated_count=1,
+            command_count=1,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_pilot_pipeline_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("buy pipeline should not run after reprice consumes budget")
+        ),
+    )
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_FULL_LIFECYCLE,
+        queue_commands=True,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    assert result.buy_command_count == 1
+    assert result.reason_summary["command_counts"]["reprice_buy"] == 1
+    assert result.stages["buy"]["reason"] == "reprice_consumed_buy_budget"
+
+
 def test_preflight_block_forces_command_zero_and_run_is_saved(tmp_path) -> None:
     connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-block.sqlite3")
 

@@ -19,6 +19,7 @@ from domain.live_sim.reasons import LiveSimReasonCode
 from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, load_settings
 from services.entry_timing.models import EntryTimingState, OrderPlanStatus, SetupType
+from services.entry_timing.tick_size import add_ticks
 from services.live_sim.live_sim_service import (
     _active_cancel_count_for_code,
     _active_exit_count_for_code,
@@ -286,7 +287,11 @@ def evaluate_live_sim_order_plan_eligibility(
             latest_tick_evidence["draft_price_drift_pct"] = drift_pct
             if drift_pct > resolved_settings.live_sim_order_plan_max_price_drift_pct:
                 reason_codes.append(LiveSimReasonCode.ORDER_PLAN_PRICE_DRIFT_EXCEEDED.value)
-        limit_price = _float(order_plan["limit_price"])
+        limit_price = _live_sim_buy_limit_price_for_plan(
+            order_plan,
+            resolved_settings,
+            latest_price=latest_price,
+        )
         if limit_price > 0 and latest_price > limit_price * (
             1 + resolved_settings.live_sim_order_plan_max_price_drift_pct / 100
         ):
@@ -320,7 +325,11 @@ def evaluate_live_sim_order_plan_eligibility(
     ):
         reason_codes.append(LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value)
     daily_notional = _daily_order_notional(connection, str(order_plan["trade_date"]))
-    sizing = _sizing(order_plan, resolved_settings)
+    sizing = _sizing(
+        order_plan,
+        resolved_settings,
+        latest_price=latest_price if latest_price > 0 else None,
+    )
     if daily_notional + float(sizing["notional"]) > resolved_settings.live_sim_max_daily_notional:
         reason_codes.append(LiveSimReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value)
     if _active_order_count(connection) >= resolved_settings.live_sim_max_active_orders:
@@ -623,8 +632,18 @@ def _evaluation_evidence(evaluation: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _sizing(order_plan: Mapping[str, Any], settings: Settings) -> dict[str, Any]:
-    limit_price = _float(order_plan["limit_price"])
+def _sizing(
+    order_plan: Mapping[str, Any],
+    settings: Settings,
+    *,
+    latest_price: float | None = None,
+) -> dict[str, Any]:
+    limit_price = _live_sim_buy_limit_price_for_plan(
+        order_plan,
+        settings,
+        latest_price=latest_price,
+    )
+    order_plan_limit_price = _float(order_plan["limit_price"])
     max_notional = min(
         settings.live_sim_order_plan_max_notional,
         settings.live_sim_max_order_notional,
@@ -638,6 +657,9 @@ def _sizing(order_plan: Mapping[str, Any], settings: Settings) -> dict[str, Any]
         "quantity": quantity,
         "notional": notional,
         "limit_price": limit_price,
+        "order_plan_limit_price": order_plan_limit_price,
+        "buy_price_offset_ticks": settings.live_sim_buy_price_offset_ticks,
+        "price_policy": "LATEST_PRICE_PLUS_KRX_TICKS",
         "planned_quantity": planned_quantity,
         "planned_notional": planned_notional,
         "min_notional": settings.live_sim_order_plan_min_notional,
@@ -645,6 +667,23 @@ def _sizing(order_plan: Mapping[str, Any], settings: Settings) -> dict[str, Any]
         "max_order_plan_notional": settings.live_sim_order_plan_max_notional,
         "max_live_sim_order_notional": settings.live_sim_max_order_notional,
     }
+
+
+def _live_sim_buy_limit_price_for_plan(
+    order_plan: Mapping[str, Any],
+    settings: Settings,
+    *,
+    latest_price: float | None,
+) -> float:
+    base_price = latest_price if latest_price is not None and latest_price > 0 else _float(
+        order_plan["limit_price"]
+    )
+    if base_price <= 0:
+        return 0.0
+    try:
+        return float(add_ticks(base_price, settings.live_sim_buy_price_offset_ticks))
+    except ValueError:
+        return 0.0
 
 
 def _has_blocked_order_plan_reason(reasons: Sequence[str]) -> bool:

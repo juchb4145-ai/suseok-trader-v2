@@ -250,6 +250,55 @@ def test_dashboard_top_leading_and_spreading_use_state_filtered_queries(tmp_path
     }
 
 
+def test_dashboard_exposes_leadership_when_legacy_db_theme_is_data_wait(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-leadership-fallback.sqlite3")
+    settings = Settings(
+        market_data_tick_stale_sec=999_999_999,
+        market_data_degraded_tick_stale_sec=999_999_999,
+        candidate_source_stale_sec=999_999_999,
+        candidate_tick_stale_sec=999_999_999,
+        candidate_episode_ttl_sec=999_999_999,
+    )
+    members = [(f"{100000 + index:06d}", f"종목{index:02d}") for index in range(30)]
+    import_theme_memberships(
+        connection,
+        {
+            "source_type": "MOCK",
+            "source_name": "dashboard_leadership_fixture",
+            "themes": [
+                {
+                    "theme_id": "large-theme",
+                    "theme_name": "대형테마",
+                    "members": [{"code": code, "name": name} for code, name in members],
+                }
+            ],
+        },
+    )
+    for index, (code, name) in enumerate(members[:3]):
+        _append_and_project(
+            connection,
+            make_price_tick_event(
+                code=code,
+                name=name,
+                change_rate=2.4 - index * 0.2,
+                trade_value=300_000_000 - index * 10_000_000,
+                execution_strength=120.0 - index,
+            ),
+            settings,
+        )
+    calculate_all_theme_snapshots(connection, settings=settings)
+
+    snapshot = build_dashboard_snapshot(connection, settings, limit=20)
+    connection.close()
+
+    themes = snapshot["themes"]
+    assert themes["state_counts"]["DATA_WAIT"] == 1
+    assert themes["top_tradable_themes"] == []
+    assert themes["leadership"]["watchset"]["items"]
+    assert themes["leadership"]["eligible_theme_count"] == 1
+    assert themes["leadership"]["top_themes"][0]["state"] in {"LEADING", "SPREADING"}
+
+
 def test_dashboard_theme_snapshot_exposes_age_and_stale_flag(tmp_path) -> None:
     connection = initialize_database(tmp_path / "dashboard-theme-stale.sqlite3")
     calculated_at = datetime_to_wire(utc_now() - timedelta(seconds=600))

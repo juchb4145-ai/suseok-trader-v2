@@ -17,6 +17,7 @@ from services.live_sim.live_sim_service import (
     reconcile_live_sim,
     run_live_sim_cancel_unfilled_once,
     run_live_sim_exit_once,
+    run_live_sim_reprice_once,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
 from services.runtime.live_sim_pilot_pipeline import run_live_sim_pilot_pipeline_once
@@ -264,6 +265,7 @@ def run_live_sim_operating_cycle_once(
         }
 
     buy_result = None
+    reprice_result = None
     buy_queue = (
         queue_policy["base_commands_allowed"]
         and queue_policy["buy_commands_allowed"]
@@ -271,18 +273,57 @@ def run_live_sim_operating_cycle_once(
         and resolved_settings.live_sim_operating_max_buy_commands_per_cycle > 0
     )
     if resolved_mode.includes_buy and not post_reconcile_blocks_buy:
-        try:
-            buy_result = run_live_sim_pilot_pipeline_once(
-                connection,
-                settings=budgeted_settings,
-                trade_date=trade_date,
-                limit=limit,
-                queue_commands=buy_queue,
+        remaining_buy_commands = resolved_settings.live_sim_operating_max_buy_commands_per_cycle
+        if resolved_settings.live_sim_reprice_enabled:
+            try:
+                reprice_result = run_live_sim_reprice_once(
+                    connection,
+                    settings=budgeted_settings,
+                    dry_run=not buy_queue,
+                    queue_commands=buy_queue,
+                    limit=remaining_buy_commands,
+                )
+                stages["reprice"] = reprice_result.to_dict()
+                remaining_buy_commands = max(
+                    remaining_buy_commands - int(reprice_result.command_count or 0),
+                    0,
+                )
+            except Exception as exc:
+                errors.append(_stage_error("reprice", exc))
+                stages["reprice"] = {"status": "ERROR", "error": str(exc)}
+        if buy_queue and remaining_buy_commands <= 0:
+            stages["buy"] = {
+                "status": "SKIPPED",
+                "reason": "reprice_consumed_buy_budget",
+                "command_count": 0,
+                "live_sim_only": True,
+                "live_real_allowed": False,
+            }
+        else:
+            buy_settings = (
+                budgeted_settings
+                if remaining_buy_commands
+                >= resolved_settings.live_sim_operating_max_buy_commands_per_cycle
+                else replace(
+                    budgeted_settings,
+                    live_sim_order_plan_max_commands_per_run=min(
+                        budgeted_settings.live_sim_order_plan_max_commands_per_run,
+                        max(remaining_buy_commands, 0),
+                    ),
+                )
             )
-            stages["buy"] = buy_result.to_dict()
-        except Exception as exc:
-            errors.append(_stage_error("buy", exc))
-            stages["buy"] = {"status": "ERROR", "error": str(exc)}
+            try:
+                buy_result = run_live_sim_pilot_pipeline_once(
+                    connection,
+                    settings=buy_settings,
+                    trade_date=trade_date,
+                    limit=limit,
+                    queue_commands=buy_queue,
+                )
+                stages["buy"] = buy_result.to_dict()
+            except Exception as exc:
+                errors.append(_stage_error("buy", exc))
+                stages["buy"] = {"status": "ERROR", "error": str(exc)}
     else:
         stages["buy"] = {
             "status": "SKIPPED",
@@ -322,6 +363,7 @@ def run_live_sim_operating_cycle_once(
 
     counts = _stage_counts(
         buy_result=buy_result,
+        reprice_result=reprice_result,
         cancel_result=cancel_result,
         exit_result=exit_result,
     )
@@ -339,6 +381,7 @@ def run_live_sim_operating_cycle_once(
         )
     reason_summary["command_counts"] = {
         "buy": counts["buy_command_count"],
+        "reprice_buy": counts["reprice_command_count"],
         "cancel": counts["cancel_command_count"],
         "exit": counts["exit_command_count"],
         "total": command_total,
@@ -588,12 +631,19 @@ def _mode_policy(mode: OperatingMode) -> dict[str, bool]:
 def _stage_counts(
     *,
     buy_result: Any,
+    reprice_result: Any,
     cancel_result: Any,
     exit_result: Any,
 ) -> dict[str, int]:
+    reprice_evaluated = int(getattr(reprice_result, "evaluated_count", 0) or 0)
+    reprice_commands = int(getattr(reprice_result, "command_count", 0) or 0)
     return {
-        "buy_evaluated_count": int(getattr(buy_result, "evaluated_count", 0) or 0),
-        "buy_command_count": int(getattr(buy_result, "command_count", 0) or 0),
+        "buy_evaluated_count": int(getattr(buy_result, "evaluated_count", 0) or 0)
+        + reprice_evaluated,
+        "buy_command_count": int(getattr(buy_result, "command_count", 0) or 0)
+        + reprice_commands,
+        "reprice_evaluated_count": reprice_evaluated,
+        "reprice_command_count": reprice_commands,
         "cancel_candidate_count": int(getattr(cancel_result, "evaluated_count", 0) or 0),
         "cancel_command_count": int(getattr(cancel_result, "command_count", 0) or 0),
         "exit_signal_count": int(getattr(exit_result, "evaluated_count", 0) or 0),
