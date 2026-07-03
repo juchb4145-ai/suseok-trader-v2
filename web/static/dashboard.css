@@ -114,6 +114,11 @@ h2 {
   font-size: 13px;
 }
 
+.warning-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .dashboard-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -429,6 +434,10 @@ td {
   background: rgba(245, 185, 66, 0.1);
   color: #ffe0a3;
   font-size: 13px;
+}
+
+.ai-advisory-note {
+  margin-top: 0;
 }
 
 .operator-columns {

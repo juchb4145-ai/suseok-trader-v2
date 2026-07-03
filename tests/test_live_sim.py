@@ -329,6 +329,39 @@ def test_live_sim_buy_limit_price_uses_krx_tick_offset(tmp_path) -> None:
     assert intent.evidence_json["price_policy"]["buy_price_offset_ticks"] == 1
 
 
+def test_live_sim_runtime_status_heartbeat_is_ignored_without_error(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-heartbeat-ignore.sqlite3")
+    result = handle_live_sim_gateway_event(
+        connection,
+        GatewayEvent(
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={
+                "mode": "LIVE_SIM",
+                "broker_env": "SIMULATION",
+                "server_mode": "SIMULATION",
+                "account_mode": "SIMULATION",
+            },
+        ),
+        settings=_live_sim_settings(),
+    )
+    error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM live_sim_errors"
+    ).fetchone()["count"]
+    lifecycle_error_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM live_sim_lifecycle_events
+        WHERE event_type = 'LIFECYCLE_ERROR'
+        """
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result == {"handled": False, "reason": "runtime_status_event_not_live_sim"}
+    assert error_count == 0
+    assert lifecycle_error_count == 0
+
+
 def test_live_sim_partial_fill_idempotent_and_position_accounting(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-position.sqlite3")
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())

@@ -72,6 +72,7 @@ ACTIVE_LIVE_SIM_POSITION_STATUSES = {"OPEN", "CLOSING", "RECONCILE_MISMATCH"}
 ACTIVE_CANCEL_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
 ACTIVE_EXIT_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
 ACTIVE_EXIT_SIGNAL_STATUSES = {"SIGNALLED", "EXIT_INTENT_CREATED", "COMMAND_QUEUED"}
+LIVE_SIM_RUNTIME_STATUS_EVENT_TYPES = {"heartbeat", "orderability"}
 
 LIVE_SIM_ADMISSION_REASON_MAP = {
     AdmissionReason.CANDIDATE_NOT_FOUND.value: LiveSimReasonCode.CANDIDATE_NOT_FOUND.value,
@@ -576,6 +577,8 @@ def handle_live_sim_gateway_event(
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
     event_type = event.event_type.strip().lower()
+    if event_type in LIVE_SIM_RUNTIME_STATUS_EVENT_TYPES:
+        return {"handled": False, "reason": "runtime_status_event_not_live_sim"}
     if event_type in {"command_started", "command_ack", "command_failed"}:
         return _handle_live_sim_command_event(connection, event)
     if event_type == "execution_event":
@@ -4270,7 +4273,20 @@ def _unresolved_lifecycle_error_count(
     code: str | None = None,
 ) -> int:
     clauses = [
-        "event_type IN ('RECONCILE_MISMATCH', 'LIFECYCLE_ERROR')",
+        """
+        (
+            event_type = 'RECONCILE_MISMATCH'
+            OR (
+                event_type = 'LIFECYCLE_ERROR'
+                AND NOT (
+                    entity_type = 'LIVE_SIM_ERROR'
+                    AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
+                    AND live_sim_order_id IS NULL
+                    AND position_id IS NULL
+                )
+            )
+        )
+        """,
     ]
     params: list[Any] = []
     if code is not None:

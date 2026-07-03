@@ -10,6 +10,9 @@ const text = (value) => {
   return String(value);
 };
 
+const firstValue = (...values) =>
+  values.find((value) => value !== null && value !== undefined && value !== "");
+
 const escapeHtml = (value) =>
   text(value)
     .replaceAll("&", "&amp;")
@@ -79,6 +82,20 @@ const reasonChannelList = (channels, reasons) => {
 };
 
 const emptyState = (message) => `<div class="empty-state">${escapeHtml(message)}</div>`;
+
+const aiAdvisoryEmptyMessage = (latestRun) => {
+  if (!latestRun || !latestRun.run_id) {
+    return "저장된 AI Candidate Scorer run이 없습니다.";
+  }
+  const candidateCount = Number(latestRun.candidate_count || 0);
+  const selectedCount = Number(latestRun.selected_count || 0);
+  const when = latestRun.completed_at || latestRun.created_at;
+  const savedAt = when ? ` 저장 시각 ${when}.` : "";
+  if (candidateCount <= 0) {
+    return `마지막 저장 run은 후보 0개라 score row가 없습니다.${savedAt}`;
+  }
+  return `마지막 저장 run에 후보별 score row가 없습니다. candidates ${candidateCount}, selected ${selectedCount}.${savedAt}`;
+};
 
 const number = (value) => {
   const parsed = Number(value);
@@ -393,32 +410,56 @@ const renderAiAdvisory = (snapshot) => {
   const advisory = snapshot.ai_advisory || {};
   const status = advisory.status || {};
   const noBuyAi = (snapshot.no_buy_sentinel || {}).ai_summary || {};
+  const latestRun = advisory.latest_run || status.latest_run || {};
+  const latestProvider = firstValue(noBuyAi.provider, latestRun.provider);
+  const latestModel = firstValue(noBuyAi.model, latestRun.model);
+  const currentProviderModel = `${text(status.provider)} / ${text(status.model)}`;
+  const latestProviderModel = `${text(latestProvider)} / ${text(latestModel)}`;
+  const latestRunStatus = firstValue(noBuyAi.latest_run_status, latestRun.status, "-");
+  const latestSelectedCount = firstValue(noBuyAi.selected_count, latestRun.selected_count, 0);
+  const topScore = firstValue(noBuyAi.top_score, (advisory.top_scores || [])[0]?.score);
+  const topConfidence = firstValue(noBuyAi.top_confidence, (advisory.top_scores || [])[0]?.confidence);
+  const fallbackUsed = firstValue(noBuyAi.fallback_used, status.fallback_used, false);
+  const errorCount = firstValue(noBuyAi.error_count, status.error_count, advisory.latest_error_count, 0);
+  const noTradeReason = firstValue(noBuyAi.no_trade_reason, latestRun.no_trade_reason, "-");
   const scores = advisory.top_scores || [];
+  const providerDriftNotice =
+    latestProvider &&
+    status.provider &&
+    (text(latestProvider) !== text(status.provider) || text(latestModel) !== text(status.model))
+      ? `<p class="notice ai-advisory-note">현재 설정은 ${escapeHtml(currentProviderModel)}이고 마지막 저장 run은 ${escapeHtml(latestProviderModel)}입니다.</p>`
+      : "";
   document.getElementById("ai-advisory-badges").innerHTML = [
     badge(status.enabled ? "ENABLED" : "OBSERVE", `enabled ${text(status.enabled)}`),
     badge("OBSERVE", "advisory-only"),
     badge(noBuyAi.classification || "NONE", text(noBuyAi.classification || "NONE")),
   ].join("");
   document.getElementById("ai-advisory-status").innerHTML = [
-    metric("provider/model", `${text(noBuyAi.provider || status.provider)} / ${text(noBuyAi.model || status.model)}`),
-    metric("latest run", noBuyAi.latest_run_status || "-"),
-    metric("selected", noBuyAi.selected_count || 0),
-    metric("top score/conf", `${number(noBuyAi.top_score)} / ${number(noBuyAi.top_confidence)}`),
-    metric("fallback/error", `${text(noBuyAi.fallback_used)} / ${number(noBuyAi.error_count)}`),
-    metric("no trade reason", noBuyAi.no_trade_reason || "-"),
+    metric("config provider/model", currentProviderModel),
+    metric("latest run", latestRunStatus),
+    metric("run provider/model", latestProviderModel),
+    metric("selected", latestSelectedCount),
+    metric("top score/conf", `${number(topScore)} / ${number(topConfidence)}`),
+    metric("fallback/error", `${text(fallbackUsed)} / ${number(errorCount)}`),
+    metric("no trade reason", noTradeReason),
   ].join("");
-  document.getElementById("ai-advisory-scores").innerHTML = scores.length
-    ? table(
-        ["종목", "selected", "score", "confidence", "analysis"],
-        scores.slice(0, 8).map((row) => [
-          `${text(row.code)} ${text(row.candidate_instance_id)}`,
-          badge(row.selected ? "SELECTED" : "OBSERVE", row.selected),
-          number(row.score),
-          number(row.confidence),
-          row.analysis,
-        ]),
-      )
-    : emptyState("AI Candidate Scorer 결과가 없습니다.");
+  document.getElementById("ai-advisory-scores").innerHTML = [
+    providerDriftNotice,
+    scores.length
+      ? table(
+          ["종목", "selected", "score", "confidence", "analysis"],
+          scores.slice(0, 8).map((row) => [
+            `${text(row.code)} ${text(row.candidate_instance_id)}`,
+            badge(row.selected ? "SELECTED" : "OBSERVE", row.selected),
+            number(row.score),
+            number(row.confidence),
+            row.analysis,
+          ]),
+        )
+      : emptyState(aiAdvisoryEmptyMessage(latestRun)),
+  ]
+    .filter(Boolean)
+    .join("");
 };
 
 const renderNoBuy = (snapshot) => {
@@ -694,6 +735,8 @@ const refreshDashboard = async () => {
   }
 };
 
-window.addEventListener("DOMContentLoaded", () => {
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", () => refreshDashboard(), { once: true });
+} else {
   refreshDashboard();
-});
+}

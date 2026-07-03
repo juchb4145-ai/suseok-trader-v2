@@ -812,7 +812,16 @@ def _lifecycle_error_count(connection: sqlite3.Connection) -> int:
             """
             SELECT COUNT(*) AS count
             FROM live_sim_lifecycle_events
-            WHERE event_type IN ('RECONCILE_MISMATCH', 'LIFECYCLE_ERROR')
+            WHERE event_type = 'RECONCILE_MISMATCH'
+                OR (
+                    event_type = 'LIFECYCLE_ERROR'
+                    AND NOT (
+                        entity_type = 'LIVE_SIM_ERROR'
+                        AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
+                        AND live_sim_order_id IS NULL
+                        AND position_id IS NULL
+                    )
+                )
             """
         ).fetchone()
     except sqlite3.Error:

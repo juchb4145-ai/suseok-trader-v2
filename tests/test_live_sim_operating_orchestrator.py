@@ -123,6 +123,105 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
     assert eod_warn.status is not PreflightStatus.BLOCK
 
 
+def test_preflight_ignores_unknown_gateway_status_lifecycle_errors(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(
+        tmp_path / "preflight-unknown-status-event.sqlite3"
+    )
+    settings = _operating_settings()
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_events (
+            lifecycle_event_id,
+            event_type,
+            entity_type,
+            status,
+            reason,
+            evidence_json,
+            created_at,
+            live_sim_only,
+            live_real_allowed
+        )
+        VALUES (
+            'benign-heartbeat-error',
+            'LIFECYCLE_ERROR',
+            'LIVE_SIM_ERROR',
+            'ERROR',
+            'UNKNOWN_LIVE_SIM_GATEWAY_EVENT',
+            ?,
+            ?,
+            1,
+            0
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "payload": {
+                        "event_type": "heartbeat",
+                        "payload": {"mode": "LIVE_SIM"},
+                    }
+                }
+            ),
+            now,
+        ),
+    )
+
+    preflight = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_events (
+            lifecycle_event_id,
+            event_type,
+            entity_type,
+            entity_id,
+            live_sim_order_id,
+            status,
+            reason,
+            evidence_json,
+            created_at,
+            live_sim_only,
+            live_real_allowed
+        )
+        VALUES (
+            'real-order-lifecycle-error',
+            'LIFECYCLE_ERROR',
+            'LIVE_SIM_ORDER',
+            'live-order-1',
+            'live-order-1',
+            'ERROR',
+            'COMMAND_FAILED',
+            '{}',
+            ?,
+            1,
+            0
+        )
+        """,
+        (now,),
+    )
+    blocked = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    assert _check_status(preflight, "lifecycle_error_count") == "PASS"
+    assert _check_status(blocked, "lifecycle_error_count") == "BLOCK"
+    assert any("lifecycle_error_count" in reason for reason in blocked.blocking_reasons)
+
+
 def test_preflight_safety_preview_does_not_block_on_exhausted_buy_limit(
     tmp_path,
 ) -> None:

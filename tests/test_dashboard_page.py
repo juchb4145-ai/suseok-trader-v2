@@ -63,3 +63,17 @@ def test_dashboard_static_market_theme_uses_theme_and_index_readiness_sources() 
     assert "index core ready" in js
     assert "index core degraded" in js
     assert "Number(indexStatus.latest_tick_count" not in js
+
+
+def test_dashboard_ai_advisory_separates_config_from_latest_run() -> None:
+    js = (ROOT / "web" / "static" / "dashboard.js").read_text(encoding="utf-8")
+    css = (ROOT / "web" / "static" / "dashboard.css").read_text(encoding="utf-8")
+
+    assert 'metric("config provider/model"' in js
+    assert 'metric("run provider/model"' in js
+    assert "noBuyAi.provider || status.provider" not in js
+    assert "현재 설정은" in js
+    assert "마지막 저장 run은 후보 0개라 score row가 없습니다" in js
+    assert 'document.readyState === "loading"' in js
+    assert ".warning-list li" in css
+    assert "overflow-wrap: anywhere" in css
