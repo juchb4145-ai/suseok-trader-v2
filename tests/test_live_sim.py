@@ -127,6 +127,49 @@ def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     assert snapshot.status == "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT"
 
 
+def test_live_sim_daily_loss_blocks_buy_intent_and_command(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-daily-loss.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_max_daily_loss=100_000)
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="CLOSED",
+        quantity=0,
+        realized_pnl=-120_000,
+    )
+
+    eligibility = evaluate_live_sim_eligibility(connection, candidate_id, settings=settings)
+    rejected_intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    connection.execute("DELETE FROM live_sim_positions")
+    connection.commit()
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="CLOSED",
+        quantity=0,
+        realized_pnl=-120_000,
+    )
+    try:
+        queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    except ValueError as exc:
+        queue_error = str(exc)
+    else:
+        raise AssertionError("expected daily loss to block LIVE_SIM BUY command queue")
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
+    connection.close()
+
+    assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in eligibility.reason_codes
+    assert rejected_intent.status is LiveSimIntentStatus.REJECTED
+    assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in rejected_intent.reason_codes
+    assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in queue_error
+    assert command_count == 0
+
+
 def test_live_sim_pilot_can_create_dry_run_evidence_and_intent_same_profile(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-shadow-dry-run.sqlite3")
     settings = _live_sim_settings(
@@ -278,6 +321,7 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
         live_sim_exit_gateway_command_enabled=True,
         live_sim_exit_stop_loss_pct=3.0,
         live_sim_stale_tick_sec=999_999_999,
+        live_sim_max_daily_loss=1,
     )
     intent = create_live_sim_intent(connection, candidate_id, settings=settings)
     order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
@@ -298,6 +342,7 @@ def test_live_sim_stop_loss_exit_sell_close_only_and_sell_fill_closes(tmp_path) 
     )
     handle_live_sim_gateway_event(connection, buy_fill, settings=settings)
     connection.execute("UPDATE market_ticks_latest SET price = 96000 WHERE code = '005930'")
+    connection.execute("UPDATE live_sim_positions SET unrealized_pnl = -4000")
     connection.commit()
 
     result = run_live_sim_exit_once(connection, settings=settings, queue_commands=True)
@@ -362,6 +407,60 @@ def test_live_sim_default_disabled_creates_rejection_no_command(tmp_path) -> Non
     assert command_count == 0
     assert rejection_count == 1
     assert intent.live_real_allowed is False
+
+
+def _insert_live_sim_position(
+    connection,
+    *,
+    trade_date: str,
+    status: str,
+    quantity: int,
+    realized_pnl: float,
+    unrealized_pnl: float = 0.0,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_positions (
+            position_id,
+            account_id,
+            trade_date,
+            code,
+            name,
+            side,
+            quantity,
+            available_quantity,
+            avg_entry_price,
+            total_entry_notional,
+            realized_pnl,
+            unrealized_pnl,
+            opened_at,
+            closed_at,
+            last_price,
+            last_price_at,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES ('live-sim-loss-position', 'SIM-12345678', ?, '005930', '삼성전자',
+            'LONG', ?, ?, 97000, ?, ?, ?, ?, ?, 97000, ?, ?, ?, ?)
+        """,
+        (
+            trade_date,
+            quantity,
+            quantity,
+            97_000 * quantity,
+            realized_pnl,
+            unrealized_pnl,
+            now,
+            now if status == "CLOSED" else None,
+            now,
+            status,
+            now,
+            now,
+        ),
+    )
+    connection.commit()
 
 
 def _live_sim_settings(**overrides) -> Settings:

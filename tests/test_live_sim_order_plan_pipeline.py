@@ -17,7 +17,7 @@ from services.runtime.live_sim_pilot_pipeline import run_live_sim_pilot_pipeline
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 from storage.sqlite import initialize_database
 from tests.test_entry_timing import _raise_fixture_turnover
-from tests.test_live_sim import _mark_gateway_ready
+from tests.test_live_sim import _insert_live_sim_position, _mark_gateway_ready
 from tests.test_strategy_service import _insert_strategy_fixture
 
 
@@ -287,6 +287,18 @@ def test_order_plan_rejects_kill_switch_live_real_and_limits(tmp_path) -> None:
         order_plan_id,
         settings=_pilot_settings(live_sim_max_daily_order_count=1),
     )
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="CLOSED",
+        quantity=0,
+        realized_pnl=-120_000,
+    )
+    daily_loss = evaluate_live_sim_order_plan_eligibility(
+        connection,
+        order_plan_id,
+        settings=_pilot_settings(live_sim_max_daily_loss=100_000),
+    )
     connection.close()
 
     assert LiveSimReasonCode.LIVE_SIM_KILL_SWITCH_ACTIVE.value in kill_switch.reason_codes
@@ -295,6 +307,7 @@ def test_order_plan_rejects_kill_switch_live_real_and_limits(tmp_path) -> None:
     assert LiveSimReasonCode.ACTIVE_ORDER_LIMIT_EXCEEDED.value in active_order.reason_codes
     assert LiveSimReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value in active_position.reason_codes
     assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value in daily_limit.reason_codes
+    assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in daily_loss.reason_codes
 
 
 def test_live_sim_order_plan_api_routes(tmp_path, monkeypatch) -> None:

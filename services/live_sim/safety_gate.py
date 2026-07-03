@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,6 +11,7 @@ from domain.live_sim.reasons import LiveSimReasonCode
 from storage.gateway_command_store import get_command_status_counts
 
 from services.config import Settings, TradingMode, load_settings
+from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
 
 SIMULATION_LIKE_MODES = {"SIMULATION", "MOCK", "PAPER", "MOCK_TRADING", "LIVE_SIM"}
 
@@ -41,6 +43,8 @@ class LiveSimSafetyGateResult:
     openai_tools_disabled: bool = True
     order_tools_disabled: bool = True
     dashboard_order_controls_unavailable: bool = True
+    daily_loss_limit_exceeded: bool = False
+    daily_loss_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,17 +73,23 @@ class LiveSimSafetyGateResult:
             "openai_tools_disabled": self.openai_tools_disabled,
             "order_tools_disabled": self.order_tools_disabled,
             "dashboard_order_controls_unavailable": self.dashboard_order_controls_unavailable,
+            "daily_loss_limit_exceeded": self.daily_loss_limit_exceeded,
+            "daily_loss_evidence": dict(self.daily_loss_evidence),
         }
 
 
 def check_live_sim_safety_gate(
     connection: sqlite3.Connection,
     settings: Settings | None = None,
+    *,
+    enforce_daily_loss_limit: bool = False,
+    trade_date: str | None = None,
 ) -> LiveSimSafetyGateResult:
     resolved_settings = settings or load_settings()
     gateway_values = _gateway_status_values(connection)
     reason_codes: list[str] = []
     warnings: list[str] = []
+    daily_loss_evidence: dict[str, Any] = {}
 
     trading_mode_ok = (
         resolved_settings.trading_mode is TradingMode.LIVE_SIM or resolved_settings.live_sim_enabled
@@ -156,6 +166,14 @@ def check_live_sim_safety_gate(
         warnings.append(
             "Gateway command queue has failed/rejected history; inspect before LIVE_SIM."
         )
+    if enforce_daily_loss_limit:
+        daily_loss_evidence = build_live_sim_daily_loss_evidence(
+            connection,
+            trade_date=trade_date or market_today(),
+            settings=resolved_settings,
+        )
+        if daily_loss_evidence["daily_loss_limit_exceeded"]:
+            reason_codes.append(LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value)
 
     daily_count = _daily_live_sim_order_count(connection)
     daily_limit_remaining = max(resolved_settings.live_sim_max_daily_order_count - daily_count, 0)
@@ -188,6 +206,10 @@ def check_live_sim_safety_gate(
         openai_tools_disabled=not resolved_settings.ai_sidecar_tools_enabled,
         order_tools_disabled=not resolved_settings.ai_sidecar_order_tools_enabled,
         dashboard_order_controls_unavailable=True,
+        daily_loss_limit_exceeded=bool(
+            daily_loss_evidence.get("daily_loss_limit_exceeded", False)
+        ),
+        daily_loss_evidence=daily_loss_evidence,
     )
 
 

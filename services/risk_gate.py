@@ -28,6 +28,7 @@ from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
+from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -890,6 +891,8 @@ def check_account_limits(
         reasons.append(RiskReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value)
     if live_sim["projected_daily_notional"] > live_sim["max_daily_notional"]:
         reasons.append(RiskReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value)
+    if live_sim["daily_loss_limit_exceeded"]:
+        reasons.append(RiskReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value)
     if live_sim["active_order_count"] >= live_sim["max_active_orders"]:
         reasons.append(RiskReasonCode.ACTIVE_ORDER_LIMIT_EXCEEDED.value)
     if live_sim["active_position_count"] >= live_sim["max_active_positions"]:
@@ -912,7 +915,10 @@ def check_account_limits(
 
     severity = (
         RiskSeverity.CRITICAL
-        if RiskReasonCode.ACCOUNT_KILL_SWITCH_ACTIVE.value in reasons
+        if (
+            RiskReasonCode.ACCOUNT_KILL_SWITCH_ACTIVE.value in reasons
+            or RiskReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in reasons
+        )
         else RiskSeverity.HIGH
     )
     return _check(
@@ -1040,19 +1046,10 @@ def _live_sim_account_limit_evidence(
         context.trade_date,
     )
     exposure = _live_sim_total_exposure(connection)
-    realized_pnl = _sum_rows_where(
+    daily_loss = build_live_sim_daily_loss_evidence(
         connection,
-        "live_sim_positions",
-        "realized_pnl",
-        "status IN ({statuses}) AND quantity > 0",
-        statuses=ACTIVE_LIVE_SIM_POSITION_STATUSES,
-    )
-    unrealized_pnl = _sum_rows_where(
-        connection,
-        "live_sim_positions",
-        "unrealized_pnl",
-        "status IN ({statuses}) AND quantity > 0",
-        statuses=ACTIVE_LIVE_SIM_POSITION_STATUSES,
+        trade_date=context.trade_date,
+        settings=settings,
     )
     live_sim_rows_present = bool(
         active_order_count
@@ -1096,8 +1093,16 @@ def _live_sim_account_limit_evidence(
         "current_total_exposure": exposure,
         "projected_total_exposure": exposure + estimated_notional,
         "max_total_exposure": max_total_exposure,
-        "realized_pnl": realized_pnl,
-        "unrealized_pnl": unrealized_pnl,
+        "realized_pnl": daily_loss["realized_pnl"],
+        "unrealized_pnl": daily_loss["unrealized_pnl"],
+        "daily_pnl": daily_loss["daily_pnl"],
+        "daily_loss": daily_loss["daily_loss"],
+        "max_daily_loss": daily_loss["max_daily_loss"],
+        "max_daily_loss_pct": daily_loss["max_daily_loss_pct"],
+        "pct_loss_limit": daily_loss["pct_loss_limit"],
+        "effective_daily_loss_limit": daily_loss["effective_loss_limit"],
+        "daily_loss_limit_enabled": daily_loss["daily_loss_limit_enabled"],
+        "daily_loss_limit_exceeded": daily_loss["daily_loss_limit_exceeded"],
     }
 
 

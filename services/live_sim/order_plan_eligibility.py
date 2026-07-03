@@ -153,15 +153,14 @@ def evaluate_live_sim_order_plan_eligibility(
     evaluation = _entry_timing_evaluation_row(connection, normalized_id)
 
     reason_codes: list[str] = []
-    if not safety_gate.passed:
-        reason_codes.extend(safety_gate.reason_codes)
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_SAFETY_GATE_FAILED.value)
-    if not resolved_settings.trading_capabilities.live_sim_order_plan_allowed:
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
-    if not resolved_settings.live_sim_order_plan_routing_enabled:
-        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
-
     if order_plan is None:
+        if not safety_gate.passed:
+            reason_codes.extend(safety_gate.reason_codes)
+            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_SAFETY_GATE_FAILED.value)
+        if not resolved_settings.trading_capabilities.live_sim_order_plan_allowed:
+            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
+        if not resolved_settings.live_sim_order_plan_routing_enabled:
+            reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
         return _eligibility_result(
             eligible=False,
             status="INELIGIBLE",
@@ -173,6 +172,20 @@ def evaluate_live_sim_order_plan_eligibility(
             safety_gate=safety_gate.to_dict(),
             evidence={"order_plan_id": normalized_id},
         )
+
+    safety_gate = check_live_sim_safety_gate(
+        connection,
+        resolved_settings,
+        enforce_daily_loss_limit=True,
+        trade_date=str(order_plan["trade_date"]),
+    )
+    if not safety_gate.passed:
+        reason_codes.extend(safety_gate.reason_codes)
+        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_SAFETY_GATE_FAILED.value)
+    if not resolved_settings.trading_capabilities.live_sim_order_plan_allowed:
+        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
+    if not resolved_settings.live_sim_order_plan_routing_enabled:
+        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_ROUTING_DISABLED.value)
 
     candidate_id = str(order_plan["candidate_instance_id"])
     code = validate_stock_code(order_plan["code"])

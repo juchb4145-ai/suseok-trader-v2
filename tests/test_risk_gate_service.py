@@ -7,7 +7,7 @@ from domain.candidate.state import CandidateState
 from domain.risk.category import RiskCategory
 from domain.risk.models import RiskInputContext
 from domain.risk.reasons import RiskReasonCode
-from domain.risk.status import RiskCheckStatus, RiskObservationStatus
+from domain.risk.status import RiskCheckStatus, RiskObservationStatus, RiskSeverity
 from services.config import Settings
 from services.risk_gate import (
     check_chase_overheat,
@@ -297,6 +297,95 @@ def test_account_limits_block_when_dry_run_position_capacity_is_exhausted(tmp_pa
     assert check.evidence_json["dry_run"]["code_open_position_count"] == 1
 
 
+def test_live_sim_daily_loss_limit_ignores_under_limit_loss(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_live_sim_loss_under.sqlite3")
+    settings = _settings(
+        live_sim_kill_switch=False,
+        live_sim_max_daily_loss=100_000,
+    )
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="CLOSED",
+        quantity=0,
+        realized_pnl=-50_000,
+    )
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    check = _check_by_category(observation, RiskCategory.ACCOUNT_LIMITS.value)
+    connection.close()
+
+    assert check.status is RiskCheckStatus.PASS_OBSERVED
+    assert RiskReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value not in check.reason_codes
+    assert check.evidence_json["live_sim"]["daily_pnl"] == -50_000
+
+
+def test_live_sim_daily_loss_limit_blocks_realized_loss(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_live_sim_realized_loss.sqlite3")
+    settings = _settings(
+        live_sim_kill_switch=False,
+        live_sim_max_daily_loss=100_000,
+    )
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="CLOSED",
+        quantity=0,
+        realized_pnl=-120_000,
+    )
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    check = _check_by_category(observation, RiskCategory.ACCOUNT_LIMITS.value)
+    connection.close()
+
+    assert check.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert check.severity is RiskSeverity.CRITICAL
+    assert observation.overall_status is RiskObservationStatus.OBSERVE_BLOCK
+    assert RiskReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in check.reason_codes
+    assert check.evidence_json["live_sim"]["realized_pnl"] == -120_000
+    assert check.evidence_json["live_sim"]["unrealized_pnl"] == 0
+    assert check.evidence_json["live_sim"]["daily_pnl"] == -120_000
+
+
+def test_live_sim_daily_loss_limit_blocks_unrealized_loss_in_open_positions(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk_live_sim_unrealized_loss.sqlite3")
+    settings = _settings(
+        live_sim_kill_switch=False,
+        live_sim_max_active_positions=10,
+        live_sim_position_allow_scale_in=True,
+        live_sim_max_daily_loss_pct=30.0,
+    )
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="OPEN",
+        quantity=1,
+        realized_pnl=-20_000,
+        unrealized_pnl=-80_000,
+    )
+
+    observation = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    check = _check_by_category(observation, RiskCategory.ACCOUNT_LIMITS.value)
+    connection.close()
+
+    assert check.status is RiskCheckStatus.BLOCK_OBSERVED
+    assert check.severity is RiskSeverity.CRITICAL
+    assert RiskReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in check.reason_codes
+    assert check.evidence_json["live_sim"]["realized_pnl"] == -20_000
+    assert check.evidence_json["live_sim"]["unrealized_pnl"] == -80_000
+    assert check.evidence_json["live_sim"]["daily_pnl"] == -100_000
+    assert check.evidence_json["live_sim"]["effective_daily_loss_limit"] == 90_000
+
+
 def test_batch_evaluation_records_counts_and_errors(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_batch.sqlite3")
     settings = _settings()
@@ -468,6 +557,63 @@ def _insert_dry_run_position(connection, *, candidate_id: str) -> None:
             row["trade_date"],
             row["code"],
             row["name"],
+            now,
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def _insert_live_sim_position(
+    connection,
+    *,
+    trade_date: str,
+    status: str,
+    quantity: int,
+    realized_pnl: float,
+    unrealized_pnl: float = 0.0,
+    code: str = "005930",
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_positions (
+            position_id,
+            account_id,
+            trade_date,
+            code,
+            name,
+            side,
+            quantity,
+            available_quantity,
+            avg_entry_price,
+            total_entry_notional,
+            realized_pnl,
+            unrealized_pnl,
+            opened_at,
+            closed_at,
+            last_price,
+            last_price_at,
+            status,
+            created_at,
+            updated_at
+        )
+        VALUES (?, 'SIM-12345678', ?, ?, '삼성전자', 'LONG', ?, ?, 97000, ?, ?, ?,
+            ?, ?, 97000, ?, ?, ?, ?)
+        """,
+        (
+            f"live-position-{code}-{status.lower()}",
+            trade_date,
+            code,
+            quantity,
+            quantity,
+            97_000 * quantity,
+            realized_pnl,
+            unrealized_pnl,
+            now,
+            now if status == "CLOSED" else None,
+            now,
+            status,
             now,
             now,
         ),

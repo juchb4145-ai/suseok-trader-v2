@@ -225,6 +225,8 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dry_run_exit_order_routing_enabled is False
     assert settings.dry_run_exit_gateway_command_enabled is False
     assert settings.dry_run_exit_config_version == "exit_dry_run_v1"
+    assert settings.live_sim_max_daily_loss == 0.0
+    assert settings.live_sim_max_daily_loss_pct == 0.0
     assert settings.live_sim_pilot_pipeline_enabled is False
     assert settings.live_sim_pilot_auto_queue_command is False
     assert settings.live_sim_order_plan_routing_enabled is False
@@ -577,6 +579,26 @@ def test_live_sim_order_plan_settings_are_validated() -> None:
         assert "LIVE_SIM_ORDER_PLAN_DEFAULT_NOTIONAL" in str(exc)
     else:
         raise AssertionError("expected invalid LIVE_SIM order plan default/max notional")
+
+
+def test_live_sim_daily_loss_settings_are_validated() -> None:
+    settings = load_settings(
+        {
+            "LIVE_SIM_MAX_DAILY_LOSS": "100000",
+            "LIVE_SIM_MAX_DAILY_LOSS_PCT": "5.5",
+        }
+    )
+
+    assert settings.live_sim_max_daily_loss == 100_000
+    assert settings.live_sim_max_daily_loss_pct == 5.5
+
+    for key in ("LIVE_SIM_MAX_DAILY_LOSS", "LIVE_SIM_MAX_DAILY_LOSS_PCT"):
+        try:
+            load_settings({key: "-0.1"})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid LIVE_SIM daily loss setting: {key}")
 
 
 def test_live_sim_operating_loop_settings_are_validated() -> None:

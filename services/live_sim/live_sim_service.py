@@ -177,7 +177,6 @@ def evaluate_live_sim_eligibility(
 ) -> LiveSimEligibility:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
-    safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
     dry_run_evidence = _latest_dry_run_evidence(connection, normalized_id)
     admission = evaluate_trade_admission(
         connection,
@@ -196,6 +195,12 @@ def evaluate_live_sim_eligibility(
             ),
         ),
         dry_run_evidence=dry_run_evidence,
+    )
+    safety_gate = check_live_sim_safety_gate(
+        connection,
+        resolved_settings,
+        enforce_daily_loss_limit=True,
+        trade_date=admission.trade_date,
     )
 
     reason_codes: list[str] = _map_admission_reasons(
@@ -432,7 +437,12 @@ def queue_live_sim_order_command(
         connection.commit()
         raise ValueError(f"LIVE_SIM intent cannot be queued from status: {intent_row['status']}")
 
-    safety_gate = check_live_sim_safety_gate(connection, resolved_settings)
+    safety_gate = check_live_sim_safety_gate(
+        connection,
+        resolved_settings,
+        enforce_daily_loss_limit=intent_row["side"] == LiveSimSide.BUY.value,
+        trade_date=intent_row["trade_date"],
+    )
     queue_reasons = list(safety_gate.reason_codes)
     if intent_row["side"] == LiveSimSide.SELL.value and not resolved_settings.live_sim_allow_sell:
         queue_reasons.append(LiveSimReasonCode.SELL_NOT_ALLOWED.value)

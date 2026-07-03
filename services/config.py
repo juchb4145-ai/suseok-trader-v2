@@ -375,6 +375,8 @@ class Settings:
     live_sim_max_order_notional: float = 100_000
     live_sim_max_daily_order_count: int = 3
     live_sim_max_daily_notional: float = 300_000
+    live_sim_max_daily_loss: float = 0.0
+    live_sim_max_daily_loss_pct: float = 0.0
     live_sim_max_active_orders: int = 1
     live_sim_max_active_positions: int = 1
     live_sim_duplicate_cooldown_sec: int = 600
@@ -820,6 +822,12 @@ class Settings:
         ):
             if getattr(self, field_name) <= 0:
                 raise ValueError(f"{field_name.upper()} must be > 0")
+        for field_name in (
+            "live_sim_max_daily_loss",
+            "live_sim_max_daily_loss_pct",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
         for field_name in (
             "live_sim_max_daily_order_count",
             "live_sim_max_active_orders",
@@ -2172,6 +2180,16 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         live_sim_max_daily_notional=_parse_float(
             env.get("LIVE_SIM_MAX_DAILY_NOTIONAL", "300000"),
             "LIVE_SIM_MAX_DAILY_NOTIONAL",
+            min_value=0.0,
+        ),
+        live_sim_max_daily_loss=_parse_float(
+            env.get("LIVE_SIM_MAX_DAILY_LOSS", "0"),
+            "LIVE_SIM_MAX_DAILY_LOSS",
+            min_value=0.0,
+        ),
+        live_sim_max_daily_loss_pct=_parse_float(
+            env.get("LIVE_SIM_MAX_DAILY_LOSS_PCT", "0.0"),
+            "LIVE_SIM_MAX_DAILY_LOSS_PCT",
             min_value=0.0,
         ),
         live_sim_max_active_orders=_parse_int(
