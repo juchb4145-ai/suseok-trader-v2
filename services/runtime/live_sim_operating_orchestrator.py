@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, TypeVar
 
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
 
@@ -20,6 +21,7 @@ from services.live_sim.live_sim_service import (
     run_live_sim_reprice_once,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.live_sim_pilot_pipeline import run_live_sim_pilot_pipeline_once
 from services.runtime.preflight import (
     LiveSimPreflightResult,
@@ -28,6 +30,10 @@ from services.runtime.preflight import (
     run_live_sim_preflight,
 )
 from services.theme_leadership import rebuild_theme_leadership
+
+OPERATING_EVALUATION_LOCK_RETRY_COUNT = 3
+OPERATING_EVALUATION_LOCK_RETRY_DELAY_SEC = 2.0
+T = TypeVar("T")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -230,11 +236,13 @@ def run_live_sim_operating_cycle_once(
         stages["theme_leadership"] = {"status": "ERROR", "error": str(exc)}
 
     try:
-        entry_result = evaluate_entry_timing(
-            connection,
-            trade_date=trade_date,
-            limit=limit,
-            settings=resolved_settings,
+        entry_result = _run_with_evaluation_lock_retries(
+            lambda: evaluate_entry_timing(
+                connection,
+                trade_date=trade_date,
+                limit=limit,
+                settings=resolved_settings,
+            )
         )
         stages["entry_timing"] = entry_result.to_dict()
     except Exception as exc:
@@ -313,12 +321,14 @@ def run_live_sim_operating_cycle_once(
                 )
             )
             try:
-                buy_result = run_live_sim_pilot_pipeline_once(
-                    connection,
-                    settings=buy_settings,
-                    trade_date=trade_date,
-                    limit=limit,
-                    queue_commands=buy_queue,
+                buy_result = _run_with_evaluation_lock_retries(
+                    lambda: run_live_sim_pilot_pipeline_once(
+                        connection,
+                        settings=buy_settings,
+                        trade_date=trade_date,
+                        limit=limit,
+                        queue_commands=buy_queue,
+                    )
                 )
                 stages["buy"] = buy_result.to_dict()
             except Exception as exc:
@@ -750,6 +760,17 @@ def _command_counts_from_run(run: Mapping[str, Any] | None) -> dict[str, int]:
     return {"buy": buy, "cancel": cancel, "exit": exit_count, "total": buy + cancel + exit_count}
 
 
+def _run_with_evaluation_lock_retries(operation: Callable[[], T]) -> T:
+    for attempt in range(OPERATING_EVALUATION_LOCK_RETRY_COUNT + 1):
+        try:
+            return operation()
+        except EvaluationRunLockError:
+            if attempt >= OPERATING_EVALUATION_LOCK_RETRY_COUNT:
+                raise
+            time.sleep(OPERATING_EVALUATION_LOCK_RETRY_DELAY_SEC)
+    raise AssertionError("unreachable evaluation lock retry state")
+
+
 def _operating_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in row.keys()}
     item["queue_commands"] = bool(item["queue_commands"])
@@ -765,7 +786,10 @@ def _operating_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _stage_error(stage: str, exc: Exception) -> dict[str, Any]:
-    return {"stage": stage, "error": str(exc)}
+    error = {"stage": stage, "error": str(exc)}
+    if isinstance(exc, EvaluationRunLockError):
+        error.update(exc.to_dict())
+    return error
 
 
 def _reconcile_blocks_new_buy(reconcile: Mapping[str, Any]) -> bool:

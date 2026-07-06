@@ -841,8 +841,6 @@ def check_duplicate_cooldown(
         severity = RiskSeverity.MEDIUM
     if recent_observation is not None:
         reasons.append(RiskReasonCode.RECENT_OBSERVATION_COOLDOWN.value)
-        status = _caution_if_pass(status)
-        severity = _higher_severity(severity, RiskSeverity.LOW)
     if not reasons:
         reasons.append(RiskReasonCode.OBSERVE_ONLY.value)
     return _check(

@@ -26,6 +26,7 @@ from services.live_sim.order_plan_eligibility import (
 )
 from services.live_sim.order_plan_intent import create_live_sim_intent_from_order_plan
 from services.live_sim.safety_gate import check_live_sim_safety_gate
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 
 PIPELINE_SOURCE = "order_plan_pipeline"
 
@@ -298,6 +299,9 @@ def run_live_sim_pilot_pipeline_once(
             safety_gate=safety_gate.to_dict(),
             ai_advisory_summary=ai_advisory_summary,
         )
+    except EvaluationRunLockError:
+        connection.rollback()
+        raise
     except Exception as exc:
         error_count += 1
         _complete_pilot_run(

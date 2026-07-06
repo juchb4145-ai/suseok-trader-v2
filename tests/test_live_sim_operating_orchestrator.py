@@ -12,6 +12,7 @@ from services.ai_advisory.storage import save_scoring_run
 from services.config import Settings
 from services.dashboard_service import build_dashboard_snapshot
 from services.live_sim.live_sim_service import reconcile_live_sim
+from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.live_sim_operating_orchestrator import (
     OperatingMode,
     list_live_sim_operating_runs,
@@ -352,6 +353,100 @@ def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:
     assert queue_false_commands == 0
 
 
+def test_operating_entry_timing_retries_evaluation_lock_then_succeeds(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_operating_orchestrator as orchestrator
+
+    connection = initialize_database(tmp_path / "entry-lock-retry.sqlite3")
+    settings = _operating_settings(live_sim_reconcile_enabled=False)
+    attempts = 0
+    sleeps: list[float] = []
+
+    def flaky_entry_timing(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise _evaluation_lock_error()
+        return _FakeLifecycleResult(
+            run_id="entry",
+            run_type="ENTRY_TIMING",
+            evaluated_count=1,
+            command_count=0,
+        )
+
+    monkeypatch.setattr(orchestrator, "evaluate_entry_timing", flaky_entry_timing)
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda seconds: sleeps.append(seconds))
+    _patch_noop_lifecycle_stages(monkeypatch, orchestrator)
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=settings,
+        mode=OperatingMode.OBSERVE_CYCLE,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    connection.close()
+
+    assert attempts == 3
+    assert sleeps == [2.0, 2.0]
+    assert result.stages["entry_timing"]["status"] == "COMPLETED"
+    assert [error["stage"] for error in result.errors] == []
+
+
+def test_operating_buy_records_lock_error_after_retries(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_operating_orchestrator as orchestrator
+
+    connection = initialize_database(tmp_path / "buy-lock-retry.sqlite3")
+    settings = _operating_settings(live_sim_reconcile_enabled=False)
+    buy_attempts = 0
+    sleeps: list[float] = []
+
+    def locked_buy(*args, **kwargs):
+        nonlocal buy_attempts
+        buy_attempts += 1
+        raise _evaluation_lock_error(owner_id=f"incremental-{buy_attempts}")
+
+    monkeypatch.setattr(
+        orchestrator,
+        "evaluate_entry_timing",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="entry",
+            run_type="ENTRY_TIMING",
+            evaluated_count=1,
+            command_count=0,
+        ),
+    )
+    monkeypatch.setattr(orchestrator, "run_live_sim_pilot_pipeline_once", locked_buy)
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda seconds: sleeps.append(seconds))
+    _patch_noop_lifecycle_stages(monkeypatch, orchestrator)
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    runs = list_live_sim_operating_runs(connection)
+    connection.close()
+
+    assert buy_attempts == 4
+    assert sleeps == [2.0, 2.0, 2.0]
+    assert result.status == "COMPLETED_WITH_ERRORS"
+    assert result.stages["buy"]["status"] == "ERROR"
+    assert result.errors[-1]["stage"] == "buy"
+    assert result.errors[-1]["error"] == "EVALUATION_RUN_LOCKED"
+    assert runs[0]["errors"][-1]["stage"] == "buy"
+    assert runs[0]["errors"][-1]["error"] == "EVALUATION_RUN_LOCKED"
+
+
 def test_pilot_buy_only_can_queue_buy_but_never_cancel_exit(tmp_path) -> None:
     connection, _ = _prepared_order_plan_connection(tmp_path / "buy-only.sqlite3")
     settings = _operating_settings(
@@ -636,6 +731,50 @@ class _FakeBuyResult:
 
     def to_dict(self) -> dict[str, Any]:
         return self.__dict__
+
+
+@dataclass(frozen=True, kw_only=True)
+class _FakeThemeResult:
+    status: str = "COMPLETED"
+
+    def to_dict(self, *, include_members: bool = False) -> dict[str, Any]:
+        return {"status": self.status, "include_members": include_members}
+
+
+def _patch_noop_lifecycle_stages(monkeypatch, orchestrator) -> None:
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_cancel_unfilled_once",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="cancel",
+            run_type="CANCEL",
+            evaluated_count=0,
+            command_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_exit_once",
+        lambda *args, **kwargs: _FakeLifecycleResult(
+            run_id="exit",
+            run_type="EXIT",
+            evaluated_count=0,
+            command_count=0,
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "rebuild_theme_leadership",
+        lambda *args, **kwargs: _FakeThemeResult(),
+    )
+
+
+def _evaluation_lock_error(owner_id: str = "incremental-run") -> EvaluationRunLockError:
+    return EvaluationRunLockError(
+        lock_name="evaluation_pipeline",
+        owner_id=owner_id,
+        expires_at="2026-07-06T00:00:00Z",
+    )
 
 
 def _operating_settings(**overrides) -> Settings:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +17,8 @@ from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runt
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 
 DIRTY_REASON_PRICE_TICK = "PRICE_TICK"
+DEFAULT_INCREMENTAL_EVALUATION_LOCK_CHUNK_SIZE = 5
+INCREMENTAL_EVALUATION_CHUNK_YIELD_SEC = 0.0
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -175,99 +178,133 @@ def process_incremental_evaluation_batch(
         )
 
     bounded_limit = _bounded_limit(limit or resolved_settings.incremental_evaluation_batch_size)
-    with runtime_execution_lock(
-        connection,
-        EVALUATION_PIPELINE_LOCK,
-        details={"run_type": "incremental_evaluation", "limit": bounded_limit},
-    ):
-        rows = _queue_rows(
+    chunk_limit = min(bounded_limit, DEFAULT_INCREMENTAL_EVALUATION_LOCK_CHUNK_SIZE)
+    remaining_limit = bounded_limit
+    seen_candidate_ids: set[str] = set()
+    processed_count = 0
+    skipped_closed_count = 0
+    strategy_count = 0
+    risk_count = 0
+    errors: list[dict[str, Any]] = []
+    polled_count = 0
+
+    while remaining_limit > 0:
+        current_limit = min(remaining_limit, chunk_limit)
+        fetched_count = 0
+        with runtime_execution_lock(
             connection,
-            limit=bounded_limit,
-            retry_limit=resolved_settings.incremental_evaluation_retry_limit,
-        )
-        if not rows:
-            queued_after = _queue_count(connection)
-            return IncrementalEvaluationBatchResult(
-                run_id=run_id,
-                status="IDLE",
-                queued_before=queued_before,
-                queued_after=queued_after,
+            EVALUATION_PIPELINE_LOCK,
+            details={
+                "run_type": "incremental_evaluation",
+                "limit": bounded_limit,
+                "chunk_limit": current_limit,
+            },
+        ):
+            rows = _queue_rows(
+                connection,
+                limit=current_limit,
+                retry_limit=resolved_settings.incremental_evaluation_retry_limit,
+                exclude_candidate_ids=seen_candidate_ids,
             )
+            if not rows:
+                break
+            fetched_count = len(rows)
+            polled_count += fetched_count
+            remaining_limit -= fetched_count
+            seen_candidate_ids.update(str(row["candidate_instance_id"]) for row in rows)
 
-        processed_count = 0
-        skipped_closed_count = 0
-        strategy_count = 0
-        risk_count = 0
-        errors: list[dict[str, Any]] = []
+            chunk_processed_count = 0
+            chunk_skipped_closed_count = 0
+            chunk_strategy_count = 0
+            chunk_risk_count = 0
 
-        for row in rows:
-            candidate_id = str(row["candidate_instance_id"])
-            try:
-                if not _is_candidate_active(connection, candidate_id):
-                    _delete_queue_row(connection, candidate_id)
-                    connection.commit()
-                    skipped_closed_count += 1
-                    continue
+            for row in rows:
+                candidate_id = str(row["candidate_instance_id"])
+                try:
+                    if not _is_candidate_active(connection, candidate_id):
+                        _delete_queue_row(connection, candidate_id)
+                        connection.commit()
+                        chunk_skipped_closed_count += 1
+                        continue
 
-                refresh_result = refresh_candidate_context(
-                    connection,
-                    candidate_id,
-                    settings=resolved_settings,
-                )
-                if refresh_result.error_count:
-                    raise RuntimeError("candidate context refresh failed")
-                if not _is_candidate_active(connection, candidate_id):
-                    _delete_queue_row(connection, candidate_id)
-                    connection.commit()
-                    skipped_closed_count += 1
-                    continue
-
-                if resolved_settings.strategy_engine_enabled:
-                    strategy_observation = evaluate_candidate_strategy(
+                    refresh_result = refresh_candidate_context(
                         connection,
                         candidate_id,
                         settings=resolved_settings,
                     )
-                    save_strategy_observation(connection, strategy_observation)
-                    strategy_count += 1
-                if resolved_settings.risk_gate_enabled:
-                    risk_observation = evaluate_risk_for_candidate(
-                        connection,
-                        candidate_id,
-                        settings=resolved_settings,
-                    )
-                    save_risk_observation(connection, risk_observation)
-                    risk_count += 1
+                    if refresh_result.error_count:
+                        raise RuntimeError("candidate context refresh failed")
+                    if not _is_candidate_active(connection, candidate_id):
+                        _delete_queue_row(connection, candidate_id)
+                        connection.commit()
+                        chunk_skipped_closed_count += 1
+                        continue
 
-                _delete_queue_row(connection, candidate_id)
-                connection.commit()
-                processed_count += 1
-            except Exception as exc:
-                connection.rollback()
-                error = {
-                    "candidate_instance_id": candidate_id,
-                    "code": row["code"],
-                    "error_message": str(exc),
-                }
-                errors.append(error)
-                _mark_queue_error(connection, candidate_id, str(exc))
-                connection.commit()
+                    if resolved_settings.strategy_engine_enabled:
+                        strategy_observation = evaluate_candidate_strategy(
+                            connection,
+                            candidate_id,
+                            settings=resolved_settings,
+                        )
+                        save_strategy_observation(connection, strategy_observation)
+                        chunk_strategy_count += 1
+                    if resolved_settings.risk_gate_enabled:
+                        risk_observation = evaluate_risk_for_candidate(
+                            connection,
+                            candidate_id,
+                            settings=resolved_settings,
+                        )
+                        save_risk_observation(connection, risk_observation)
+                        chunk_risk_count += 1
 
+                    _delete_queue_row(connection, candidate_id)
+                    connection.commit()
+                    chunk_processed_count += 1
+                except Exception as exc:
+                    connection.rollback()
+                    error = {
+                        "candidate_instance_id": candidate_id,
+                        "code": row["code"],
+                        "error_message": str(exc),
+                    }
+                    errors.append(error)
+                    _mark_queue_error(connection, candidate_id, str(exc))
+                    connection.commit()
+
+            processed_count += chunk_processed_count
+            skipped_closed_count += chunk_skipped_closed_count
+            strategy_count += chunk_strategy_count
+            risk_count += chunk_risk_count
+
+        if fetched_count < current_limit:
+            break
+        if remaining_limit > 0:
+            time.sleep(INCREMENTAL_EVALUATION_CHUNK_YIELD_SEC)
+
+    if polled_count == 0:
         queued_after = _queue_count(connection)
-        status = "COMPLETED_WITH_ERRORS" if errors else "COMPLETED"
         return IncrementalEvaluationBatchResult(
             run_id=run_id,
-            status=status,
+            status="IDLE",
             queued_before=queued_before,
             queued_after=queued_after,
-            polled_count=len(rows),
-            processed_count=processed_count,
-            skipped_closed_count=skipped_closed_count,
-            strategy_observation_count=strategy_count,
-            risk_observation_count=risk_count,
-            error_count=len(errors),
-            errors=tuple(errors),
         )
+
+    queued_after = _queue_count(connection)
+    status = "COMPLETED_WITH_ERRORS" if errors else "COMPLETED"
+    return IncrementalEvaluationBatchResult(
+        run_id=run_id,
+        status=status,
+        queued_before=queued_before,
+        queued_after=queued_after,
+        polled_count=polled_count,
+        processed_count=processed_count,
+        skipped_closed_count=skipped_closed_count,
+        strategy_observation_count=strategy_count,
+        risk_observation_count=risk_count,
+        error_count=len(errors),
+        errors=tuple(errors),
+    )
 
 
 def get_incremental_evaluation_status(
@@ -326,16 +363,26 @@ def _queue_rows(
     *,
     limit: int,
     retry_limit: int,
+    exclude_candidate_ids: set[str] | None = None,
 ) -> list[sqlite3.Row]:
+    params: list[Any] = [retry_limit]
+    excluded = sorted(exclude_candidate_ids or set())
+    exclusion_sql = ""
+    if excluded:
+        placeholders = ", ".join("?" for _ in excluded)
+        exclusion_sql = f"AND candidate_instance_id NOT IN ({placeholders})"
+        params.extend(excluded)
+    params.append(limit)
     return connection.execute(
-        """
+        f"""
         SELECT *
         FROM incremental_evaluation_queue
         WHERE attempts < ?
+        {exclusion_sql}
         ORDER BY priority DESC, updated_at ASC, candidate_instance_id ASC
         LIMIT ?
         """,
-        (retry_limit, limit),
+        tuple(params),
     ).fetchall()
 
 

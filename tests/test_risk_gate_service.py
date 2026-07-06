@@ -104,6 +104,31 @@ def test_risk_observation_persistence_latest_and_checks_stays_observe_only(tmp_p
     assert command_count == 0
 
 
+def test_recent_observation_cooldown_is_info_only_and_does_not_block_pass(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "risk_recent_cooldown.sqlite3")
+    settings = _settings(risk_gate_observation_cooldown_sec=600)
+    candidate_id = _insert_strategy_fixture(connection)
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy)
+    first = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    save_risk_observation(connection, first)
+
+    second = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    duplicate_check = _check_by_category(second, RiskCategory.DUPLICATE_COOLDOWN.value)
+    connection.close()
+
+    assert first.overall_status is RiskObservationStatus.OBSERVE_PASS
+    assert second.overall_status is RiskObservationStatus.OBSERVE_PASS
+    assert duplicate_check.status is RiskCheckStatus.PASS_OBSERVED
+    assert duplicate_check.severity is RiskSeverity.INFO
+    assert RiskReasonCode.RECENT_OBSERVATION_COOLDOWN.value in duplicate_check.reason_codes
+    assert duplicate_check.evidence_json["recent_observation"]["risk_observation_id"] == (
+        first.risk_observation_id
+    )
+
+
 def test_cross_exchange_divergence_is_opt_in_caution_only(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_cross_exchange.sqlite3")
     candidate_id = _insert_strategy_fixture(connection)

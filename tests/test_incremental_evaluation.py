@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from types import SimpleNamespace
 
+import services.runtime.incremental_evaluation as incremental_evaluation
 from apps.core_api import app
 from domain.broker.utils import datetime_to_wire, utc_now
 from fastapi.testclient import TestClient
@@ -50,6 +53,65 @@ def test_price_tick_dirty_set_evaluates_strategy_and_risk(tmp_path) -> None:
     assert status_after["queued_count"] == 0
     assert strategy_count == 1
     assert risk_count == 1
+
+
+def test_incremental_evaluation_releases_lock_between_chunks(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "incremental-chunks.sqlite3")
+    settings = _incremental_settings(
+        incremental_evaluation_batch_size=6,
+        strategy_engine_enabled=False,
+        risk_gate_enabled=False,
+    )
+    for index in range(6):
+        code = f"{index + 1:06d}"
+        candidate_id = _insert_strategy_fixture(
+            connection,
+            candidate_id=f"CAND-2026-06-27-{code}-1",
+            code=code,
+            name=f"종목{index + 1}",
+        )
+        _insert_incremental_queue_row(connection, candidate_id=candidate_id, code=code)
+
+    active_locks: list[bool] = []
+    lock_chunk_limits: list[int] = []
+    sleeps: list[float] = []
+
+    @contextmanager
+    def recording_lock(*args, **kwargs):
+        active_locks.append(True)
+        lock_chunk_limits.append(kwargs["details"]["chunk_limit"])
+        try:
+            yield "test-lock"
+        finally:
+            active_locks.pop()
+
+    def sleep(seconds: float) -> None:
+        assert active_locks == []
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(incremental_evaluation, "runtime_execution_lock", recording_lock)
+    monkeypatch.setattr(incremental_evaluation.time, "sleep", sleep)
+    monkeypatch.setattr(
+        incremental_evaluation,
+        "refresh_candidate_context",
+        lambda *args, **kwargs: SimpleNamespace(error_count=0),
+    )
+
+    result = process_incremental_evaluation_batch(connection, settings=settings)
+    queued_after = get_incremental_evaluation_status(connection, settings=settings)[
+        "queued_count"
+    ]
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.polled_count == 6
+    assert result.processed_count == 6
+    assert queued_after == 0
+    assert lock_chunk_limits == [5, 1]
+    assert sleeps == [0.0]
 
 
 def test_price_tick_dirty_set_ignores_codes_without_active_candidate(tmp_path) -> None:
@@ -186,5 +248,34 @@ def _insert_active_theme_source(
             f"source-{code}",
             json.dumps(payload, ensure_ascii=False),
         ),
+    )
+    connection.commit()
+
+
+def _insert_incremental_queue_row(
+    connection,
+    *,
+    candidate_id: str,
+    code: str,
+    trade_date: str = "2026-06-27",
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO incremental_evaluation_queue (
+            candidate_instance_id,
+            trade_date,
+            code,
+            reason,
+            source_event_id,
+            priority,
+            enqueued_at,
+            updated_at,
+            attempts,
+            last_error
+        )
+        VALUES (?, ?, ?, 'PRICE_TICK', ?, 100, ?, ?, 0, NULL)
+        """,
+        (candidate_id, trade_date, code, f"evt-{code}", now, now),
     )
     connection.commit()
