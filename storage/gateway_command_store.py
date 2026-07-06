@@ -549,7 +549,8 @@ def _dispatch_ready_commands(
                 source,
                 idempotency_key,
                 payload_json,
-                created_at
+                created_at,
+                expires_at
             FROM gateway_commands
             WHERE status = ?
                 AND (available_at IS NULL OR available_at <= ?)
@@ -591,12 +592,15 @@ def _dispatch_ready_commands(
 
 
 def _row_to_gateway_command(row: sqlite3.Row) -> GatewayCommand:
+    payload = json.loads(row["payload_json"])
+    if row["expires_at"] is not None and "_gateway_command_expires_at" not in payload:
+        payload["_gateway_command_expires_at"] = row["expires_at"]
     return GatewayCommand(
         command_id=row["command_id"],
         command_type=row["command_type"],
         source=row["source"],
         ts=parse_timestamp(row["created_at"], "created_at"),
-        payload=json.loads(row["payload_json"]),
+        payload=payload,
         idempotency_key=row["idempotency_key"],
     )
 

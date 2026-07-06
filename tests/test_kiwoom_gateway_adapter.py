@@ -24,6 +24,7 @@ from domain.broker.market import BrokerPriceTick
 from domain.broker.market_index import BrokerMarketIndexTick
 from domain.broker.tr import BrokerTrResponse
 from gateway.core_io_worker import CoreIoWorker
+from gateway.event_factory import make_command_started_event
 from gateway.kiwoom_client import (
     FID_ACC_TRADE_VALUE,
     FID_ACC_VOLUME,
@@ -700,6 +701,69 @@ def test_runtime_reconnect_loop_ignores_never_connected_sessions(monkeypatch) ->
 
     assert reconnect_calls == []
     assert runtime.heartbeat_payload()["reconnect_pending"] is False
+
+
+def test_runtime_session_disconnect_fails_claimed_unstarted_command(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+    command = _live_sim_order_command(command_id="cmd_disconnect_unstarted")
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    client = _disconnectable_mock_client()
+    core = Core()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=core)
+    runtime.on_connected(True, 0, "ok")
+    runtime._claimed_not_started_commands[command.command_id] = command
+
+    client.connect_state = False
+    runtime.emit_heartbeat()
+    runtime.flush_events()
+
+    failed = [event for event in core.events if event.event_type == "command_failed"]
+    assert len(failed) == 1
+    assert failed[0].command_id == command.command_id
+    assert failed[0].payload["error_message"] == "SESSION_DISCONNECTED_BEFORE_EXECUTION"
+    assert runtime._claimed_not_started_commands == {}
+
+
+def test_runtime_session_disconnect_leaves_started_command_unconfirmed(monkeypatch) -> None:
+    clock = {"now": datetime(2026, 7, 1, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+    command = _live_sim_order_command(command_id="cmd_disconnect_started")
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    class Handler:
+        def handle(self, command: GatewayCommand) -> list[GatewayEvent]:
+            return [make_command_started_event(command, source="kiwoom_gateway")]
+
+    client = _disconnectable_mock_client()
+    core = Core()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=core)
+    runtime.command_handler = Handler()
+    runtime.on_connected(True, 0, "ok")
+    runtime.handle_commands([command])
+
+    client.connect_state = False
+    runtime.emit_heartbeat()
+    runtime.flush_events()
+
+    assert [event.event_type for event in core.events].count("command_started") == 1
+    assert not any(
+        event.event_type == "command_failed" and event.command_id == command.command_id
+        for event in core.events
+    )
 
 
 def test_runtime_does_not_register_market_index_when_feature_flag_off() -> None:
@@ -2122,6 +2186,28 @@ def test_kiwoom_handler_live_sim_send_order_requires_safety_metadata() -> None:
     assert client.orders[0].code == "005930"
     assert client.orders[0].order_exchange == "KRX"
     assert accepted[-1].payload["details"]["order_exchange"] == "KRX"
+
+
+def test_kiwoom_handler_expired_live_sim_send_order_emits_command_failed() -> None:
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(client)
+    base = _live_sim_order_command(command_id="cmd_expired_before_execution")
+    command = GatewayCommand(
+        command_id=base.command_id,
+        command_type=base.command_type,
+        source=base.source,
+        idempotency_key=base.idempotency_key,
+        payload={
+            **base.payload,
+            "_gateway_command_expires_at": "2020-01-01T00:00:00Z",
+        },
+    )
+
+    events = handler.handle(command)
+
+    assert [event.event_type for event in events] == ["command_failed"]
+    assert events[0].payload["error_message"] == "EXPIRED_BEFORE_EXECUTION"
+    assert client.orders == []
 
 
 def test_kiwoom_handler_live_sim_send_order_forwards_nxt_exchange() -> None:

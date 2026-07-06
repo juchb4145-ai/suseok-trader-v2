@@ -2385,6 +2385,22 @@ def _handle_live_sim_command_event(
                 order["live_sim_order_id"],
             ),
         )
+        if order["side"] == LiveSimSide.BUY.value:
+            connection.execute(
+                """
+                UPDATE live_sim_intents
+                SET status = ?,
+                    broker_order_sent = 0
+                WHERE live_sim_intent_id = ?
+                    AND status IN (?, ?)
+                """,
+                (
+                    LiveSimIntentStatus.REJECTED.value,
+                    order["live_sim_intent_id"],
+                    LiveSimIntentStatus.CREATED.value,
+                    LiveSimIntentStatus.COMMAND_QUEUED.value,
+                ),
+            )
         if order["side"] == LiveSimSide.SELL.value:
             _mark_exit_intent_by_order_rejected(
                 connection,

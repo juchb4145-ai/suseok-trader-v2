@@ -9,7 +9,7 @@ from typing import Any
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.tr import BrokerTrResponse
-from domain.broker.utils import normalize_payload
+from domain.broker.utils import normalize_payload, parse_timestamp, utc_now
 from storage.gateway_command_store import validate_command_type_allowed
 
 from gateway.event_factory import (
@@ -183,6 +183,14 @@ class KiwoomGatewayCommandHandler:
                 make_command_failed_event(
                     command,
                     f"unsupported Kiwoom gateway command: {command.command_type}",
+                    source=self.source,
+                )
+            ]
+        if command_type in {"send_order", "cancel_order"} and _command_expired(command):
+            return [
+                make_command_failed_event(
+                    command,
+                    "EXPIRED_BEFORE_EXECUTION",
                     source=self.source,
                 )
             ]
@@ -644,6 +652,20 @@ def _string_value(payload: Mapping[str, Any], key: str, default: str) -> str:
 def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = payload.get(key)
     return value if isinstance(value, Mapping) else {}
+
+
+def _command_expired(command: GatewayCommand) -> bool:
+    value = (
+        command.payload.get("_gateway_command_expires_at")
+        or command.payload.get("gateway_command_expires_at")
+        or command.payload.get("expires_at")
+    )
+    if not value:
+        return False
+    try:
+        return parse_timestamp(value, "expires_at") <= utc_now()
+    except (TypeError, ValueError):
+        return False
 
 
 def _string_list(value: object) -> list[str]:

@@ -88,6 +88,17 @@ def test_enqueue_command_then_poll_dispatches_and_increments_attempts(tmp_path) 
     assert row["dispatched_at"] is not None
 
 
+def test_polled_command_carries_expires_at_metadata(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    expires_at = utc_now() + timedelta(seconds=30)
+
+    enqueue_command(connection, make_command("cmd_with_expiry"), expires_at=expires_at)
+    command = poll_commands(connection, limit=1, wait_sec=0)[0]
+    connection.close()
+
+    assert command.payload["_gateway_command_expires_at"] == datetime_to_wire(expires_at)
+
+
 def test_idempotency_key_prevents_duplicate_enqueue(tmp_path) -> None:
     connection = initialize_database(tmp_path / "commands.sqlite3")
 

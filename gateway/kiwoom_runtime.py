@@ -237,6 +237,7 @@ class KiwoomGatewayRuntime:
         self._posted_count = 0
         self._polled_count = 0
         self._handled_command_count = 0
+        self._claimed_not_started_commands: dict[str, GatewayCommand] = {}
         self._last_error = ""
         self._login_in_progress = False
         self._login_requested = False
@@ -429,13 +430,16 @@ class KiwoomGatewayRuntime:
     def handle_commands(self, commands: Iterable[GatewayCommand]) -> None:
         for command in commands:
             self._handled_command_count += 1
+            self._claimed_not_started_commands[command.command_id] = command
             try:
-                events = self.command_handler.handle(command)
+                events = list(self.command_handler.handle(command))
+                self._clear_claimed_command_if_started_or_terminal(command, events)
                 self._track_realtime_command(command, events)
                 for event in events:
                     self.emit_event(event)
             except Exception as exc:
                 self._last_error = str(exc)
+                self._claimed_not_started_commands.pop(command.command_id, None)
                 self.emit_event(
                     make_command_failed_event(
                         command,
@@ -452,6 +456,44 @@ class KiwoomGatewayRuntime:
                         "error": str(exc),
                     },
                 )
+
+    def _clear_claimed_command_if_started_or_terminal(
+        self,
+        command: GatewayCommand,
+        events: Iterable[GatewayEvent],
+    ) -> None:
+        for event in events:
+            if str(event.command_id or "") != command.command_id:
+                continue
+            event_type = event.event_type.strip().lower()
+            if event_type in {"command_started", "command_ack", "command_failed"}:
+                self._claimed_not_started_commands.pop(command.command_id, None)
+                return
+
+    def _fail_unstarted_inflight_commands(self, *, reason: str) -> int:
+        commands = list(self._claimed_not_started_commands.values())
+        self._claimed_not_started_commands.clear()
+        if self._core_worker is not None:
+            while True:
+                worker_commands = self._core_worker.drain_commands(limit=100)
+                if not worker_commands:
+                    break
+                commands.extend(worker_commands)
+        seen: set[str] = set()
+        failed_count = 0
+        for command in commands:
+            if command.command_id in seen:
+                continue
+            seen.add(command.command_id)
+            self.emit_event(
+                make_command_failed_event(
+                    command,
+                    reason,
+                    source=self.config.source,
+                )
+            )
+            failed_count += 1
+        return failed_count
 
     def _drain_events_locally(self, *, limit: int = 200) -> None:
         drained = 0
@@ -1162,6 +1204,9 @@ class KiwoomGatewayRuntime:
             self._reconnect_attempt_count = 0
             delay = self._reconnect_delay_sec()
             self._next_reconnect_at = now + timedelta(seconds=delay)
+            failed_inflight_count = self._fail_unstarted_inflight_commands(
+                reason="SESSION_DISCONNECTED_BEFORE_EXECUTION"
+            )
             self.emit(
                 "gateway_error",
                 {
@@ -1169,6 +1214,7 @@ class KiwoomGatewayRuntime:
                     "reason_codes": ["SESSION_DISCONNECTED"],
                     "reconnect_count": self._reconnect_count,
                     "reconnect_delay_sec": delay,
+                    "failed_unstarted_command_count": failed_inflight_count,
                 },
             )
             return
