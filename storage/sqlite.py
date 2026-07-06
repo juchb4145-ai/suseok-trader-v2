@@ -1465,6 +1465,7 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_market_data_exchange_schema(connection)
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_market_tick_samples_code_event_ts
@@ -1523,19 +1524,6 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_projection_errors_created_at
         ON market_projection_errors (created_at)
-        """
-    )
-    _ensure_market_data_exchange_schema(connection)
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_market_tick_samples_code_exchange_event_ts
-        ON market_tick_samples (code, exchange, event_ts)
-        """
-    )
-    connection.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_market_minute_bars_code_exchange_interval_bucket
-        ON market_minute_bars (code, exchange, interval_sec, bucket_start)
         """
     )
 

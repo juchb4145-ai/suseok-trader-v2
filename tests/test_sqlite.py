@@ -220,6 +220,64 @@ def test_sqlite_market_data_tables_are_exchange_aware(tmp_path) -> None:
     assert bar_pk == ["code", "exchange", "session", "interval_sec", "bucket_start"]
 
 
+def test_sqlite_initialization_migrates_legacy_market_data_exchange_schema(tmp_path) -> None:
+    db_path = tmp_path / "legacy.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.executescript(
+        """
+        CREATE TABLE market_ticks_latest (
+            code TEXT PRIMARY KEY
+        );
+        CREATE TABLE market_tick_samples (
+            event_id TEXT PRIMARY KEY,
+            code TEXT NOT NULL,
+            event_ts TEXT NOT NULL
+        );
+        CREATE TABLE market_minute_bars (
+            code TEXT NOT NULL,
+            interval_sec INTEGER NOT NULL,
+            bucket_start TEXT NOT NULL,
+            PRIMARY KEY (code, interval_sec, bucket_start)
+        );
+        """
+    )
+    legacy.close()
+
+    connection = initialize_database(db_path)
+
+    latest_pk = [
+        row["name"]
+        for row in sorted(
+            connection.execute("PRAGMA table_info(market_ticks_latest)").fetchall(),
+            key=lambda item: int(item["pk"]),
+        )
+        if int(row["pk"]) > 0
+    ]
+    sample_columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(market_tick_samples)")
+    }
+    bar_pk = [
+        row["name"]
+        for row in sorted(
+            connection.execute("PRAGMA table_info(market_minute_bars)").fetchall(),
+            key=lambda item: int(item["pk"]),
+        )
+        if int(row["pk"]) > 0
+    ]
+    indexes = {
+        row["name"]
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'index'"
+        ).fetchall()
+    }
+    connection.close()
+
+    assert latest_pk == ["code", "exchange"]
+    assert {"exchange", "session"}.issubset(sample_columns)
+    assert bar_pk == ["code", "exchange", "session", "interval_sec", "bucket_start"]
+    assert "idx_market_tick_samples_code_exchange_event_ts" in indexes
+
+
 def test_sqlite_initialization_creates_theme_projection_tables(tmp_path) -> None:
     db_path = tmp_path / "app.sqlite3"
     connection = initialize_database(db_path)
