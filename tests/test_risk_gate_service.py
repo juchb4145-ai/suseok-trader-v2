@@ -4,12 +4,14 @@ import json
 
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.candidate.state import CandidateState
+from domain.live_sim.status import LiveSimOrderStatus
 from domain.risk.category import RiskCategory
 from domain.risk.models import RiskInputContext
 from domain.risk.reasons import RiskReasonCode
 from domain.risk.status import RiskCheckStatus, RiskObservationStatus, RiskSeverity
-from services.config import Settings
+from services.config import Settings, TradingMode
 from services.risk_gate import (
+    check_account_limits,
     check_chase_overheat,
     check_duplicate_cooldown,
     check_liquidity_spread,
@@ -127,6 +129,35 @@ def test_recent_observation_cooldown_is_info_only_and_does_not_block_pass(
     assert duplicate_check.evidence_json["recent_observation"]["risk_observation_id"] == (
         first.risk_observation_id
     )
+
+
+def test_account_limits_ignore_order_expired_before_dispatch_daily_budget(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk-expired-live-sim-budget.sqlite3")
+    _insert_live_sim_order(
+        connection,
+        status=LiveSimOrderStatus.ORDER_EXPIRED.value,
+        notional=97_000,
+    )
+    settings = _settings(
+        trading_mode=TradingMode.LIVE_SIM,
+        trading_allow_live_sim=True,
+        live_sim_enabled=True,
+        live_sim_kill_switch=False,
+        live_sim_max_order_notional=300_000,
+        live_sim_max_daily_notional=300_000,
+        live_sim_max_daily_order_count=1,
+    )
+
+    check = check_account_limits(connection, _context(price=97_000), settings)
+    connection.close()
+
+    live_sim = check.evidence_json["live_sim"]
+    assert check.status is RiskCheckStatus.PASS_OBSERVED
+    assert live_sim["daily_order_count"] == 0
+    assert live_sim["daily_notional"] == 0.0
+    assert live_sim["projected_daily_notional"] == 291_000.0
+    assert RiskReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in check.reason_codes
+    assert RiskReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in check.reason_codes
 
 
 def test_cross_exchange_divergence_is_opt_in_caution_only(tmp_path) -> None:
@@ -603,6 +634,57 @@ def _check_by_category(observation, category: str):
         if check.category.value == category:
             return check
     raise AssertionError(f"check category not found: {category}")
+
+
+def _insert_live_sim_order(
+    connection,
+    *,
+    status: str,
+    notional: float,
+) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_orders (
+            live_sim_order_id,
+            live_sim_intent_id,
+            trade_date,
+            account_id,
+            code,
+            name,
+            side,
+            order_type,
+            quantity,
+            limit_price,
+            notional,
+            status,
+            filled_quantity,
+            remaining_quantity,
+            idempotency_key,
+            created_at
+        )
+        VALUES (
+            'expired-before-dispatch',
+            'intent-expired-before-dispatch',
+            '2026-06-27',
+            'SIM-12345678',
+            '005930',
+            '삼성전자',
+            'BUY',
+            'LIMIT',
+            1,
+            ?,
+            ?,
+            ?,
+            0,
+            0,
+            'key-expired-before-dispatch',
+            ?
+        )
+        """,
+        (notional, notional, status, now),
+    )
+    connection.commit()
 
 
 def _insert_cross_exchange_observation(

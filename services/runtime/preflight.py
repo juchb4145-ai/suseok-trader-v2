@@ -15,6 +15,7 @@ from services.ai_advisory.storage import build_status as build_ai_advisory_statu
 from services.config import Settings, TradingMode, load_settings
 from services.entry_timing.service import get_entry_timing_status
 from services.live_sim.live_sim_service import (
+    _unresolved_lifecycle_error_count,
     get_latest_live_sim_reconcile,
     get_live_sim_status,
 )
@@ -177,6 +178,23 @@ def run_live_sim_preflight(
         if gateway_orderable
         else "Gateway is not orderable; command queueing is blocked when requested.",
         {"gateway_orderable": gateway_orderable},
+    )
+
+    pending_backlog = _pending_command_backlog(connection)
+    pending_threshold = (
+        resolved_settings.live_sim_preflight_pending_command_backlog_warn_threshold
+    )
+    pending_count = int(pending_backlog.get("pending_command_count") or 0)
+    add(
+        "gateway_pending_command_backlog",
+        PreflightStatus.WARN if pending_count > pending_threshold else PreflightStatus.PASS,
+        "Gateway pending command backlog is above the warning threshold."
+        if pending_count > pending_threshold
+        else "Gateway pending command backlog is within threshold.",
+        {
+            **pending_backlog,
+            "threshold": pending_threshold,
+        },
     )
 
     live_real_disabled = (
@@ -373,6 +391,8 @@ def run_live_sim_preflight(
         "heartbeat_age_sec": None if heartbeat_age_sec == float("inf") else heartbeat_age_sec,
         "gateway_orderable": gateway_orderable,
         "command_queue_healthy": _bool_value(gateway_values.get("command_queue_healthy"), True),
+        "pending_command_count": pending_count,
+        "pending_command_backlog_threshold": pending_threshold,
         "account_mode": account_mode,
         "broker_env": broker_env,
         "server_mode": server_mode,
@@ -784,6 +804,24 @@ def _safe_gateway_status(connection: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
+def _pending_command_backlog(connection: sqlite3.Connection) -> dict[str, Any]:
+    rows = connection.execute(
+        """
+        SELECT LOWER(command_type) AS command_type, COUNT(*) AS count
+        FROM gateway_commands
+        WHERE status = 'QUEUED'
+        GROUP BY LOWER(command_type)
+        """
+    ).fetchall()
+    command_type_counts = {
+        str(row["command_type"]): int(row["count"] or 0) for row in rows
+    }
+    return {
+        "pending_command_count": sum(command_type_counts.values()),
+        "pending_command_type_counts": command_type_counts,
+    }
+
+
 def _safe_safety_gate(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
     try:
         return check_live_sim_safety_gate(
@@ -829,25 +867,9 @@ def _counts_from_live_sim_status(
 
 def _lifecycle_error_count(connection: sqlite3.Connection) -> int:
     try:
-        row = connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM live_sim_lifecycle_events
-            WHERE event_type = 'RECONCILE_MISMATCH'
-                OR (
-                    event_type = 'LIFECYCLE_ERROR'
-                    AND NOT (
-                        entity_type = 'LIVE_SIM_ERROR'
-                        AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
-                        AND live_sim_order_id IS NULL
-                        AND position_id IS NULL
-                    )
-                )
-            """
-        ).fetchone()
+        return _unresolved_lifecycle_error_count(connection)
     except sqlite3.Error:
         return 0
-    return int(row["count"] if row else 0)
 
 
 def _overall_status(checks: Sequence[PreflightCheck]) -> PreflightStatus:

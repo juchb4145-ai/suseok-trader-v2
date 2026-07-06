@@ -260,6 +260,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_buy_price_offset_ticks == 1
     assert settings.live_sim_reprice_enabled is False
     assert settings.live_sim_reprice_max_attempts == 1
+    assert settings.live_sim_preflight_pending_command_backlog_warn_threshold == 30
     assert settings.live_sim_entry_window_start == "09:05:00"
     assert settings.live_sim_entry_window_end == "14:30:00"
     assert settings.live_sim_exit_eod_flatten_time == "15:15:00"

@@ -56,6 +56,7 @@ ACTIVE_LIVE_SIM_ORDER_STATUSES = (
 )
 ACTIVE_LIVE_SIM_POSITION_STATUSES = ("OPEN", "CLOSING", "RECONCILE_MISMATCH")
 LIVE_SIM_POSITION_ORDER_STATUSES = ("PARTIALLY_FILLED", "FILLED")
+NON_CONSUMING_LIVE_SIM_ORDER_STATUSES = ("ORDER_EXPIRED",)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1193,8 +1194,9 @@ def _live_sim_account_limit_evidence(
         connection,
         "live_sim_orders",
         "notional",
-        "trade_date = ?",
+        "trade_date = ? AND status NOT IN ({statuses})",
         context.trade_date,
+        statuses=NON_CONSUMING_LIVE_SIM_ORDER_STATUSES,
     )
     exposure = _live_sim_total_exposure(connection)
     daily_loss = build_live_sim_daily_loss_evidence(
@@ -1229,8 +1231,9 @@ def _live_sim_account_limit_evidence(
         "daily_order_count": _count_rows_where(
             connection,
             "live_sim_orders",
-            "trade_date = ?",
+            "trade_date = ? AND status NOT IN ({statuses})",
             context.trade_date,
+            statuses=NON_CONSUMING_LIVE_SIM_ORDER_STATUSES,
         ),
         "max_daily_order_count": settings.live_sim_max_daily_order_count,
         "daily_notional": daily_notional,

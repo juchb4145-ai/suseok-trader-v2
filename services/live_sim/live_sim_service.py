@@ -64,6 +64,7 @@ TERMINAL_LIVE_SIM_ORDER_STATUSES = {
     LiveSimOrderStatus.CANCELLED.value,
     LiveSimOrderStatus.FAILED.value,
     LiveSimOrderStatus.EXPIRED.value,
+    LiveSimOrderStatus.ORDER_EXPIRED.value,
     LiveSimOrderStatus.CANCEL_ACKED.value,
     LiveSimOrderStatus.CANCEL_REJECTED.value,
     LiveSimOrderStatus.EXIT_FILLED.value,
@@ -616,6 +617,133 @@ def reconcile_live_sim(
     settings: Settings | None = None,
 ) -> LiveSimReconcileSnapshot:
     return reconcile_live_sim_orders_and_positions(connection, settings=settings)
+
+
+def sweep_expired_live_sim_order_commands(
+    connection: sqlite3.Connection,
+    settings: Settings | None = None,
+    *,
+    limit: int = 500,
+) -> dict[str, Any]:
+    resolved_settings = settings or load_settings()
+    bounded_limit = _bounded_limit(limit)
+    rows = connection.execute(
+        """
+        SELECT
+            o.live_sim_order_id,
+            o.live_sim_intent_id,
+            o.gateway_command_id,
+            o.status AS order_status,
+            o.remaining_quantity,
+            gc.status AS command_status,
+            gc.command_type,
+            gc.attempts,
+            gc.created_at AS command_created_at,
+            gc.expires_at,
+            gc.completed_at,
+            gc.dispatched_at
+        FROM live_sim_orders o
+        JOIN gateway_commands gc ON gc.command_id = o.gateway_command_id
+        WHERE o.status = ?
+            AND gc.command_type = 'send_order'
+            AND gc.status = ?
+            AND gc.dispatched_at IS NULL
+        ORDER BY o.created_at ASC, o.live_sim_order_id ASC
+        LIMIT ?
+        """,
+        (
+            LiveSimOrderStatus.COMMAND_QUEUED.value,
+            "EXPIRED",
+            bounded_limit,
+        ),
+    ).fetchall()
+    now = datetime_to_wire(utc_now())
+    expired: list[dict[str, Any]] = []
+    for row in rows:
+        evidence = {
+            "live_sim_order_id": row["live_sim_order_id"],
+            "live_sim_intent_id": row["live_sim_intent_id"],
+            "gateway_command_id": row["gateway_command_id"],
+            "previous_order_status": row["order_status"],
+            "next_order_status": LiveSimOrderStatus.ORDER_EXPIRED.value,
+            "command_status": row["command_status"],
+            "command_type": row["command_type"],
+            "command_attempts": row["attempts"],
+            "command_created_at": row["command_created_at"],
+            "command_expires_at": row["expires_at"],
+            "command_completed_at": row["completed_at"],
+            "command_dispatched_at": row["dispatched_at"],
+            "broker_reached": False,
+            "remaining_quantity_before": row["remaining_quantity"],
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+            "max_order_ttl_sec": resolved_settings.live_sim_order_ttl_sec,
+        }
+        update_cursor = connection.execute(
+            """
+            UPDATE live_sim_orders
+            SET status = ?,
+                remaining_quantity = 0,
+                broker_message = COALESCE(
+                    broker_message,
+                    'Gateway command expired before dispatch.'
+                ),
+                last_event_at = ?
+            WHERE live_sim_order_id = ?
+                AND status = ?
+                AND EXISTS (
+                    SELECT 1
+                    FROM gateway_commands gc
+                    WHERE gc.command_id = live_sim_orders.gateway_command_id
+                        AND gc.status = 'EXPIRED'
+                        AND gc.dispatched_at IS NULL
+                )
+            """,
+            (
+                LiveSimOrderStatus.ORDER_EXPIRED.value,
+                now,
+                row["live_sim_order_id"],
+                LiveSimOrderStatus.COMMAND_QUEUED.value,
+            ),
+        )
+        if update_cursor.rowcount != 1:
+            continue
+        connection.execute(
+            """
+            UPDATE live_sim_intents
+            SET status = ?,
+                broker_order_sent = 0
+            WHERE live_sim_intent_id = ?
+                AND status = ?
+            """,
+            (
+                LiveSimIntentStatus.EXPIRED.value,
+                row["live_sim_intent_id"],
+                LiveSimIntentStatus.COMMAND_QUEUED.value,
+            ),
+        )
+        _record_lifecycle_event(
+            connection,
+            event_type="COMMAND_EXPIRED_BEFORE_DISPATCH",
+            entity_type="LIVE_SIM_ORDER",
+            entity_id=row["live_sim_order_id"],
+            live_sim_order_id=row["live_sim_order_id"],
+            status=LiveSimOrderStatus.ORDER_EXPIRED.value,
+            reason="GATEWAY_COMMAND_EXPIRED_BEFORE_DISPATCH",
+            evidence=evidence,
+        )
+        expired.append(evidence)
+    connection.commit()
+    return {
+        "status": "COMPLETED",
+        "expired_order_count": len(expired),
+        "orders": expired,
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "broker_order_path": "LIVE_SIM_ONLY",
+        "real_order_allowed": False,
+    }
 
 
 def reconcile_live_sim_orders_and_positions(
@@ -4139,16 +4267,22 @@ def _daily_order_count(connection: sqlite3.Connection, trade_date: str) -> int:
         FROM live_sim_orders
         WHERE trade_date = ?
             AND UPPER(side) = 'BUY'
+            AND status != ?
         """,
-        (trade_date,),
+        (trade_date, LiveSimOrderStatus.ORDER_EXPIRED.value),
     ).fetchone()
     return int(row["count"])
 
 
 def _daily_order_notional(connection: sqlite3.Connection, trade_date: str) -> float:
     row = connection.execute(
-        "SELECT COALESCE(SUM(notional), 0) AS total FROM live_sim_orders WHERE trade_date = ?",
-        (trade_date,),
+        """
+        SELECT COALESCE(SUM(notional), 0) AS total
+        FROM live_sim_orders
+        WHERE trade_date = ?
+            AND status != ?
+        """,
+        (trade_date, LiveSimOrderStatus.ORDER_EXPIRED.value),
     ).fetchone()
     return float(row["total"])
 
@@ -4287,15 +4421,12 @@ def _unresolved_lifecycle_error_count(
     clauses = [
         """
         (
-            event_type = 'RECONCILE_MISMATCH'
-            OR (
-                event_type = 'LIFECYCLE_ERROR'
-                AND NOT (
-                    entity_type = 'LIVE_SIM_ERROR'
-                    AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
-                    AND live_sim_order_id IS NULL
-                    AND position_id IS NULL
-                )
+            event_type = 'LIFECYCLE_ERROR'
+            AND NOT (
+                entity_type = 'LIVE_SIM_ERROR'
+                AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
+                AND live_sim_order_id IS NULL
+                AND position_id IS NULL
             )
         )
         """,
@@ -4312,7 +4443,38 @@ def _unresolved_lifecycle_error_count(
         """,
         tuple(params),
     ).fetchone()
-    return int(row["count"] or 0)
+    lifecycle_error_count = int(row["count"] or 0)
+    if _latest_reconcile_is_clean(connection):
+        return lifecycle_error_count
+
+    reconcile_clauses = ["event_type = 'RECONCILE_MISMATCH'"]
+    reconcile_params: list[Any] = []
+    if code is not None:
+        reconcile_clauses.append("evidence_json LIKE ?")
+        reconcile_params.append(f'%"{validate_stock_code(code)}"%')
+    reconcile_row = connection.execute(
+        f"""
+        SELECT COUNT(*) AS count
+        FROM live_sim_lifecycle_events
+        WHERE {" AND ".join(reconcile_clauses)}
+        """,
+        tuple(reconcile_params),
+    ).fetchone()
+    return lifecycle_error_count + int(reconcile_row["count"] or 0)
+
+
+def _latest_reconcile_is_clean(connection: sqlite3.Connection) -> bool:
+    row = connection.execute(
+        """
+        SELECT mismatch_count, blocking_new_buy
+        FROM live_sim_reconcile_snapshots
+        ORDER BY created_at DESC, reconcile_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return False
+    return int(row["mismatch_count"] or 0) == 0 and not bool(row["blocking_new_buy"])
 
 
 def _live_sim_candidate_targets(

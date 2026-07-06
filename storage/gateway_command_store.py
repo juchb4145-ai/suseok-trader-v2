@@ -554,7 +554,14 @@ def _dispatch_ready_commands(
             WHERE status = ?
                 AND (available_at IS NULL OR available_at <= ?)
                 AND (expires_at IS NULL OR expires_at > ?)
-            ORDER BY created_at ASC, command_id ASC
+            ORDER BY
+                CASE
+                    WHEN command_type IN ('send_order', 'cancel_order') THEN 0
+                    WHEN command_type IN ('register_realtime', 'request_tr') THEN 2
+                    ELSE 1
+                END ASC,
+                created_at ASC,
+                command_id ASC
             LIMIT ?
             """,
             (GatewayCommandStatus.QUEUED.value, now, now, limit),

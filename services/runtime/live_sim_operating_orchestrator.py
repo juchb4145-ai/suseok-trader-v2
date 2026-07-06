@@ -19,6 +19,7 @@ from services.live_sim.live_sim_service import (
     run_live_sim_cancel_unfilled_once,
     run_live_sim_exit_once,
     run_live_sim_reprice_once,
+    sweep_expired_live_sim_order_commands,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
@@ -134,6 +135,36 @@ def run_live_sim_operating_cycle_once(
         "blocking_reasons": [],
     }
 
+    try:
+        stages["expired_command_sweep"] = sweep_expired_live_sim_order_commands(
+            connection,
+            settings=resolved_settings,
+        )
+    except Exception as exc:
+        errors.append(_stage_error("expired_command_sweep", exc))
+        stages["expired_command_sweep"] = {"status": "ERROR", "error": str(exc)}
+
+    reconcile_status = None
+    latest_reconcile: dict[str, Any] | None = None
+    try:
+        if resolved_settings.live_sim_reconcile_enabled:
+            reconcile = reconcile_live_sim(connection, settings=resolved_settings)
+            latest_reconcile = reconcile.to_dict()
+            reconcile_status = reconcile.status
+        else:
+            warnings.append("LIVE_SIM_RECONCILE_ENABLED is false; reconcile stage skipped.")
+            latest_reconcile = get_latest_live_sim_reconcile(connection)
+            reconcile_status = (
+                None if latest_reconcile is None else str(latest_reconcile.get("status"))
+            )
+    except Exception as exc:
+        errors.append(_stage_error("reconcile", exc))
+        latest_reconcile = get_latest_live_sim_reconcile(connection)
+        reconcile_status = (
+            None if latest_reconcile is None else str(latest_reconcile.get("status"))
+        )
+    stages["reconcile"] = latest_reconcile
+
     preflight = run_live_sim_preflight(
         connection,
         mode=resolved_mode,
@@ -155,25 +186,6 @@ def run_live_sim_operating_cycle_once(
         settings=resolved_settings,
     )
     reason_summary["queue_policy"] = queue_policy
-
-    reconcile_status = None
-    latest_reconcile: dict[str, Any] | None = None
-    try:
-        if resolved_settings.live_sim_reconcile_enabled:
-            reconcile = reconcile_live_sim(connection, settings=resolved_settings)
-            latest_reconcile = reconcile.to_dict()
-            reconcile_status = reconcile.status
-        else:
-            warnings.append("LIVE_SIM_RECONCILE_ENABLED is false; reconcile stage skipped.")
-            latest_reconcile = get_latest_live_sim_reconcile(connection)
-            reconcile_status = (
-                None if latest_reconcile is None else str(latest_reconcile.get("status"))
-            )
-    except Exception as exc:
-        errors.append(_stage_error("reconcile", exc))
-        latest_reconcile = get_latest_live_sim_reconcile(connection)
-        reconcile_status = None if latest_reconcile is None else str(latest_reconcile.get("status"))
-    stages["reconcile"] = latest_reconcile
 
     post_reconcile_blocks_buy = bool(
         latest_reconcile

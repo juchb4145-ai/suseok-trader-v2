@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from apps.core_api import app
+from domain.broker.commands import GatewayCommand
 from domain.broker.utils import datetime_to_wire, market_today, utc_now
 from fastapi.testclient import TestClient
 from services.ai_advisory.storage import save_scoring_run
@@ -25,6 +26,7 @@ from services.runtime.preflight import (
     run_live_sim_preflight,
 )
 from services.runtime.theme_refresh_cycle import THEME_REFRESH_LOCK
+from storage.gateway_command_store import enqueue_command
 from storage.sqlite import initialize_database
 from tests.test_live_sim_order_plan_pipeline import (
     _pilot_settings,
@@ -322,6 +324,32 @@ def test_preflight_external_llm_warn_only_for_external_ai_provider(tmp_path) -> 
     assert _check_status(external_provider, "external_llm") == "WARN"
 
 
+def test_preflight_warns_on_pending_gateway_command_backlog(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "preflight-backlog.sqlite3")
+    settings = _operating_settings(
+        live_sim_preflight_pending_command_backlog_warn_threshold=2
+    )
+    for index in range(3):
+        enqueue_command(connection, _queued_request_tr_command(f"cmd_backlog_{index}"))
+
+    preflight = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.OBSERVE_CYCLE,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    check = _check(preflight, "gateway_pending_command_backlog")
+    connection.close()
+
+    assert check.status is PreflightStatus.WARN
+    assert check.details["pending_command_count"] == 3
+    assert check.details["pending_command_type_counts"] == {"request_tr": 3}
+    assert check.details["threshold"] == 2
+    assert preflight.gateway["pending_command_count"] == 3
+
+
 def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:
     observe_conn, _ = _prepared_order_plan_connection(tmp_path / "observe.sqlite3")
     observe = run_live_sim_operating_cycle_once(
@@ -382,6 +410,37 @@ def test_theme_refresh_lock_does_not_block_operating_entry_or_buy(tmp_path) -> N
     assert result.buy_evaluated_count == 1
     assert result.buy_command_count == 0
     assert lock_count == 1
+
+
+def test_operating_sweeps_expired_command_before_reconcile_and_preflight(
+    tmp_path,
+) -> None:
+    connection, _ = _prepared_order_plan_connection(
+        tmp_path / "expired-sweep-operating.sqlite3"
+    )
+    _insert_expired_pre_dispatch_order(connection)
+    _insert_reconcile_block(connection)
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=_operating_settings(),
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    order_status = connection.execute(
+        "SELECT status FROM live_sim_orders WHERE live_sim_order_id = 'expired-order'"
+    ).fetchone()["status"]
+    connection.close()
+
+    assert result.stages["expired_command_sweep"]["expired_order_count"] == 1
+    assert result.stages["reconcile"]["mismatch_count"] == 0
+    assert result.stages["reconcile"]["snapshot_json"]["blocking_new_buy"] is False
+    assert _check_status(result.preflight, "reconcile_latest_status") == "PASS"
+    assert _check_status(result.preflight, "lifecycle_error_count") == "PASS"
+    assert result.stages["buy"]["status"] == "COMPLETED"
+    assert order_status == "ORDER_EXPIRED"
 
 
 def test_operating_entry_timing_retries_evaluation_lock_then_succeeds(
@@ -808,6 +867,19 @@ def _evaluation_lock_error(owner_id: str = "incremental-run") -> EvaluationRunLo
     )
 
 
+def _queued_request_tr_command(command_id: str) -> GatewayCommand:
+    return GatewayCommand(
+        command_id=command_id,
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": command_id,
+            "tr_code": "OPT10001",
+            "params": {"code": "005930"},
+        },
+    )
+
+
 def _insert_runtime_lock(
     connection,
     *,
@@ -865,6 +937,70 @@ def _insert_reconcile_block(connection) -> None:
             'RECONCILE_MISMATCH', ?, ?, 1, 1)
         """,
         (json.dumps({"blocking_new_buy": True}), now),
+    )
+    connection.commit()
+
+
+def _insert_expired_pre_dispatch_order(connection) -> None:
+    now = datetime_to_wire(utc_now())
+    payload = json.dumps(
+        {
+            "mode": "LIVE_SIM",
+            "live_mode": "LIVE_SIM",
+            "code": "005930",
+            "side": "BUY",
+            "quantity": 1,
+            "price": 97000,
+            "metadata": {"live_sim_only": True, "live_real_allowed": False},
+        },
+        sort_keys=True,
+    )
+    connection.execute(
+        """
+        INSERT INTO gateway_commands (
+            command_id,
+            command_type,
+            source,
+            status,
+            idempotency_key,
+            payload_json,
+            payload_hash,
+            created_at,
+            completed_at,
+            expires_at
+        )
+        VALUES ('expired-command', 'send_order', 'live_sim', 'EXPIRED',
+            'expired-key', ?, 'expired-hash', ?, ?, ?)
+        """,
+        (payload, now, now, now),
+    )
+    connection.execute(
+        """
+        INSERT INTO live_sim_orders (
+            live_sim_order_id,
+            live_sim_intent_id,
+            gateway_command_id,
+            trade_date,
+            account_id,
+            code,
+            name,
+            side,
+            order_type,
+            quantity,
+            limit_price,
+            notional,
+            status,
+            filled_quantity,
+            remaining_quantity,
+            idempotency_key,
+            command_queued_at,
+            created_at
+        )
+        VALUES ('expired-order', 'expired-intent', 'expired-command', ?,
+            'SIM-12345678', '005930', '삼성전자', 'BUY', 'LIMIT', 1, 97000,
+            97000, 'COMMAND_QUEUED', 0, 1, 'expired-key', ?, ?)
+        """,
+        (market_today(), now, now),
     )
     connection.commit()
 

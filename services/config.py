@@ -392,6 +392,7 @@ class Settings:
     live_sim_max_active_positions: int = 1
     live_sim_duplicate_cooldown_sec: int = 600
     live_sim_order_ttl_sec: int = 60
+    live_sim_preflight_pending_command_backlog_warn_threshold: int = 30
     live_sim_require_dry_run_evidence: bool = True
     live_sim_require_risk_observe_pass: bool = True
     live_sim_require_strategy_matched: bool = True
@@ -855,6 +856,7 @@ class Settings:
             "live_sim_max_active_positions",
             "live_sim_duplicate_cooldown_sec",
             "live_sim_order_ttl_sec",
+            "live_sim_preflight_pending_command_backlog_warn_threshold",
             "live_sim_stale_tick_sec",
         ):
             if getattr(self, field_name) < 1:
@@ -2352,6 +2354,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         live_sim_order_ttl_sec=_parse_int(
             env.get("LIVE_SIM_ORDER_TTL_SEC", "60"),
             "LIVE_SIM_ORDER_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_preflight_pending_command_backlog_warn_threshold=_parse_int(
+            env.get("LIVE_SIM_PREFLIGHT_PENDING_COMMAND_BACKLOG_WARN_THRESHOLD", "30"),
+            "LIVE_SIM_PREFLIGHT_PENDING_COMMAND_BACKLOG_WARN_THRESHOLD",
             min_value=1,
         ),
         live_sim_require_dry_run_evidence=_parse_bool(

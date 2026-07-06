@@ -23,10 +23,12 @@ from services.live_sim.live_sim_service import (
     run_live_sim_cancel_unfilled_once,
     run_live_sim_exit_once,
     run_live_sim_reprice_once,
+    sweep_expired_live_sim_order_commands,
 )
 from services.live_sim.safety_gate import check_live_sim_safety_gate
 from services.oms.dry_run_service import create_dry_run_intent
-from storage.gateway_command_store import poll_commands
+from services.runtime.preflight import OperatingMode, PreflightStatus, run_live_sim_preflight
+from storage.gateway_command_store import GatewayCommandStatus, poll_commands
 from storage.sqlite import initialize_database
 from tests.test_oms_dry_run import _prepared_connection
 from tests.test_oms_dry_run import _settings as _dry_run_settings
@@ -143,6 +145,26 @@ def test_live_sim_safety_gate_daily_order_limit_blocks_new_buy_only(tmp_path) ->
     assert lifecycle.daily_sell_order_count == 1
     assert lifecycle.daily_cancel_intent_count == 1
     assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in lifecycle.reason_codes
+
+
+def test_live_sim_safety_gate_daily_limit_ignores_order_expired(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-daily-limit-order-expired.sqlite3")
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_max_daily_order_count=1)
+    _insert_live_sim_order_record(
+        connection,
+        order_id="expired-before-dispatch",
+        side="BUY",
+        status=LiveSimOrderStatus.ORDER_EXPIRED.value,
+    )
+
+    result = check_live_sim_safety_gate(connection, settings, purpose="NEW_BUY")
+    connection.close()
+
+    assert result.passed is True
+    assert result.daily_buy_order_count == 0
+    assert result.daily_limit_remaining == 1
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in result.reason_codes
 
 
 def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
@@ -388,6 +410,138 @@ def test_live_sim_order_payload_uses_confirmed_nxt_exchange(tmp_path) -> None:
     assert payload["order_exchange"] == "NXT"
     assert payload["metadata"]["order_exchange"] == "NXT"
     assert intent.evidence_json["order_exchange"] == "NXT"
+
+
+def test_expired_pre_dispatch_command_sweep_marks_order_expired(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(tmp_path / "live-sim-expired-sweep.sqlite3")
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    _expire_gateway_command_before_dispatch(connection, order.gateway_command_id)
+
+    result = sweep_expired_live_sim_order_commands(connection, settings=settings)
+
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    stored_intent = connection.execute(
+        "SELECT status, broker_order_sent FROM live_sim_intents WHERE live_sim_intent_id = ?",
+        (intent.live_sim_intent_id,),
+    ).fetchone()
+    event = connection.execute(
+        """
+        SELECT event_type, status, evidence_json
+        FROM live_sim_lifecycle_events
+        WHERE live_sim_order_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (order.live_sim_order_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result["expired_order_count"] == 1
+    assert stored_order["status"] == LiveSimOrderStatus.ORDER_EXPIRED.value
+    assert stored_order["remaining_quantity"] == 0
+    assert stored_intent["status"] == LiveSimIntentStatus.EXPIRED.value
+    assert stored_intent["broker_order_sent"] == 0
+    assert event["event_type"] == "COMMAND_EXPIRED_BEFORE_DISPATCH"
+    assert event["status"] == LiveSimOrderStatus.ORDER_EXPIRED.value
+    assert json.loads(event["evidence_json"])["broker_reached"] is False
+
+
+def test_expired_command_sweep_skips_dispatched_order(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(
+        tmp_path / "live-sim-expired-dispatched.sqlite3"
+    )
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    poll_commands(connection)
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?, completed_at = ?
+        WHERE command_id = ?
+        """,
+        (
+            GatewayCommandStatus.EXPIRED.value,
+            datetime_to_wire(utc_now()),
+            order.gateway_command_id,
+        ),
+    )
+    connection.commit()
+
+    result = sweep_expired_live_sim_order_commands(connection, settings=settings)
+
+    stored_order = get_live_sim_order(connection, order.live_sim_order_id)
+    event_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM live_sim_lifecycle_events
+        WHERE event_type = 'COMMAND_EXPIRED_BEFORE_DISPATCH'
+        """
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result["expired_order_count"] == 0
+    assert stored_order["status"] == LiveSimOrderStatus.COMMAND_QUEUED.value
+    assert event_count == 0
+
+
+def test_expired_command_sweep_clears_reconcile_buy_block(tmp_path) -> None:
+    connection, candidate_id = _prepared_connection(
+        tmp_path / "live-sim-expired-reconcile-clean.sqlite3"
+    )
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(
+        live_sim_pilot_pipeline_enabled=True,
+        live_sim_order_plan_routing_enabled=True,
+    )
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    order = queue_live_sim_order_command(connection, intent.live_sim_intent_id, settings=settings)
+    _expire_gateway_command_before_dispatch(connection, order.gateway_command_id)
+
+    _insert_reconcile_mismatch(connection)
+    stale_preflight = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    sweep_expired_live_sim_order_commands(connection, settings=settings)
+    clean = reconcile_live_sim(connection, settings=settings)
+    preflight = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    open_order_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM live_sim_orders
+        WHERE status = ?
+        """,
+        (LiveSimOrderStatus.COMMAND_QUEUED.value,),
+    ).fetchone()["count"]
+    connection.close()
+
+    assert _preflight_check_status(stale_preflight, "reconcile_latest_status") == "BLOCK"
+    assert _preflight_check_status(stale_preflight, "lifecycle_error_count") == "BLOCK"
+    assert clean.mismatch_count == 0
+    assert clean.snapshot_json["blocking_new_buy"] is False
+    assert open_order_count == 0
+    assert _preflight_check_status(preflight, "reconcile_latest_status") == "PASS"
+    assert _preflight_check_status(preflight, "lifecycle_error_count") == "PASS"
+    assert preflight.status is not PreflightStatus.BLOCK
 
 
 def test_live_sim_runtime_status_heartbeat_is_ignored_without_error(tmp_path) -> None:
@@ -941,9 +1095,12 @@ def _insert_live_sim_order_record(
     *,
     order_id: str,
     side: str,
+    status: str = "FILLED",
 ) -> None:
     now = datetime_to_wire(utc_now())
     side = side.upper()
+    normalized_status = status.upper()
+    filled_quantity = 1 if normalized_status == LiveSimOrderStatus.FILLED.value else 0
     connection.execute(
         """
         INSERT INTO live_sim_orders (
@@ -965,13 +1122,15 @@ def _insert_live_sim_order_record(
             created_at
         )
         VALUES (?, ?, ?, 'SIM-12345678', '005930', '삼성전자', ?, 'LIMIT',
-            1, 97000, 97000, 'FILLED', 1, 0, ?, ?)
+            1, 97000, 97000, ?, ?, 0, ?, ?)
         """,
         (
             order_id,
             f"intent-{order_id}",
             broker_utils.market_today(),
             side,
+            normalized_status,
+            filled_quantity,
             f"idempotency-{order_id}",
             now,
         ),
@@ -1046,6 +1205,108 @@ def _mark_gateway_ready(connection) -> None:
             (key, value, now),
         )
     connection.commit()
+
+
+def _expire_gateway_command_before_dispatch(connection, command_id: str) -> None:
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = ?,
+            completed_at = ?,
+            dispatched_at = NULL
+        WHERE command_id = ?
+        """,
+        (GatewayCommandStatus.EXPIRED.value, datetime_to_wire(utc_now()), command_id),
+    )
+    connection.commit()
+
+
+def _insert_reconcile_mismatch(connection) -> None:
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_reconcile_snapshots (
+            reconcile_id,
+            account_id,
+            trade_date,
+            broker_open_order_count,
+            broker_position_count,
+            local_open_order_count,
+            local_position_count,
+            mismatch_count,
+            status,
+            snapshot_json,
+            created_at,
+            blocking_new_buy,
+            allow_exit
+        )
+        VALUES (
+            'stale-reconcile-mismatch',
+            'SIM-12345678',
+            '2026-07-06',
+            0,
+            0,
+            1,
+            0,
+            1,
+            'RECONCILE_MISMATCH',
+            ?,
+            ?,
+            1,
+            1
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "mismatches": [{"reason": "command_terminal_mismatch"}],
+                    "blocking_new_buy": True,
+                },
+                sort_keys=True,
+            ),
+            now,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_events (
+            lifecycle_event_id,
+            event_type,
+            entity_type,
+            entity_id,
+            status,
+            reason,
+            evidence_json,
+            created_at,
+            live_sim_only,
+            live_real_allowed
+        )
+        VALUES (
+            'stale-reconcile-mismatch-event',
+            'RECONCILE_MISMATCH',
+            'RECONCILE',
+            'stale-reconcile-mismatch',
+            'RECONCILE_MISMATCH',
+            'RECONCILE_MISMATCH',
+            ?,
+            ?,
+            1,
+            0
+        )
+        """,
+        (
+            json.dumps({"mismatches": [{"reason": "command_terminal_mismatch"}]}),
+            now,
+        ),
+    )
+    connection.commit()
+
+
+def _preflight_check_status(preflight, name: str) -> str:
+    for check in preflight.checks:
+        if check.name == name:
+            return check.status.value
+    raise AssertionError(f"missing preflight check: {name}")
 
 
 def _execution_event(

@@ -220,6 +220,34 @@ def test_expired_command_is_not_polled(tmp_path) -> None:
     assert row["attempts"] == 0
 
 
+def test_order_commands_are_claimed_before_market_data_backlog(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    enqueue_command(connection, make_command("cmd_request_old", command_type="request_tr"))
+    enqueue_command(
+        connection,
+        make_command("cmd_realtime_old", command_type="register_realtime"),
+    )
+    enqueue_command(connection, make_live_sim_order_command("cmd_send_new"))
+
+    commands = poll_commands(connection, limit=1, wait_sec=0)
+    rows = connection.execute(
+        """
+        SELECT command_id, status, attempts
+        FROM gateway_commands
+        ORDER BY command_id ASC
+        """
+    ).fetchall()
+    connection.close()
+
+    assert [command.command_id for command in commands] == ["cmd_send_new"]
+    statuses = {row["command_id"]: row["status"] for row in rows}
+    attempts = {row["command_id"]: row["attempts"] for row in rows}
+    assert statuses["cmd_send_new"] == GatewayCommandStatus.DISPATCHED.value
+    assert attempts["cmd_send_new"] == 1
+    assert statuses["cmd_request_old"] == GatewayCommandStatus.QUEUED.value
+    assert statuses["cmd_realtime_old"] == GatewayCommandStatus.QUEUED.value
+
+
 def test_stale_dispatched_command_is_failed_and_queue_health_refreshed(tmp_path) -> None:
     connection = initialize_database(tmp_path / "commands.sqlite3")
     enqueue_command(connection, make_command("cmd_stale_dispatched"))

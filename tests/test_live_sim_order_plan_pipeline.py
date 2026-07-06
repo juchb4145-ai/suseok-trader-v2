@@ -7,7 +7,7 @@ import domain.broker.utils as broker_utils
 from apps.core_api import app
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
-from domain.live_sim.status import LiveSimIntentStatus
+from domain.live_sim.status import LiveSimIntentStatus, LiveSimOrderStatus
 from fastapi.testclient import TestClient
 from services.config import Settings, TradingMode, TradingProfile
 from services.entry_timing.service import evaluate_entry_timing
@@ -309,6 +309,31 @@ def test_order_plan_rejects_kill_switch_live_real_and_limits(tmp_path) -> None:
     assert LiveSimReasonCode.ACTIVE_POSITION_LIMIT_EXCEEDED.value in active_position.reason_codes
     assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value in daily_limit.reason_codes
     assert LiveSimReasonCode.DAILY_LOSS_LIMIT_EXCEEDED.value in daily_loss.reason_codes
+
+
+def test_order_plan_daily_limits_ignore_order_expired_before_dispatch(tmp_path) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "plan-expired-daily-budget.sqlite3"
+    )
+    _insert_live_sim_order(
+        connection,
+        status=LiveSimOrderStatus.ORDER_EXPIRED.value,
+        order_id="expired-before-dispatch",
+    )
+
+    eligibility = evaluate_live_sim_order_plan_eligibility(
+        connection,
+        order_plan_id,
+        settings=_pilot_settings(
+            live_sim_max_daily_order_count=1,
+            live_sim_max_daily_notional=100_000,
+        ),
+    )
+    connection.close()
+
+    assert eligibility.eligible is True
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in eligibility.reason_codes
+    assert LiveSimReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in eligibility.reason_codes
 
 
 def test_order_plan_entry_window_blocks_buy_and_records_rejection(

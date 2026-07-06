@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 from domain.broker.utils import market_time_str, market_today, parse_timestamp, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
+from domain.live_sim.status import LiveSimOrderStatus
 from storage.gateway_command_store import get_command_status_counts
 
 from services.config import Settings, TradingMode, load_settings
@@ -365,8 +366,13 @@ def _daily_live_sim_order_count(
         FROM live_sim_orders
         WHERE trade_date = ?
             AND UPPER(side) = ?
+            AND status != ?
         """,
-        (trade_date or market_today(), side.strip().upper()),
+        (
+            trade_date or market_today(),
+            side.strip().upper(),
+            LiveSimOrderStatus.ORDER_EXPIRED.value,
+        ),
     ).fetchone()
     return int(row["count"])
 
