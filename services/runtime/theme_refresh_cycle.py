@@ -3,10 +3,11 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from json import loads
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
-from storage.gateway_command_store import get_command_type_counts
+from storage.gateway_command_store import canonical_json, get_command_type_counts
 
 from services.config import Settings, load_settings
 from services.market_scan_service import run_market_scan_once
@@ -82,13 +83,81 @@ def run_theme_refresh_cycle_once(
         THEME_REFRESH_LOCK,
         details={"run_type": "theme_refresh_cycle", "trade_date": trade_date},
     ):
-        return _run_theme_refresh_cycle_once(
+        result = _run_theme_refresh_cycle_once(
             connection,
             trade_date=trade_date,
             settings=resolved_settings,
             queue_market_scan_commands=queue_market_scan_commands,
             queue_realtime_commands=queue_realtime_commands,
         )
+        store_theme_refresh_cycle_run(connection, result)
+        return result
+
+
+def store_theme_refresh_cycle_run(
+    connection: sqlite3.Connection,
+    result: ThemeRefreshCycleRunResult,
+) -> None:
+    payload = result.to_dict()
+    started = not connection.in_transaction
+    if started:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        connection.execute(
+            """
+            INSERT INTO theme_refresh_cycle_runs (
+                run_id,
+                trade_date,
+                status,
+                created_at,
+                order_command_delta_json,
+                gateway_command_delta_json,
+                no_order_side_effects,
+                result_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                trade_date = excluded.trade_date,
+                status = excluded.status,
+                created_at = excluded.created_at,
+                order_command_delta_json = excluded.order_command_delta_json,
+                gateway_command_delta_json = excluded.gateway_command_delta_json,
+                no_order_side_effects = excluded.no_order_side_effects,
+                result_json = excluded.result_json
+            """,
+            (
+                result.run_id,
+                result.trade_date,
+                result.status,
+                result.created_at,
+                canonical_json(payload["order_command_delta"]),
+                canonical_json(payload["gateway_command_delta"]),
+                1 if result.no_order_side_effects else 0,
+                canonical_json(payload),
+            ),
+        )
+        if started:
+            connection.commit()
+    except Exception:
+        if started:
+            connection.rollback()
+        raise
+
+
+def get_latest_theme_refresh_cycle_run(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM theme_refresh_cycle_runs
+        ORDER BY created_at DESC, run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return _theme_refresh_run_row_to_dict(row)
 
 
 def _run_theme_refresh_cycle_once(
@@ -198,3 +267,15 @@ def _command_delta(
 ) -> dict[str, int]:
     keys = sorted(set(before) | set(after))
     return {key: int(after.get(key, 0)) - int(before.get(key, 0)) for key in keys}
+
+
+def _theme_refresh_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    payload = loads(str(row["result_json"]))
+    payload["run_id"] = str(row["run_id"])
+    payload["trade_date"] = row["trade_date"]
+    payload["status"] = str(row["status"])
+    payload["created_at"] = str(row["created_at"])
+    payload["order_command_delta"] = loads(str(row["order_command_delta_json"]))
+    payload["gateway_command_delta"] = loads(str(row["gateway_command_delta_json"]))
+    payload["no_order_side_effects"] = bool(row["no_order_side_effects"])
+    return payload

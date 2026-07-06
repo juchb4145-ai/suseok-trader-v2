@@ -1,6 +1,6 @@
 # LIVE_SIM 파일럿 런처 런북
 
-`tools/start_live_sim_pilot.ps1`는 LIVE_SIM 파일럿 장중 기동을 한 번에 수행하는 PowerShell 런처다. Core와 Kiwoom Gateway를 분리 기동하고, Naver theme import, theme snapshot rebuild, Core API 기반 기동 검증, Markdown 리포트 생성을 순서대로 실행한다.
+`tools/start_live_sim_pilot.ps1`는 LIVE_SIM 파일럿 장중 기동을 한 번에 수행하는 PowerShell 런처다. Core와 Kiwoom Gateway를 분리 기동하고, Naver theme import, theme snapshot rebuild, Core API 기반 기동 검증, theme refresh loop 기동, Markdown 리포트 생성을 순서대로 실행한다.
 
 이 런처는 `GatewayCommand`나 주문을 직접 생성하지 않는다. 주문 가능 여부는 `.env`, safety gate, preflight, operating loop가 판단한다. LIVE_REAL 관련 플래그는 켜지 않는다.
 
@@ -15,6 +15,7 @@ pwsh -File .\tools\start_live_sim_pilot.ps1
 ```powershell
 pwsh -File .\tools\start_live_sim_pilot.ps1 -DryRun
 pwsh -File .\tools\start_live_sim_pilot.ps1 -SkipNaverImport
+pwsh -File .\tools\start_live_sim_pilot.ps1 -SkipThemeRefreshLoop
 pwsh -File .\tools\start_live_sim_pilot.ps1 -GatewayPython C:\Python39-32\python.exe
 ```
 
@@ -46,6 +47,7 @@ pwsh -File .\tools\stop_live_sim_pilot.ps1 -Force
 | LIVE_SIM status | safety gate 요약 출력 | kill switch, heartbeat, gateway_orderable, simulation mode 확인 |
 | Preflight | `PASS` 또는 원인 있는 `WARN`; `BLOCK`이면 주문 차단 | 출력된 `blocking_reasons`를 먼저 해소 |
 | Operating loop | `LIVE_SIM_OPERATING_LOOP_ENABLED=true`이면 90초 내 새 run 생성 | Core loop 설정, market time window, evaluation lock 상태 확인 |
+| Theme refresh loop | 4단계 검증 통과 후 별도 프로세스 시작, 첫 run `COMPLETED`, `order_command_delta` 전부 0 | `logs/live_sim_pilot/runtime/theme_refresh_*.err.log`, `/api/themes/refresh-cycle/latest`, `MARKET_SCAN_INTERVAL_SEC`, loop window 확인 |
 
 ## 단계별 판정 기준
 
@@ -82,7 +84,25 @@ pwsh -File .\tools\stop_live_sim_pilot.ps1 -Force
 
 Preflight가 `BLOCK`이면 런처는 "기동은 완료됐지만 주문은 차단 상태"라고 표시한다. 이 상태에서는 Core/Gateway가 떠 있어도 BUY 큐잉은 진행되지 않는다.
 
-5단계 리포트는 `reports/live_sim_pilot_launch/<yyyy-MM-dd_HHmmss>/launch_report.md`에 저장된다. 토큰은 마스킹된다.
+5단계 theme refresh loop는 4단계 검증이 모두 통과한 뒤 시작한다. 이 순서를 지키는 이유는 refresh loop가 `register_realtime`/`request_tr` command 트래픽을 만들 수 있어, 기동 직후의 지수/tick 검증과 섞이지 않게 하기 위해서다.
+
+런처는 다음 명령을 백그라운드로 실행하고 PID를 `logs/live_sim_pilot/pids.json`의 `theme_refresh` 키에 기록한다.
+
+```powershell
+pwsh -File .\tools\start_theme_refresh_loop.ps1
+```
+
+파라미터는 런처에서 하드코딩하지 않는다. `start_theme_refresh_loop.ps1`가 `.env`의 `THEME_REFRESH_*`, `MARKET_SCAN_INTERVAL_SEC`, `REALTIME_SUBSCRIPTION_QUEUE_COMMANDS`를 해석한다.
+
+첫 run 판정은 `MARKET_SCAN_INTERVAL_SEC + 60초` 안에 `GET /api/themes/refresh-cycle/latest`를 폴링해서 확인한다.
+
+- 기대: 새 `run_id`
+- 기대: `status=COMPLETED`
+- 기대: `order_command_delta.send_order=0`, `cancel_order=0`, `modify_order=0`
+
+첫 run이 실패해도 Core/Gateway 기동은 유지한다. 콘솔과 리포트에는 `후보 생성이 멈출 수 있음` 경고가 남고 최종 상태는 `STARTED_DEGRADED`가 된다. 기존 `start_theme_refresh_loop.ps1`의 `order_command_delta` 비영 안전장치는 그대로 유지되며 우회하지 않는다.
+
+6단계 리포트는 `reports/live_sim_pilot_launch/<yyyy-MM-dd_HHmmss>/launch_report.md`에 저장된다. 토큰은 마스킹된다.
 
 ## DryRun 수동 확인 절차
 
@@ -97,6 +117,7 @@ pwsh -File .\tools\start_live_sim_pilot.ps1 -DryRun
 - 0단계 안전 게이트가 `✅`로 끝난다.
 - 출력된 Core 명령에 `--reload`가 없다.
 - 출력된 Gateway 명령에 `--no-observe-only`, `--auto-login`, `--no-threaded-login`이 있다.
+- theme refresh loop 계획이 `pwsh -File tools\start_theme_refresh_loop.ps1`로 표시된다. `-SkipThemeRefreshLoop`를 주면 건너뜀으로 표시된다.
 - `TRADING_CORE_TOKEN`과 `GATEWAY_CORE_TOKEN` 불일치 시 실패하는지 확인한다.
 - 포트 8000이나 기존 Gateway가 떠 있으면 중복 기동으로 실패하는지 확인한다.
 
@@ -108,12 +129,14 @@ pwsh -File .\tools\start_live_sim_pilot.ps1 -DryRun
 
 ## 종료 기준
 
-정상 종료는 gateway를 먼저, core를 나중에 종료한다.
+정상 종료는 theme refresh loop를 먼저 멈춘 뒤 gateway, core 순서로 종료한다. theme loop가 먼저 멈춰야 신규 `register_realtime`/`request_tr` command 생성이 차단된다.
 
 ```powershell
 pwsh -File .\tools\stop_live_sim_pilot.ps1
 ```
 
 stop 스크립트는 종료 전에 `GET /api/live-sim/orders?limit=500`을 조회한다. `COMMAND_QUEUED`, `BROKER_ACKED`, `PARTIALLY_FILLED` 주문이 있으면 목록을 보여주고 `-Force` 없이는 종료를 거부한다.
+
+theme refresh loop는 장 마감 시 자기 종료할 수 있다. stop 시점에 `theme_refresh` PID가 이미 없으면 정상으로 처리한다.
 
 `runtime_execution_locks` 잔여 락은 Core 재기동 시 자동 정리된다. stop 스크립트는 DB를 직접 수정하지 않는다.

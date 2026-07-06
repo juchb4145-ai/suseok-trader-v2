@@ -7,7 +7,10 @@ from domain.theme.state import ThemeState
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
-from services.runtime.theme_refresh_cycle import run_theme_refresh_cycle_once
+from services.runtime.theme_refresh_cycle import (
+    get_latest_theme_refresh_cycle_run,
+    run_theme_refresh_cycle_once,
+)
 from services.theme_diagnostics import (
     build_naver_leading_theme_overlap_report,
     build_theme_data_wait_diagnostics,
@@ -202,6 +205,22 @@ def run_theme_refresh_cycle(
         return result.to_dict()
     finally:
         connection.close()
+
+
+@router.get("/refresh-cycle/latest")
+def latest_theme_refresh_cycle() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        run = get_latest_theme_refresh_cycle_run(connection)
+    finally:
+        connection.close()
+    return {
+        "run": run,
+        "read_only": True,
+        "no_order_side_effects": True,
+        "live_real_allowed": False,
+    }
 
 
 @router.get("/{theme_id}/members")

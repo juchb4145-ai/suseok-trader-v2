@@ -1,6 +1,7 @@
 param(
     [switch]$DryRun,
     [switch]$SkipNaverImport,
+    [switch]$SkipThemeRefreshLoop,
     [string]$GatewayPython = ""
 )
 
@@ -143,6 +144,23 @@ function Resolve-BoolSetting {
     throw "$Name 값은 true/false여야 합니다. 현재값: $Value"
 }
 
+function Resolve-PositiveIntSetting {
+    param(
+        [string]$Name,
+        [string]$Value,
+        [int]$Default
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $Default
+    }
+    $Parsed = 0
+    if (-not [int]::TryParse($Value.Trim(), [ref]$Parsed) -or $Parsed -lt 1) {
+        throw "$Name 값은 1 이상의 정수여야 합니다. 현재값: $Value"
+    }
+    return $Parsed
+}
+
 function Assert-EnvEquals {
     param(
         [string]$Name,
@@ -190,7 +208,11 @@ function Get-RuntimeProcesses {
             Where-Object {
                 $null -ne $_.CommandLine -and
                 [int]$_.ProcessId -ne $SelfPid -and
-                ($_.CommandLine -match "apps\.core_api:app" -or $_.CommandLine -match "apps\.kiwoom_gateway")
+                (
+                    $_.CommandLine -match "apps\.core_api:app" -or
+                    $_.CommandLine -match "apps\.kiwoom_gateway" -or
+                    $_.CommandLine -match "start_theme_refresh_loop\.ps1"
+                )
             } |
             Select-Object ProcessId, ParentProcessId, Name, CommandLine
     )
@@ -336,7 +358,17 @@ function Get-TimestampAgeSec {
         return [double]::PositiveInfinity
     }
     try {
-        $Parsed = [DateTimeOffset]::Parse([string]$Value)
+        if ($Value -is [DateTimeOffset]) {
+            $Parsed = [DateTimeOffset]$Value
+        } elseif ($Value -is [DateTime]) {
+            $DateTimeValue = [DateTime]$Value
+            if ($DateTimeValue.Kind -eq [DateTimeKind]::Unspecified) {
+                $DateTimeValue = [DateTime]::SpecifyKind($DateTimeValue, [DateTimeKind]::Utc)
+            }
+            $Parsed = [DateTimeOffset]$DateTimeValue
+        } else {
+            $Parsed = [DateTimeOffset]::Parse([string]$Value)
+        }
         return [Math]::Max(0, ([DateTimeOffset]::UtcNow - $Parsed.ToUniversalTime()).TotalSeconds)
     } catch {
         return [double]::PositiveInfinity
@@ -571,6 +603,55 @@ function Wait-NewOperatingRun {
     return @{ passed = $false; data = $Latest }
 }
 
+function Test-OrderCommandDeltaZero {
+    param([object]$Run)
+
+    if ($null -eq $Run -or $null -eq $Run.order_command_delta) {
+        return $false
+    }
+    foreach ($Property in $Run.order_command_delta.PSObject.Properties) {
+        if ([int]$Property.Value -ne 0) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Wait-ThemeRefreshFirstRun {
+    param(
+        [string]$BaselineRunId,
+        [datetime]$Deadline
+    )
+
+    $Latest = $null
+    while ((Get-Date) -lt $Deadline) {
+        try {
+            $Data = Invoke-CoreGet -Path "/api/themes/refresh-cycle/latest" -TimeoutSec 5
+            $Latest = $Data.run
+            if ($null -ne $Latest -and [string]$Latest.run_id -ne $BaselineRunId) {
+                $Passed = ([string]$Latest.status -eq "COMPLETED") -and
+                    (Test-OrderCommandDeltaZero -Run $Latest)
+                return @{ passed = $Passed; data = $Latest }
+            }
+        } catch {
+            $Latest = @{ error = $_.Exception.Message }
+        }
+        Start-Sleep -Seconds 3
+    }
+    return @{ passed = $false; data = $Latest }
+}
+
+function Start-ThemeRefreshLoop {
+    $Pwsh = (Get-Command pwsh -ErrorAction Stop).Source
+    $ThemeLoopScript = Join-Path $PSScriptRoot "start_theme_refresh_loop.ps1"
+    $ThemeArgs = @(
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", $ThemeLoopScript
+    )
+    return Start-DetachedProcess -Label "theme_refresh" -FilePath $Pwsh -Arguments $ThemeArgs
+}
+
 function Write-LaunchReport {
     param(
         [string]$Status,
@@ -655,6 +736,11 @@ function Build-EnvSummary {
         LIVE_SIM_SERVER_MODE = Get-EnvSetting -Name "LIVE_SIM_SERVER_MODE"
         LIVE_SIM_OPERATING_LOOP_ENABLED = Get-EnvSetting -Name "LIVE_SIM_OPERATING_LOOP_ENABLED"
         LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = Get-EnvSetting -Name "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS"
+        MARKET_SCAN_INTERVAL_SEC = Get-EnvSetting -Name "MARKET_SCAN_INTERVAL_SEC"
+        THEME_REFRESH_TRADING_SESSION = Get-EnvSetting -Name "THEME_REFRESH_TRADING_SESSION"
+        THEME_REFRESH_QUEUE_MARKET_SCAN_COMMANDS = Get-EnvSetting -Name "THEME_REFRESH_QUEUE_MARKET_SCAN_COMMANDS"
+        THEME_REFRESH_QUEUE_REALTIME_COMMANDS = Get-EnvSetting -Name "THEME_REFRESH_QUEUE_REALTIME_COMMANDS"
+        REALTIME_SUBSCRIPTION_QUEUE_COMMANDS = Get-EnvSetting -Name "REALTIME_SUBSCRIPTION_QUEUE_COMMANDS"
         KIWOOM_MARKET_INDEX_ENABLED = Get-EnvSetting -Name "KIWOOM_MARKET_INDEX_ENABLED"
         KIWOOM_MARKET_INDEX_REALTIME_ENABLED = Get-EnvSetting -Name "KIWOOM_MARKET_INDEX_REALTIME_ENABLED"
         KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED = Get-EnvSetting -Name "KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED"
@@ -709,7 +795,7 @@ try {
     $Existing = Get-RuntimeProcesses
     if ($Existing.Count -gt 0) {
         $Summary = ($Existing | ForEach-Object { "PID=$($_.ProcessId) $($_.Name)" }) -join ", "
-        throw "이미 실행 중인 Core/Gateway 프로세스가 있습니다: $Summary. 먼저 .\tools\stop_live_sim_pilot.ps1 를 실행하세요."
+        throw "이미 실행 중인 Core/Gateway/theme refresh 프로세스가 있습니다: $Summary. 먼저 .\tools\stop_live_sim_pilot.ps1 를 실행하세요."
     }
 
     Add-Result -Step "0" -Name "안전 게이트" -Passed $true -Message "LIVE_REAL 금지, LIVE_SIM/SIMULATION 설정, 토큰 일치, 중복 기동 없음"
@@ -726,6 +812,7 @@ try {
         Write-Host "Naver import: $(if ($SkipNaverImport) { '건너뜀' } else { "$Python64 -m tools.import_naver_themes" })"
         Write-Host "Theme snapshot rebuild: $Python64 -m tools.rebuild_theme_snapshots"
         Write-Host "기동 검증: gateway/login, price tick, market index tick, condition load, live-sim status, preflight, operating run"
+        Write-Host "Theme refresh loop: $(if ($SkipThemeRefreshLoop) { '건너뜀' } else { 'pwsh -File tools\start_theme_refresh_loop.ps1' })"
         exit 0
     }
 
@@ -789,14 +876,29 @@ try {
     $ConditionLoaded = Wait-ConditionLoaded -Deadline $ValidationDeadline
     Add-Result -Step "4" -Name "condition_load_state" -Passed ([bool]$ConditionLoaded.passed) -Message "condition_load_state=$($ConditionLoaded.data.condition_load_state)" -Details $ConditionLoaded.data
 
-    $LiveSimStatus = Invoke-CoreGet -Path "/api/live-sim/status" -TimeoutSec 10
-    $Safety = $LiveSimStatus.safety_gate
-    Add-Result -Step "4" -Name "LIVE_SIM safety gate" -Passed $true -Message "status=$($Safety.status), gateway_orderable=$($Safety.gateway_orderable), open_order_count=$($LiveSimStatus.open_order_count)" -Details $LiveSimStatus
+    $LiveSimStatus = $null
+    try {
+        $LiveSimStatus = Invoke-CoreGet -Path "/api/live-sim/status" -TimeoutSec 15
+        $Safety = $LiveSimStatus.safety_gate
+        Add-Result -Step "4" -Name "LIVE_SIM safety gate" -Passed $true -Message "status=$($Safety.status), gateway_orderable=$($Safety.gateway_orderable), open_order_count=$($LiveSimStatus.open_order_count)" -Details $LiveSimStatus
+    } catch {
+        Add-Result -Step "4" -Name "LIVE_SIM safety gate" -Passed $false -Message "조회 실패: $($_.Exception.Message)"
+    }
 
     $Mode = Get-EnvSetting -Name "LIVE_SIM_OPERATING_DEFAULT_MODE" -Default "PILOT_FULL_LIFECYCLE"
     $QueueCommands = Resolve-BoolSetting -Name "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS" -Value (Get-EnvSetting -Name "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS") -Default $false
     $PreflightPath = "/api/live-sim/operator/preflight?mode=$Mode&queue_commands=$($QueueCommands.ToString().ToLowerInvariant())"
-    $Preflight = Invoke-CoreGet -Path $PreflightPath -TimeoutSec 20
+    $Preflight = $null
+    try {
+        $Preflight = Invoke-CoreGet -Path $PreflightPath -TimeoutSec 30
+    } catch {
+        $Preflight = [pscustomobject]@{
+            status = "BLOCK"
+            warnings = @()
+            blocking_reasons = @("preflight_request_failed: $($_.Exception.Message)")
+            checks = @()
+        }
+    }
     $PreflightPassed = [string]$Preflight.status -ne "BLOCK"
     Add-Result -Step "4" -Name "run_live_sim_preflight" -Passed $PreflightPassed -Message "status=$($Preflight.status), warnings=$(@($Preflight.warnings).Count), blocking_reasons=$(@($Preflight.blocking_reasons).Count)" -Details $Preflight
     if (-not $PreflightPassed) {
@@ -818,11 +920,57 @@ try {
         Add-Result -Step "4" -Name "operating loop 새 run" -Passed $true -Message "LIVE_SIM_OPERATING_LOOP_ENABLED=false 이므로 확인 생략"
     }
 
-    Write-Info "[5단계] 기동 리포트"
+    Write-Info "[5단계] Theme refresh loop 기동"
+    $Stage4Failed = @($script:LaunchResults | Where-Object {
+            [string]$_.step -eq "4" -and -not $_.passed
+        }).Count -gt 0
+    if ($SkipThemeRefreshLoop) {
+        Write-WarnKo "Theme refresh loop를 건너뜁니다. 후보 생성이 멈출 수 있습니다."
+        Add-Result -Step "5" -Name "theme refresh loop" -Passed $true -Message "사용자 옵션으로 건너뜀"
+    } elseif ($Stage4Failed) {
+        Write-WarnKo "4단계 기동 검증이 실패해 theme refresh loop를 시작하지 않습니다. 후보 생성이 멈출 수 있습니다."
+        Add-Result -Step "5" -Name "theme refresh loop" -Passed $false -Message "4단계 미통과로 시작 생략; 후보 생성이 멈출 수 있음"
+    } else {
+        try {
+            $BaselineThemeRunId = ""
+            try {
+                $BaselineTheme = Invoke-CoreGet -Path "/api/themes/refresh-cycle/latest" -TimeoutSec 5
+                if ($null -ne $BaselineTheme.run) {
+                    $BaselineThemeRunId = [string]$BaselineTheme.run.run_id
+                }
+            } catch {
+                $BaselineThemeRunId = ""
+            }
+
+            Start-ThemeRefreshLoop | Out-Null
+            Add-Result -Step "5" -Name "theme refresh process" -Passed $true -Message "theme_refresh PID를 pids.json에 기록"
+
+            $ThemeIntervalSec = Resolve-PositiveIntSetting `
+                -Name "MARKET_SCAN_INTERVAL_SEC" `
+                -Value (Get-EnvSetting -Name "MARKET_SCAN_INTERVAL_SEC") `
+                -Default 120
+            $ThemeDeadline = (Get-Date).AddSeconds($ThemeIntervalSec + 60)
+            $ThemeRun = Wait-ThemeRefreshFirstRun `
+                -BaselineRunId $BaselineThemeRunId `
+                -Deadline $ThemeDeadline
+            $ThemeRunMessage = "latest_run_id=$($ThemeRun.data.run_id), status=$($ThemeRun.data.status), order_command_delta=$($ThemeRun.data.order_command_delta | ConvertTo-Json -Compress)"
+            if (-not $ThemeRun.passed) {
+                $ThemeRunMessage += ". 후보 생성이 멈출 수 있습니다."
+                Write-WarnKo $ThemeRunMessage
+            }
+            Add-Result -Step "5" -Name "theme refresh 첫 run" -Passed ([bool]$ThemeRun.passed) -Message $ThemeRunMessage -Details $ThemeRun.data
+        } catch {
+            $ThemeError = "theme refresh loop 기동/검증 실패: $($_.Exception.Message). 후보 생성이 멈출 수 있습니다."
+            Write-WarnKo $ThemeError
+            Add-Result -Step "5" -Name "theme refresh loop" -Passed $false -Message $ThemeError
+        }
+    }
+
+    Write-Info "[6단계] 기동 리포트"
     $AnyFailed = @($script:LaunchResults | Where-Object { -not $_.passed }).Count -gt 0
     $FinalStatus = if ($Preflight.status -eq "BLOCK") { "STARTED_BLOCKED" } elseif ($AnyFailed) { "STARTED_DEGRADED" } else { "STARTED_OK" }
     Write-LaunchReport -Status $FinalStatus -EnvSummary $EnvSummary -Preflight $Preflight -LiveSimStatus $LiveSimStatus
-    Add-Result -Step "5" -Name "launch_report" -Passed $true -Message $ReportFile
+    Add-Result -Step "6" -Name "launch_report" -Passed $true -Message $ReportFile
     Write-LaunchReport -Status $FinalStatus -EnvSummary $EnvSummary -Preflight $Preflight -LiveSimStatus $LiveSimStatus
 
     Write-Host ""

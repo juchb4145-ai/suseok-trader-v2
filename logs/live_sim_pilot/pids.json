@@ -1,0 +1,69 @@
+{
+  "launcher": "start_live_sim_pilot.ps1",
+  "started_at": "2026-07-06T13:02:04.8551716+09:00",
+  "root": "C:\\Users\\juchn\\주식3",
+  "core_url": "http://127.0.0.1:8000",
+  "dry_run": false,
+  "report_file": "C:\\Users\\juchn\\주식3\\reports\\live_sim_pilot_launch\\2026-07-06_130204\\launch_report.md",
+  "processes": {
+    "core": {
+      "label": "core",
+      "pid": 41156,
+      "file_path": "C:\\Users\\juchn\\주식3\\venv_64\\Scripts\\python.exe",
+      "arguments": [
+        "-m",
+        "uvicorn",
+        "apps.core_api:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000"
+      ],
+      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-06_130204.out.log",
+      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-06_130204.err.log",
+      "started_at": "2026-07-06T13:02:05.4727731+09:00"
+    },
+    "gateway": {
+      "label": "gateway",
+      "pid": 8332,
+      "file_path": "C:\\Users\\juchn\\주식3\\venv_32\\Scripts\\python.exe",
+      "arguments": [
+        "-m",
+        "apps.kiwoom_gateway",
+        "--core-url",
+        "http://127.0.0.1:8000",
+        "--token",
+        "8tcS...Pado",
+        "--auto-login",
+        "--no-threaded-login",
+        "--no-observe-only",
+        "--poll-wait-sec",
+        "1.0",
+        "--command-limit",
+        "20",
+        "--heartbeat-interval-sec",
+        "2",
+        "--realtime-exchange",
+        "krx",
+        "--realtime-recover-interval-sec",
+        "300",
+        "--condition-profiles",
+        "<condition-profiles-json>",
+        "--realtime-codes",
+        "005930,000660",
+        "--market-index-enabled",
+        "--market-index-realtime-enabled",
+        "--market-index-tr-bootstrap-enabled",
+        "--market-index-codes",
+        "KOSPI,KOSDAQ",
+        "--market-index-screen-no",
+        "5700",
+        "--market-index-poll-sec",
+        "60.0"
+      ],
+      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-06_130204.out.log",
+      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-06_130204.err.log",
+      "started_at": "2026-07-06T13:03:53.7897458+09:00"
+    }
+  }
+}

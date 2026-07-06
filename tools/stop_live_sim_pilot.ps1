@@ -43,7 +43,7 @@ function Stop-PilotProcess {
     $PidValue = [int]$Record.pid
     $Process = Get-ProcessIfRunning -ProcessId $PidValue
     if ($null -eq $Process) {
-        Write-WarnKo "$Label PID=$PidValue 는 이미 종료되어 있습니다."
+        Write-Ok "$Label PID=$PidValue 는 이미 종료되어 있습니다."
         return
     }
     Stop-Process -Id $PidValue -Force -ErrorAction Stop
@@ -99,6 +99,8 @@ try {
 
 $Gateway = $State.processes.gateway
 $Core = $State.processes.core
+$ThemeRefresh = $State.processes.theme_refresh
+Stop-PilotProcess -Label "theme_refresh" -Record $ThemeRefresh
 Stop-PilotProcess -Label "gateway" -Record $Gateway
 Stop-PilotProcess -Label "core" -Record $Core
 

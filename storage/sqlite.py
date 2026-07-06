@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 35
+SCHEMA_VERSION = 36
 APP_NAME = "suseok-trader-v2"
 
 
@@ -759,6 +759,26 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_expires
         ON runtime_execution_locks (expires_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS theme_refresh_cycle_runs (
+            run_id TEXT PRIMARY KEY,
+            trade_date TEXT,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            order_command_delta_json TEXT NOT NULL DEFAULT '{}',
+            gateway_command_delta_json TEXT NOT NULL DEFAULT '{}',
+            no_order_side_effects INTEGER NOT NULL DEFAULT 1,
+            result_json TEXT NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_theme_refresh_cycle_runs_created
+        ON theme_refresh_cycle_runs (created_at)
         """
     )
     connection.execute(

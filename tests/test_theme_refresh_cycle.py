@@ -13,6 +13,7 @@ from services.runtime.evaluation_run_guard import (
 )
 from services.runtime.theme_refresh_cycle import (
     THEME_REFRESH_LOCK,
+    get_latest_theme_refresh_cycle_run,
     run_theme_refresh_cycle_once,
 )
 from services.theme_service import calculate_theme_snapshot, import_theme_memberships
@@ -46,10 +47,14 @@ def test_theme_refresh_cycle_updates_snapshots_without_order_commands(tmp_path) 
         WHERE command_type IN ('send_order', 'cancel_order', 'modify_order')
         """
     ).fetchone()["count"]
+    latest_run = get_latest_theme_refresh_cycle_run(connection)
     connection.close()
 
     payload = result.to_dict()
     assert result.status == "COMPLETED"
+    assert latest_run is not None
+    assert latest_run["run_id"] == result.run_id
+    assert latest_run["status"] == "COMPLETED"
     assert payload["order_command_delta"] == {
         "cancel_order": 0,
         "modify_order": 0,
