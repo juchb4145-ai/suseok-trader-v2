@@ -10,7 +10,7 @@ from domain.broker.utils import datetime_to_wire, new_message_id, parse_timestam
 from storage.gateway_command_store import canonical_json
 
 EVALUATION_PIPELINE_LOCK = "evaluation_pipeline"
-DEFAULT_EVALUATION_LOCK_TTL_SEC = 900
+DEFAULT_EVALUATION_LOCK_TTL_SEC = 120
 
 
 class EvaluationRunLockError(RuntimeError):
@@ -79,6 +79,25 @@ def runtime_execution_lock(
         yield resolved_owner_id
     finally:
         _release_lock(connection, lock_name=lock_name, owner_id=resolved_owner_id)
+
+
+def clear_runtime_execution_locks(connection: sqlite3.Connection) -> int:
+    started = not connection.in_transaction
+    if started:
+        connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM runtime_execution_locks"
+        ).fetchone()
+        deleted_count = int(row[0] or 0)
+        connection.execute("DELETE FROM runtime_execution_locks")
+        if started:
+            connection.commit()
+        return deleted_count
+    except Exception:
+        if started:
+            connection.rollback()
+        raise
 
 
 def _acquire_lock(

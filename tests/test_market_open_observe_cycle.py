@@ -174,8 +174,10 @@ def test_observe_cycle_returns_conflict_when_evaluation_lock_is_active(
 ) -> None:
     db_path = tmp_path / "observe_cycle_locked.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
-    connection = initialize_database(db_path)
-    try:
+    initialize_database(db_path).close()
+
+    with TestClient(app) as client:
+        connection = open_connection(db_path)
         now = utc_now()
         connection.execute(
             """
@@ -196,10 +198,7 @@ def test_observe_cycle_returns_conflict_when_evaluation_lock_is_active(
             ),
         )
         connection.commit()
-    finally:
         connection.close()
-
-    with TestClient(app) as client:
         response = client.post(
             "/api/operator/observe-cycle/run-once",
             headers={"X-Local-Token": "test-token"},

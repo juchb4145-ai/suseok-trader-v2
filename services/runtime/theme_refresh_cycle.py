@@ -11,9 +11,11 @@ from storage.gateway_command_store import get_command_type_counts
 from services.config import Settings, load_settings
 from services.market_scan_service import run_market_scan_once
 from services.realtime_subscription import run_realtime_subscription_once
-from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runtime_execution_lock
+from services.runtime.evaluation_run_guard import runtime_execution_lock
 from services.theme_leadership import rebuild_theme_leadership
 from services.theme_service import calculate_all_theme_snapshots
+
+THEME_REFRESH_LOCK = "theme_refresh"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -75,11 +77,9 @@ def run_theme_refresh_cycle_once(
     queue_realtime_commands: bool | None = None,
 ) -> ThemeRefreshCycleRunResult:
     resolved_settings = settings or load_settings()
-    # Reuse the evaluation pipeline lock because this lightweight loop mutates
-    # the same theme projections and realtime command queue as the full observe cycle.
     with runtime_execution_lock(
         connection,
-        EVALUATION_PIPELINE_LOCK,
+        THEME_REFRESH_LOCK,
         details={"run_type": "theme_refresh_cycle", "trade_date": trade_date},
     ):
         return _run_theme_refresh_cycle_once(

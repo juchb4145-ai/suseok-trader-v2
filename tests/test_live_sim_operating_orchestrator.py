@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,7 @@ from services.runtime.preflight import (
     PreflightStatus,
     run_live_sim_preflight,
 )
+from services.runtime.theme_refresh_cycle import THEME_REFRESH_LOCK
 from storage.sqlite import initialize_database
 from tests.test_live_sim_order_plan_pipeline import (
     _pilot_settings,
@@ -351,6 +353,35 @@ def test_observe_and_queue_false_never_create_commands(tmp_path) -> None:
     assert queue_false.buy_evaluated_count == 1
     assert queue_false.buy_command_count == 0
     assert queue_false_commands == 0
+
+
+def test_theme_refresh_lock_does_not_block_operating_entry_or_buy(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(tmp_path / "theme-lock-operating.sqlite3")
+    _insert_runtime_lock(
+        connection,
+        lock_name=THEME_REFRESH_LOCK,
+        owner_id="theme-refresh-running",
+    )
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=_operating_settings(live_sim_pilot_auto_queue_command=True),
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    lock_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM runtime_execution_locks WHERE lock_name = ?",
+        (THEME_REFRESH_LOCK,),
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result.stages["entry_timing"]["status"] == "COMPLETED"
+    assert result.stages["buy"]["status"] == "COMPLETED"
+    assert result.buy_evaluated_count == 1
+    assert result.buy_command_count == 0
+    assert lock_count == 1
 
 
 def test_operating_entry_timing_retries_evaluation_lock_then_succeeds(
@@ -775,6 +806,34 @@ def _evaluation_lock_error(owner_id: str = "incremental-run") -> EvaluationRunLo
         owner_id=owner_id,
         expires_at="2026-07-06T00:00:00Z",
     )
+
+
+def _insert_runtime_lock(
+    connection,
+    *,
+    lock_name: str,
+    owner_id: str,
+) -> None:
+    now = utc_now()
+    connection.execute(
+        """
+        INSERT INTO runtime_execution_locks (
+            lock_name,
+            owner_id,
+            acquired_at,
+            expires_at,
+            detail_json
+        )
+        VALUES (?, ?, ?, ?, '{}')
+        """,
+        (
+            lock_name,
+            owner_id,
+            datetime_to_wire(now),
+            datetime_to_wire(now + timedelta(seconds=300)),
+        ),
+    )
+    connection.commit()
 
 
 def _operating_settings(**overrides) -> Settings:

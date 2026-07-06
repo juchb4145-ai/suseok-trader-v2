@@ -6,6 +6,7 @@ import pytest
 from domain.broker.utils import datetime_to_wire, utc_now
 from services.config import Settings
 from services.runtime.evaluation_run_guard import (
+    DEFAULT_EVALUATION_LOCK_TTL_SEC,
     EVALUATION_PIPELINE_LOCK,
     EvaluationRunLockError,
     immediate_transaction,
@@ -13,6 +14,10 @@ from services.runtime.evaluation_run_guard import (
 from services.strategy_engine import evaluate_candidates
 from storage.gateway_command_store import canonical_json
 from storage.sqlite import initialize_database
+
+
+def test_default_evaluation_lock_ttl_is_two_minutes() -> None:
+    assert DEFAULT_EVALUATION_LOCK_TTL_SEC == 120
 
 
 def test_active_evaluation_lock_blocks_strategy_run_before_run_row(tmp_path) -> None:

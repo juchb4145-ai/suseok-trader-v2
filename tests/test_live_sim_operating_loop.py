@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 from typing import Any
 
 from apps import core_api
+from domain.broker.utils import datetime_to_wire, utc_now
 from services.config import Settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from storage.sqlite import initialize_database
 
 
 def test_live_sim_operating_loop_disabled_does_not_create_task(monkeypatch) -> None:
@@ -24,6 +27,26 @@ def test_live_sim_operating_loop_disabled_does_not_create_task(monkeypatch) -> N
 
     assert task is None
     assert created_tasks == []
+
+
+def test_core_startup_clears_residual_runtime_execution_locks(
+    tmp_path,
+    caplog,
+) -> None:
+    connection = initialize_database(tmp_path / "startup-lock-cleanup.sqlite3")
+    _insert_runtime_lock(connection, lock_name="evaluation_pipeline", owner_id="dead-eval")
+    _insert_runtime_lock(connection, lock_name="theme_refresh", owner_id="dead-theme")
+    caplog.set_level(logging.INFO, logger=core_api.logger.name)
+
+    deleted_count = core_api._clear_startup_runtime_execution_locks(connection)
+    remaining_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM runtime_execution_locks"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert deleted_count == 2
+    assert remaining_count == 0
+    assert "cleared runtime execution locks on startup: count=2" in caplog.text
 
 
 def test_live_sim_operating_cycle_skips_outside_market_time(tmp_path, monkeypatch) -> None:
@@ -174,3 +197,31 @@ class _FakeConnection:
 
     def close(self) -> None:
         self.closed = True
+
+
+def _insert_runtime_lock(
+    connection,
+    *,
+    lock_name: str,
+    owner_id: str,
+) -> None:
+    now = utc_now()
+    connection.execute(
+        """
+        INSERT INTO runtime_execution_locks (
+            lock_name,
+            owner_id,
+            acquired_at,
+            expires_at,
+            detail_json
+        )
+        VALUES (?, ?, ?, ?, '{}')
+        """,
+        (
+            lock_name,
+            owner_id,
+            datetime_to_wire(now),
+            datetime_to_wire(now + timedelta(seconds=300)),
+        ),
+    )
+    connection.commit()

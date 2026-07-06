@@ -35,7 +35,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from services.condition_fusion import rebuild_condition_fusion
 from services.config import Settings, clear_settings_cache, load_settings
-from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.evaluation_run_guard import (
+    EvaluationRunLockError,
+    clear_runtime_execution_locks,
+)
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
 from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
 from storage.event_retention import prune_event_store_events
@@ -51,7 +54,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     ensure_auth_token_configured()
     settings = load_settings()
     connection = initialize_database(settings.trading_db_path)
-    connection.close()
+    try:
+        _clear_startup_runtime_execution_locks(connection)
+    finally:
+        connection.close()
     condition_fusion_sweep_task = (
         asyncio.create_task(_condition_fusion_sweep_loop(settings))
         if settings.condition_fusion_sweep_enabled
@@ -106,6 +112,12 @@ def _run_condition_fusion_sweep_once(settings: Settings) -> None:
         rebuild_condition_fusion(connection, settings=settings)
     finally:
         connection.close()
+
+
+def _clear_startup_runtime_execution_locks(connection) -> int:
+    deleted_count = clear_runtime_execution_locks(connection)
+    logger.info("cleared runtime execution locks on startup: count=%s", deleted_count)
+    return deleted_count
 
 
 async def _incremental_evaluation_loop(settings: Settings) -> None:
