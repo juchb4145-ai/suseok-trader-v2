@@ -7,7 +7,7 @@ from typing import Any
 
 from apps import core_api
 from domain.broker.utils import datetime_to_wire, utc_now
-from services.config import Settings
+from services.config import Settings, clear_settings_cache
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from storage.sqlite import initialize_database
 
@@ -165,6 +165,56 @@ def test_live_sim_operating_cycle_reloads_settings_each_tick(
 
     assert [settings.live_sim_kill_switch for settings in captured_settings] == [False, True]
     assert captured_queue_commands == [True, False]
+    assert opened_paths == [tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"]
+    assert all(connection.closed for connection in connections)
+
+
+def test_live_sim_operating_cycle_reloads_dotenv_each_tick(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    captured_order_limits: list[float] = []
+    captured_queue_commands: list[bool] = []
+    opened_paths: list[object] = []
+    connections = [_FakeConnection(), _FakeConnection()]
+
+    def write_env(db_path: object, max_order_notional: int, queue_commands: bool) -> None:
+        env_file.write_text(
+            "\n".join(
+                (
+                    f"TRADING_DB_PATH={db_path}",
+                    f"LIVE_SIM_MAX_ORDER_NOTIONAL={max_order_notional}",
+                    "LIVE_SIM_MAX_DAILY_NOTIONAL=5000000",
+                    f"LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS={str(queue_commands).lower()}",
+                )
+            ),
+            encoding="utf-8",
+        )
+
+    def initialize(path: object) -> _FakeConnection:
+        opened_paths.append(path)
+        return connections[len(opened_paths) - 1]
+
+    def operating_cycle(*args: Any, **kwargs: Any) -> None:
+        captured_order_limits.append(kwargs["settings"].live_sim_max_order_notional)
+        captured_queue_commands.append(kwargs["queue_commands"])
+
+    monkeypatch.setenv("TRADING_ENV_FILE", str(env_file))
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
+    monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
+    monkeypatch.setattr(core_api, "initialize_database", initialize)
+    monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", operating_cycle)
+    clear_settings_cache()
+
+    startup_settings = Settings(trading_db_path=tmp_path / "startup.sqlite3")
+    write_env(tmp_path / "first.sqlite3", 100_000, False)
+    core_api._run_live_sim_operating_cycle_once(startup_settings)
+    write_env(tmp_path / "second.sqlite3", 3_000_000, True)
+    core_api._run_live_sim_operating_cycle_once(startup_settings)
+
+    assert captured_order_limits == [100_000, 3_000_000]
+    assert captured_queue_commands == [False, True]
     assert opened_paths == [tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"]
     assert all(connection.closed for connection in connections)
 

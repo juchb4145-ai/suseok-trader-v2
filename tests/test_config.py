@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from gateway.settings import load_gateway_settings
 from services.config import TradingMode, TradingProfile, clear_settings_cache, load_settings
 
@@ -368,6 +370,73 @@ def test_default_environment_settings_are_cached_until_cleared(tmp_path, monkeyp
     assert first is cached
     assert cached.trading_db_path == first_db
     assert refreshed.trading_db_path == second_db
+
+
+def test_default_settings_overlay_dotenv_over_process_environment(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "# intraday operator overrides",
+                "LIVE_SIM_MAX_ORDER_NOTIONAL='3000000'",
+                'LIVE_SIM_MAX_DAILY_NOTIONAL="5000000"',
+                "TRADING_DB_PATH=storage/from-dotenv.sqlite3",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setenv("TRADING_ENV_FILE", str(env_file))
+    monkeypatch.setenv("LIVE_SIM_MAX_ORDER_NOTIONAL", "100000")
+    monkeypatch.setenv("LIVE_SIM_MAX_DAILY_NOTIONAL", "300000")
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "from-process.sqlite3"))
+    clear_settings_cache()
+
+    settings = load_settings()
+
+    assert settings.live_sim_max_order_notional == 3_000_000
+    assert settings.live_sim_max_daily_notional == 5_000_000
+    assert settings.trading_db_path == Path("storage/from-dotenv.sqlite3")
+
+
+def test_default_settings_fall_back_to_process_environment_without_dotenv(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TRADING_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.setenv("LIVE_SIM_MAX_ORDER_NOTIONAL", "123456")
+    clear_settings_cache()
+
+    settings = load_settings()
+
+    assert settings.live_sim_max_order_notional == 123_456
+
+
+def test_explicit_environ_load_does_not_read_dotenv(tmp_path, monkeypatch) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "LIVE_SIM_MAX_ORDER_NOTIONAL=3000000",
+                "LIVE_SIM_MAX_DAILY_NOTIONAL=5000000",
+            )
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TRADING_ENV_FILE", str(env_file))
+
+    settings = load_settings(
+        {
+            "LIVE_SIM_MAX_ORDER_NOTIONAL": "111111",
+            "LIVE_SIM_MAX_DAILY_NOTIONAL": "222222",
+        }
+    )
+
+    assert settings.live_sim_max_order_notional == 111_111
+    assert settings.live_sim_max_daily_notional == 222_222
 
 
 def test_market_data_interval_settings_are_validated() -> None:

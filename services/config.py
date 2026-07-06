@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from domain.market.bars import normalize_interval_list
 
 DEFAULT_DB_PATH = "storage/suseok-trader-v2.sqlite3"
+DEFAULT_ENV_FILE_PATH = Path(__file__).resolve().parents[1] / ".env"
+ENV_FILE_PATH_ENV = "TRADING_ENV_FILE"
 
 
 class TradingMode(StrEnum):
@@ -1271,7 +1273,56 @@ def clear_settings_cache() -> None:
 
 @lru_cache(maxsize=1)
 def _load_default_settings() -> Settings:
-    return _build_settings(os.environ)
+    """Load settings from os.environ overlaid by .env file values.
+
+    The .env file has higher priority than os.environ so intraday operator
+    edits use .env as the single source of truth.
+    """
+    return _build_settings(_default_settings_environment())
+
+
+def _default_settings_environment() -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(_load_env_file_values(_resolve_env_file_path(env)))
+    return env
+
+
+def _resolve_env_file_path(env: Mapping[str, str]) -> Path:
+    configured_path = env.get(ENV_FILE_PATH_ENV, "").strip()
+    if configured_path:
+        return Path(configured_path).expanduser()
+    return DEFAULT_ENV_FILE_PATH
+
+
+def _load_env_file_values(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+
+    try:
+        raw_lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}
+
+    values: dict[str, str] = {}
+    for raw_line in raw_lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        separator = line.find("=")
+        if separator < 1:
+            continue
+
+        name = line[:separator].strip()
+        value = line[separator + 1 :].strip()
+        if len(value) >= 2 and (
+            (value.startswith('"') and value.endswith('"'))
+            or (value.startswith("'") and value.endswith("'"))
+        ):
+            value = value[1:-1]
+        values[name] = value
+
+    return values
 
 
 def _build_settings(env: Mapping[str, str]) -> Settings:
