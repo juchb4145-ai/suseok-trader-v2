@@ -25,6 +25,7 @@ from services.runtime.market_open_observe_cycle import (
     list_market_open_observe_cycle_runs,
     run_market_open_observe_cycle_once,
 )
+from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
@@ -193,7 +194,26 @@ def operator_projection_outbox_status() -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        return get_projection_outbox_status(connection)
+        return get_projection_outbox_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.post("/projection-outbox/run-once", dependencies=[Depends(require_local_token)])
+def operator_projection_outbox_run_once(
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = process_projection_outbox_batch(
+            connection,
+            settings=settings,
+            limit=limit,
+        )
+        payload = result.to_dict()
+        payload["read_only_projection"] = True
+        return payload
     finally:
         connection.close()
 

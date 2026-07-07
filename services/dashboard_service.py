@@ -248,7 +248,7 @@ def build_dashboard_snapshot(
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
-    projection_outbox_status = get_projection_outbox_status(connection)
+    projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     latest_observe_cycle = get_latest_market_open_observe_cycle_run(connection)
     no_buy_sentinel = build_no_buy_sentinel_snapshot(
         connection,
@@ -1162,6 +1162,9 @@ def _pipeline_summary(
             "enabled": projection_outbox_status["enabled"],
             "shadow_mode": projection_outbox_status["shadow_mode"],
             "worker_enabled": projection_outbox_status["worker_enabled"],
+            "apply_projection_enabled": projection_outbox_status[
+                "apply_projection_enabled"
+            ],
             "total_count": projection_outbox_status["total_count"],
             "pending_count": projection_outbox_status["pending_count"],
             "processing_count": projection_outbox_status["processing_count"],

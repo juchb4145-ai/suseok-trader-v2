@@ -77,6 +77,8 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["market_data"]["cross_exchange"]["enabled"] is False
     assert snapshot["market_data"]["cross_exchange"]["latest_observations"] == []
     assert snapshot["projection_outbox"]["shadow_mode"] is True
+    assert snapshot["projection_outbox"]["worker_enabled"] is False
+    assert snapshot["projection_outbox"]["apply_projection_enabled"] is False
     assert snapshot["projection_outbox"]["pending_count"] == 0
     assert snapshot["pipeline_summary"]["projection_outbox"]["pending_count"] == 0
 
@@ -93,6 +95,7 @@ def test_dashboard_snapshot_includes_projection_outbox_status(tmp_path) -> None:
     assert snapshot["projection_outbox"]["enabled"] is True
     assert snapshot["projection_outbox"]["shadow_mode"] is True
     assert snapshot["projection_outbox"]["worker_enabled"] is False
+    assert snapshot["projection_outbox"]["apply_projection_enabled"] is False
     assert snapshot["projection_outbox"]["pending_count"] == 1
     assert snapshot["projection_outbox"]["by_projection_name"]["market_data"][
         "pending_count"

@@ -13,9 +13,10 @@
 - Dashboard top theme 표시는 단순 latest sample만 쓰지 않고 state-filtered query를 별도로 사용한다. 기존 테스트가 DATA_WAIT 최신 표본 뒤에 숨은 LEADING/SPREADING 테마를 검증한다. 근거: `services/dashboard_service.py`, `tests/test_dashboard_service.py`.
 - Stale `DISPATCHED` order command는 timeout 후 `UNCONFIRMED`로 전환되고 운영자 종결 도구가 `command_started`/`command_ack`/CHEJAN/체결 evidence를 확인한다. 근거: `storage/gateway_command_store.py`, `tools/resolve_live_sim_order.py`.
 
-## PR-2 진행 상태
+## P0-1 진행 상태
 
 - P0-1 mitigation step 1: `projection_outbox` skeleton을 추가했다. Gateway POST의 기존 inline projection은 유지되며, outbox는 shadow 준비용 PENDING job 관측 기반으로만 동작한다. 주문/LIVE_SIM 동작, `LIVE_REAL`, 매수 gate, safety gate 정책은 변경하지 않았다.
+- PR-3: `projection_outbox` shadow verification worker를 추가했다. worker는 inline projection을 대체하지 않고 projection table을 직접 갱신하지 않으며, outbox job 상태만 `APPLIED`/`SKIPPED`/`ERROR`/`DEAD_LETTER`로 정리한다. background worker는 기본 disabled다.
 
 ## P0
 

@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from domain.broker.events import GatewayEvent
@@ -177,7 +178,199 @@ def enqueue_projection_jobs_for_gateway_event(
     )
 
 
-def get_projection_outbox_status(connection: sqlite3.Connection) -> dict[str, Any]:
+def claim_projection_outbox_jobs(
+    connection: sqlite3.Connection,
+    *,
+    owner_id: str,
+    limit: int,
+    processing_ttl_sec: int,
+    min_age_sec: float = 0.0,
+) -> list[dict[str, Any]]:
+    del processing_ttl_sec
+    normalized_owner_id = _require_non_empty(owner_id, "owner_id")
+    bounded_limit = min(max(int(limit), 1), 500)
+    now = utc_now()
+    now_wire = datetime_to_wire(now)
+    min_created_at = datetime_to_wire(now - timedelta(seconds=max(float(min_age_sec), 0.0)))
+    claimed: list[dict[str, Any]] = []
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        candidates = connection.execute(
+            """
+            SELECT outbox_id
+            FROM projection_outbox
+            WHERE status = 'PENDING'
+                AND (available_at IS NULL OR julianday(available_at) <= julianday(?))
+                AND julianday(created_at) <= julianday(?)
+            ORDER BY priority DESC, event_rowid ASC, created_at ASC
+            LIMIT ?
+            """,
+            (now_wire, min_created_at, bounded_limit),
+        ).fetchall()
+        for candidate in candidates:
+            cursor = connection.execute(
+                """
+                UPDATE projection_outbox
+                SET
+                    status = 'PROCESSING',
+                    locked_by = ?,
+                    locked_at = ?,
+                    updated_at = ?
+                WHERE outbox_id = ?
+                    AND status = 'PENDING'
+                    AND (available_at IS NULL OR julianday(available_at) <= julianday(?))
+                    AND julianday(created_at) <= julianday(?)
+                """,
+                (
+                    normalized_owner_id,
+                    now_wire,
+                    now_wire,
+                    candidate["outbox_id"],
+                    now_wire,
+                    min_created_at,
+                ),
+            )
+            if cursor.rowcount <= 0:
+                continue
+            row = connection.execute(
+                "SELECT * FROM projection_outbox WHERE outbox_id = ?",
+                (candidate["outbox_id"],),
+            ).fetchone()
+            if row is not None:
+                claimed.append(_job_row_to_dict(row))
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return claimed
+
+
+def mark_projection_outbox_applied(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    _mark_projection_outbox_terminal(
+        connection,
+        outbox_id,
+        owner_id=owner_id,
+        status="APPLIED",
+        evidence=evidence,
+    )
+
+
+def mark_projection_outbox_skipped(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    reason: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    enriched_evidence = dict(evidence or {})
+    enriched_evidence["reason"] = _require_non_empty(reason, "reason")
+    _mark_projection_outbox_terminal(
+        connection,
+        outbox_id,
+        owner_id=owner_id,
+        status="SKIPPED",
+        evidence=enriched_evidence,
+    )
+
+
+def mark_projection_outbox_error(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    error_message: str,
+    retry_limit: int,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    normalized_outbox_id = _require_non_empty(outbox_id, "outbox_id")
+    normalized_owner_id = _require_non_empty(owner_id, "owner_id")
+    normalized_error = _require_non_empty(error_message, "error_message")
+    now = datetime_to_wire(utc_now())
+    row = connection.execute(
+        """
+        SELECT attempts, metadata_json
+        FROM projection_outbox
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (normalized_outbox_id, normalized_owner_id),
+    ).fetchone()
+    if row is None:
+        return
+    next_attempts = int(row["attempts"]) + 1
+    next_status = "DEAD_LETTER" if next_attempts >= int(retry_limit) else "ERROR"
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=next_status,
+        evidence=evidence,
+        error_message=normalized_error,
+        marked_at=now,
+    )
+    processed_at = now if next_status == "DEAD_LETTER" else None
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            attempts = ?,
+            last_error = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = ?,
+            processed_at = COALESCE(?, processed_at),
+            metadata_json = ?
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (
+            next_status,
+            next_attempts,
+            normalized_error,
+            now,
+            processed_at,
+            metadata_json,
+            normalized_outbox_id,
+            normalized_owner_id,
+        ),
+    )
+    connection.commit()
+
+
+def reset_stale_projection_outbox_processing(
+    connection: sqlite3.Connection,
+    *,
+    stale_sec: int,
+) -> int:
+    now = utc_now()
+    cutoff = datetime_to_wire(now - timedelta(seconds=max(int(stale_sec), 0)))
+    now_wire = datetime_to_wire(now)
+    cursor = connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = 'PENDING',
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = ?
+        WHERE status = 'PROCESSING'
+            AND locked_at IS NOT NULL
+            AND julianday(locked_at) <= julianday(?)
+        """,
+        (now_wire, cutoff),
+    )
+    connection.commit()
+    return int(cursor.rowcount)
+
+
+def get_projection_outbox_status(
+    connection: sqlite3.Connection,
+    settings: Any | None = None,
+) -> dict[str, Any]:
     counts = _empty_status_counts()
     for row in connection.execute(
         """
@@ -208,8 +401,21 @@ def get_projection_outbox_status(connection: sqlite3.Connection) -> dict[str, An
     ).fetchone()
     return {
         "enabled": True,
-        "shadow_mode": True,
-        "worker_enabled": False,
+        "shadow_mode": bool(getattr(settings, "projection_outbox_shadow_mode", True)),
+        "worker_enabled": bool(
+            getattr(settings, "projection_outbox_worker_enabled", False)
+        ),
+        "apply_projection_enabled": bool(
+            getattr(settings, "projection_outbox_apply_projection_enabled", False)
+        ),
+        "batch_size": int(getattr(settings, "projection_outbox_batch_size", 100)),
+        "retry_limit": int(getattr(settings, "projection_outbox_retry_limit", 3)),
+        "processing_ttl_sec": int(
+            getattr(settings, "projection_outbox_processing_ttl_sec", 60)
+        ),
+        "shadow_min_age_sec": float(
+            getattr(settings, "projection_outbox_shadow_min_age_sec", 0.5)
+        ),
         "read_only": True,
         "total_count": total_count,
         **counts,
@@ -251,6 +457,58 @@ def list_projection_outbox_jobs(
 
 def _empty_status_counts() -> dict[str, int]:
     return {count_key: 0 for count_key in _COUNT_KEYS.values()}
+
+
+def _mark_projection_outbox_terminal(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    status: str,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    normalized_outbox_id = _require_non_empty(outbox_id, "outbox_id")
+    normalized_owner_id = _require_non_empty(owner_id, "owner_id")
+    now = datetime_to_wire(utc_now())
+    row = connection.execute(
+        """
+        SELECT metadata_json
+        FROM projection_outbox
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (normalized_outbox_id, normalized_owner_id),
+    ).fetchone()
+    if row is None:
+        return
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=status,
+        evidence=evidence,
+        marked_at=now,
+    )
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = ?,
+            processed_at = ?,
+            last_error = NULL,
+            metadata_json = ?
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (
+            status,
+            now,
+            now,
+            metadata_json,
+            normalized_outbox_id,
+            normalized_owner_id,
+        ),
+    )
+    connection.commit()
 
 
 def _outbox_counts_by_projection_name(
@@ -365,3 +623,38 @@ def _loads_json_object(value: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _merge_metadata_json(
+    metadata_json: str,
+    *,
+    status: str,
+    evidence: Mapping[str, Any] | None,
+    marked_at: str,
+    error_message: str | None = None,
+) -> str:
+    metadata = _loads_json_object(metadata_json)
+    history = metadata.get("worker_history")
+    if not isinstance(history, list):
+        history = []
+    entry: dict[str, Any] = {
+        "status": status,
+        "marked_at": marked_at,
+        "evidence": dict(evidence or {}),
+    }
+    if error_message is not None:
+        entry["error_message"] = error_message
+    history.append(entry)
+    metadata["worker_history"] = history[-20:]
+    metadata["last_worker_status"] = status
+    metadata["last_worker_evidence"] = dict(evidence or {})
+    if error_message is not None:
+        metadata["last_worker_error"] = error_message
+    return canonical_json(metadata)
+
+
+def _require_non_empty(value: object, field_name: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError(f"{field_name} must not be empty")
+    return text

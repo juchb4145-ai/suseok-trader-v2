@@ -252,6 +252,14 @@ class Settings:
     incremental_evaluation_worker_interval_sec: float = 1.0
     incremental_evaluation_batch_size: int = 20
     incremental_evaluation_retry_limit: int = 3
+    projection_outbox_worker_enabled: bool = False
+    projection_outbox_worker_interval_sec: float = 1.0
+    projection_outbox_batch_size: int = 100
+    projection_outbox_retry_limit: int = 3
+    projection_outbox_processing_ttl_sec: int = 60
+    projection_outbox_shadow_mode: bool = True
+    projection_outbox_apply_projection_enabled: bool = False
+    projection_outbox_shadow_min_age_sec: float = 0.5
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -629,6 +637,21 @@ class Settings:
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.projection_outbox_worker_interval_sec <= 0:
+            raise ValueError("PROJECTION_OUTBOX_WORKER_INTERVAL_SEC must be > 0")
+        for field_name in (
+            "projection_outbox_batch_size",
+            "projection_outbox_retry_limit",
+            "projection_outbox_processing_ttl_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.projection_outbox_shadow_min_age_sec < 0:
+            raise ValueError("PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC must be >= 0")
+        if not self.projection_outbox_shadow_mode:
+            raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
+        if self.projection_outbox_apply_projection_enabled:
+            raise ValueError("PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED must remain false")
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -1865,6 +1888,40 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("INCREMENTAL_EVALUATION_RETRY_LIMIT", "3"),
             "INCREMENTAL_EVALUATION_RETRY_LIMIT",
             min_value=1,
+        ),
+        projection_outbox_worker_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_WORKER_ENABLED", "false")
+        ),
+        projection_outbox_worker_interval_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_WORKER_INTERVAL_SEC", "1.0"),
+            "PROJECTION_OUTBOX_WORKER_INTERVAL_SEC",
+            min_value=0.1,
+        ),
+        projection_outbox_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_BATCH_SIZE", "100"),
+            "PROJECTION_OUTBOX_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_retry_limit=_parse_int(
+            env.get("PROJECTION_OUTBOX_RETRY_LIMIT", "3"),
+            "PROJECTION_OUTBOX_RETRY_LIMIT",
+            min_value=1,
+        ),
+        projection_outbox_processing_ttl_sec=_parse_int(
+            env.get("PROJECTION_OUTBOX_PROCESSING_TTL_SEC", "60"),
+            "PROJECTION_OUTBOX_PROCESSING_TTL_SEC",
+            min_value=1,
+        ),
+        projection_outbox_shadow_mode=_parse_bool(
+            env.get("PROJECTION_OUTBOX_SHADOW_MODE", "true")
+        ),
+        projection_outbox_apply_projection_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED", "false")
+        ),
+        projection_outbox_shadow_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC", "0.5"),
+            "PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC",
+            min_value=0.0,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),
