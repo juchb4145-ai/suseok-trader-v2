@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -55,6 +56,7 @@ _PAYLOAD_VALIDATORS = {
     "tr_response": BrokerTrResponse.from_dict,
     "execution_event": BrokerExecutionEvent.from_dict,
 }
+_DATABASE_LOCK_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2, 0.4, 0.8)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -68,6 +70,21 @@ class AppendGatewayEventResult:
 
 
 def append_gateway_event(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+) -> AppendGatewayEventResult:
+    for delay_sec in (*_DATABASE_LOCK_RETRY_DELAYS_SEC, None):
+        try:
+            return _append_gateway_event_once(connection, event)
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            if not _is_database_locked_error(exc) or delay_sec is None:
+                raise
+            time.sleep(delay_sec)
+    raise RuntimeError("unreachable gateway event retry state")
+
+
+def _append_gateway_event_once(
     connection: sqlite3.Connection,
     event: GatewayEvent,
 ) -> AppendGatewayEventResult:
@@ -216,6 +233,10 @@ def append_gateway_event(
         payload_hash=payload_hash,
         error_message=error_message,
     )
+
+
+def _is_database_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 def list_recent_gateway_events(

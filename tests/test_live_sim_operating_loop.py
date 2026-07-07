@@ -61,7 +61,7 @@ def test_live_sim_operating_cycle_skips_outside_market_time(tmp_path, monkeypatc
     def fail_operating_cycle(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("operating cycle should not run outside market hours")
 
-    monkeypatch.setattr(core_api, "initialize_database", fail_initialize_database)
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", fail_initialize_database)
     monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", fail_operating_cycle)
 
     core_api._run_live_sim_operating_cycle_once(settings)
@@ -80,7 +80,7 @@ def test_live_sim_operating_cycle_uses_default_mode_and_never_upgrades_queue(
     monkeypatch.setattr(core_api, "load_settings", lambda: settings)
     monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
-    monkeypatch.setattr(core_api, "initialize_database", lambda path: connection)
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", lambda path: connection)
 
     def operating_cycle(*args: Any, **kwargs: Any) -> None:
         captured["args"] = args
@@ -114,7 +114,7 @@ def test_live_sim_operating_cycle_uses_fresh_queue_command_setting(
     monkeypatch.setattr(core_api, "load_settings", lambda: fresh_settings)
     monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
-    monkeypatch.setattr(core_api, "initialize_database", lambda path: connection)
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", lambda path: connection)
 
     def operating_cycle(*args: Any, **kwargs: Any) -> None:
         captured["args"] = args
@@ -150,7 +150,7 @@ def test_live_sim_operating_cycle_reloads_settings_each_tick(
 
     monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
-    monkeypatch.setattr(core_api, "initialize_database", initialize)
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", initialize)
     monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", operating_cycle)
 
     startup_settings = Settings(trading_db_path=tmp_path / "startup.sqlite3")
@@ -203,7 +203,7 @@ def test_live_sim_operating_cycle_reloads_dotenv_each_tick(
     monkeypatch.setenv("TRADING_ENV_FILE", str(env_file))
     monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
     monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
-    monkeypatch.setattr(core_api, "initialize_database", initialize)
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", initialize)
     monkeypatch.setattr(core_api, "run_live_sim_operating_cycle_once", operating_cycle)
     clear_settings_cache()
 

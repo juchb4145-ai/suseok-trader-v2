@@ -42,7 +42,7 @@ from services.runtime.evaluation_run_guard import (
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
 from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
 from storage.event_retention import prune_event_store_events
-from storage.sqlite import initialize_database
+from storage.sqlite import initialize_database, open_connection
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 STATIC_DIR = ROOT_DIR / "web" / "static"
@@ -107,7 +107,7 @@ async def _condition_fusion_sweep_loop(settings: Settings) -> None:
 
 
 def _run_condition_fusion_sweep_once(settings: Settings) -> None:
-    connection = initialize_database(settings.trading_db_path)
+    connection = _open_runtime_database_connection(settings.trading_db_path)
     try:
         rebuild_condition_fusion(connection, settings=settings)
     finally:
@@ -133,7 +133,7 @@ async def _incremental_evaluation_loop(settings: Settings) -> None:
 
 
 def _run_incremental_evaluation_once(settings: Settings) -> None:
-    connection = initialize_database(settings.trading_db_path)
+    connection = _open_runtime_database_connection(settings.trading_db_path)
     try:
         process_incremental_evaluation_batch(connection, settings=settings)
     finally:
@@ -169,7 +169,7 @@ def _run_live_sim_operating_cycle_once(_startup_settings: Settings) -> None:
         logger.debug("LIVE_SIM operating cycle skipped outside market hours")
         return
 
-    connection = initialize_database(fresh_settings.trading_db_path)
+    connection = _open_runtime_database_connection(fresh_settings.trading_db_path)
     try:
         run_live_sim_operating_cycle_once(
             connection,
@@ -203,11 +203,15 @@ async def _event_retention_loop(settings: Settings) -> None:
 
 
 def _run_event_retention_once(settings: Settings) -> None:
-    connection = initialize_database(settings.trading_db_path)
+    connection = _open_runtime_database_connection(settings.trading_db_path)
     try:
         prune_event_store_events(connection, settings=settings, dry_run=False)
     finally:
         connection.close()
+
+
+def _open_runtime_database_connection(db_path):
+    return open_connection(db_path)
 
 
 def create_app() -> FastAPI:

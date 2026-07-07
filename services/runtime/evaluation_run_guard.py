@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import timedelta
@@ -11,6 +12,7 @@ from storage.gateway_command_store import canonical_json
 
 EVALUATION_PIPELINE_LOCK = "evaluation_pipeline"
 DEFAULT_EVALUATION_LOCK_TTL_SEC = 120
+_BEGIN_IMMEDIATE_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2, 0.4)
 
 
 class EvaluationRunLockError(RuntimeError):
@@ -41,7 +43,7 @@ class EvaluationRunLockError(RuntimeError):
 def immediate_transaction(connection: sqlite3.Connection) -> Iterator[None]:
     started = not connection.in_transaction
     if started:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate_with_retry(connection)
     try:
         yield
     except Exception:
@@ -84,7 +86,7 @@ def runtime_execution_lock(
 def clear_runtime_execution_locks(connection: sqlite3.Connection) -> int:
     started = not connection.in_transaction
     if started:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate_with_retry(connection)
     try:
         row = connection.execute(
             "SELECT COUNT(*) AS count FROM runtime_execution_locks"
@@ -113,7 +115,7 @@ def _acquire_lock(
     expires_at = datetime_to_wire(now_dt + timedelta(seconds=max(int(ttl_sec), 1)))
     started = not connection.in_transaction
     if started:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate_with_retry(connection)
     try:
         row = connection.execute(
             """
@@ -163,7 +165,7 @@ def _release_lock(
 ) -> None:
     started = not connection.in_transaction
     if started:
-        connection.execute("BEGIN IMMEDIATE")
+        _begin_immediate_with_retry(connection)
     try:
         connection.execute(
             """
@@ -178,3 +180,19 @@ def _release_lock(
         if started:
             connection.rollback()
         raise
+
+
+def _begin_immediate_with_retry(connection: sqlite3.Connection) -> None:
+    for delay_sec in (*_BEGIN_IMMEDIATE_RETRY_DELAYS_SEC, None):
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            return
+        except sqlite3.OperationalError as exc:
+            if not _is_database_locked_error(exc) or delay_sec is None:
+                raise
+            time.sleep(delay_sec)
+    raise RuntimeError("unreachable BEGIN IMMEDIATE retry state")
+
+
+def _is_database_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()

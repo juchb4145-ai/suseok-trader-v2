@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 
 from domain.broker.conditions import BrokerConditionEvent
@@ -42,6 +43,7 @@ from api.dependencies.auth import require_local_token
 
 router = APIRouter(prefix="/api/gateway")
 logger = logging.getLogger(__name__)
+_gateway_event_write_lock = threading.RLock()
 
 
 @router.post("/events", dependencies=[Depends(require_local_token)])
@@ -59,51 +61,67 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     projection_status: str | None = None
     projection_statuses: dict[str, str] = {}
     try:
-        result = append_gateway_event(connection, event)
-        if result.status == "ACCEPTED" and not result.duplicate:
-            event_type = event.event_type.strip().lower()
-            if event_type in MARKET_DATA_EVENT_TYPES:
-                projection_result = process_gateway_event(connection, event, settings=settings)
-                projection_status = projection_result.status
-                projection_statuses["market_data"] = projection_result.status
-                if event_type == "price_tick" and projection_result.status == "APPLIED":
-                    projection_statuses["incremental_evaluation"] = (
-                        _enqueue_incremental_evaluation_for_price_tick(
-                            connection,
-                            event,
-                            settings=settings,
-                        )
+        with _gateway_event_write_lock:
+            result = append_gateway_event(connection, event)
+            if result.status == "ACCEPTED" and not result.duplicate:
+                event_type = event.event_type.strip().lower()
+                if event_type in MARKET_DATA_EVENT_TYPES:
+                    projection_result = process_gateway_event(
+                        connection,
+                        event,
+                        settings=settings,
                     )
-                if (
-                    event_type == "condition_event"
-                    and projection_result.status == "APPLIED"
-                    and settings.condition_fusion_event_incremental_enabled
-                ):
-                    projection_statuses["condition_fusion"] = (
-                        _refresh_condition_fusion_for_condition_event(
-                            connection,
-                            event,
-                            settings=settings,
+                    projection_status = projection_result.status
+                    projection_statuses["market_data"] = projection_result.status
+                    if event_type == "price_tick" and projection_result.status == "APPLIED":
+                        projection_statuses["incremental_evaluation"] = (
+                            _enqueue_incremental_evaluation_for_price_tick(
+                                connection,
+                                event,
+                                settings=settings,
+                            )
                         )
+                    if (
+                        event_type == "condition_event"
+                        and projection_result.status == "APPLIED"
+                        and settings.condition_fusion_event_incremental_enabled
+                    ):
+                        projection_statuses["condition_fusion"] = (
+                            _refresh_condition_fusion_for_condition_event(
+                                connection,
+                                event,
+                                settings=settings,
+                            )
+                        )
+                if event_type in MARKET_SYMBOL_EVENT_TYPES:
+                    reference_result = process_market_symbols_event(connection, event)
+                    projection_statuses["market_reference"] = reference_result.status
+                if event_type in MARKET_INDEX_EVENT_TYPES:
+                    index_result = process_market_index_event(
+                        connection,
+                        event,
+                        settings=settings,
                     )
-            if event_type in MARKET_SYMBOL_EVENT_TYPES:
-                reference_result = process_market_symbols_event(connection, event)
-                projection_statuses["market_reference"] = reference_result.status
-            if event_type in MARKET_INDEX_EVENT_TYPES:
-                index_result = process_market_index_event(connection, event, settings=settings)
-                projection_statuses["market_index"] = index_result.status
-                if index_result.status == "APPLIED" and settings.market_regime_enabled:
-                    if should_rebuild_market_regime_snapshot(connection):
-                        regime = rebuild_market_regime_snapshot(connection, settings=settings)
-                        projection_statuses["market_regime"] = regime["regime_status"]
-                    else:
-                        projection_statuses["market_regime"] = "SKIPPED_RECENT"
-            if event_type in SCAN_EVENT_TYPES:
-                scan_result = process_market_scan_event(connection, event, settings=settings)
-                if scan_result.status != "IGNORED":
-                    projection_statuses["market_scan"] = scan_result.status
-        if result.status == "ACCEPTED" and not result.duplicate:
-            handle_live_sim_gateway_event(connection, event, settings=settings)
+                    projection_statuses["market_index"] = index_result.status
+                    if index_result.status == "APPLIED" and settings.market_regime_enabled:
+                        if should_rebuild_market_regime_snapshot(connection):
+                            regime = rebuild_market_regime_snapshot(
+                                connection,
+                                settings=settings,
+                            )
+                            projection_statuses["market_regime"] = regime["regime_status"]
+                        else:
+                            projection_statuses["market_regime"] = "SKIPPED_RECENT"
+                if event_type in SCAN_EVENT_TYPES:
+                    scan_result = process_market_scan_event(
+                        connection,
+                        event,
+                        settings=settings,
+                    )
+                    if scan_result.status != "IGNORED":
+                        projection_statuses["market_scan"] = scan_result.status
+            if result.status == "ACCEPTED" and not result.duplicate:
+                handle_live_sim_gateway_event(connection, event, settings=settings)
     finally:
         connection.close()
 

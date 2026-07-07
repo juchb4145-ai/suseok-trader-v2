@@ -69,6 +69,10 @@ TERMINAL_LIVE_SIM_ORDER_STATUSES = {
     LiveSimOrderStatus.CANCEL_REJECTED.value,
     LiveSimOrderStatus.EXIT_FILLED.value,
 }
+NON_CONSUMING_LIVE_SIM_ORDER_STATUSES = {
+    LiveSimOrderStatus.FAILED.value,
+    LiveSimOrderStatus.ORDER_EXPIRED.value,
+}
 ACTIVE_LIVE_SIM_POSITION_STATUSES = {"OPEN", "CLOSING", "RECONCILE_MISMATCH"}
 ACTIVE_CANCEL_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
 ACTIVE_EXIT_INTENT_STATUSES = {"CREATED", "COMMAND_QUEUED"}
@@ -4278,27 +4282,27 @@ def _recent_active_live_sim_count_for_code(
 
 def _daily_order_count(connection: sqlite3.Connection, trade_date: str) -> int:
     row = connection.execute(
-        """
+        f"""
         SELECT COUNT(*) AS count
         FROM live_sim_orders
         WHERE trade_date = ?
             AND UPPER(side) = 'BUY'
-            AND status != ?
+            AND status NOT IN ({_placeholders(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES)})
         """,
-        (trade_date, LiveSimOrderStatus.ORDER_EXPIRED.value),
+        (trade_date, *sorted(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES)),
     ).fetchone()
     return int(row["count"])
 
 
 def _daily_order_notional(connection: sqlite3.Connection, trade_date: str) -> float:
     row = connection.execute(
-        """
+        f"""
         SELECT COALESCE(SUM(notional), 0) AS total
         FROM live_sim_orders
         WHERE trade_date = ?
-            AND status != ?
+            AND status NOT IN ({_placeholders(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES)})
         """,
-        (trade_date, LiveSimOrderStatus.ORDER_EXPIRED.value),
+        (trade_date, *sorted(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES)),
     ).fetchone()
     return float(row["total"])
 

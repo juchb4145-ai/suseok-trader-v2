@@ -167,6 +167,26 @@ def test_live_sim_safety_gate_daily_limit_ignores_order_expired(tmp_path) -> Non
     assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in result.reason_codes
 
 
+def test_live_sim_safety_gate_daily_limit_ignores_failed_order(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "live-sim-daily-limit-failed-order.sqlite3")
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings(live_sim_max_daily_order_count=1)
+    _insert_live_sim_order_record(
+        connection,
+        order_id="failed-before-broker",
+        side="BUY",
+        status=LiveSimOrderStatus.FAILED.value,
+    )
+
+    result = check_live_sim_safety_gate(connection, settings, purpose="NEW_BUY")
+    connection.close()
+
+    assert result.passed is True
+    assert result.daily_buy_order_count == 0
+    assert result.daily_limit_remaining == 1
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in result.reason_codes
+
+
 def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-flow.sqlite3")
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())

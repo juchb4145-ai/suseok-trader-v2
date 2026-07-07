@@ -17,6 +17,10 @@ from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidenc
 SIMULATION_LIKE_MODES = {"SIMULATION", "MOCK", "PAPER", "MOCK_TRADING", "LIVE_SIM"}
 LiveSimSafetyGatePurpose = Literal["NEW_BUY", "LIFECYCLE"]
 _SAFETY_GATE_PURPOSES = {"NEW_BUY", "LIFECYCLE"}
+NON_CONSUMING_LIVE_SIM_ORDER_STATUSES = {
+    LiveSimOrderStatus.FAILED.value,
+    LiveSimOrderStatus.ORDER_EXPIRED.value,
+}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -361,17 +365,17 @@ def _daily_live_sim_order_count(
     side: str = "BUY",
 ) -> int:
     row = connection.execute(
-        """
+        f"""
         SELECT COUNT(*) AS count
         FROM live_sim_orders
         WHERE trade_date = ?
             AND UPPER(side) = ?
-            AND status != ?
+            AND status NOT IN ({_placeholders(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES)})
         """,
         (
             trade_date or market_today(),
             side.strip().upper(),
-            LiveSimOrderStatus.ORDER_EXPIRED.value,
+            *sorted(NON_CONSUMING_LIVE_SIM_ORDER_STATUSES),
         ),
     ).fetchone()
     return int(row["count"])
@@ -393,6 +397,10 @@ def _daily_live_sim_cancel_intent_count(
         (trade_date or market_today(),),
     ).fetchone()
     return int(row["count"])
+
+
+def _placeholders(values: set[str]) -> str:
+    return ",".join("?" for _ in values)
 
 
 def _merge_reasons(reasons: list[str]) -> list[str]:

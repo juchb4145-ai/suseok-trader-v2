@@ -190,8 +190,17 @@ def poll_commands(
     deadline = time.monotonic() + bounded_wait_sec
 
     while True:
-        expire_stale_gateway_commands(connection)
-        commands = _dispatch_ready_commands(connection, bounded_limit)
+        try:
+            expire_stale_gateway_commands(connection)
+            commands = _dispatch_ready_commands(connection, bounded_limit)
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            if not _is_database_locked_error(exc):
+                raise
+            if time.monotonic() >= deadline:
+                return []
+            time.sleep(min(0.1, max(deadline - time.monotonic(), 0)))
+            continue
         if commands or time.monotonic() >= deadline:
             return commands
         time.sleep(min(0.1, max(deadline - time.monotonic(), 0)))
@@ -265,7 +274,6 @@ def record_command_event(
 
 
 def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
-    expire_stale_gateway_commands(connection)
     rows = connection.execute(
         """
         SELECT status, COUNT(*) AS count
@@ -276,8 +284,6 @@ def get_command_status_counts(connection: sqlite3.Connection) -> dict[str, int]:
     counts = {status.value: 0 for status in GatewayCommandStatus}
     for row in rows:
         counts[row["status"]] = row["count"]
-    _upsert_command_queue_health(connection, healthy=True)
-    connection.commit()
     return counts
 
 
@@ -322,6 +328,56 @@ def expire_stale_gateway_commands(
     dispatched_cutoff = datetime_to_wire(
         now_dt - timedelta(seconds=max(int(dispatched_timeout_sec), 1))
     )
+    candidate_counts = connection.execute(
+        """
+        SELECT
+            SUM(
+                CASE
+                    WHEN status = ?
+                        AND expires_at IS NOT NULL
+                        AND expires_at <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS expired_queued_count,
+            SUM(
+                CASE
+                    WHEN status = ?
+                        AND command_type NOT IN ('send_order', 'cancel_order')
+                        AND dispatched_at IS NOT NULL
+                        AND dispatched_at <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS timed_out_dispatched_count,
+            SUM(
+                CASE
+                    WHEN status = ?
+                        AND command_type IN ('send_order', 'cancel_order')
+                        AND dispatched_at IS NOT NULL
+                        AND dispatched_at <= ?
+                    THEN 1 ELSE 0
+                END
+            ) AS unconfirmed_order_count
+        FROM gateway_commands
+        """,
+        (
+            GatewayCommandStatus.QUEUED.value,
+            now,
+            GatewayCommandStatus.DISPATCHED.value,
+            dispatched_cutoff,
+            GatewayCommandStatus.DISPATCHED.value,
+            dispatched_cutoff,
+        ),
+    ).fetchone()
+    stale_counts = {
+        "expired_queued_count": int(candidate_counts["expired_queued_count"] or 0),
+        "timed_out_dispatched_count": int(
+            candidate_counts["timed_out_dispatched_count"] or 0
+        ),
+        "unconfirmed_order_count": int(candidate_counts["unconfirmed_order_count"] or 0),
+    }
+    if not any(stale_counts.values()):
+        return stale_counts
+
     queued_cursor = connection.execute(
         """
         UPDATE gateway_commands
@@ -524,23 +580,29 @@ def _dispatch_ready_commands(
     limit: int,
 ) -> list[GatewayCommand]:
     now = datetime_to_wire(utc_now())
+    has_expired_queued = _has_expired_queued_command(connection, now)
+    has_ready_queued = _has_ready_queued_command(connection, now)
+    if not has_expired_queued and not has_ready_queued:
+        return []
+
     try:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute(
-            """
-            UPDATE gateway_commands
-            SET status = ?, completed_at = ?
-            WHERE status = ?
-                AND expires_at IS NOT NULL
-                AND expires_at <= ?
-            """,
-            (
-                GatewayCommandStatus.EXPIRED.value,
-                now,
-                GatewayCommandStatus.QUEUED.value,
-                now,
-            ),
-        )
+        if has_expired_queued:
+            connection.execute(
+                """
+                UPDATE gateway_commands
+                SET status = ?, completed_at = ?
+                WHERE status = ?
+                    AND expires_at IS NOT NULL
+                    AND expires_at <= ?
+                """,
+                (
+                    GatewayCommandStatus.EXPIRED.value,
+                    now,
+                    GatewayCommandStatus.QUEUED.value,
+                    now,
+                ),
+            )
         rows = connection.execute(
             """
             SELECT
@@ -589,6 +651,36 @@ def _dispatch_ready_commands(
         raise
 
     return [_row_to_gateway_command(row) for row in rows]
+
+
+def _has_expired_queued_command(connection: sqlite3.Connection, now: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM gateway_commands
+        WHERE status = ?
+            AND expires_at IS NOT NULL
+            AND expires_at <= ?
+        LIMIT 1
+        """,
+        (GatewayCommandStatus.QUEUED.value, now),
+    ).fetchone()
+    return row is not None
+
+
+def _has_ready_queued_command(connection: sqlite3.Connection, now: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM gateway_commands
+        WHERE status = ?
+            AND (available_at IS NULL OR available_at <= ?)
+            AND (expires_at IS NULL OR expires_at > ?)
+        LIMIT 1
+        """,
+        (GatewayCommandStatus.QUEUED.value, now, now),
+    ).fetchone()
+    return row is not None
 
 
 def _row_to_gateway_command(row: sqlite3.Row) -> GatewayCommand:
@@ -681,6 +773,10 @@ def _optional_timestamp(value: datetime | str | None) -> str | None:
 
 def _normalize_command_type(command_type: str) -> str:
     return command_type.strip().lower()
+
+
+def _is_database_locked_error(exc: sqlite3.OperationalError) -> bool:
+    return "database is locked" in str(exc).lower()
 
 
 def _mapping_value(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:

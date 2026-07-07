@@ -67,6 +67,7 @@ class CoreIoWorker:
         self._latest_post_at: float | None = None
         self._thread_id: int | None = None
         self._next_post_retry_at = 0.0
+        self._next_command_poll_at = 0.0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -179,12 +180,12 @@ class CoreIoWorker:
         with self._condition:
             self._thread_id = threading.get_ident()
         while not self._stop_event.is_set():
+            if self._command_polling_enabled and time.monotonic() >= self._next_command_poll_at:
+                self._poll_commands()
+                self._next_command_poll_at = time.monotonic() + self._command_poll_interval_sec
+                continue
             posted = self._post_next_event()
             if posted:
-                continue
-            if self._command_polling_enabled:
-                self._poll_commands()
-                self._wait_for_work(timeout_sec=self._command_poll_interval_sec)
                 continue
             self._wait_for_work(timeout_sec=0.1)
 

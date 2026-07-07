@@ -160,6 +160,35 @@ def test_account_limits_ignore_order_expired_before_dispatch_daily_budget(tmp_pa
     assert RiskReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in check.reason_codes
 
 
+def test_account_limits_ignore_failed_live_sim_order_daily_budget(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "risk-failed-live-sim-budget.sqlite3")
+    _insert_live_sim_order(
+        connection,
+        status=LiveSimOrderStatus.FAILED.value,
+        notional=97_000,
+    )
+    settings = _settings(
+        trading_mode=TradingMode.LIVE_SIM,
+        trading_allow_live_sim=True,
+        live_sim_enabled=True,
+        live_sim_kill_switch=False,
+        live_sim_max_order_notional=300_000,
+        live_sim_max_daily_notional=300_000,
+        live_sim_max_daily_order_count=1,
+    )
+
+    check = check_account_limits(connection, _context(price=97_000), settings)
+    connection.close()
+
+    live_sim = check.evidence_json["live_sim"]
+    assert check.status is RiskCheckStatus.PASS_OBSERVED
+    assert live_sim["daily_order_count"] == 0
+    assert live_sim["daily_notional"] == 0.0
+    assert live_sim["projected_daily_notional"] == 291_000.0
+    assert RiskReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in check.reason_codes
+    assert RiskReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in check.reason_codes
+
+
 def test_cross_exchange_divergence_is_opt_in_caution_only(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_cross_exchange.sqlite3")
     candidate_id = _insert_strategy_fixture(connection)

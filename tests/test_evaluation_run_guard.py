@@ -9,6 +9,7 @@ from services.runtime.evaluation_run_guard import (
     DEFAULT_EVALUATION_LOCK_TTL_SEC,
     EVALUATION_PIPELINE_LOCK,
     EvaluationRunLockError,
+    _begin_immediate_with_retry,
     immediate_transaction,
 )
 from services.strategy_engine import evaluate_candidates
@@ -89,6 +90,29 @@ def test_immediate_transaction_rolls_back_unhandled_error(tmp_path) -> None:
     connection.close()
 
     assert row_count == 0
+
+
+def test_begin_immediate_retries_transient_database_lock(monkeypatch) -> None:
+    connection = _FlakyBeginConnection()
+    monkeypatch.setattr("services.runtime.evaluation_run_guard.time.sleep", lambda _: None)
+
+    _begin_immediate_with_retry(connection)  # type: ignore[arg-type]
+
+    assert connection.begin_attempts == 2
+
+
+class _FlakyBeginConnection:
+    in_transaction = False
+
+    def __init__(self) -> None:
+        self.begin_attempts = 0
+
+    def execute(self, sql: str, *args):
+        if sql == "BEGIN IMMEDIATE":
+            self.begin_attempts += 1
+            if self.begin_attempts == 1:
+                raise __import__("sqlite3").OperationalError("database is locked")
+        return None
 
 
 def _insert_lock(

@@ -336,6 +336,31 @@ def test_order_plan_daily_limits_ignore_order_expired_before_dispatch(tmp_path) 
     assert LiveSimReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in eligibility.reason_codes
 
 
+def test_order_plan_daily_limits_ignore_failed_order(tmp_path) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "plan-failed-daily-budget.sqlite3"
+    )
+    _insert_live_sim_order(
+        connection,
+        status=LiveSimOrderStatus.FAILED.value,
+        order_id="failed-before-broker",
+    )
+
+    eligibility = evaluate_live_sim_order_plan_eligibility(
+        connection,
+        order_plan_id,
+        settings=_pilot_settings(
+            live_sim_max_daily_order_count=1,
+            live_sim_max_daily_notional=100_000,
+        ),
+    )
+    connection.close()
+
+    assert eligibility.eligible is True
+    assert LiveSimReasonCode.DAILY_ORDER_LIMIT_EXCEEDED.value not in eligibility.reason_codes
+    assert LiveSimReasonCode.DAILY_NOTIONAL_LIMIT_EXCEEDED.value not in eligibility.reason_codes
+
+
 def test_order_plan_entry_window_blocks_buy_and_records_rejection(
     tmp_path,
     monkeypatch,

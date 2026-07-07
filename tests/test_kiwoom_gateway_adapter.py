@@ -1389,6 +1389,53 @@ def test_core_io_worker_never_drops_protected_events_even_over_cap() -> None:
     assert snapshot.dropped_count == 0
 
 
+def test_core_io_worker_polls_commands_while_event_queue_has_backlog() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            return []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            time.sleep(0.01)
+            self.events.append(event)
+
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=True,
+        command_poll_interval_sec=0.02,
+        coalesce_after_size=1000,
+        max_buffer_size=200,
+    )
+    for index in range(100):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_condition_{index}",
+                event_type="condition_event",
+                source="kiwoom_gateway",
+                payload={"code": f"{index:06d}", "action": "ENTER"},
+            )
+        )
+
+    worker.start()
+    try:
+        _wait_until(
+            lambda: worker.snapshot().poll_count >= 2
+            and worker.snapshot().event_queue_size > 0,
+            timeout_sec=1.0,
+        )
+    finally:
+        worker.stop()
+
+    snapshot = worker.snapshot()
+    assert snapshot.poll_count >= 2
+    assert snapshot.event_queue_size > 0
+
+
 def test_runtime_command_handler_exception_emits_failure_without_crashing() -> None:
     command = GatewayCommand(
         command_id="cmd_boom",

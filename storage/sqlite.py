@@ -12,7 +12,7 @@ def open_connection(db_path: str | Path) -> sqlite3.Connection:
     if path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path, timeout=5.0)
+    connection = sqlite3.connect(path, timeout=15.0)
     connection.row_factory = sqlite3.Row
     _configure_connection(connection)
     return connection
@@ -58,12 +58,18 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
 
 
 def _configure_connection(connection: sqlite3.Connection) -> None:
+    connection.execute("PRAGMA busy_timeout=15000")
     connection.execute("PRAGMA journal_mode=WAL")
-    connection.execute("PRAGMA busy_timeout=5000")
     connection.execute("PRAGMA synchronous=NORMAL")
 
 
 def _upsert_metadata(connection: sqlite3.Connection, key: str, value: str) -> None:
+    existing = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = ?",
+        (key,),
+    ).fetchone()
+    if existing is not None and existing["value"] == value:
+        return
     connection.execute(
         """
         INSERT INTO app_metadata (key, value)

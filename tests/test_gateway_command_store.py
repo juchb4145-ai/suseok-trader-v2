@@ -303,6 +303,44 @@ def test_stale_dispatched_command_is_failed_and_queue_health_refreshed(tmp_path)
     assert status["value"] == "true"
 
 
+def test_command_status_counts_are_read_only_for_queue_health(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "commands.sqlite3")
+    connection.execute(
+        """
+        INSERT INTO gateway_status (key, value, updated_at)
+        VALUES ('command_queue_healthy', 'false', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (datetime_to_wire(utc_now()),),
+    )
+    connection.commit()
+
+    counts = get_command_status_counts(connection)
+    status = connection.execute(
+        "SELECT value FROM gateway_status WHERE key = 'command_queue_healthy'"
+    ).fetchone()
+    connection.close()
+
+    assert counts[GatewayCommandStatus.QUEUED.value] == 0
+    assert status["value"] == "false"
+
+
+def test_idle_poll_commands_does_not_require_write_lock(tmp_path) -> None:
+    db_path = tmp_path / "commands.sqlite3"
+    initialize_database(db_path).close()
+    writer = initialize_database(db_path)
+    reader = initialize_database(db_path)
+    writer.execute("BEGIN IMMEDIATE")
+
+    commands = poll_commands(reader, wait_sec=0)
+
+    writer.rollback()
+    writer.close()
+    reader.close()
+
+    assert commands == []
+
+
 def test_stale_dispatched_order_becomes_unconfirmed(tmp_path) -> None:
     connection = initialize_database(tmp_path / "commands.sqlite3")
     enqueue_command(connection, make_live_sim_order_command("cmd_stale_order"))

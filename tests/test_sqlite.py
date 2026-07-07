@@ -18,7 +18,7 @@ def test_sqlite_initialization_creates_app_metadata_and_pragmas(tmp_path) -> Non
     assert metadata["app_name"] == APP_NAME
     assert metadata["schema_version"] == str(SCHEMA_VERSION)
     assert journal_mode == "wal"
-    assert busy_timeout == 5000
+    assert busy_timeout == 15000
     assert synchronous == 1
 
 
