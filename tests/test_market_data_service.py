@@ -638,6 +638,54 @@ def test_tr_response_projection_stores_rows_without_touching_latest_tick(tmp_pat
     assert latest is None
 
 
+def test_candidate_quote_refresh_tr_response_updates_latest_tick(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "candidate-quote-refresh.sqlite3")
+    response = BrokerTrResponse(
+        request_id="candidate_quote_refresh:2026-06-26:005930:1",
+        tr_code="OPT10001",
+        request_name="candidate_quote_refresh_opt10001",
+        success=True,
+        rows=[
+            {
+                "종목코드": "A005930",
+                "종목명": "삼성전자",
+                "현재가": "+70500",
+                "등락율": "+1.25",
+                "거래량": "1,234",
+                "거래대금": "87,000,000",
+                "고가": "+71000",
+                "저가": "-69000",
+            }
+        ],
+        ts=TS,
+    )
+    event = GatewayEvent(
+        event_id="evt_candidate_quote_refresh",
+        event_type="tr_response",
+        source="test-gateway",
+        payload=response.to_dict(),
+        ts=TS,
+    )
+
+    result = append_and_project(connection, event)
+
+    latest = get_latest_tick(connection, "005930")
+    snapshot_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_tr_snapshots"
+    ).fetchone()["count"]
+    sample_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_tick_samples"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result.status == "APPLIED"
+    assert latest is not None
+    assert latest["price"] == 70_500
+    assert latest["source"] == "test-gateway"
+    assert snapshot_count == 1
+    assert sample_count == 1
+
+
 def test_readiness_reports_missing_fresh_stale_and_bar_gaps(tmp_path) -> None:
     connection = initialize_database(tmp_path / "market.sqlite3")
     settings = Settings(market_data_bar_intervals_sec=(60, 180, 300, 600))

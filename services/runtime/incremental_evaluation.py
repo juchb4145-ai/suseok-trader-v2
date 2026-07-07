@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import datetime_to_wire, new_message_id, utc_now, validate_stock_code
+from domain.broker.utils import (
+    datetime_to_wire,
+    new_message_id,
+    parse_timestamp,
+    utc_now,
+    validate_stock_code,
+)
 from domain.candidate.state import CandidateState
 
 from services.candidate_service import refresh_candidate_context
@@ -17,8 +23,16 @@ from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runt
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 
 DIRTY_REASON_PRICE_TICK = "PRICE_TICK"
+DIRTY_REASON_CANDIDATE_QUOTE_REFRESH = "CANDIDATE_QUOTE_REFRESH"
+DIRTY_REASON_CANDIDATE_EVALUATION_BACKFILL = "CANDIDATE_EVALUATION_BACKFILL"
 DEFAULT_INCREMENTAL_EVALUATION_LOCK_CHUNK_SIZE = 5
 INCREMENTAL_EVALUATION_CHUNK_YIELD_SEC = 0.0
+_EVALUATION_BACKFILL_STATES = (
+    CandidateState.HYDRATING.value,
+    CandidateState.DATA_WAIT.value,
+    CandidateState.WATCHING.value,
+    CandidateState.CONTEXT_READY.value,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -77,6 +91,30 @@ class IncrementalEvaluationBatchResult:
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class IncrementalEvaluationBackfillResult:
+    status: str
+    trade_date: str | None
+    candidate_count: int = 0
+    enqueued_count: int = 0
+    candidates: Sequence[dict[str, Any]] = field(default_factory=tuple)
+    observe_only: bool = True
+    no_order_side_effects: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "trade_date": self.trade_date,
+            "candidate_count": self.candidate_count,
+            "enqueued_count": self.enqueued_count,
+            "candidates": list(self.candidates),
+            "observe_only": True,
+            "not_order_intent": True,
+            "no_order_side_effects": True,
+            "real_order_allowed": False,
+        }
+
+
 def enqueue_incremental_evaluation_for_event(
     connection: sqlite3.Connection,
     event: GatewayEvent,
@@ -100,16 +138,50 @@ def enqueue_incremental_evaluation_for_event(
             event_id=event.event_id,
         )
 
-    rows = _active_candidate_rows_for_code(connection, code)
+    return enqueue_incremental_evaluation_for_code(
+        connection,
+        code,
+        reason=DIRTY_REASON_PRICE_TICK,
+        source_event_id=event.event_id,
+        event_id=event.event_id,
+        priority=100,
+        settings=resolved_settings,
+    )
+
+
+def enqueue_incremental_evaluation_for_code(
+    connection: sqlite3.Connection,
+    code: str,
+    *,
+    reason: str = DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
+    source_event_id: str | None = None,
+    event_id: str | None = None,
+    priority: int = 90,
+    settings: Settings | None = None,
+) -> IncrementalEvaluationEnqueueResult:
+    resolved_settings = settings or load_settings()
+    normalized_event_id = str(event_id or source_event_id or "")
+    if not resolved_settings.incremental_evaluation_enabled:
+        return IncrementalEvaluationEnqueueResult(status="DISABLED", event_id=normalized_event_id)
+    try:
+        normalized_code = validate_stock_code(code)
+    except Exception:
+        return IncrementalEvaluationEnqueueResult(
+            status="IGNORED_INVALID_PAYLOAD",
+            event_id=normalized_event_id,
+        )
+
+    rows = _active_candidate_rows_for_code(connection, normalized_code)
     if not rows:
         return IncrementalEvaluationEnqueueResult(
             status="IGNORED_NO_ACTIVE_CANDIDATE",
-            event_id=event.event_id,
-            code=code,
+            event_id=normalized_event_id,
+            code=normalized_code,
         )
 
     now = datetime_to_wire(utc_now())
     candidate_ids = tuple(str(row["candidate_instance_id"]) for row in rows)
+    normalized_reason = str(reason or DIRTY_REASON_CANDIDATE_QUOTE_REFRESH).strip().upper()
     for row in rows:
         connection.execute(
             """
@@ -143,9 +215,9 @@ def enqueue_incremental_evaluation_for_event(
                 row["candidate_instance_id"],
                 row["trade_date"],
                 row["code"],
-                DIRTY_REASON_PRICE_TICK,
-                event.event_id,
-                100,
+                normalized_reason,
+                source_event_id,
+                int(priority),
                 now,
                 now,
             ),
@@ -153,10 +225,60 @@ def enqueue_incremental_evaluation_for_event(
     connection.commit()
     return IncrementalEvaluationEnqueueResult(
         status="ENQUEUED",
-        event_id=event.event_id,
-        code=code,
+        event_id=normalized_event_id,
+        code=normalized_code,
         enqueued_count=len(candidate_ids),
         candidate_ids=candidate_ids,
+    )
+
+
+def enqueue_incremental_evaluation_for_fresh_candidates(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None = None,
+    settings: Settings | None = None,
+    limit: int = 10,
+) -> IncrementalEvaluationBackfillResult:
+    resolved_settings = settings or load_settings()
+    rows = _fresh_candidate_rows_missing_evaluation(
+        connection,
+        trade_date=trade_date,
+        settings=resolved_settings,
+        limit=limit,
+    )
+    enqueued_count = 0
+    candidates: list[dict[str, Any]] = []
+    for row in rows:
+        result = enqueue_incremental_evaluation_for_code(
+            connection,
+            row["code"],
+            reason=DIRTY_REASON_CANDIDATE_EVALUATION_BACKFILL,
+            source_event_id=row["event_id"],
+            event_id=row["event_id"],
+            priority=85,
+            settings=resolved_settings,
+        )
+        if result.status == "ENQUEUED":
+            enqueued_count += result.enqueued_count
+        candidates.append(
+            {
+                "candidate_instance_id": row["candidate_instance_id"],
+                "code": row["code"],
+                "name": row["name"],
+                "state": row["state"],
+                "tick_event_ts": row["tick_event_ts"],
+                "strategy_evaluated_at": row["strategy_evaluated_at"],
+                "risk_evaluated_at": row["risk_evaluated_at"],
+                "enqueue_status": result.status,
+            }
+        )
+    status = "ENQUEUED" if enqueued_count else ("NOOP" if not rows else "SKIPPED")
+    return IncrementalEvaluationBackfillResult(
+        status=status,
+        trade_date=trade_date,
+        candidate_count=len(rows),
+        enqueued_count=enqueued_count,
+        candidates=tuple(candidates),
     )
 
 
@@ -356,6 +478,76 @@ def _active_candidate_rows_for_code(
         """,
         (code, CandidateState.CLOSED.value),
     ).fetchall()
+
+
+def _fresh_candidate_rows_missing_evaluation(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str | None,
+    settings: Settings,
+    limit: int,
+) -> list[sqlite3.Row]:
+    placeholders = ",".join("?" for _ in _EVALUATION_BACKFILL_STATES)
+    params: list[Any] = [*_EVALUATION_BACKFILL_STATES]
+    trade_date_clause = ""
+    if trade_date:
+        trade_date_clause = "AND c.trade_date = ?"
+        params.append(trade_date)
+    params.append(_bounded_limit(limit))
+    rows = connection.execute(
+        f"""
+        SELECT
+            c.candidate_instance_id,
+            c.trade_date,
+            c.code,
+            c.name,
+            c.state,
+            c.last_seen_at,
+            mt.event_ts AS tick_event_ts,
+            mt.event_id,
+            so.evaluated_at AS strategy_evaluated_at,
+            ro.evaluated_at AS risk_evaluated_at
+        FROM candidates AS c
+        JOIN market_ticks_latest AS mt
+            ON mt.code = c.code AND mt.exchange = 'KRX'
+        LEFT JOIN strategy_observations_latest AS so
+            ON so.candidate_instance_id = c.candidate_instance_id
+        LEFT JOIN risk_observations_latest AS ro
+            ON ro.candidate_instance_id = c.candidate_instance_id
+        WHERE c.state IN ({placeholders})
+            {trade_date_clause}
+            AND (
+                so.evaluated_at IS NULL
+                OR ro.evaluated_at IS NULL
+                OR so.evaluated_at < mt.event_ts
+                OR ro.evaluated_at < mt.event_ts
+            )
+        ORDER BY
+            CASE c.state
+                WHEN 'CONTEXT_READY' THEN 0
+                WHEN 'WATCHING' THEN 1
+                WHEN 'DATA_WAIT' THEN 2
+                WHEN 'HYDRATING' THEN 3
+                ELSE 9
+            END ASC,
+            mt.event_ts DESC,
+            c.last_seen_at DESC,
+            c.candidate_instance_id ASC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    now = utc_now()
+    threshold_sec = max(int(settings.entry_timing_stale_max_seconds), 1)
+    fresh_rows: list[sqlite3.Row] = []
+    for row in rows:
+        try:
+            tick_ts = parse_timestamp(row["tick_event_ts"], "tick_event_ts")
+        except (TypeError, ValueError):
+            continue
+        if (now - tick_ts).total_seconds() <= threshold_sec:
+            fresh_rows.append(row)
+    return fresh_rows
 
 
 def _queue_rows(

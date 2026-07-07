@@ -279,7 +279,11 @@ def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:
 
 
 def _is_priority_event(event: GatewayEvent) -> bool:
-    return str(event.event_type or "").strip().lower() == "heartbeat"
+    return str(event.event_type or "").strip().lower() in {
+        "heartbeat",
+        "market_index_tick",
+        "tr_response",
+    }
 
 
 _COMMAND_CRITICAL_EVENT_TYPES = {
@@ -308,6 +312,7 @@ _DROP_PROTECTED_EVENT_TYPES = {
     "command_ack",
     "command_failed",
     "rate_limited",
+    "tr_response",
     "execution_event",
     "order_pre_ack",
     "kiwoom_order_chejan",

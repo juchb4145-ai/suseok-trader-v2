@@ -9,10 +9,14 @@ from typing import Any
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
 from storage.gateway_command_store import canonical_json, get_command_type_counts
 
+from services.candidate_quote_refresh import run_candidate_quote_refresh_once
 from services.config import Settings, load_settings
 from services.market_scan_service import run_market_scan_once
 from services.realtime_subscription import run_realtime_subscription_once
 from services.runtime.evaluation_run_guard import runtime_execution_lock
+from services.runtime.incremental_evaluation import (
+    enqueue_incremental_evaluation_for_fresh_candidates,
+)
 from services.theme_leadership import rebuild_theme_leadership
 from services.theme_service import calculate_all_theme_snapshots
 
@@ -28,6 +32,8 @@ class ThemeRefreshCycleRunResult:
     theme_snapshots: Mapping[str, Any]
     leadership: Mapping[str, Any]
     realtime_subscription: Mapping[str, Any]
+    candidate_quote_refresh: Mapping[str, Any]
+    incremental_backfill: Mapping[str, Any]
     command_type_counts_before: Mapping[str, int]
     command_type_counts_after: Mapping[str, int]
     errors: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
@@ -52,6 +58,8 @@ class ThemeRefreshCycleRunResult:
             "theme_snapshots": normalize_value(dict(self.theme_snapshots)),
             "leadership": normalize_value(dict(self.leadership)),
             "realtime_subscription": normalize_value(dict(self.realtime_subscription)),
+            "candidate_quote_refresh": normalize_value(dict(self.candidate_quote_refresh)),
+            "incremental_backfill": normalize_value(dict(self.incremental_backfill)),
             "command_type_counts_before": dict(self.command_type_counts_before),
             "command_type_counts_after": dict(self.command_type_counts_after),
             "gateway_command_delta": _command_delta(
@@ -175,6 +183,8 @@ def _run_theme_refresh_cycle_once(
     theme_payload: dict[str, Any] = {}
     leadership_payload: dict[str, Any] = {}
     subscription_payload: dict[str, Any] = {}
+    quote_refresh_payload: dict[str, Any] = {}
+    incremental_backfill_payload: dict[str, Any] = {}
 
     try:
         market_scan_payload = run_market_scan_once(
@@ -226,6 +236,31 @@ def _run_theme_refresh_cycle_once(
         errors.append({"stage": "RealtimeSubscription", "error": str(exc)})
         subscription_payload = {"status": "ERROR", "error": str(exc)}
 
+    try:
+        quote_refresh_payload = run_candidate_quote_refresh_once(
+            connection,
+            trade_date=trade_date,
+            settings=settings,
+            queue_commands=(
+                settings.realtime_subscription_queue_commands
+                if queue_realtime_commands is None
+                else queue_realtime_commands
+            ),
+        ).to_dict()
+    except Exception as exc:
+        errors.append({"stage": "CandidateQuoteRefresh", "error": str(exc)})
+        quote_refresh_payload = {"status": "ERROR", "error": str(exc)}
+
+    try:
+        incremental_backfill_payload = enqueue_incremental_evaluation_for_fresh_candidates(
+            connection,
+            trade_date=trade_date,
+            settings=settings,
+        ).to_dict()
+    except Exception as exc:
+        errors.append({"stage": "IncrementalBackfill", "error": str(exc)})
+        incremental_backfill_payload = {"status": "ERROR", "error": str(exc)}
+
     after = get_command_type_counts(connection)
     order_delta = _command_delta(_order_command_counts(before), _order_command_counts(after))
     no_order_side_effects = all(value == 0 for value in order_delta.values())
@@ -246,6 +281,8 @@ def _run_theme_refresh_cycle_once(
         theme_snapshots=theme_payload,
         leadership=leadership_payload,
         realtime_subscription=subscription_payload,
+        candidate_quote_refresh=quote_refresh_payload,
+        incremental_backfill=incremental_backfill_payload,
         command_type_counts_before=before,
         command_type_counts_after=after,
         errors=tuple(errors),

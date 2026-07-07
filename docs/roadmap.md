@@ -49,6 +49,7 @@
 | Broker Reconcile Pilot | simulation-account snapshot 정합성 확인 | 실계좌 reconcile과 혼동 금지 |
 | Operator Kill Switch Drill | kill switch 절차와 운영 훈련 정리 | 버튼/자동 실행보다 확인 절차가 먼저 |
 | No-Buy Recovery Roadmap | 무매수 funnel 계측, LIVE_SIM/DRY_RUN 데드락 해소, profile/admission 정리 | [No-Buy Recovery Roadmap](no_buy_recovery_roadmap_ko.md)를 기준으로 작은 PR로 진행 |
+| Redesign Roadmap 2026-07 | 파일럿 실가동 기준 재설계 점검: 브로커 reconcile, dead-man cancel, god 모듈 분해, 백테스터 | [재설계 로드맵(2026-07)](redesign_roadmap_2026-07_ko.md)의 Phase 1부터 진행 |
 
 ## Future: LIVE_REAL Safety Project
 

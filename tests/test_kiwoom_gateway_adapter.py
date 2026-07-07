@@ -1242,6 +1242,128 @@ def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -
     assert worker._core_client.events[0].event_id == "evt_heartbeat_new"
 
 
+def test_core_io_worker_prioritizes_latest_market_index_tick_when_queue_is_backed_up() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_condition",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "condition_name": "A", "action": "ENTER"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_price",
+            event_type="price_tick",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "price": 70000},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_index_old",
+            event_type="market_index_tick",
+            source="kiwoom_gateway",
+            payload={"index_code": "KOSPI", "price": 2800.0},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_index_latest",
+            event_type="market_index_tick",
+            source="kiwoom_gateway",
+            payload={"index_code": "KOSPI", "price": 2801.0},
+        )
+    )
+
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 3
+    assert snapshot.coalesced_count == 1
+    assert worker._post_next_event() is True
+    assert worker._core_client.events[0].event_id == "evt_index_latest"
+
+
+def test_core_io_worker_prioritizes_tr_response_behind_command_lifecycle() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    command = GatewayCommand(
+        command_id="cmd_candidate_quote",
+        command_type="request_tr",
+        source="candidate_quote_refresh",
+        idempotency_key="idem-candidate-quote",
+        payload={},
+    )
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+    )
+    worker.enqueue_event(make_command_started_event(command, source="kiwoom_gateway"))
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_condition",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "condition_name": "A", "action": "ENTER"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_tr_response",
+            event_type="tr_response",
+            source="kiwoom_gateway",
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key,
+            payload={
+                "request_id": "candidate_quote_refresh_005930_20260707T040500",
+                "tr_code": "OPT10001",
+                "code": "005930",
+                "rows": [{"code": "005930", "current_price": "70000"}],
+            },
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_ack",
+            event_type="command_ack",
+            source="kiwoom_gateway",
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key,
+            payload={"command_id": command.command_id, "status": "acked"},
+        )
+    )
+
+    assert worker._post_next_event() is True
+    assert worker._post_next_event() is True
+    assert worker._post_next_event() is True
+    assert [event.event_type for event in worker._core_client.events] == [
+        "command_started",
+        "command_ack",
+        "tr_response",
+    ]
+
+
 def test_core_io_worker_prioritizes_command_lifecycle_over_heartbeat() -> None:
     class Core:
         def __init__(self) -> None:
@@ -1383,9 +1505,22 @@ def test_core_io_worker_never_drops_protected_events_even_over_cap() -> None:
                 payload={"command_id": f"cmd_{index}"},
             )
         )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_tr_response",
+            event_type="tr_response",
+            source="kiwoom_gateway",
+            payload={
+                "request_id": "candidate_quote_refresh_005930_20260707T040500",
+                "tr_code": "OPT10001",
+                "code": "005930",
+                "rows": [{"code": "005930", "current_price": "70000"}],
+            },
+        )
+    )
 
     snapshot = worker.snapshot()
-    assert snapshot.event_queue_size == 4
+    assert snapshot.event_queue_size == 5
     assert snapshot.dropped_count == 0
 
 

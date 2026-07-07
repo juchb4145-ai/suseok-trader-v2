@@ -9,6 +9,7 @@ from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from services.candidate_quote_refresh import candidate_quote_refresh_codes_from_payload
 from services.condition_fusion import rebuild_condition_fusion_for_code
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
@@ -23,7 +24,11 @@ from services.market_regime_service import (
     should_rebuild_market_regime_snapshot,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
-from services.runtime.incremental_evaluation import enqueue_incremental_evaluation_for_event
+from services.runtime.incremental_evaluation import (
+    DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
+    enqueue_incremental_evaluation_for_code,
+    enqueue_incremental_evaluation_for_event,
+)
 from storage.event_store import (
     append_gateway_event,
     count_recent_gateway_events,
@@ -81,6 +86,18 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                 settings=settings,
                             )
                         )
+                    if event_type == "tr_response" and projection_result.status == "APPLIED":
+                        quote_refresh_status = (
+                            _enqueue_incremental_evaluation_for_candidate_quote_refresh(
+                                connection,
+                                event,
+                                settings=settings,
+                            )
+                        )
+                        if quote_refresh_status is not None:
+                            projection_statuses["incremental_evaluation"] = (
+                                quote_refresh_status
+                            )
                     if (
                         event_type == "condition_event"
                         and projection_result.status == "APPLIED"
@@ -165,6 +182,41 @@ def _enqueue_incremental_evaluation_for_price_tick(
         logger.exception("incremental evaluation enqueue failed")
         return "ERROR"
     return result.status
+
+
+def _enqueue_incremental_evaluation_for_candidate_quote_refresh(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+) -> str | None:
+    codes = candidate_quote_refresh_codes_from_payload(event.payload)
+    if not codes:
+        return None
+    statuses: list[str] = []
+    for code in codes:
+        try:
+            result = enqueue_incremental_evaluation_for_code(
+                connection,
+                code,
+                reason=DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
+                source_event_id=event.event_id,
+                event_id=event.event_id,
+                priority=90,
+                settings=settings,
+            )
+        except Exception:
+            logger.exception("candidate quote refresh incremental enqueue failed")
+            statuses.append("ERROR")
+            continue
+        statuses.append(result.status)
+    if not statuses:
+        return None
+    if any(status == "ENQUEUED" for status in statuses):
+        return "ENQUEUED"
+    if any(status == "ERROR" for status in statuses):
+        return "ERROR"
+    return ",".join(sorted(set(statuses)))
 
 
 def _refresh_condition_fusion_for_condition_event(

@@ -6,12 +6,15 @@ from types import SimpleNamespace
 
 import services.runtime.incremental_evaluation as incremental_evaluation
 from apps.core_api import app
+from domain.broker.events import GatewayEvent
+from domain.broker.tr import BrokerTrResponse
 from domain.broker.utils import datetime_to_wire, utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_price_tick_event
 from services.config import Settings
 from services.runtime.incremental_evaluation import (
     enqueue_incremental_evaluation_for_event,
+    enqueue_incremental_evaluation_for_fresh_candidates,
     get_incremental_evaluation_status,
     process_incremental_evaluation_batch,
 )
@@ -132,6 +135,24 @@ def test_price_tick_dirty_set_ignores_codes_without_active_candidate(tmp_path) -
     assert queued_count == 0
 
 
+def test_backfill_enqueues_fresh_candidate_without_latest_evaluation(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "incremental-backfill.sqlite3")
+    candidate_id = _insert_strategy_fixture(connection)
+
+    result = enqueue_incremental_evaluation_for_fresh_candidates(
+        connection,
+        trade_date="2026-06-27",
+        settings=_incremental_settings(entry_timing_stale_max_seconds=999_999_999),
+    )
+    row = connection.execute("SELECT * FROM incremental_evaluation_queue").fetchone()
+    connection.close()
+
+    assert result.status == "ENQUEUED"
+    assert result.enqueued_count == 1
+    assert row["candidate_instance_id"] == candidate_id
+    assert row["reason"] == "CANDIDATE_EVALUATION_BACKFILL"
+
+
 def test_gateway_enqueues_and_operator_run_once_processes_incremental_evaluation(
     tmp_path,
     monkeypatch,
@@ -186,6 +207,64 @@ def test_gateway_enqueues_and_operator_run_once_processes_incremental_evaluation
     assert status_after.json()["queued_count"] == 0
     assert strategy_count == 1
     assert risk_count == 1
+
+
+def test_gateway_candidate_quote_refresh_tr_response_enqueues_incremental_evaluation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "incremental-candidate-quote.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    monkeypatch.setenv("TRADING_CORE_TOKEN", "test-token")
+    monkeypatch.setenv("INCREMENTAL_EVALUATION_WORKER_ENABLED", "false")
+
+    connection = initialize_database(db_path)
+    candidate_id = _insert_strategy_fixture(connection)
+    connection.close()
+    response = BrokerTrResponse(
+        request_id="candidate_quote_refresh:2026-06-27:005930:1",
+        tr_code="OPT10001",
+        request_name="candidate_quote_refresh_opt10001",
+        success=True,
+        rows=[
+            {
+                "종목코드": "A005930",
+                "종목명": "삼성전자",
+                "현재가": "+98000",
+                "등락율": "+1.5",
+                "거래량": "1200",
+                "거래대금": "117600000",
+                "고가": "+99000",
+                "저가": "-96000",
+            }
+        ],
+    )
+    event = GatewayEvent(
+        event_id="evt_candidate_quote_refresh_incremental",
+        event_type="tr_response",
+        source="test-gateway",
+        payload=response.to_dict(),
+    )
+
+    with TestClient(app) as client:
+        result = client.post(
+            "/api/gateway/events",
+            json=event.to_dict(),
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    connection = open_connection(db_path)
+    queue = connection.execute("SELECT * FROM incremental_evaluation_queue").fetchone()
+    latest = connection.execute(
+        "SELECT price FROM market_ticks_latest WHERE code = '005930' AND exchange = 'KRX'"
+    ).fetchone()
+    connection.close()
+
+    assert result.status_code == 200
+    assert result.json()["projection_statuses"]["incremental_evaluation"] == "ENQUEUED"
+    assert queue["candidate_instance_id"] == candidate_id
+    assert queue["reason"] == "CANDIDATE_QUOTE_REFRESH"
+    assert latest["price"] == 98_000
 
 
 def _incremental_settings(**overrides) -> Settings:

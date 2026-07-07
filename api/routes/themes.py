@@ -5,7 +5,7 @@ from typing import Any
 from domain.broker.utils import BrokerValidationError, validate_stock_code
 from domain.theme.state import ThemeState
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from services.config import load_settings
+from services.config import clear_settings_cache, load_settings
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
 from services.runtime.theme_refresh_cycle import (
     get_latest_theme_refresh_cycle_run,
@@ -189,6 +189,7 @@ def run_theme_refresh_cycle(
     queue_market_scan_commands: bool | None = Query(default=None),
     queue_realtime_commands: bool | None = Query(default=None),
 ) -> dict[str, Any]:
+    clear_settings_cache()
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:

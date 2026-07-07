@@ -30,6 +30,9 @@ from storage.projection_watermarks import (
     reset_projection_watermark,
 )
 
+from services.candidate_quote_refresh import (
+    candidate_quote_refresh_tick_payloads_from_tr_response,
+)
 from services.config import Settings, load_settings
 
 MARKET_DATA_PROJECTION_NAME = "market_data"
@@ -184,7 +187,7 @@ def process_gateway_event(
         elif event_type == "condition_event":
             applied_count = _process_condition_event(connection, event)
         else:
-            applied_count = _process_tr_response(connection, event)
+            applied_count = _process_tr_response(connection, event, resolved_settings)
         _advance_market_data_watermark_for_event(connection, event, commit=False)
         connection.commit()
     except Exception as exc:
@@ -922,7 +925,11 @@ def _process_condition_event(connection: sqlite3.Connection, event: GatewayEvent
     return 2
 
 
-def _process_tr_response(connection: sqlite3.Connection, event: GatewayEvent) -> int:
+def _process_tr_response(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    settings: Settings,
+) -> int:
     response = BrokerTrResponse.from_dict(event.payload)
     event_ts, received_at = _event_store_times(connection, event)
     inserted_count = 0
@@ -956,6 +963,20 @@ def _process_tr_response(connection: sqlite3.Connection, event: GatewayEvent) ->
             ),
         )
         inserted_count += 1
+    for tick_payload in candidate_quote_refresh_tick_payloads_from_tr_response(
+        event.payload,
+        event_ts=event_ts,
+    ):
+        tick_event = GatewayEvent(
+            event_id=event.event_id,
+            event_type="price_tick",
+            source=event.source,
+            command_id=event.command_id,
+            idempotency_key=event.idempotency_key,
+            ts=parse_timestamp(event_ts, "event_ts"),
+            payload=tick_payload,
+        )
+        inserted_count += _process_price_tick(connection, tick_event, settings)
     return inserted_count
 
 

@@ -10,6 +10,7 @@ from typing import Any, TypeVar
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
 
 from services.ai_advisory.service import score_ai_candidates
+from services.candidate_quote_refresh import run_candidate_quote_refresh_once
 from services.config import Settings, load_settings
 from services.entry_timing.service import evaluate_entry_timing
 from services.live_sim.live_sim_service import (
@@ -23,6 +24,9 @@ from services.live_sim.live_sim_service import (
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.incremental_evaluation import (
+    enqueue_incremental_evaluation_for_fresh_candidates,
+)
 from services.runtime.live_sim_pilot_pipeline import run_live_sim_pilot_pipeline_once
 from services.runtime.preflight import (
     LiveSimPreflightResult,
@@ -246,6 +250,29 @@ def run_live_sim_operating_cycle_once(
     except Exception as exc:
         errors.append(_stage_error("theme_leadership", exc))
         stages["theme_leadership"] = {"status": "ERROR", "error": str(exc)}
+
+    try:
+        quote_refresh_result = run_candidate_quote_refresh_once(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+            queue_commands=queue_policy["base_commands_allowed"],
+        )
+        stages["candidate_quote_refresh"] = quote_refresh_result.to_dict()
+    except Exception as exc:
+        errors.append(_stage_error("candidate_quote_refresh", exc))
+        stages["candidate_quote_refresh"] = {"status": "ERROR", "error": str(exc)}
+
+    try:
+        incremental_backfill = enqueue_incremental_evaluation_for_fresh_candidates(
+            connection,
+            trade_date=trade_date,
+            settings=resolved_settings,
+        )
+        stages["incremental_backfill"] = incremental_backfill.to_dict()
+    except Exception as exc:
+        errors.append(_stage_error("incremental_backfill", exc))
+        stages["incremental_backfill"] = {"status": "ERROR", "error": str(exc)}
 
     try:
         entry_result = _run_with_evaluation_lock_retries(
