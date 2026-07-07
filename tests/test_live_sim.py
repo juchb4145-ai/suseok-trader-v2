@@ -779,6 +779,79 @@ def test_live_sim_reconcile_notional_tolerance_ignores_rounding_noise(tmp_path) 
     )
 
 
+def test_live_sim_broker_snapshot_mismatch_blocks_and_clears_buy(tmp_path) -> None:
+    connection, _ = _prepared_connection(tmp_path / "live-sim-broker-reconcile.sqlite3")
+    _insert_live_sim_position(
+        connection,
+        trade_date="2026-06-27",
+        status="OPEN",
+        quantity=2,
+        realized_pnl=0,
+    )
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_executions (
+            live_sim_execution_id,
+            account_id,
+            code,
+            side,
+            quantity,
+            price,
+            notional,
+            executed_at,
+            raw_event_json
+        )
+        VALUES ('exec-broker-reconcile', 'SIM-12345678', '005930', 'BUY',
+            2, 97000, 194000, ?, '{}')
+        """,
+        (now,),
+    )
+    connection.commit()
+    settings = _live_sim_settings(live_sim_reconcile_request_broker_snapshot_enabled=True)
+
+    missing_broker_position = reconcile_live_sim(
+        connection,
+        settings=settings,
+        broker_snapshot={"account_id": "SIM-12345678", "positions": [], "open_orders": []},
+    )
+    matched_broker_position = reconcile_live_sim(
+        connection,
+        settings=settings,
+        broker_snapshot={
+            "account_id": "SIM-12345678",
+            "orders": [
+                {
+                    "order_no": "SHOULD-NOT-BE-READ",
+                    "code": "000660",
+                    "remaining_quantity": 1,
+                }
+            ],
+            "open_orders": [],
+            "positions": [
+                {
+                    "code": "005930",
+                    "name": "삼성전자",
+                    "quantity": 2,
+                    "available_quantity": 2,
+                    "avg_entry_price": 97000,
+                }
+            ],
+            "open_orders": [],
+        },
+    )
+    connection.close()
+
+    assert missing_broker_position.status == "RECONCILE_MISMATCH"
+    assert missing_broker_position.snapshot_json["broker_snapshot_available"] is True
+    assert missing_broker_position.snapshot_json["blocking_new_buy"] is True
+    assert missing_broker_position.snapshot_json["mismatches"][0]["reason"] == (
+        "broker_position_quantity_mismatch"
+    )
+    assert matched_broker_position.status == "OK"
+    assert matched_broker_position.snapshot_json["blocking_new_buy"] is False
+
+
 def test_live_sim_cancel_unfilled_ttl_queues_once_and_ack_cancels(tmp_path) -> None:
     connection, candidate_id = _prepared_connection(tmp_path / "live-sim-cancel.sqlite3")
     create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())

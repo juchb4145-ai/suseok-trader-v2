@@ -865,11 +865,19 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
             reason_summary_json TEXT NOT NULL DEFAULT '{}',
             warnings_json TEXT NOT NULL DEFAULT '[]',
             errors_json TEXT NOT NULL DEFAULT '[]',
+            stage_latency_json TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL DEFAULT (datetime('now')),
             live_sim_only INTEGER NOT NULL DEFAULT 1,
             live_real_allowed INTEGER NOT NULL DEFAULT 0
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "live_sim_operating_runs",
+        {
+            "stage_latency_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
     )
     connection.execute(
         """

@@ -17,7 +17,7 @@ from domain.broker.condition_profiles import (
     normalize_condition_profile_payload,
 )
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import datetime_to_wire, utc_now
+from domain.broker.utils import datetime_to_wire, new_message_id, utc_now
 
 from gateway.condition_admission import (
     ConditionAdmissionDecision,
@@ -77,6 +77,9 @@ class KiwoomGatewayRuntimeConfig:
     event_posting_enabled: bool = True
     core_io_worker_enabled: bool = False
     order_pre_ack_journal_path: str | None = None
+    dead_man_cancel_enabled: bool = True
+    dead_man_cancel_core_stale_sec: float = 30.0
+    dead_man_cancel_max_orders: int = 20
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -86,10 +89,12 @@ class PendingOrderRecord:
     account_id: str
     code: str
     side: str
+    quantity: int
     live_sim_intent_id: str
     account_mode: str
     broker_env: str
     server_mode: str
+    order_exchange: str = "KRX"
 
 
 class PendingOrderRegistry:
@@ -111,6 +116,7 @@ class PendingOrderRegistry:
             account_id=request.account,
             code=normalize_code(request.code),
             side=request.side.upper(),
+            quantity=int(request.quantity),
             live_sim_intent_id=str(
                 metadata.get("live_sim_intent_id")
                 or command.payload.get("live_sim_intent_id")
@@ -119,6 +125,7 @@ class PendingOrderRegistry:
             account_mode=str(command.payload.get("account_mode") or "SIMULATION").upper(),
             broker_env=str(command.payload.get("broker_env") or "SIMULATION").upper(),
             server_mode=str(command.payload.get("server_mode") or "SIMULATION").upper(),
+            order_exchange=request.order_exchange,
         )
         self._by_command_id[record.command_id] = record
         signature = self._signature(record.account_id, record.code, record.side)
@@ -142,6 +149,36 @@ class PendingOrderRegistry:
         enriched["idempotency_key"] = record.idempotency_key
         enriched["live_sim_intent_id"] = record.live_sim_intent_id
         return enriched
+
+    def cancelable_buy_orders(self) -> list[tuple[str, PendingOrderRecord]]:
+        return [
+            (order_no, record)
+            for order_no, record in sorted(self._by_broker_order_no.items())
+            if order_no
+            and record.side.upper() == "BUY"
+            and record.account_mode.upper() == "SIMULATION"
+            and record.broker_env.upper() == "SIMULATION"
+            and record.live_sim_intent_id
+        ]
+
+    def apply_chejan_payload(self, payload: Mapping[str, Any]) -> None:
+        broker_order_no = str(
+            payload.get("broker_order_no") or payload.get("broker_order_id") or ""
+        ).strip()
+        if not broker_order_no:
+            return
+        event_kind = str(payload.get("event_kind") or "").strip().lower()
+        remaining_quantity = _optional_int(payload.get("remaining_quantity"))
+        if event_kind in {"order_cancelled", "order_rejected"} or (
+            event_kind == "order_fill" and remaining_quantity == 0
+        ):
+            record = self._by_broker_order_no.pop(broker_order_no, None)
+            if record is not None:
+                self._by_command_id.pop(record.command_id, None)
+                self._by_signature.pop(
+                    self._signature(record.account_id, record.code, record.side),
+                    None,
+                )
 
     def enrich_execution_payload(
         self,
@@ -313,6 +350,12 @@ class KiwoomGatewayRuntime:
         self._core_worker: CoreIoWorker | None = None
         self._local_event_count = 0
         self._latest_local_event: dict[str, Any] = {}
+        self._latest_core_poll_success_monotonic: float | None = None
+        self._latest_core_poll_error_monotonic: float | None = None
+        self._core_poll_error_count = 0
+        self._dead_man_cancelled_order_nos: set[str] = set()
+        self._dead_man_cancel_count = 0
+        self._latest_dead_man_cancel_at: datetime | None = None
         self.replay_order_pre_ack_journal()
 
     def emit(self, event_type: str, payload: Mapping[str, Any], **kwargs: Any) -> None:
@@ -352,6 +395,7 @@ class KiwoomGatewayRuntime:
         self._check_login_reconnect()
         self._recover_realtime_if_stalled()
         self._recover_market_index_if_waiting_callback()
+        self._dead_man_cancel_if_core_unreachable()
         payload = self.heartbeat_payload()
         payload["sequence"] = self._heartbeat_sequence
         self.emit("heartbeat", payload)
@@ -379,6 +423,11 @@ class KiwoomGatewayRuntime:
         snapshot = self._core_worker.snapshot()
         self._posted_count = snapshot.posted_count
         self._polled_count = snapshot.poll_count
+        if snapshot.latest_poll_at is not None:
+            self._latest_core_poll_success_monotonic = snapshot.latest_poll_at
+        if snapshot.latest_poll_error_at is not None:
+            self._latest_core_poll_error_monotonic = snapshot.latest_poll_error_at
+        self._core_poll_error_count = int(snapshot.consecutive_poll_error_count)
         if snapshot.last_error:
             self._last_error = snapshot.last_error
 
@@ -427,11 +476,17 @@ class KiwoomGatewayRuntime:
             )
         except GatewayTransportError as exc:
             self._last_error = str(exc)
+            self._latest_core_poll_error_monotonic = time.monotonic()
+            self._core_poll_error_count += 1
             return
         except Exception as exc:
             self._last_error = str(exc)
+            self._latest_core_poll_error_monotonic = time.monotonic()
+            self._core_poll_error_count += 1
             return
         self._polled_count += 1
+        self._latest_core_poll_success_monotonic = time.monotonic()
+        self._core_poll_error_count = 0
         self.handle_commands(commands)
         self.flush_events()
 
@@ -576,6 +631,13 @@ class KiwoomGatewayRuntime:
             "core_io_worker_coalesce_after_size": worker_coalesce_after_size,
             "core_io_worker_dropped_event_count": worker_dropped_count,
             "core_io_worker_max_buffer_size": worker_max_buffer_size,
+            "core_poll_error_count": self._core_poll_error_count,
+            "dead_man_cancel_enabled": bool(self.config.dead_man_cancel_enabled),
+            "dead_man_cancel_core_stale_sec": float(
+                self.config.dead_man_cancel_core_stale_sec
+            ),
+            "dead_man_cancel_count": self._dead_man_cancel_count,
+            "latest_dead_man_cancel_at": _datetime_or_empty(self._latest_dead_man_cancel_at),
             "local_event_count": self._local_event_count,
             "latest_local_event": dict(self._latest_local_event),
             "login_in_progress": self._login_in_progress,
@@ -1149,6 +1211,7 @@ class KiwoomGatewayRuntime:
 
     def on_chejan_result(self, result: KiwoomChejanParseResult) -> None:
         chejan_payload = self.pending_orders.enrich_chejan_payload(result.to_event_payload())
+        self.pending_orders.apply_chejan_payload(chejan_payload)
         command_id = str(chejan_payload.get("command_id") or "") or None
         idempotency_key = str(chejan_payload.get("idempotency_key") or "") or None
         self.emit(
@@ -1166,6 +1229,102 @@ class KiwoomGatewayRuntime:
                 payload,
                 command_id=exec_command_id or command_id,
                 idempotency_key=exec_key or idempotency_key,
+            )
+
+    def _dead_man_cancel_if_core_unreachable(self) -> None:
+        if not self.config.dead_man_cancel_enabled:
+            return
+        if not self.config.core_io_enabled or not self.config.command_polling_enabled:
+            return
+        if self._core_poll_error_count <= 0:
+            return
+        now_monotonic = time.monotonic()
+        baseline = self._latest_core_poll_success_monotonic
+        if baseline is None:
+            baseline = self._latest_core_poll_error_monotonic
+        if baseline is None:
+            return
+        stale_sec = now_monotonic - baseline
+        if stale_sec < max(float(self.config.dead_man_cancel_core_stale_sec), 0.0):
+            return
+        if broker_env_from_server_gubun(self._server_gubun()) != "SIMULATION":
+            self.emit(
+                "gateway_error",
+                {
+                    "message": "DEAD_MAN_CANCEL_BLOCKED_NON_SIMULATION",
+                    "broker_env": broker_env_from_server_gubun(self._server_gubun()),
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                },
+            )
+            return
+        max_orders = max(int(self.config.dead_man_cancel_max_orders), 0)
+        if max_orders <= 0:
+            return
+        cancelled = 0
+        for broker_order_no, record in self.pending_orders.cancelable_buy_orders():
+            if cancelled >= max_orders:
+                break
+            if broker_order_no in self._dead_man_cancelled_order_nos:
+                continue
+            request = KiwoomOrderRequest(
+                account=record.account_id,
+                code=record.code,
+                quantity=max(int(record.quantity), 1),
+                price=0,
+                side="BUY_CANCEL",
+                tag=new_message_id("dead_man_cancel"),
+                order_type=3,
+                hoga="00",
+                original_order_no=broker_order_no,
+                command_id="",
+                idempotency_key=f"dead-man-cancel:{record.command_id}:{broker_order_no}",
+                order_exchange=record.order_exchange,
+                metadata={
+                    "source": "kiwoom_gateway_dead_man_cancel",
+                    "original_gateway_command_id": record.command_id,
+                    "original_idempotency_key": record.idempotency_key,
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                    "cancel_only": True,
+                    "reason": "CORE_COMMAND_POLL_STALE",
+                },
+            )
+            try:
+                result = self.client.send_order(request)
+            except Exception as exc:
+                self._last_error = str(exc)
+                self.emit(
+                    "gateway_error",
+                    {
+                        "message": "DEAD_MAN_CANCEL_FAILED",
+                        "broker_order_no": broker_order_no,
+                        "command_id": record.command_id,
+                        "error": str(exc),
+                        "live_sim_only": True,
+                        "live_real_allowed": False,
+                    },
+                )
+                continue
+            self._dead_man_cancelled_order_nos.add(broker_order_no)
+            cancelled += 1
+            self._dead_man_cancel_count += 1
+            self._latest_dead_man_cancel_at = utc_now()
+            self.emit(
+                "gateway_log",
+                {
+                    "message": "DEAD_MAN_CANCEL_SENT",
+                    "broker_order_no": broker_order_no,
+                    "command_id": record.command_id,
+                    "accepted": bool(result.ok),
+                    "broker_result_code": result.code,
+                    "broker_message": result.message,
+                    "core_poll_error_count": self._core_poll_error_count,
+                    "core_stale_sec": round(stale_sec, 3),
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                    "cancel_only": True,
+                },
             )
 
     def kiwoom_logged_in(self) -> bool:
@@ -2036,6 +2195,15 @@ def _is_market_index_parse_error(payload: Mapping[str, Any]) -> bool:
     if isinstance(reason_codes, Iterable) and not isinstance(reason_codes, (str, bytes)):
         return "INDEX_PARSE_ERROR" in {str(item).upper() for item in reason_codes}
     return False
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
 
 
 def _latest_datetime(*values: datetime | None) -> datetime | None:

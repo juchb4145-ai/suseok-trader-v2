@@ -80,13 +80,42 @@ public enqueue endpoint는 없다. 내부 service와 tests만 `storage.gateway_c
 | --- | --- |
 | `QUEUED` | Gateway가 아직 가져가지 않음 |
 | `DISPATCHED` | Gateway로 전달됨 |
+| `UNCONFIRMED` | 주문 command가 Gateway로 전달됐으나 ack/failure/execution 이벤트가 시간 내 돌아오지 않아 broker TR/저널 대사가 필요함 |
 | `ACKED` | Gateway가 정상 처리 ack |
 | `REJECTED` | safety/policy에 의해 거부 |
 | `FAILED` | Gateway 처리 실패 |
-| `EXPIRED` | 만료 |
+| `EXPIRED` | Gateway가 가져가기 전에 TTL 만료 |
 | `CANCELLED` | future cancellation 예약 |
 
 `command_started`, `command_ack`, `command_failed` event가 `command_id`를 포함하면 `gateway_commands`와 `gateway_command_events`가 업데이트된다.
+
+### TTL / Expired / Unstarted
+
+| 조건 | 전이 | 의미 |
+| --- | --- | --- |
+| `QUEUED` + `expires_at <= now` + `dispatched_at IS NULL` | `EXPIRED` | Gateway가 command를 보지 못한 상태로 만료. broker 도달 없음. |
+| `DISPATCHED` + non-order command timeout | `FAILED` | transport 처리 결과가 사라진 것으로 간주. 재시도는 새 command로만 한다. |
+| `DISPATCHED` + `send_order`/`cancel_order` timeout | `UNCONFIRMED` | broker 도달 여부를 알 수 없음. pre-ack journal, broker snapshot, chejan/TR 대사로 해소해야 한다. |
+| Gateway가 command를 claim했지만 `command_started`도 못 보냄 | `command_failed` event 우선 전송 | Gateway runtime이 미시작 in-flight command를 실패 이벤트로 보상한다. |
+
+Polling은 만료된 `QUEUED` command를 먼저 `EXPIRED`로 정리한 뒤 ready command를 `DISPATCHED`로 claim한다. ready command 정렬은 order-critical command를 최우선으로 둔다.
+
+우선순위:
+
+1. `send_order`, `cancel_order`
+2. `heartbeat_request`, `load_conditions`, `send_condition`, `stop_condition`, 기타 control command
+3. `register_realtime`, `request_tr`
+
+### Delivery Semantics
+
+Event ingest는 at-least-once다. 같은 `event_id`는 중복 count로 보존하고, command-critical event(`command_started`, `command_ack`, `command_failed`, `rate_limited`, `execution_event`, chejan 계열)는 Gateway buffer에서 drop-protected다.
+
+Command dispatch는 at-most-once를 목표로 한다. `poll_commands()`가 command를 반환하는 순간 `DISPATCHED`와 `attempts += 1`이 기록된다. order command는 timeout 시 `FAILED`가 아니라 `UNCONFIRMED`가 되며, 보상 경로는 다음 순서다.
+
+- pre-ack journal recovery event 재전송
+- broker snapshot reconcile
+- operator drill 또는 `tools/resolve_live_sim_order.py` 수동 해소
+- Core polling stale 시 Gateway dead-man cancel은 미체결 BUY의 cancel-only만 허용
 
 ## Token Auth
 

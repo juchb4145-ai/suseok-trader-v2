@@ -11,6 +11,7 @@ from typing import Any
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import (
+    BrokerValidationError,
     datetime_to_wire,
     market_time_str,
     market_today,
@@ -619,8 +620,14 @@ def handle_live_sim_gateway_event(
 def reconcile_live_sim(
     connection: sqlite3.Connection,
     settings: Settings | None = None,
+    *,
+    broker_snapshot: Mapping[str, Any] | None = None,
 ) -> LiveSimReconcileSnapshot:
-    return reconcile_live_sim_orders_and_positions(connection, settings=settings)
+    return reconcile_live_sim_orders_and_positions(
+        connection,
+        settings=settings,
+        broker_snapshot=broker_snapshot,
+    )
 
 
 def sweep_expired_live_sim_order_commands(
@@ -753,6 +760,8 @@ def sweep_expired_live_sim_order_commands(
 def reconcile_live_sim_orders_and_positions(
     connection: sqlite3.Connection,
     settings: Settings | None = None,
+    *,
+    broker_snapshot: Mapping[str, Any] | None = None,
 ) -> LiveSimReconcileSnapshot:
     resolved_settings = settings or load_settings()
     trade_date = _today_trade_date()
@@ -876,7 +885,23 @@ def reconcile_live_sim_orders_and_positions(
         mismatch_count += stale_orders
         mismatches.append({"reason": "stale_open_orders", "count": stale_orders})
 
-    broker_snapshot_available = False
+    normalized_broker_snapshot = _normalize_broker_snapshot(broker_snapshot, resolved_settings)
+    broker_snapshot_available = normalized_broker_snapshot is not None
+    broker_open_orders = (
+        [] if normalized_broker_snapshot is None else normalized_broker_snapshot["open_orders"]
+    )
+    broker_positions = (
+        [] if normalized_broker_snapshot is None else normalized_broker_snapshot["positions"]
+    )
+    if normalized_broker_snapshot is not None:
+        mismatch_count += _append_broker_snapshot_mismatches(
+            open_orders=open_orders,
+            positions=positions,
+            broker_open_orders=broker_open_orders,
+            broker_positions=broker_positions,
+            mismatches=mismatches,
+        )
+
     blocking_new_buy = bool(
         mismatch_count > 0 and resolved_settings.live_sim_reconcile_block_new_buy_on_mismatch
     )
@@ -893,15 +918,20 @@ def reconcile_live_sim_orders_and_positions(
         reconcile_id=new_message_id("live_sim_reconcile"),
         account_id=resolved_settings.live_sim_account_id or "SIMULATION_ACCOUNT_REQUIRED",
         trade_date=trade_date,
-        broker_open_order_count=0,
-        broker_position_count=0,
+        broker_open_order_count=len(broker_open_orders),
+        broker_position_count=len(broker_positions),
         local_open_order_count=len(open_orders),
         local_position_count=len(positions),
         mismatch_count=mismatch_count,
         status=status,
         snapshot_json={
             "broker_snapshot_available": broker_snapshot_available,
-            "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+            "broker_snapshot_status": (
+                "BROKER_SNAPSHOT_APPLIED"
+                if broker_snapshot_available
+                else "BROKER_SNAPSHOT_UNAVAILABLE"
+            ),
+            "broker_snapshot": normalized_broker_snapshot or {},
             "open_orders": open_orders,
             "positions": positions,
             "mismatches": mismatches,
@@ -2274,6 +2304,7 @@ def apply_live_sim_broker_snapshot(
     event: GatewayEvent,
     settings: Settings | None = None,
 ) -> dict[str, Any]:
+    resolved_settings = settings or load_settings()
     payload = dict(event.payload)
     _record_lifecycle_event(
         connection,
@@ -2284,8 +2315,24 @@ def apply_live_sim_broker_snapshot(
         reason=str(event.event_type).upper(),
         evidence={"payload": payload, "event_id": event.event_id},
     )
+    if _normalize_broker_snapshot(payload, resolved_settings) is not None:
+        snapshot = reconcile_live_sim_orders_and_positions(
+            connection,
+            settings=resolved_settings,
+            broker_snapshot=payload,
+        )
+        return {
+            "handled": True,
+            "snapshot_event_id": event.event_id,
+            "reconcile": snapshot.to_dict(),
+        }
     connection.commit()
-    return {"handled": True, "snapshot_event_id": event.event_id}
+    return {
+        "handled": True,
+        "snapshot_event_id": event.event_id,
+        "reconcile": None,
+        "reason": "broker_snapshot_payload_not_complete",
+    }
 
 
 def _handle_live_sim_command_event(
@@ -4750,6 +4797,306 @@ def _net_position_quantity_from_fills(
         (account_id, validate_stock_code(code)),
     ).fetchone()
     return int(row["quantity"] or 0)
+
+
+def _normalize_broker_snapshot(
+    snapshot: Mapping[str, Any] | None,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    if not isinstance(snapshot, Mapping):
+        return None
+    root = _json_object(snapshot.get("broker_snapshot")) or dict(snapshot)
+    snapshot_keys = {
+        "open_orders",
+        "unfilled_orders",
+        "orders",
+        "open_order_snapshots",
+        "positions",
+        "holdings",
+        "position_snapshots",
+        "balances",
+    }
+    has_snapshot_contract = any(key in root for key in snapshot_keys)
+    open_orders_raw = _mapping_list(
+        _first_present(
+            root,
+            "open_orders",
+            "unfilled_orders",
+            "orders",
+            "open_order_snapshots",
+        )
+    )
+    positions_raw = _mapping_list(
+        _first_present(
+            root,
+            "positions",
+            "holdings",
+            "position_snapshots",
+            "balances",
+        )
+    )
+    if not has_snapshot_contract and not open_orders_raw and not positions_raw:
+        return None
+
+    return {
+        "account_id": str(root.get("account_id") or settings.live_sim_account_id or ""),
+        "trade_date": str(root.get("trade_date") or _today_trade_date()),
+        "snapshot_at": str(root.get("snapshot_at") or root.get("created_at") or ""),
+        "open_orders": [
+            normalized
+            for row in open_orders_raw
+            if (normalized := _normalize_broker_open_order(row)) is not None
+        ],
+        "positions": [
+            normalized
+            for row in positions_raw
+            if (normalized := _normalize_broker_position(row)) is not None
+        ],
+        "source": str(root.get("source") or "broker_snapshot"),
+        "complete": _bool_like(root.get("complete", root.get("snapshot_complete", True))),
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "broker_order_path": "LIVE_SIM_ONLY",
+    }
+
+
+def _append_broker_snapshot_mismatches(
+    *,
+    open_orders: Sequence[Mapping[str, Any]],
+    positions: Sequence[Mapping[str, Any]],
+    broker_open_orders: Sequence[Mapping[str, Any]],
+    broker_positions: Sequence[Mapping[str, Any]],
+    mismatches: list[dict[str, Any]],
+) -> int:
+    mismatch_count = 0
+    broker_orders_by_no = {
+        str(order["broker_order_no"]): order
+        for order in broker_open_orders
+        if str(order.get("broker_order_no") or "").strip()
+    }
+    local_orders_by_no = {
+        str(order["broker_order_no"]): order
+        for order in open_orders
+        if str(order.get("broker_order_no") or "").strip()
+    }
+    for order in open_orders:
+        broker_order_no = str(order.get("broker_order_no") or "").strip()
+        if not broker_order_no:
+            continue
+        broker_order = broker_orders_by_no.get(broker_order_no)
+        if broker_order is None:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "broker_order_no": broker_order_no,
+                    "reason": "broker_open_order_missing_for_local_order",
+                }
+            )
+            continue
+        if broker_order.get("code") != order.get("code"):
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "broker_order_no": broker_order_no,
+                    "reason": "broker_open_order_code_mismatch",
+                    "local_code": order.get("code"),
+                    "broker_code": broker_order.get("code"),
+                }
+            )
+        local_remaining = _optional_int_value(order.get("remaining_quantity"))
+        broker_remaining = _optional_int_value(broker_order.get("remaining_quantity"))
+        if (
+            local_remaining is not None
+            and broker_remaining is not None
+            and local_remaining != broker_remaining
+        ):
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "broker_order_no": broker_order_no,
+                    "reason": "broker_open_order_remaining_quantity_mismatch",
+                    "local_remaining_quantity": local_remaining,
+                    "broker_remaining_quantity": broker_remaining,
+                }
+            )
+
+    for broker_order in broker_open_orders:
+        broker_order_no = str(broker_order.get("broker_order_no") or "").strip()
+        if broker_order_no and broker_order_no in local_orders_by_no:
+            continue
+        mismatch_count += 1
+        mismatches.append(
+            {
+                "broker_order_no": broker_order_no or None,
+                "code": broker_order.get("code"),
+                "reason": "local_order_missing_for_broker_open_order",
+                "broker_order": broker_order,
+            }
+        )
+
+    local_qty_by_code = _position_quantity_by_code(positions)
+    local_available_by_code = _position_available_quantity_by_code(positions)
+    broker_qty_by_code = _position_quantity_by_code(broker_positions)
+    broker_available_by_code = _position_available_quantity_by_code(broker_positions)
+    for code in sorted(set(local_qty_by_code) | set(broker_qty_by_code)):
+        local_quantity = local_qty_by_code.get(code, 0)
+        broker_quantity = broker_qty_by_code.get(code, 0)
+        if local_quantity != broker_quantity:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "code": code,
+                    "reason": "broker_position_quantity_mismatch",
+                    "local_quantity": local_quantity,
+                    "broker_quantity": broker_quantity,
+                }
+            )
+            continue
+        local_available = local_available_by_code.get(code)
+        broker_available = broker_available_by_code.get(code)
+        if (
+            local_available is not None
+            and broker_available is not None
+            and local_available != broker_available
+        ):
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "code": code,
+                    "reason": "broker_position_available_quantity_mismatch",
+                    "local_available_quantity": local_available,
+                    "broker_available_quantity": broker_available,
+                }
+            )
+    return mismatch_count
+
+
+def _normalize_broker_open_order(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    code = _optional_stock_code(_first_present(row, "code", "stock_code", "symbol"))
+    broker_order_no = _optional_text(
+        _first_present(row, "broker_order_no", "order_no", "broker_order_id")
+    )
+    quantity = _optional_int_value(_first_present(row, "quantity", "order_quantity", "qty"))
+    remaining = _optional_int_value(
+        _first_present(row, "remaining_quantity", "unfilled_quantity", "open_quantity")
+    )
+    if remaining is None:
+        remaining = quantity
+    if code is None and broker_order_no is None:
+        return None
+    return {
+        "broker_order_no": broker_order_no,
+        "code": code,
+        "side": str(_first_present(row, "side", "order_side") or "").upper(),
+        "quantity": quantity if quantity is not None else remaining or 0,
+        "remaining_quantity": remaining if remaining is not None else quantity or 0,
+        "price": _optional_float_value(_first_present(row, "price", "order_price")),
+        "raw": normalize_value(dict(row)),
+    }
+
+
+def _normalize_broker_position(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    code = _optional_stock_code(_first_present(row, "code", "stock_code", "symbol"))
+    if code is None:
+        return None
+    quantity = _optional_int_value(
+        _first_present(row, "quantity", "position_quantity", "holding_quantity")
+    )
+    available = _optional_int_value(
+        _first_present(row, "available_quantity", "sellable_quantity", "available_qty")
+    )
+    return {
+        "code": code,
+        "name": str(row.get("name") or row.get("stock_name") or code),
+        "quantity": quantity if quantity is not None else 0,
+        "available_quantity": available if available is not None else quantity,
+        "avg_entry_price": _optional_float_value(
+            _first_present(row, "avg_entry_price", "average_buy_price", "avg_price")
+        ),
+        "raw": normalize_value(dict(row)),
+    }
+
+
+def _position_quantity_by_code(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    quantities: dict[str, int] = {}
+    for row in rows:
+        code = _optional_stock_code(row.get("code"))
+        if code is None:
+            continue
+        quantities[code] = quantities.get(code, 0) + int(row.get("quantity") or 0)
+    return quantities
+
+
+def _position_available_quantity_by_code(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, int | None]:
+    quantities: dict[str, int | None] = {}
+    for row in rows:
+        code = _optional_stock_code(row.get("code"))
+        if code is None:
+            continue
+        available = row.get("available_quantity")
+        if available is None:
+            quantities.setdefault(code, None)
+            continue
+        quantities[code] = int(quantities.get(code) or 0) + int(available or 0)
+    return quantities
+
+
+def _mapping_list(value: object) -> list[Mapping[str, Any]]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _first_present(row: Mapping[str, Any], *keys: str) -> object:
+    for key in keys:
+        if key in row and row.get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _optional_stock_code(value: object) -> str | None:
+    if value is None or not str(value).strip():
+        return None
+    try:
+        return validate_stock_code(str(value))
+    except (BrokerValidationError, ValueError):
+        return None
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _optional_int_value(value: object) -> int | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return int(float(str(value).replace(",", "")))
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float_value(value: object) -> float | None:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _bool_like(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "n", "off"}
 
 
 def _stale_open_order_count(connection: sqlite3.Connection, settings: Settings) -> int:

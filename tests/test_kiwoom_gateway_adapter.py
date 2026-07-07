@@ -154,6 +154,14 @@ def test_kiwoom_gateway_market_index_options_accept_env(monkeypatch) -> None:
     assert args.market_index_codes == "KOSPI"
 
 
+def test_kiwoom_gateway_dead_man_cancel_options_default_on() -> None:
+    args = parse_args([])
+
+    assert args.dead_man_cancel_enabled is True
+    assert args.dead_man_cancel_core_stale_sec == 30.0
+    assert args.dead_man_cancel_max_orders == 20
+
+
 def test_kiwoom_gateway_app_drains_worker_commands_instead_of_sync_polling() -> None:
     from apps import kiwoom_gateway
 
@@ -2622,6 +2630,95 @@ def test_pending_order_registry_uses_command_id_before_ambiguous_signature() -> 
     assert "command_id" not in ambiguous
     assert matched["command_id"] == "cmd_order_1"
     assert matched["live_sim_intent_id"] == "intent-1"
+
+
+def test_kiwoom_runtime_dead_man_cancel_is_cancel_only_after_core_poll_failure() -> None:
+    class FailingCoreClient:
+        def poll_commands(self, *, limit: int = 20, wait_sec: float = 0) -> list[GatewayCommand]:
+            raise RuntimeError("core unavailable")
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=FailingCoreClient(),
+        config=KiwoomGatewayRuntimeConfig(
+            dead_man_cancel_enabled=True,
+            dead_man_cancel_core_stale_sec=0,
+            core_io_enabled=True,
+            command_polling_enabled=True,
+            event_posting_enabled=False,
+        ),
+    )
+    command = _live_sim_order_command(command_id="cmd_dead_man_source")
+    request = KiwoomOrderRequest(
+        account="1234567890",
+        code="005930",
+        quantity=3,
+        price=70000,
+        side="BUY",
+        tag="cmd_dead_man_source",
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key or "",
+        metadata={"live_sim_intent_id": "intent-dead-man"},
+    )
+    runtime.pending_orders.record_ack(
+        command,
+        request,
+        KiwoomOrderResult(
+            ok=True,
+            code=0,
+            message="accepted",
+            request=request,
+            order_no="DM-ORDER-1",
+        ),
+    )
+    other_command = GatewayCommand(
+        command_id="cmd_not_live_sim",
+        command_type="send_order",
+        source="manual",
+        idempotency_key="idem-not-live-sim",
+        payload={
+            "account_id": "1234567890",
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "server_mode": "SIMULATION",
+            "code": "000660",
+            "side": "BUY",
+            "quantity": 5,
+        },
+    )
+    other_request = KiwoomOrderRequest(
+        account="1234567890",
+        code="000660",
+        quantity=5,
+        price=100000,
+        side="BUY",
+        tag="cmd_not_live_sim",
+        command_id=other_command.command_id,
+        idempotency_key=other_command.idempotency_key or "",
+        metadata={},
+    )
+    runtime.pending_orders.record_ack(
+        other_command,
+        other_request,
+        KiwoomOrderResult(
+            ok=True,
+            code=0,
+            message="accepted",
+            request=other_request,
+            order_no="DM-ORDER-IGNORED",
+        ),
+    )
+
+    runtime.poll_and_handle_commands()
+    runtime.emit_heartbeat()
+
+    assert len(client.orders) == 1
+    cancel_request = client.orders[0]
+    assert cancel_request.side == "BUY_CANCEL"
+    assert cancel_request.original_order_no == "DM-ORDER-1"
+    assert cancel_request.quantity == 3
+    assert cancel_request.metadata["cancel_only"] is True
 
 
 def test_kiwoom_handler_rejects_live_real_and_cancel_modify() -> None:

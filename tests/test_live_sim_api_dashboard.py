@@ -47,6 +47,11 @@ def test_live_sim_api_get_post_token_and_queue(tmp_path, monkeypatch) -> None:
             "/api/live-sim/reconcile",
             headers={"X-Local-Token": "secret-token"},
         )
+        broker_reconciled = client.post(
+            "/api/live-sim/reconcile/broker-snapshot",
+            headers={"X-Local-Token": "secret-token"},
+            json={"account_id": "SIM-12345678", "open_orders": [], "positions": []},
+        )
 
     assert status.status_code == 200
     assert status.json()["enabled"] is True
@@ -66,6 +71,8 @@ def test_live_sim_api_get_post_token_and_queue(tmp_path, monkeypatch) -> None:
     assert queued.json()["gateway_command_id"]
     assert queued.json()["real_order_allowed"] is False
     assert reconciled.status_code == 200
+    assert broker_reconciled.status_code == 200
+    assert broker_reconciled.json()["reconcile"]["snapshot_json"]["broker_snapshot_available"]
 
 
 def test_dashboard_snapshot_includes_live_sim_read_only(tmp_path) -> None:

@@ -54,8 +54,19 @@ def test_live_sim_pilot_kpi_report_builds_daily_sections(tmp_path) -> None:
     assert payload["strategy"]["exit_reason_distribution"]["TAKE_PROFIT"]["count"] == 1
     assert payload["strategy"]["stop_loss_mfe_pct_distribution"]["median"] == 1.0
     assert payload["strategy"]["winning_trade_mae_pct_distribution"]["median"] == -1.0
+    assert payload["operating_latency"]["run_count"] == 2
+    reconcile_latency = next(
+        item
+        for item in payload["operating_latency"]["stages"]
+        if item["stage"] == "reconcile"
+    )
+    assert reconcile_latency["sample_count"] == 2
+    assert reconcile_latency["p50_ms"] == 20.0
+    assert reconcile_latency["p95_ms"] == 29.0
     assert "손절 트레이드의 MFE 분포" in markdown
     assert "승리 트레이드의 MAE 분포" in markdown
+    assert "## Operating Latency" in markdown
+    assert "| Reconcile | 2 | 20.0000 | 29.0000" in markdown
 
 
 def test_live_sim_pilot_report_opens_database_readonly(tmp_path) -> None:
@@ -229,6 +240,22 @@ def _insert_kpi_fixture(connection) -> None:
         {},
     )
     _insert_ttl_cancel(connection, "cancel-1", "order-buy-1", now)
+    _insert_operating_run(
+        connection,
+        "operating-1",
+        now,
+        {"reconcile": {"duration_ms": 10.0}, "buy": {"duration_ms": 20.0}},
+    )
+    _insert_operating_run(
+        connection,
+        "operating-2",
+        later,
+        {
+            "reconcile": {"duration_ms": 30.0},
+            "preflight": {"duration_ms": 5.0},
+            "buy": {"duration_ms": 40.0},
+        },
+    )
     connection.commit()
 
 
@@ -678,6 +705,39 @@ def _insert_ttl_cancel(connection, cancel_id, order_id, created_at) -> None:
         VALUES (?, ?, '005930', 1, 'TTL_EXPIRED', 'ACKED', ?, ?)
         """,
         (cancel_id, order_id, f"idem-{cancel_id}", created_at),
+    )
+
+
+def _insert_operating_run(connection, run_id, created_at, stage_latency) -> None:
+    connection.execute(
+        """
+        INSERT INTO live_sim_operating_runs (
+            run_id,
+            trade_date,
+            mode,
+            queue_commands,
+            preflight_status,
+            status,
+            buy_evaluated_count,
+            buy_command_count,
+            cancel_candidate_count,
+            cancel_command_count,
+            exit_signal_count,
+            exit_command_count,
+            reconcile_status,
+            no_buy_status,
+            ai_run_status,
+            reason_summary_json,
+            warnings_json,
+            errors_json,
+            stage_latency_json,
+            created_at
+        )
+        VALUES (?, ?, 'PILOT_FULL_LIFECYCLE', 1, 'PASS', 'COMPLETED',
+            0, 0, 0, 0, 0, 0, 'OK', 'SKIPPED', 'SKIPPED',
+            '{}', '[]', '[]', ?, ?)
+        """,
+        (run_id, TRADE_DATE, json.dumps(stage_latency), created_at),
     )
 
 

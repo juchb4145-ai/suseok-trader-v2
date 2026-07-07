@@ -22,10 +22,12 @@ class CoreIoWorkerSnapshot:
     dropped_count: int
     last_error: str
     latest_poll_at: float | None
+    latest_poll_error_at: float | None
     latest_post_at: float | None
     thread_id: int | None
     coalesce_after_size: int
     max_buffer_size: int
+    consecutive_poll_error_count: int
 
 
 class CoreIoWorker:
@@ -64,10 +66,12 @@ class CoreIoWorker:
         self._dropped_count = 0
         self._last_error = ""
         self._latest_poll_at: float | None = None
+        self._latest_poll_error_at: float | None = None
         self._latest_post_at: float | None = None
         self._thread_id: int | None = None
         self._next_post_retry_at = 0.0
         self._next_command_poll_at = 0.0
+        self._consecutive_poll_error_count = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -147,8 +151,10 @@ class CoreIoWorker:
             dropped_count = self._dropped_count
             last_error = self._last_error
             latest_poll_at = self._latest_poll_at
+            latest_poll_error_at = self._latest_poll_error_at
             latest_post_at = self._latest_post_at
             thread_id = self._thread_id
+            consecutive_poll_error_count = self._consecutive_poll_error_count
         return CoreIoWorkerSnapshot(
             running=self._thread is not None and self._thread.is_alive(),
             event_queue_size=event_queue_size,
@@ -159,10 +165,12 @@ class CoreIoWorker:
             dropped_count=dropped_count,
             last_error=last_error,
             latest_poll_at=latest_poll_at,
+            latest_poll_error_at=latest_poll_error_at,
             latest_post_at=latest_post_at,
             thread_id=thread_id,
             coalesce_after_size=self._coalesce_after_size,
             max_buffer_size=self._max_buffer_size,
+            consecutive_poll_error_count=consecutive_poll_error_count,
         )
 
     def _coalesce_event_locked(self, event: GatewayEvent) -> bool:
@@ -248,11 +256,14 @@ class CoreIoWorker:
         except Exception as exc:
             with self._condition:
                 self._last_error = str(exc)
+                self._latest_poll_error_at = time.monotonic()
+                self._consecutive_poll_error_count += 1
             self._stop_event.wait(self._retry_sleep_sec)
             return
         with self._condition:
             self._poll_count += 1
             self._latest_poll_at = time.monotonic()
+            self._consecutive_poll_error_count = 0
             self._last_error = ""
         for command in commands:
             self._commands.put(command)

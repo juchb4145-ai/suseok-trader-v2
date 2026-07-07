@@ -183,6 +183,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
         help="Append-only local JSONL journal written immediately before Kiwoom SendOrder.",
     )
+    parser.add_argument(
+        "--dead-man-cancel-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("KIWOOM_DEAD_MAN_CANCEL_ENABLED", True),
+        help="Cancel-only protection for LIVE_SIM BUY orders when Core polling is stale.",
+    )
+    parser.add_argument(
+        "--dead-man-cancel-core-stale-sec",
+        type=float,
+        default=float(os.environ.get("KIWOOM_DEAD_MAN_CANCEL_CORE_STALE_SEC", "30.0")),
+    )
+    parser.add_argument(
+        "--dead-man-cancel-max-orders",
+        type=int,
+        default=int(os.environ.get("KIWOOM_DEAD_MAN_CANCEL_MAX_ORDERS", "20")),
+    )
     return parser.parse_args(argv)
 
 
@@ -267,6 +283,12 @@ def run_gateway(args: argparse.Namespace) -> int:
             event_posting_enabled=event_posting_enabled,
             core_io_worker_enabled=core_io_worker_enabled,
             order_pre_ack_journal_path=str(args.order_pre_ack_journal_path or ""),
+            dead_man_cancel_enabled=bool(args.dead_man_cancel_enabled),
+            dead_man_cancel_core_stale_sec=max(
+                float(args.dead_man_cancel_core_stale_sec),
+                0.0,
+            ),
+            dead_man_cancel_max_orders=max(int(args.dead_man_cancel_max_orders), 0),
         ),
     )
     wire_kiwoom_signals(client, runtime)

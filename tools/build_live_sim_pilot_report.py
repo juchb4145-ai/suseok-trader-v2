@@ -16,6 +16,21 @@ if str(ROOT_DIR) not in sys.path:
 
 DEFAULT_REPORT_ROOT = ROOT_DIR / "reports" / "live_sim_pilot"
 EXIT_REASON_BUCKETS = ("STOP_LOSS", "TAKE_PROFIT", "TRAILING", "MAX_HOLD", "EOD")
+OPERATING_STAGE_LABELS = {
+    "expired_command_sweep": "Expired command sweep",
+    "reconcile": "Reconcile",
+    "preflight": "Preflight",
+    "cancel": "Cancel",
+    "exit": "Exit",
+    "theme_leadership": "Theme leadership",
+    "candidate_quote_refresh": "Candidate quote refresh",
+    "incremental_backfill": "Incremental backfill",
+    "entry_timing": "Entry timing",
+    "ai_advisory": "AI advisory",
+    "reprice": "Reprice",
+    "buy": "Buy",
+    "no_buy_sentinel": "No-buy sentinel",
+}
 
 
 def build_live_sim_pilot_kpi(
@@ -153,6 +168,7 @@ def build_live_sim_pilot_kpi(
         orders_by_intent=orders_by_intent,
     )
     strategy = _build_strategy_section(connection, resolved_trade_date)
+    operating_latency = _build_operating_latency_section(connection, resolved_trade_date)
     review_reports = list_live_sim_review_reports(
         connection,
         trade_date=resolved_trade_date,
@@ -172,6 +188,7 @@ def build_live_sim_pilot_kpi(
         "funnel": funnel,
         "fills": fills,
         "strategy": strategy,
+        "operating_latency": operating_latency,
         "review_store": {
             "live_sim_review_report_count": len(review_reports),
             "latest_review_ids": [row["review_id"] for row in review_reports[:10]],
@@ -546,6 +563,66 @@ def _build_strategy_section(
     }
 
 
+def _build_operating_latency_section(
+    connection: sqlite3.Connection,
+    trade_date: str,
+) -> dict[str, Any]:
+    rows = _fetch_all(
+        connection,
+        """
+        SELECT run_id, trade_date, mode, status, stage_latency_json, created_at
+        FROM live_sim_operating_runs
+        WHERE trade_date = ?
+        ORDER BY created_at ASC, run_id ASC
+        """,
+        (trade_date,),
+    )
+    status_counts = Counter(str(row.get("status") or "UNKNOWN") for row in rows)
+    mode_counts = Counter(str(row.get("mode") or "UNKNOWN") for row in rows)
+    stage_values: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        stage_latency = _json_object(row.get("stage_latency_json"))
+        for stage, raw_item in stage_latency.items():
+            item = _mapping(raw_item)
+            duration_ms = _optional_float(item.get("duration_ms"))
+            if duration_ms is not None:
+                stage_values[str(stage)].append(duration_ms)
+
+    stage_order = [
+        *[stage for stage in OPERATING_STAGE_LABELS if stage in stage_values],
+        *sorted(stage for stage in stage_values if stage not in OPERATING_STAGE_LABELS),
+    ]
+    stages = []
+    for stage in stage_order:
+        summary = _latency_ms_summary(stage_values[stage])
+        stages.append(
+            {
+                "stage": stage,
+                "label": OPERATING_STAGE_LABELS.get(stage, stage),
+                **summary,
+            }
+        )
+
+    latest = rows[-1] if rows else None
+    latest_run = None
+    if latest is not None:
+        latest_run = {
+            "run_id": latest.get("run_id"),
+            "mode": latest.get("mode"),
+            "status": latest.get("status"),
+            "created_at": latest.get("created_at"),
+        }
+
+    return {
+        "run_count": len(rows),
+        "status_counts": dict(status_counts),
+        "mode_counts": dict(mode_counts),
+        "stage_count": len(stages),
+        "stages": stages,
+        "latest_run": latest_run,
+    }
+
+
 def _closed_trade_record(
     connection: sqlite3.Connection,
     position: Mapping[str, Any],
@@ -679,6 +756,7 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
     funnel = _mapping(payload.get("funnel"))
     fills = _mapping(payload.get("fills"))
     strategy = _mapping(payload.get("strategy"))
+    operating_latency = _mapping(payload.get("operating_latency"))
     lines = [
         "# LIVE_SIM Pilot Daily KPI",
         "",
@@ -723,6 +801,31 @@ def _render_markdown(payload: Mapping[str, Any]) -> str:
             "- reprice attempts / success: "
             f"`{_cell(fills.get('reprice_attempt_count'))}` / "
             f"`{_cell(fills.get('reprice_success_count'))}`",
+            "",
+            "## Operating Latency",
+            "",
+            f"- operating run count: `{_cell(operating_latency.get('run_count'))}`",
+            f"- latest run: `{_json_excerpt(operating_latency.get('latest_run'))}`",
+            "",
+            "| Stage | Samples | p50 ms | p95 ms | Mean ms | Max ms |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in _list(operating_latency.get("stages")):
+        item = _mapping(row)
+        lines.append(
+            "| {stage} | {count} | {p50} | {p95} | {mean} | {max_value} |".format(
+                stage=_md_cell(item.get("label")),
+                count=_md_cell(item.get("sample_count")),
+                p50=_md_cell(_format_number(item.get("p50_ms"))),
+                p95=_md_cell(_format_number(item.get("p95_ms"))),
+                mean=_md_cell(_format_number(item.get("mean_ms"))),
+                max_value=_md_cell(_format_number(item.get("max_ms"))),
+            )
+        )
+
+    lines.extend(
+        [
             "",
             "## Strategy",
             "",
@@ -915,6 +1018,27 @@ def _distribution(values: Sequence[float]) -> dict[str, Any]:
         "p75": _percentile(clean, 0.75),
         "max": clean[-1],
         "mean": _mean(clean),
+    }
+
+
+def _latency_ms_summary(values: Sequence[float]) -> dict[str, Any]:
+    clean = sorted(float(value) for value in values if value is not None)
+    if not clean:
+        return {
+            "sample_count": 0,
+            "min_ms": None,
+            "p50_ms": None,
+            "p95_ms": None,
+            "max_ms": None,
+            "mean_ms": None,
+        }
+    return {
+        "sample_count": len(clean),
+        "min_ms": clean[0],
+        "p50_ms": _percentile(clean, 0.50),
+        "p95_ms": _percentile(clean, 0.95),
+        "max_ms": clean[-1],
+        "mean_ms": _mean(clean),
     }
 
 

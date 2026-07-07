@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from typing import Any, TypeVar
 
@@ -62,6 +63,7 @@ class LiveSimOperatingRunResult:
     errors: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
     reason_summary: Mapping[str, Any] = field(default_factory=dict)
     stages: Mapping[str, Any] = field(default_factory=dict)
+    stage_latency: Mapping[str, Any] = field(default_factory=dict)
     operator_summary: Mapping[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime_to_wire(utc_now()))
     live_sim_only: bool = True
@@ -90,6 +92,7 @@ class LiveSimOperatingRunResult:
             "reason_summary": normalize_value(dict(self.reason_summary)),
             "preflight": self.preflight.to_dict(),
             "stages": normalize_value(dict(self.stages)),
+            "stage_latency": normalize_value(dict(self.stage_latency)),
             "operator_summary": normalize_value(dict(self.operator_summary)),
             "created_at": self.created_at,
             "live_sim_only": True,
@@ -129,6 +132,7 @@ def run_live_sim_operating_cycle_once(
     run_id = new_message_id("live_sim_operating_run")
     created_at = datetime_to_wire(utc_now())
     stages: dict[str, Any] = {}
+    stage_latency: dict[str, Any] = {}
     errors: list[dict[str, Any]] = []
     warnings: list[str] = []
     reason_summary: dict[str, Any] = {
@@ -140,10 +144,11 @@ def run_live_sim_operating_cycle_once(
     }
 
     try:
-        stages["expired_command_sweep"] = sweep_expired_live_sim_order_commands(
-            connection,
-            settings=resolved_settings,
-        )
+        with _record_stage_latency(stage_latency, "expired_command_sweep"):
+            stages["expired_command_sweep"] = sweep_expired_live_sim_order_commands(
+                connection,
+                settings=resolved_settings,
+            )
     except Exception as exc:
         errors.append(_stage_error("expired_command_sweep", exc))
         stages["expired_command_sweep"] = {"status": "ERROR", "error": str(exc)}
@@ -151,16 +156,17 @@ def run_live_sim_operating_cycle_once(
     reconcile_status = None
     latest_reconcile: dict[str, Any] | None = None
     try:
-        if resolved_settings.live_sim_reconcile_enabled:
-            reconcile = reconcile_live_sim(connection, settings=resolved_settings)
-            latest_reconcile = reconcile.to_dict()
-            reconcile_status = reconcile.status
-        else:
-            warnings.append("LIVE_SIM_RECONCILE_ENABLED is false; reconcile stage skipped.")
-            latest_reconcile = get_latest_live_sim_reconcile(connection)
-            reconcile_status = (
-                None if latest_reconcile is None else str(latest_reconcile.get("status"))
-            )
+        with _record_stage_latency(stage_latency, "reconcile"):
+            if resolved_settings.live_sim_reconcile_enabled:
+                reconcile = reconcile_live_sim(connection, settings=resolved_settings)
+                latest_reconcile = reconcile.to_dict()
+                reconcile_status = reconcile.status
+            else:
+                warnings.append("LIVE_SIM_RECONCILE_ENABLED is false; reconcile stage skipped.")
+                latest_reconcile = get_latest_live_sim_reconcile(connection)
+                reconcile_status = (
+                    None if latest_reconcile is None else str(latest_reconcile.get("status"))
+                )
     except Exception as exc:
         errors.append(_stage_error("reconcile", exc))
         latest_reconcile = get_latest_live_sim_reconcile(connection)
@@ -169,15 +175,16 @@ def run_live_sim_operating_cycle_once(
         )
     stages["reconcile"] = latest_reconcile
 
-    preflight = run_live_sim_preflight(
-        connection,
-        mode=resolved_mode,
-        queue_commands=queue_commands,
-        trade_date=trade_date,
-        include_ai=resolved_include_ai,
-        include_no_buy=resolved_include_no_buy,
-        settings=resolved_settings,
-    )
+    with _record_stage_latency(stage_latency, "preflight"):
+        preflight = run_live_sim_preflight(
+            connection,
+            mode=resolved_mode,
+            queue_commands=queue_commands,
+            trade_date=trade_date,
+            include_ai=resolved_include_ai,
+            include_no_buy=resolved_include_no_buy,
+            settings=resolved_settings,
+        )
     stages["preflight"] = preflight.to_dict()
     warnings.extend(preflight.warnings)
     reason_summary["blocking_reasons"].extend(preflight.blocking_reasons)
@@ -208,13 +215,14 @@ def run_live_sim_operating_cycle_once(
         and resolved_settings.live_sim_operating_max_cancel_commands_per_cycle > 0
     )
     try:
-        cancel_result = run_live_sim_cancel_unfilled_once(
-            connection,
-            settings=budgeted_settings,
-            dry_run=not cancel_queue,
-            queue_commands=cancel_queue,
-            limit=limit,
-        )
+        with _record_stage_latency(stage_latency, "cancel"):
+            cancel_result = run_live_sim_cancel_unfilled_once(
+                connection,
+                settings=budgeted_settings,
+                dry_run=not cancel_queue,
+                queue_commands=cancel_queue,
+                limit=limit,
+            )
         stages["cancel"] = cancel_result.to_dict()
     except Exception as exc:
         errors.append(_stage_error("cancel", exc))
@@ -227,62 +235,67 @@ def run_live_sim_operating_cycle_once(
         and resolved_settings.live_sim_operating_max_exit_commands_per_cycle > 0
     )
     try:
-        exit_result = run_live_sim_exit_once(
-            connection,
-            settings=budgeted_settings,
-            dry_run=not exit_queue,
-            queue_commands=exit_queue,
-            limit=limit,
-        )
+        with _record_stage_latency(stage_latency, "exit"):
+            exit_result = run_live_sim_exit_once(
+                connection,
+                settings=budgeted_settings,
+                dry_run=not exit_queue,
+                queue_commands=exit_queue,
+                limit=limit,
+            )
         stages["exit"] = exit_result.to_dict()
     except Exception as exc:
         errors.append(_stage_error("exit", exc))
         stages["exit"] = {"status": "ERROR", "error": str(exc)}
 
     try:
-        theme_result = rebuild_theme_leadership(
-            connection,
-            trade_date=trade_date,
-            write_candidate_sources=resolved_settings.theme_leadership_write_candidate_sources,
-            settings=resolved_settings,
-        )
+        with _record_stage_latency(stage_latency, "theme_leadership"):
+            theme_result = rebuild_theme_leadership(
+                connection,
+                trade_date=trade_date,
+                write_candidate_sources=resolved_settings.theme_leadership_write_candidate_sources,
+                settings=resolved_settings,
+            )
         stages["theme_leadership"] = theme_result.to_dict(include_members=False)
     except Exception as exc:
         errors.append(_stage_error("theme_leadership", exc))
         stages["theme_leadership"] = {"status": "ERROR", "error": str(exc)}
 
     try:
-        quote_refresh_result = run_candidate_quote_refresh_once(
-            connection,
-            trade_date=trade_date,
-            settings=resolved_settings,
-            queue_commands=queue_policy["base_commands_allowed"],
-        )
+        with _record_stage_latency(stage_latency, "candidate_quote_refresh"):
+            quote_refresh_result = run_candidate_quote_refresh_once(
+                connection,
+                trade_date=trade_date,
+                settings=resolved_settings,
+                queue_commands=queue_policy["base_commands_allowed"],
+            )
         stages["candidate_quote_refresh"] = quote_refresh_result.to_dict()
     except Exception as exc:
         errors.append(_stage_error("candidate_quote_refresh", exc))
         stages["candidate_quote_refresh"] = {"status": "ERROR", "error": str(exc)}
 
     try:
-        incremental_backfill = enqueue_incremental_evaluation_for_fresh_candidates(
-            connection,
-            trade_date=trade_date,
-            settings=resolved_settings,
-        )
+        with _record_stage_latency(stage_latency, "incremental_backfill"):
+            incremental_backfill = enqueue_incremental_evaluation_for_fresh_candidates(
+                connection,
+                trade_date=trade_date,
+                settings=resolved_settings,
+            )
         stages["incremental_backfill"] = incremental_backfill.to_dict()
     except Exception as exc:
         errors.append(_stage_error("incremental_backfill", exc))
         stages["incremental_backfill"] = {"status": "ERROR", "error": str(exc)}
 
     try:
-        entry_result = _run_with_evaluation_lock_retries(
-            lambda: evaluate_entry_timing(
-                connection,
-                trade_date=trade_date,
-                limit=limit,
-                settings=resolved_settings,
+        with _record_stage_latency(stage_latency, "entry_timing"):
+            entry_result = _run_with_evaluation_lock_retries(
+                lambda: evaluate_entry_timing(
+                    connection,
+                    trade_date=trade_date,
+                    limit=limit,
+                    settings=resolved_settings,
+                )
             )
-        )
         stages["entry_timing"] = entry_result.to_dict()
     except Exception as exc:
         errors.append(_stage_error("entry_timing", exc))
@@ -291,13 +304,14 @@ def run_live_sim_operating_cycle_once(
     ai_run_status = None
     if resolved_include_ai:
         try:
-            ai_result = score_ai_candidates(
-                connection,
-                trade_date=trade_date,
-                limit=limit,
-                allow_external=resolved_settings.ai_external_llm_allow_network,
-                settings=resolved_settings,
-            )
+            with _record_stage_latency(stage_latency, "ai_advisory"):
+                ai_result = score_ai_candidates(
+                    connection,
+                    trade_date=trade_date,
+                    limit=limit,
+                    allow_external=resolved_settings.ai_external_llm_allow_network,
+                    settings=resolved_settings,
+                )
             stages["ai_advisory"] = ai_result.to_dict()
             ai_run_status = ai_result.status
         except Exception as exc:
@@ -305,11 +319,12 @@ def run_live_sim_operating_cycle_once(
             stages["ai_advisory"] = {"status": "ERROR", "error": str(exc)}
             ai_run_status = "ERROR"
     else:
-        stages["ai_advisory"] = {
-            "status": "SKIPPED",
-            "advisory_only": True,
-            "no_order_side_effects": True,
-        }
+        with _record_stage_latency(stage_latency, "ai_advisory"):
+            stages["ai_advisory"] = {
+                "status": "SKIPPED",
+                "advisory_only": True,
+                "no_order_side_effects": True,
+            }
 
     buy_result = None
     reprice_result = None
@@ -323,13 +338,14 @@ def run_live_sim_operating_cycle_once(
         remaining_buy_commands = resolved_settings.live_sim_operating_max_buy_commands_per_cycle
         if resolved_settings.live_sim_reprice_enabled:
             try:
-                reprice_result = run_live_sim_reprice_once(
-                    connection,
-                    settings=budgeted_settings,
-                    dry_run=not buy_queue,
-                    queue_commands=buy_queue,
-                    limit=remaining_buy_commands,
-                )
+                with _record_stage_latency(stage_latency, "reprice"):
+                    reprice_result = run_live_sim_reprice_once(
+                        connection,
+                        settings=budgeted_settings,
+                        dry_run=not buy_queue,
+                        queue_commands=buy_queue,
+                        limit=remaining_buy_commands,
+                    )
                 stages["reprice"] = reprice_result.to_dict()
                 remaining_buy_commands = max(
                     remaining_buy_commands - int(reprice_result.command_count or 0),
@@ -360,42 +376,45 @@ def run_live_sim_operating_cycle_once(
                 )
             )
             try:
-                buy_result = _run_with_evaluation_lock_retries(
-                    lambda: run_live_sim_pilot_pipeline_once(
-                        connection,
-                        settings=buy_settings,
-                        trade_date=trade_date,
-                        limit=limit,
-                        queue_commands=buy_queue,
+                with _record_stage_latency(stage_latency, "buy"):
+                    buy_result = _run_with_evaluation_lock_retries(
+                        lambda: run_live_sim_pilot_pipeline_once(
+                            connection,
+                            settings=buy_settings,
+                            trade_date=trade_date,
+                            limit=limit,
+                            queue_commands=buy_queue,
+                        )
                     )
-                )
                 stages["buy"] = buy_result.to_dict()
             except Exception as exc:
                 errors.append(_stage_error("buy", exc))
                 stages["buy"] = {"status": "ERROR", "error": str(exc)}
     else:
-        stages["buy"] = {
-            "status": "SKIPPED",
-            "reason": "mode_disallows_buy"
-            if not resolved_mode.includes_buy
-            else "reconcile_blocks_new_buy",
-            "command_count": 0,
-            "live_sim_only": True,
-            "live_real_allowed": False,
-        }
+        with _record_stage_latency(stage_latency, "buy"):
+            stages["buy"] = {
+                "status": "SKIPPED",
+                "reason": "mode_disallows_buy"
+                if not resolved_mode.includes_buy
+                else "reconcile_blocks_new_buy",
+                "command_count": 0,
+                "live_sim_only": True,
+                "live_real_allowed": False,
+            }
 
     no_buy_status = None
     if resolved_include_no_buy:
         try:
-            no_buy_snapshot = build_no_buy_sentinel_snapshot(
-                connection,
-                settings=resolved_settings,
-                trade_date=trade_date,
-                manual=True,
-                limit=limit,
-                include_ai=resolved_include_ai,
-                write_snapshot=resolved_settings.no_buy_sentinel_write_snapshots,
-            )
+            with _record_stage_latency(stage_latency, "no_buy_sentinel"):
+                no_buy_snapshot = build_no_buy_sentinel_snapshot(
+                    connection,
+                    settings=resolved_settings,
+                    trade_date=trade_date,
+                    manual=True,
+                    limit=limit,
+                    include_ai=resolved_include_ai,
+                    write_snapshot=resolved_settings.no_buy_sentinel_write_snapshots,
+                )
             no_buy_payload = no_buy_snapshot.to_dict()
             stages["no_buy_sentinel"] = no_buy_payload
             no_buy_status = no_buy_payload["status"]
@@ -404,11 +423,12 @@ def run_live_sim_operating_cycle_once(
             stages["no_buy_sentinel"] = {"status": "ERROR", "error": str(exc)}
             no_buy_status = "ERROR"
     else:
-        stages["no_buy_sentinel"] = {
-            "status": "SKIPPED",
-            "read_only": True,
-            "no_order_side_effects": True,
-        }
+        with _record_stage_latency(stage_latency, "no_buy_sentinel"):
+            stages["no_buy_sentinel"] = {
+                "status": "SKIPPED",
+                "read_only": True,
+                "no_order_side_effects": True,
+            }
 
     counts = _stage_counts(
         buy_result=buy_result,
@@ -466,6 +486,7 @@ def run_live_sim_operating_cycle_once(
         errors=tuple(errors),
         reason_summary=reason_summary,
         stages=stages,
+        stage_latency=stage_latency,
         operator_summary=operator_summary,
         created_at=created_at,
     )
@@ -550,11 +571,12 @@ def save_live_sim_operating_run(
             reason_summary_json,
             warnings_json,
             errors_json,
+            stage_latency_json,
             created_at,
             live_sim_only,
             live_real_allowed
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
         """,
         (
             result.run_id,
@@ -575,6 +597,7 @@ def save_live_sim_operating_run(
             _json_dumps(result.reason_summary),
             _json_dumps(list(result.warnings)),
             _json_dumps(list(result.errors)),
+            _json_dumps(result.stage_latency),
             result.created_at,
         ),
     )
@@ -810,12 +833,33 @@ def _run_with_evaluation_lock_retries(operation: Callable[[], T]) -> T:
     raise AssertionError("unreachable evaluation lock retry state")
 
 
+@contextmanager
+def _record_stage_latency(
+    stage_latency: dict[str, Any],
+    stage: str,
+) -> Iterator[None]:
+    started_monotonic = time.monotonic()
+    started_at = datetime_to_wire(utc_now())
+    try:
+        yield
+    finally:
+        ended_at = datetime_to_wire(utc_now())
+        duration_ms = round((time.monotonic() - started_monotonic) * 1000.0, 3)
+        stage_latency[str(stage)] = {
+            "stage": str(stage),
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_ms": duration_ms,
+        }
+
+
 def _operating_run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item = {key: row[key] for key in row.keys()}
     item["queue_commands"] = bool(item["queue_commands"])
     item["reason_summary"] = _json_object(item.pop("reason_summary_json"))
     item["warnings"] = _json_array(item.pop("warnings_json"))
     item["errors"] = _json_array(item.pop("errors_json"))
+    item["stage_latency"] = _json_object(item.pop("stage_latency_json", "{}"))
     item["live_sim_only"] = bool(item["live_sim_only"])
     item["live_real_allowed"] = bool(item["live_real_allowed"])
     item["broker_order_path"] = "LIVE_SIM_ONLY"

@@ -602,6 +602,21 @@ def live_sim_reconcile() -> dict[str, Any]:
     return {"reconcile": snapshot.to_dict(), **_live_sim_response_flags()}
 
 
+@router.post("/reconcile/broker-snapshot", dependencies=[Depends(require_local_token)])
+def live_sim_reconcile_broker_snapshot(body: dict[str, Any]) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        snapshot = reconcile_live_sim(
+            connection,
+            settings=settings,
+            broker_snapshot=body,
+        )
+    finally:
+        connection.close()
+    return {"reconcile": snapshot.to_dict(), **_live_sim_response_flags()}
+
+
 @router.post("/cancel/run-once", dependencies=[Depends(require_local_token)])
 def live_sim_cancel_run_once(
     dry_run: bool = Query(default=False),
@@ -657,7 +672,15 @@ def live_sim_reconcile_request_broker_snapshot() -> dict[str, Any]:
     settings = load_settings()
     if not settings.live_sim_reconcile_request_broker_snapshot_enabled:
         raise _bad_request("LIVE_SIM broker snapshot request is disabled")
-    raise _bad_request("LIVE_SIM broker snapshot request command is reserved for a later PR")
+    return {
+        "status": "BROKER_SNAPSHOT_INGEST_ENABLED",
+        "ingest_endpoint": "/api/live-sim/reconcile/broker-snapshot",
+        "payload_contract": {
+            "open_orders": "list of broker open order rows",
+            "positions": "list of broker position rows",
+        },
+        **_live_sim_response_flags(),
+    }
 
 
 def _live_sim_response_flags() -> dict[str, Any]:
