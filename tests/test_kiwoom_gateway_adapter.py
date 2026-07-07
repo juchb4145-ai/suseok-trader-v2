@@ -1242,6 +1242,64 @@ def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -
     assert worker._core_client.events[0].event_id == "evt_heartbeat_new"
 
 
+def test_core_io_worker_prioritizes_command_lifecycle_over_heartbeat() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    worker = CoreIoWorker(
+        core_client=Core(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+    )
+    command = GatewayCommand(
+        command_id="cmd_order_priority",
+        command_type="send_order",
+        source="live_sim",
+        idempotency_key="idem-cmd_order_priority",
+        payload={},
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_condition",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "condition_name": "A", "action": "ENTER"},
+        )
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_heartbeat",
+            event_type="heartbeat",
+            source="kiwoom_gateway",
+            payload={"sequence": 1},
+        )
+    )
+    worker.enqueue_event(make_command_started_event(command, source="kiwoom_gateway"))
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_ack",
+            event_type="command_ack",
+            source="kiwoom_gateway",
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key,
+            payload={"command_id": command.command_id, "status": "acked"},
+        )
+    )
+
+    assert worker._post_next_event() is True
+    assert worker._post_next_event() is True
+    assert [event.event_type for event in worker._core_client.events] == [
+        "command_started",
+        "command_ack",
+    ]
+
+
 def test_core_io_worker_bounds_buffer_and_preserves_order_events() -> None:
     class Core:
         def post_event(self, event: GatewayEvent) -> None:
@@ -1254,6 +1312,14 @@ def test_core_io_worker_bounds_buffer_and_preserves_order_events() -> None:
         command_polling_enabled=False,
         coalesce_after_size=1000,
         max_buffer_size=5,
+    )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_started",
+            event_type="command_started",
+            source="kiwoom_gateway",
+            payload={"command_id": "cmd_1"},
+        )
     )
     worker.enqueue_event(
         GatewayEvent(
@@ -1284,10 +1350,11 @@ def test_core_io_worker_bounds_buffer_and_preserves_order_events() -> None:
 
     snapshot = worker.snapshot()
     assert snapshot.event_queue_size == 5
-    assert snapshot.dropped_count == 7
+    assert snapshot.dropped_count == 8
     assert snapshot.max_buffer_size == 5
     with worker._condition:
         queued_ids = [event.event_id for event in worker._events]
+    assert "evt_started" in queued_ids
     assert "evt_ack" in queued_ids
     assert "evt_exec" in queued_ids
     # Oldest ticks were dropped first; the newest ticks survive.
@@ -2276,6 +2343,36 @@ def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> Non
     recovery_events = OrderPreAckJournal(journal_path).recovery_events(source="kiwoom_gateway")
     assert [event.event_type for event in recovery_events] == ["order_pre_ack"]
     assert recovery_events[0].payload["status"] == "RECOVERED_BROKER_ACCEPTED"
+
+
+def test_kiwoom_handler_emits_order_start_before_send_order_call(tmp_path) -> None:
+    async_events: list[GatewayEvent] = []
+
+    class InspectingClient(MockKiwoomClient):
+        def send_order(self, request: KiwoomOrderRequest) -> KiwoomOrderResult:
+            assert [event.event_type for event in async_events] == [
+                "command_started",
+                "order_pre_ack",
+            ]
+            return super().send_order(request)
+
+    client = InspectingClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_async_events=lambda events: async_events.extend(events),
+        order_journal=OrderPreAckJournal(tmp_path / "orders.jsonl"),
+    )
+
+    returned_events = handler.handle(
+        _live_sim_order_command(command_id="cmd_started_before_send")
+    )
+
+    assert [event.event_type for event in async_events] == [
+        "command_started",
+        "order_pre_ack",
+    ]
+    assert [event.event_type for event in returned_events] == ["command_ack"]
+    assert async_events[0].command_id == "cmd_started_before_send"
 
 
 def test_pending_order_registry_uses_command_id_before_ambiguous_signature() -> None:

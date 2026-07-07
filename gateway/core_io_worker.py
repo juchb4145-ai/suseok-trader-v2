@@ -90,6 +90,11 @@ class CoreIoWorker:
         if not self._event_posting_enabled:
             return
         with self._condition:
+            if _is_command_critical_event(event):
+                self._enqueue_command_critical_event_locked(event)
+                self._enforce_buffer_limit_locked()
+                self._condition.notify()
+                return
             if _is_priority_event(event):
                 self._enqueue_priority_event_locked(event)
                 self._enforce_buffer_limit_locked()
@@ -221,7 +226,17 @@ class CoreIoWorker:
                     del self._events[index]
                     self._coalesced_count += 1
                     break
-        self._events.appendleft(event)
+        self._insert_after_command_critical_locked(event)
+
+    def _enqueue_command_critical_event_locked(self, event: GatewayEvent) -> None:
+        self._insert_after_command_critical_locked(event)
+
+    def _insert_after_command_critical_locked(self, event: GatewayEvent) -> None:
+        insert_at = 0
+        for index, queued_event in enumerate(self._events):
+            if _is_command_critical_event(queued_event):
+                insert_at = index + 1
+        self._events.insert(insert_at, event)
 
     def _poll_commands(self) -> None:
         try:
@@ -266,6 +281,19 @@ def _is_priority_event(event: GatewayEvent) -> bool:
     return str(event.event_type or "").strip().lower() == "heartbeat"
 
 
+_COMMAND_CRITICAL_EVENT_TYPES = {
+    "command_started",
+    "command_ack",
+    "command_failed",
+    "rate_limited",
+    "execution_event",
+    "order_pre_ack",
+    "kiwoom_order_chejan",
+    "kiwoom_balance_chejan",
+    "kiwoom_special_chejan",
+}
+
+
 _DROPPABLE_EVENT_TYPES = {
     "heartbeat",
     "price_tick",
@@ -275,11 +303,20 @@ _DROPPABLE_EVENT_TYPES = {
 }
 
 _DROP_PROTECTED_EVENT_TYPES = {
+    "command_started",
     "command_ack",
     "command_failed",
+    "rate_limited",
     "execution_event",
     "order_pre_ack",
+    "kiwoom_order_chejan",
+    "kiwoom_balance_chejan",
+    "kiwoom_special_chejan",
 }
+
+
+def _is_command_critical_event(event: GatewayEvent) -> bool:
+    return str(event.event_type or "").strip().lower() in _COMMAND_CRITICAL_EVENT_TYPES
 
 
 def _is_droppable_event(event: GatewayEvent) -> bool:

@@ -1,14 +1,14 @@
 {
   "launcher": "start_live_sim_pilot.ps1",
-  "started_at": "2026-07-07T09:01:41.8180100+09:00",
+  "started_at": "2026-07-07T09:40:21.1312875+09:00",
   "root": "C:\\Users\\juchn\\주식3",
   "core_url": "http://127.0.0.1:8000",
   "dry_run": false,
-  "report_file": "C:\\Users\\juchn\\주식3\\reports\\live_sim_pilot_launch\\2026-07-07_090141\\launch_report.md",
+  "report_file": "C:\\Users\\juchn\\주식3\\reports\\live_sim_pilot_launch\\2026-07-07_094021\\launch_report.md",
   "processes": {
     "core": {
       "label": "core",
-      "pid": 34140,
+      "pid": 28968,
       "file_path": "C:\\Users\\juchn\\주식3\\venv_64\\Scripts\\python.exe",
       "arguments": [
         "-m",
@@ -19,51 +19,9 @@
         "--port",
         "8000"
       ],
-      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_090141.out.log",
-      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_090141.err.log",
-      "started_at": "2026-07-07T09:01:42.3698404+09:00"
-    },
-    "gateway": {
-      "label": "gateway",
-      "pid": 10756,
-      "file_path": "C:\\Users\\juchn\\주식3\\venv_32\\Scripts\\python.exe",
-      "arguments": [
-        "-m",
-        "apps.kiwoom_gateway",
-        "--core-url",
-        "http://127.0.0.1:8000",
-        "--token",
-        "8tcS...Pado",
-        "--auto-login",
-        "--no-threaded-login",
-        "--no-observe-only",
-        "--poll-wait-sec",
-        "1.0",
-        "--command-limit",
-        "20",
-        "--heartbeat-interval-sec",
-        "2",
-        "--realtime-exchange",
-        "krx",
-        "--realtime-recover-interval-sec",
-        "300",
-        "--condition-profiles",
-        "<condition-profiles-json>",
-        "--realtime-codes",
-        "005930,000660",
-        "--market-index-enabled",
-        "--market-index-realtime-enabled",
-        "--market-index-tr-bootstrap-enabled",
-        "--market-index-codes",
-        "KOSPI,KOSDAQ",
-        "--market-index-screen-no",
-        "5700",
-        "--market-index-poll-sec",
-        "60.0"
-      ],
-      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-07_090141.out.log",
-      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-07_090141.err.log",
-      "started_at": "2026-07-07T09:03:37.6442777+09:00"
+      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_094021.out.log",
+      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_094021.err.log",
+      "started_at": "2026-07-07T09:40:21.7568644+09:00"
     }
   }
 }

@@ -229,7 +229,7 @@ class KiwoomGatewayRuntime:
             client,
             source=self.config.source,
             on_order_ack=self.pending_orders.record_ack,
-            on_async_events=self.emit_events,
+            on_async_events=self.emit_events_immediately,
             order_journal=self.order_journal,
         )
         self._event_queue: deque[GatewayEvent] = deque()
@@ -331,6 +331,14 @@ class KiwoomGatewayRuntime:
     def emit_events(self, events: Iterable[GatewayEvent]) -> None:
         for event in events:
             self.emit_event(event)
+
+    def emit_events_immediately(self, events: Iterable[GatewayEvent]) -> None:
+        emitted_count = 0
+        for event in events:
+            self.emit_event(event)
+            emitted_count += 1
+        if emitted_count and self._core_worker is not None:
+            self.flush_events(limit=emitted_count)
 
     def replay_order_pre_ack_journal(self) -> None:
         if self.order_journal is None:
@@ -466,7 +474,7 @@ class KiwoomGatewayRuntime:
             if str(event.command_id or "") != command.command_id:
                 continue
             event_type = event.event_type.strip().lower()
-            if event_type in {"command_started", "command_ack", "command_failed"}:
+            if event_type in {"command_started", "command_ack", "command_failed", "rate_limited"}:
                 self._claimed_not_started_commands.pop(command.command_id, None)
                 return
 

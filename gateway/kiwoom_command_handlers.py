@@ -430,10 +430,13 @@ class KiwoomGatewayCommandHandler:
             ]
         decision = self.rate_limit_governor.check("send_order")
         if not decision.allowed:
-            return [
+            events: list[GatewayEvent] = []
+            self._emit_before_blocking_call(
                 make_command_started_event(command, source=self.source),
-                self._rate_limited_event(command, decision),
-            ]
+                events,
+            )
+            events.append(self._rate_limited_event(command, decision))
+            return events
 
         payload = command.payload
         request = KiwoomOrderRequest(
@@ -450,15 +453,20 @@ class KiwoomGatewayCommandHandler:
             order_exchange=normalize_order_exchange(payload.get("order_exchange", "KRX")),
             metadata=_mapping_value(payload, "metadata"),
         )
-        events = [make_command_started_event(command, source=self.source)]
+        events: list[GatewayEvent] = []
+        self._emit_before_blocking_call(
+            make_command_started_event(command, source=self.source),
+            events,
+        )
         if self.order_journal is not None:
-            events.append(
+            self._emit_before_blocking_call(
                 self.order_journal.record_pre_ack(
                     command,
                     request,
                     broker_env=actual_broker_env,
                     source=self.source,
-                )
+                ),
+                events,
             )
         try:
             result = self.client.send_order(request)
@@ -521,10 +529,13 @@ class KiwoomGatewayCommandHandler:
             ]
         decision = self.rate_limit_governor.check("cancel_order")
         if not decision.allowed:
-            return [
+            events: list[GatewayEvent] = []
+            self._emit_before_blocking_call(
                 make_command_started_event(command, source=self.source),
-                self._rate_limited_event(command, decision),
-            ]
+                events,
+            )
+            events.append(self._rate_limited_event(command, decision))
+            return events
 
         payload = command.payload
         request = KiwoomOrderRequest(
@@ -542,15 +553,20 @@ class KiwoomGatewayCommandHandler:
             order_exchange=normalize_order_exchange(payload.get("order_exchange", "KRX")),
             metadata=_mapping_value(payload, "metadata"),
         )
-        events = [make_command_started_event(command, source=self.source)]
+        events: list[GatewayEvent] = []
+        self._emit_before_blocking_call(
+            make_command_started_event(command, source=self.source),
+            events,
+        )
         if self.order_journal is not None:
-            events.append(
+            self._emit_before_blocking_call(
                 self.order_journal.record_pre_ack(
                     command,
                     request,
                     broker_env=actual_broker_env,
                     source=self.source,
-                )
+                ),
+                events,
             )
         try:
             result = self.client.send_order(request)
@@ -609,6 +625,16 @@ class KiwoomGatewayCommandHandler:
 
     def _record_rate_limit(self, command_type: str) -> None:
         self.rate_limit_governor.record(command_type)
+
+    def _emit_before_blocking_call(
+        self,
+        event: GatewayEvent,
+        returned_events: list[GatewayEvent],
+    ) -> None:
+        if self.on_async_events is not None:
+            self.on_async_events([event])
+            return
+        returned_events.append(event)
 
     def _rate_limited_event(
         self,
