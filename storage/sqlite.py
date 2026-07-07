@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 APP_NAME = "suseok-trader-v2"
 
 
@@ -36,6 +36,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_ai_advisory_tables(connection)
     _create_gateway_transport_tables(connection)
     _create_projection_watermark_tables(connection)
+    _create_projection_outbox_tables(connection)
     _create_event_retention_tables(connection)
     _create_market_data_tables(connection)
     _create_market_reference_tables(connection)
@@ -1292,6 +1293,66 @@ def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_projection_watermarks_updated_at
         ON projection_watermarks (updated_at)
+        """
+    )
+
+
+def _create_projection_outbox_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projection_outbox (
+            outbox_id TEXT PRIMARY KEY,
+            projection_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            event_rowid INTEGER,
+            source TEXT,
+            status TEXT NOT NULL DEFAULT 'PENDING' CHECK (
+                status IN (
+                    'PENDING',
+                    'PROCESSING',
+                    'APPLIED',
+                    'SKIPPED',
+                    'ERROR',
+                    'DEAD_LETTER'
+                )
+            ),
+            priority INTEGER NOT NULL DEFAULT 0,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_error TEXT,
+            available_at TEXT,
+            locked_by TEXT,
+            locked_at TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            processed_at TEXT,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            UNIQUE(projection_name, event_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_status_available
+        ON projection_outbox (status, priority DESC, available_at, created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_projection_status
+        ON projection_outbox (projection_name, status, updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_event_rowid
+        ON projection_outbox (event_rowid)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_updated_at
+        ON projection_outbox (updated_at)
         """
     )
 

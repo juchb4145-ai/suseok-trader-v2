@@ -13,6 +13,10 @@
 - Dashboard top theme 표시는 단순 latest sample만 쓰지 않고 state-filtered query를 별도로 사용한다. 기존 테스트가 DATA_WAIT 최신 표본 뒤에 숨은 LEADING/SPREADING 테마를 검증한다. 근거: `services/dashboard_service.py`, `tests/test_dashboard_service.py`.
 - Stale `DISPATCHED` order command는 timeout 후 `UNCONFIRMED`로 전환되고 운영자 종결 도구가 `command_started`/`command_ack`/CHEJAN/체결 evidence를 확인한다. 근거: `storage/gateway_command_store.py`, `tools/resolve_live_sim_order.py`.
 
+## PR-2 진행 상태
+
+- P0-1 mitigation step 1: `projection_outbox` skeleton을 추가했다. Gateway POST의 기존 inline projection은 유지되며, outbox는 shadow 준비용 PENDING job 관측 기반으로만 동작한다. 주문/LIVE_SIM 동작, `LIVE_REAL`, 매수 gate, safety gate 정책은 변경하지 않았다.
+
 ## P0
 
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
@@ -44,9 +48,13 @@
 
 ## 추가된 Guard Tests
 
-이번 audit에서 추가한 파일: `tests/test_structural_audit_guards.py`
+이번 audit 및 PR-2에서 보강한 파일: `tests/test_structural_audit_guards.py`
 
-- `test_synthetic_tr_response_multiple_ticks_detects_event_id_collision`
+- `test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`
+- `test_projection_outbox_enqueues_shadow_jobs_for_projection_events`
+- `test_projection_outbox_duplicate_event_id_does_not_create_duplicate_job`
+- `test_projection_outbox_enqueues_market_scan_for_scan_related_tr_response`
+- `test_projection_outbox_excludes_non_projection_gateway_events`
 - `test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running`
 - `test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query`
 - `test_order_command_lifecycle_detects_dispatched_without_pre_ack`
@@ -61,7 +69,7 @@ python -m pytest tests\test_structural_audit_guards.py -q
 결과:
 
 ```text
-5 passed
+9 passed
 ```
 
 ## 다음 PR 권장 순서

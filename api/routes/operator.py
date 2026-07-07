@@ -29,6 +29,7 @@ from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
 )
+from storage.projection_outbox import get_projection_outbox_status
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -183,6 +184,16 @@ def operator_incremental_evaluation_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_incremental_evaluation_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.get("/projection-outbox/status")
+def operator_projection_outbox_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_projection_outbox_status(connection)
     finally:
         connection.close()
 

@@ -19,6 +19,7 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 from storage.gateway_command_store import FORBIDDEN_ORDER_COMMAND_TYPES
+from storage.projection_outbox import get_projection_outbox_status
 
 from services.ai_advisory.storage import (
     build_status as build_ai_advisory_status,
@@ -155,6 +156,7 @@ DASHBOARD_SECTIONS = [
     "no_buy_sentinel",
     "recent_events",
     "errors",
+    "projection_outbox",
     "pipeline_summary",
 ]
 
@@ -246,6 +248,7 @@ def build_dashboard_snapshot(
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
+    projection_outbox_status = get_projection_outbox_status(connection)
     latest_observe_cycle = get_latest_market_open_observe_cycle_run(connection)
     no_buy_sentinel = build_no_buy_sentinel_snapshot(
         connection,
@@ -416,6 +419,7 @@ def build_dashboard_snapshot(
         no_buy_sentinel=no_buy_sentinel,
         latest_observe_cycle=latest_observe_cycle,
         condition_fusion_status=condition_fusion_section["status"],
+        projection_outbox_status=projection_outbox_status,
         settings=settings,
     )
 
@@ -445,6 +449,7 @@ def build_dashboard_snapshot(
         },
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
+        "projection_outbox": projection_outbox_status,
         "themes": {
             "status": {
                 **theme_status,
@@ -1100,6 +1105,7 @@ def _pipeline_summary(
     no_buy_sentinel: dict[str, Any],
     latest_observe_cycle: dict[str, Any] | None,
     condition_fusion_status: dict[str, Any],
+    projection_outbox_status: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1150,6 +1156,20 @@ def _pipeline_summary(
             "subscribed_count": condition_fusion_status.get("subscribed_count", 0),
             "not_buy_signal_count": condition_fusion_status.get("not_buy_signal_count", 0),
             "not_buy_signal": bool(condition_fusion_status.get("not_buy_signal")),
+            "read_only": True,
+        },
+        "projection_outbox": {
+            "enabled": projection_outbox_status["enabled"],
+            "shadow_mode": projection_outbox_status["shadow_mode"],
+            "worker_enabled": projection_outbox_status["worker_enabled"],
+            "total_count": projection_outbox_status["total_count"],
+            "pending_count": projection_outbox_status["pending_count"],
+            "processing_count": projection_outbox_status["processing_count"],
+            "error_count": projection_outbox_status["error_count"],
+            "dead_letter_count": projection_outbox_status["dead_letter_count"],
+            "oldest_pending_at": projection_outbox_status["oldest_pending_at"],
+            "latest_error": projection_outbox_status["latest_error"],
+            "by_projection_name": projection_outbox_status["by_projection_name"],
             "read_only": True,
         },
         "themes": {

@@ -14,6 +14,7 @@ from services.risk_gate import evaluate_risk_observations
 from services.strategy_engine import evaluate_candidates
 from services.theme_service import calculate_all_theme_snapshots, import_theme_memberships
 from storage.event_store import append_gateway_event
+from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
 from storage.sqlite import initialize_database
 
 
@@ -75,6 +76,28 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["market_data"]["cross_exchange"]["read_only"] is True
     assert snapshot["market_data"]["cross_exchange"]["enabled"] is False
     assert snapshot["market_data"]["cross_exchange"]["latest_observations"] == []
+    assert snapshot["projection_outbox"]["shadow_mode"] is True
+    assert snapshot["projection_outbox"]["pending_count"] == 0
+    assert snapshot["pipeline_summary"]["projection_outbox"]["pending_count"] == 0
+
+
+def test_dashboard_snapshot_includes_projection_outbox_status(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-projection-outbox.sqlite3")
+    event = make_price_tick_event(source="test-gateway")
+    append_gateway_event(connection, event)
+    enqueue_projection_jobs_for_gateway_event(connection, event)
+
+    snapshot = build_dashboard_snapshot(connection, Settings())
+
+    connection.close()
+    assert snapshot["projection_outbox"]["enabled"] is True
+    assert snapshot["projection_outbox"]["shadow_mode"] is True
+    assert snapshot["projection_outbox"]["worker_enabled"] is False
+    assert snapshot["projection_outbox"]["pending_count"] == 1
+    assert snapshot["projection_outbox"]["by_projection_name"]["market_data"][
+        "pending_count"
+    ] == 1
+    assert snapshot["pipeline_summary"]["projection_outbox"]["pending_count"] == 1
 
 
 def test_dashboard_gateway_stage_warns_on_stale_heartbeat(tmp_path) -> None:

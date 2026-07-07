@@ -42,6 +42,7 @@ from storage.gateway_command_store import (
     get_command_type_counts,
     poll_commands,
 )
+from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -70,6 +71,9 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
             result = append_gateway_event(connection, event)
             if result.status == "ACCEPTED" and not result.duplicate:
                 event_type = event.event_type.strip().lower()
+                outbox_status = _enqueue_projection_outbox_jobs(connection, event)
+                if outbox_status is not None:
+                    projection_statuses["projection_outbox"] = outbox_status
                 if event_type in MARKET_DATA_EVENT_TYPES:
                     projection_result = process_gateway_event(
                         connection,
@@ -164,6 +168,17 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     if projection_statuses:
         response["projection_statuses"] = projection_statuses
     return response
+
+
+def _enqueue_projection_outbox_jobs(connection, event: GatewayEvent) -> str | None:
+    try:
+        result = enqueue_projection_jobs_for_gateway_event(connection, event)
+    except Exception:
+        logger.exception("projection outbox enqueue failed")
+        return "ERROR"
+    if result.job_count <= 0:
+        return None
+    return result.status
 
 
 def _enqueue_incremental_evaluation_for_price_tick(

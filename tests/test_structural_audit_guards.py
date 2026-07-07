@@ -5,7 +5,11 @@ from datetime import timedelta
 from typing import Any
 
 from domain.broker.commands import GatewayCommand
+from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
+from domain.broker.market import BrokerPriceTick
+from domain.broker.market_index import BrokerMarketIndexTick
+from domain.broker.orders import BrokerExecutionEvent
 from domain.broker.tr import BrokerTrResponse
 from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
 from services.config import Settings
@@ -24,6 +28,11 @@ from storage.gateway_command_store import (
     GatewayCommandStatus,
     enqueue_command,
     poll_commands,
+)
+from storage.projection_outbox import (
+    enqueue_projection_jobs_for_gateway_event,
+    get_projection_outbox_status,
+    list_projection_outbox_jobs,
 )
 from storage.sqlite import initialize_database, open_connection
 
@@ -118,6 +127,159 @@ def test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids(
     assert metadata_by_code["000660"]["synthetic_event"] is True
     assert metadata_by_code["000660"]["row_index"] == 1
     assert watermark.last_event_id == event.event_id
+
+
+def test_projection_outbox_enqueues_shadow_jobs_for_projection_events(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "projection-outbox.sqlite3")
+    events = [
+        (
+            _price_tick_event("evt_outbox_price_tick"),
+            {"market_data"},
+        ),
+        (
+            _tr_response_event("evt_outbox_tr_response"),
+            {"market_data"},
+        ),
+        (
+            _condition_event("evt_outbox_condition"),
+            {"market_data", "condition_fusion"},
+        ),
+        (
+            _market_symbols_event("evt_outbox_market_symbols"),
+            {"market_reference"},
+        ),
+        (
+            _market_index_tick_event("evt_outbox_market_index"),
+            {"market_index", "market_regime"},
+        ),
+    ]
+
+    for event, expected_projections in events:
+        append_result = append_gateway_event(connection, event)
+        enqueue_result = enqueue_projection_jobs_for_gateway_event(connection, event)
+        jobs = list_projection_outbox_jobs(connection, limit=100)
+        event_jobs = [job for job in jobs if job["event_id"] == event.event_id]
+
+        assert append_result.status == "ACCEPTED"
+        assert append_result.duplicate is False
+        assert enqueue_result.status == "ENQUEUED"
+        assert enqueue_result.created_count == len(expected_projections)
+        assert {job["projection_name"] for job in event_jobs} == expected_projections
+        assert {job["status"] for job in event_jobs} == {"PENDING"}
+
+    status = get_projection_outbox_status(connection)
+    connection.close()
+
+    assert status["enabled"] is True
+    assert status["shadow_mode"] is True
+    assert status["worker_enabled"] is False
+    assert status["total_count"] == 7
+    assert status["pending_count"] == 7
+    assert status["processing_count"] == 0
+    assert status["applied_count"] == 0
+    assert status["skipped_count"] == 0
+    assert status["error_count"] == 0
+    assert status["dead_letter_count"] == 0
+    assert status["oldest_pending_at"] is not None
+    assert status["latest_error"] is None
+    assert status["by_projection_name"]["market_data"]["pending_count"] == 3
+    assert status["by_projection_name"]["condition_fusion"]["pending_count"] == 1
+    assert status["by_projection_name"]["market_reference"]["pending_count"] == 1
+    assert status["by_projection_name"]["market_index"]["pending_count"] == 1
+    assert status["by_projection_name"]["market_regime"]["pending_count"] == 1
+
+
+def test_projection_outbox_duplicate_event_id_does_not_create_duplicate_job(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "projection-outbox-duplicate.sqlite3")
+    event = _price_tick_event("evt_outbox_duplicate_price_tick")
+
+    first_append = append_gateway_event(connection, event)
+    first_enqueue = enqueue_projection_jobs_for_gateway_event(connection, event)
+    duplicate_append = append_gateway_event(connection, event)
+    duplicate_enqueue = enqueue_projection_jobs_for_gateway_event(connection, event)
+    jobs = list_projection_outbox_jobs(connection, limit=100)
+    connection.close()
+
+    assert first_append.status == "ACCEPTED"
+    assert first_enqueue.status == "ENQUEUED"
+    assert first_enqueue.created_count == 1
+    assert duplicate_append.duplicate is True
+    assert duplicate_enqueue.status == "DUPLICATE"
+    assert duplicate_enqueue.created_count == 0
+    assert duplicate_enqueue.duplicate_count == 1
+    assert [job["outbox_id"] for job in jobs] == [
+        "market_data:evt_outbox_duplicate_price_tick"
+    ]
+
+
+def test_projection_outbox_enqueues_market_scan_for_scan_related_tr_response(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "projection-outbox-scan.sqlite3")
+    event = _market_scan_tr_response_event("evt_outbox_market_scan_tr")
+
+    append_result = append_gateway_event(connection, event)
+    enqueue_result = enqueue_projection_jobs_for_gateway_event(connection, event)
+    jobs = list_projection_outbox_jobs(connection, limit=100)
+    connection.close()
+
+    assert append_result.status == "ACCEPTED"
+    assert enqueue_result.status == "ENQUEUED"
+    assert enqueue_result.created_count == 2
+    assert {job["projection_name"] for job in jobs} == {"market_data", "market_scan"}
+
+
+def test_projection_outbox_excludes_non_projection_gateway_events(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "projection-outbox-excluded.sqlite3")
+    excluded_events = [
+        GatewayEvent(
+            event_id="evt_outbox_heartbeat",
+            event_type="heartbeat",
+            source="test-gateway",
+            payload={"status": "ok"},
+            ts=utc_now(),
+        ),
+        GatewayEvent(
+            event_id="evt_outbox_gateway_log",
+            event_type="gateway_log",
+            source="test-gateway",
+            payload={"level": "INFO", "message": "ok"},
+            ts=utc_now(),
+        ),
+        GatewayEvent(
+            event_id="evt_outbox_command_ack",
+            event_type="command_ack",
+            source="test-gateway",
+            payload={"command_id": "cmd-noop", "status": "ACKED"},
+            ts=utc_now(),
+        ),
+        GatewayEvent(
+            event_id="evt_outbox_order_pre_ack",
+            event_type="order_pre_ack",
+            source="test-gateway",
+            payload={"command_id": "cmd-noop", "status": "PRE_ACK"},
+            ts=utc_now(),
+        ),
+        _execution_event("evt_outbox_execution"),
+    ]
+
+    for event in excluded_events:
+        append_result = append_gateway_event(connection, event)
+        enqueue_result = enqueue_projection_jobs_for_gateway_event(connection, event)
+
+        assert append_result.status == "ACCEPTED"
+        assert enqueue_result.status == "NOOP"
+        assert enqueue_result.job_count == 0
+
+    status = get_projection_outbox_status(connection)
+    jobs = list_projection_outbox_jobs(connection, limit=100)
+    connection.close()
+
+    assert status["total_count"] == 0
+    assert status["pending_count"] == 0
+    assert jobs == []
 
 
 def test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running(
@@ -252,6 +414,169 @@ def test_incremental_queue_backlog_and_stale_rows_are_detectable(tmp_path) -> No
         "INCREMENTAL_QUEUE_STALE",
     ]
     assert diagnostics["stale_queue_count"] == 1
+
+
+def _price_tick_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    tick = BrokerPriceTick(
+        code="005930",
+        name="삼성전자",
+        price=70_000,
+        change_rate=0.1,
+        volume=1_000,
+        trade_value=70_000_000,
+        execution_strength=101.0,
+        best_bid=69_900,
+        best_ask=70_000,
+        spread_ticks=1,
+        day_high=70_500,
+        day_low=69_500,
+        trade_time=now,
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="price_tick",
+        source="test-gateway",
+        payload=tick.to_dict(),
+        ts=now,
+    )
+
+
+def _tr_response_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    response = BrokerTrResponse(
+        request_id=f"candidate_quote_refresh:2026-07-07:{event_id}",
+        tr_code="OPT10001",
+        request_name="candidate_quote_refresh_opt10001",
+        success=True,
+        rows=[
+            {
+                "종목코드": "A005930",
+                "종목명": "삼성전자",
+                "현재가": "+70000",
+                "등락율": "+0.10",
+                "거래량": "1000",
+                "거래대금": "70000000",
+                "고가": "+70500",
+                "저가": "-69500",
+            }
+        ],
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="tr_response",
+        source="test-gateway",
+        payload=response.to_dict(),
+        ts=now,
+    )
+
+
+def _market_scan_tr_response_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    response = BrokerTrResponse(
+        request_id="market_scan:TRADE_VALUE:KOSPI:outbox-guard",
+        tr_code="OPT10032",
+        request_name="market_scan_trade_value_kospi",
+        success=True,
+        rows=[
+            {
+                "종목코드": "A005930",
+                "종목명": "삼성전자",
+                "순위": "1",
+                "현재가": "+70000",
+                "등락률": "+2.5",
+                "거래대금": "1200000000",
+                "거래량": "100000",
+            }
+        ],
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="tr_response",
+        source="test-gateway",
+        payload=response.to_dict(),
+        ts=now,
+    )
+
+
+def _condition_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    condition = BrokerConditionEvent(
+        condition_id="cond-outbox",
+        condition_name="Outbox Guard",
+        code="005930",
+        name="삼성전자",
+        action="ENTER",
+        price=70_000,
+        metadata={"test": "projection_outbox"},
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="condition_event",
+        source="test-gateway",
+        payload=condition.to_dict(),
+        ts=now,
+    )
+
+
+def _market_symbols_event(event_id: str) -> GatewayEvent:
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="market_symbols",
+        source="test-gateway",
+        payload={
+            "markets": {
+                "KOSPI": [{"code": "005930", "name": "삼성전자"}],
+                "KOSDAQ": [{"code": "035420", "name": "NAVER"}],
+            }
+        },
+        ts=utc_now(),
+    )
+
+
+def _market_index_tick_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    tick = BrokerMarketIndexTick(
+        index_code="KOSPI",
+        index_name="KOSPI",
+        price=2_800.0,
+        change_rate=0.1,
+        change_value=2.8,
+        trade_time=now,
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="market_index_tick",
+        source="test-gateway",
+        payload=tick.to_dict(),
+        ts=now,
+    )
+
+
+def _execution_event(event_id: str) -> GatewayEvent:
+    now = utc_now()
+    execution = BrokerExecutionEvent(
+        execution_id="exec-outbox-guard",
+        broker_order_id="broker-order-outbox-guard",
+        code="005930",
+        side="BUY",
+        quantity=1,
+        price=70_000,
+        executed_at=now,
+        ts=now,
+    )
+    return GatewayEvent(
+        event_id=event_id,
+        event_type="execution_event",
+        source="test-gateway",
+        payload=execution.to_dict(),
+        ts=now,
+    )
 
 
 def _insert_mixed_dashboard_latest_rows(connection) -> None:

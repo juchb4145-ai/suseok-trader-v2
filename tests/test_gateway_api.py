@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from apps.core_api import app
 from domain.broker.commands import GatewayCommand
 from fastapi.testclient import TestClient
-from gateway.event_factory import make_tr_response_event
+from gateway.event_factory import make_price_tick_event, make_tr_response_event
 from storage.gateway_command_store import GatewayCommandStatus, enqueue_command
 from storage.sqlite import open_connection
 
@@ -109,6 +109,44 @@ def test_gateway_event_api_requires_token_when_configured(tmp_path, monkeypatch)
     assert read_only_status.json()["token_required"] is True
 
 
+def test_gateway_event_api_enqueues_projection_outbox_and_keeps_inline_projection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "api_projection_outbox.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    event = make_price_tick_event(source="test-gateway")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events",
+            json=event.to_dict(),
+            headers={"X-Local-Token": "test-token"},
+        )
+        outbox_status = client.get("/api/operator/projection-outbox/status")
+
+    connection = open_connection(db_path)
+    try:
+        sample_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM market_tick_samples"
+        ).fetchone()["count"]
+        outbox_count = connection.execute(
+            "SELECT COUNT(*) AS count FROM projection_outbox"
+        ).fetchone()["count"]
+    finally:
+        connection.close()
+
+    assert response.status_code == 200
+    assert response.json()["projection_statuses"]["projection_outbox"] == "ENQUEUED"
+    assert response.json()["projection_statuses"]["market_data"] == "APPLIED"
+    assert outbox_status.status_code == 200
+    assert outbox_status.json()["shadow_mode"] is True
+    assert outbox_status.json()["pending_count"] == 1
+    assert outbox_status.json()["by_projection_name"]["market_data"]["pending_count"] == 1
+    assert sample_count == 1
+    assert outbox_count == 1
+
+
 def test_gateway_status_exposes_market_index_adapter_separate_from_projection_errors(
     tmp_path,
     monkeypatch,
@@ -207,10 +245,23 @@ def test_gateway_event_api_projects_market_scan_tr_response(tmp_path, monkeypatc
             WHERE command_type IN ('send_order', 'cancel_order', 'modify_order')
             """
         ).fetchone()["count"]
+        outbox_projection_names = [
+            row["projection_name"]
+            for row in connection.execute(
+                """
+                SELECT projection_name
+                FROM projection_outbox
+                WHERE event_id = ?
+                ORDER BY projection_name
+                """,
+                (event.event_id,),
+            ).fetchall()
+        ]
     finally:
         connection.close()
 
     assert response.status_code == 200
+    assert response.json()["projection_statuses"]["projection_outbox"] == "ENQUEUED"
     assert response.json()["projection_statuses"]["market_scan"] == "APPLIED"
     assert latest is not None
     assert latest["scan_type"] == "TRADE_VALUE"
@@ -218,3 +269,4 @@ def test_gateway_event_api_projects_market_scan_tr_response(tmp_path, monkeypatc
     assert latest["trade_value"] == 1_200_000_000
     assert '"parser_status":"PILOT_UNVERIFIED"' in latest["metadata_json"]
     assert order_count == 0
+    assert outbox_projection_names == ["market_data", "market_scan"]
