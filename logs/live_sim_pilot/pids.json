@@ -22,6 +22,63 @@
       "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_094021.out.log",
       "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\core_2026-07-07_094021.err.log",
       "started_at": "2026-07-07T09:40:21.7568644+09:00"
+    },
+    "gateway": {
+      "label": "gateway",
+      "pid": 42732,
+      "file_path": "C:\\Users\\juchn\\주식3\\venv_32\\Scripts\\python.exe",
+      "arguments": [
+        "-m",
+        "apps.kiwoom_gateway",
+        "--core-url",
+        "http://127.0.0.1:8000",
+        "--token",
+        "8tcS...Pado",
+        "--auto-login",
+        "--no-threaded-login",
+        "--no-observe-only",
+        "--poll-wait-sec",
+        "1.0",
+        "--command-limit",
+        "20",
+        "--heartbeat-interval-sec",
+        "2",
+        "--realtime-exchange",
+        "krx",
+        "--realtime-recover-interval-sec",
+        "300",
+        "--condition-profiles",
+        "<condition-profiles-json>",
+        "--realtime-codes",
+        "005930,000660",
+        "--market-index-enabled",
+        "--market-index-realtime-enabled",
+        "--market-index-tr-bootstrap-enabled",
+        "--market-index-codes",
+        "KOSPI,KOSDAQ",
+        "--market-index-screen-no",
+        "5700",
+        "--market-index-poll-sec",
+        "60.0"
+      ],
+      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-07_094021.out.log",
+      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\gateway_2026-07-07_094021.err.log",
+      "started_at": "2026-07-07T09:42:18.2834065+09:00"
+    },
+    "theme_refresh": {
+      "label": "theme_refresh",
+      "pid": 4676,
+      "file_path": "C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.6.3.0_x64__8wekyb3d8bbwe\\pwsh.exe",
+      "arguments": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "C:\\Users\\juchn\\주식3\\tools\\start_theme_refresh_loop.ps1"
+      ],
+      "stdout_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\theme_refresh_2026-07-07_094021.out.log",
+      "stderr_log": "C:\\Users\\juchn\\주식3\\logs\\live_sim_pilot\\runtime\\theme_refresh_2026-07-07_094021.err.log",
+      "started_at": "2026-07-07T09:42:34.3266923+09:00"
     }
   }
 }
