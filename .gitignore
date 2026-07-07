@@ -21,6 +21,7 @@ dist/
 *.egg-info/
 
 reports/
+logs/
 
 *.sqlite
 *.sqlite3
