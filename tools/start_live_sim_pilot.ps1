@@ -915,22 +915,32 @@ try {
             $OperatingDeadline = $ValidationDeadline
         }
         $NewRun = Wait-NewOperatingRun -BaselineRunId $BaselineRunId -Deadline $OperatingDeadline
-        Add-Result -Step "4" -Name "operating loop 새 run" -Passed ([bool]$NewRun.passed) -Message "latest_run_id=$($NewRun.data.run_id), status=$($NewRun.data.status), preflight=$($NewRun.data.preflight_status)" -Details $NewRun.data
+        $OperatingRunMessage = "latest_run_id=$($NewRun.data.run_id), status=$($NewRun.data.status), preflight=$($NewRun.data.preflight_status)"
+        if (-not $NewRun.passed) {
+            $OperatingRunMessage = "90초 내 새 operating run 관측 실패; $OperatingRunMessage"
+        }
+        Add-Result -Step "4" -Name "operating loop 새 run" -Passed ([bool]$NewRun.passed) -Message $OperatingRunMessage -Details $NewRun.data
     } else {
         Add-Result -Step "4" -Name "operating loop 새 run" -Passed $true -Message "LIVE_SIM_OPERATING_LOOP_ENABLED=false 이므로 확인 생략"
     }
 
     Write-Info "[5단계] Theme refresh loop 기동"
-    $Stage4Failed = @($script:LaunchResults | Where-Object {
-            [string]$_.step -eq "4" -and -not $_.passed
+    $Stage4HardFailed = @($script:LaunchResults | Where-Object {
+            [string]$_.step -eq "4" -and -not $_.passed -and [string]$_.name -ne "operating loop 새 run"
+        }).Count -gt 0
+    $OperatingRunFailed = @($script:LaunchResults | Where-Object {
+            [string]$_.step -eq "4" -and -not $_.passed -and [string]$_.name -eq "operating loop 새 run"
         }).Count -gt 0
     if ($SkipThemeRefreshLoop) {
         Write-WarnKo "Theme refresh loop를 건너뜁니다. 후보 생성이 멈출 수 있습니다."
         Add-Result -Step "5" -Name "theme refresh loop" -Passed $true -Message "사용자 옵션으로 건너뜀"
-    } elseif ($Stage4Failed) {
-        Write-WarnKo "4단계 기동 검증이 실패해 theme refresh loop를 시작하지 않습니다. 후보 생성이 멈출 수 있습니다."
-        Add-Result -Step "5" -Name "theme refresh loop" -Passed $false -Message "4단계 미통과로 시작 생략; 후보 생성이 멈출 수 있음"
+    } elseif ($Stage4HardFailed) {
+        Write-WarnKo "4단계 핵심 기동 검증이 실패해 theme refresh loop를 시작하지 않습니다. 후보 생성이 멈출 수 있습니다."
+        Add-Result -Step "5" -Name "theme refresh loop" -Passed $false -Message "4단계 핵심 검증 미통과로 시작 생략; 후보 생성이 멈출 수 있음"
     } else {
+        if ($OperatingRunFailed) {
+            Write-WarnKo "operating loop 새 run 검증은 실패했지만 핵심 gateway/tick/index/preflight 검증이 통과해 theme refresh loop를 시작합니다."
+        }
         try {
             $BaselineThemeRunId = ""
             try {

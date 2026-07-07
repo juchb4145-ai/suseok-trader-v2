@@ -46,8 +46,8 @@ pwsh -File .\tools\stop_live_sim_pilot.ps1 -Force
 | 조건식 로드 | `condition_load_state=LOADED` | 조건식 파일/이름, `OnReceiveConditionVer`, gateway event 로그 확인 |
 | LIVE_SIM status | safety gate 요약 출력 | kill switch, heartbeat, gateway_orderable, simulation mode 확인 |
 | Preflight | `PASS` 또는 원인 있는 `WARN`; `BLOCK`이면 주문 차단 | 출력된 `blocking_reasons`를 먼저 해소 |
-| Operating loop | `LIVE_SIM_OPERATING_LOOP_ENABLED=true`이면 90초 내 새 run 생성 | Core loop 설정, market time window, evaluation lock 상태 확인 |
-| Theme refresh loop | 4단계 검증 통과 후 별도 프로세스 시작, 첫 run `COMPLETED`, `order_command_delta` 전부 0 | `logs/live_sim_pilot/runtime/theme_refresh_*.err.log`, `/api/themes/refresh-cycle/latest`, `MARKET_SCAN_INTERVAL_SEC`, loop window 확인 |
+| Operating loop | `LIVE_SIM_OPERATING_LOOP_ENABLED=true`이면 90초 내 새 run 생성. 미관측은 degraded 경고지만 theme refresh loop 기동은 막지 않음 | Core loop 설정, market time window, evaluation lock 상태 확인 |
+| Theme refresh loop | 4단계 핵심 검증 통과 후 별도 프로세스 시작, 첫 run `COMPLETED`, `order_command_delta` 전부 0 | `logs/live_sim_pilot/runtime/theme_refresh_*.err.log`, `/api/themes/refresh-cycle/latest`, `MARKET_SCAN_INTERVAL_SEC`, loop window 확인 |
 
 ## 단계별 판정 기준
 
@@ -84,7 +84,9 @@ pwsh -File .\tools\stop_live_sim_pilot.ps1 -Force
 
 Preflight가 `BLOCK`이면 런처는 "기동은 완료됐지만 주문은 차단 상태"라고 표시한다. 이 상태에서는 Core/Gateway가 떠 있어도 BUY 큐잉은 진행되지 않는다.
 
-5단계 theme refresh loop는 4단계 검증이 모두 통과한 뒤 시작한다. 이 순서를 지키는 이유는 refresh loop가 `register_realtime`/`request_tr` command 트래픽을 만들 수 있어, 기동 직후의 지수/tick 검증과 섞이지 않게 하기 위해서다.
+5단계 theme refresh loop는 4단계 핵심 검증이 통과한 뒤 시작한다. 이 순서를 지키는 이유는 refresh loop가 `register_realtime`/`request_tr` command 트래픽을 만들 수 있어, 기동 직후의 지수/tick 검증과 섞이지 않게 하기 위해서다.
+
+핵심 검증은 gateway login, 가격 tick, 지수 tick, condition load, LIVE_SIM status, preflight다. `operating loop 새 run` 항목은 Core operating loop 관측용이다. 90초 안에 새 run이 관측되지 않으면 리포트에는 `❌`로 남기고 최종 상태는 degraded가 될 수 있지만, 후보 생성이 마르지 않도록 theme refresh loop 기동은 계속한다.
 
 런처는 다음 명령을 백그라운드로 실행하고 PID를 `logs/live_sim_pilot/pids.json`의 `theme_refresh` 키에 기록한다.
 
