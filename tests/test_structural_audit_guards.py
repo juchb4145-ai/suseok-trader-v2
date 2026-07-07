@@ -28,7 +28,9 @@ from storage.gateway_command_store import (
 from storage.sqlite import initialize_database, open_connection
 
 
-def test_synthetic_tr_response_multiple_ticks_detects_event_id_collision(tmp_path) -> None:
+def test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids(
+    tmp_path,
+) -> None:
     connection = initialize_database(tmp_path / "tr-collision.sqlite3")
     event_ts = utc_now()
     response = BrokerTrResponse(
@@ -64,6 +66,7 @@ def test_synthetic_tr_response_multiple_ticks_detects_event_id_collision(tmp_pat
         event_id="evt_candidate_quote_refresh_multi",
         event_type="tr_response",
         source="test-gateway",
+        command_id="cmd_candidate_quote_refresh_multi",
         payload=response.to_dict(),
         ts=event_ts,
     )
@@ -71,31 +74,49 @@ def test_synthetic_tr_response_multiple_ticks_detects_event_id_collision(tmp_pat
     append_gateway_event(connection, event)
     result = process_gateway_event(connection, event, settings=Settings())
 
-    sample_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM market_tick_samples"
-    ).fetchone()["count"]
+    sample_rows = connection.execute(
+        """
+        SELECT event_id, code, metadata_json
+        FROM market_tick_samples
+        ORDER BY code
+        """
+    ).fetchall()
     tr_snapshot_count = connection.execute(
         "SELECT COUNT(*) AS count FROM market_tr_snapshots"
     ).fetchone()["count"]
-    error = connection.execute(
+    projection_error_count = connection.execute(
         """
-        SELECT error_message
+        SELECT COUNT(*) AS count
         FROM market_projection_errors
-        WHERE event_id = ?
-        ORDER BY id DESC
-        LIMIT 1
-        """,
-        (event.event_id,),
+        """
     ).fetchone()
     watermark = get_market_data_projection_watermark(connection)
     connection.close()
 
-    assert result.status == "ERROR"
-    assert "market_tick_samples.event_id" in (result.error_message or "")
-    assert sample_count == 0
-    assert tr_snapshot_count == 0
-    assert error is not None
-    assert "market_tick_samples.event_id" in error["error_message"]
+    assert result.status == "APPLIED"
+    assert len(sample_rows) == 2
+    assert tr_snapshot_count == 2
+    assert projection_error_count["count"] == 0
+    assert {row["event_id"] for row in sample_rows} == {
+        "evt_candidate_quote_refresh_multi:synthetic_price_tick:0:005930:KRX",
+        "evt_candidate_quote_refresh_multi:synthetic_price_tick:1:000660:KRX",
+    }
+    assert len({row["event_id"] for row in sample_rows}) == len(sample_rows)
+    metadata_by_code = {
+        row["code"]: json.loads(row["metadata_json"]) for row in sample_rows
+    }
+    assert metadata_by_code["005930"]["parent_event_id"] == event.event_id
+    assert metadata_by_code["005930"]["parent_command_id"] == event.command_id
+    assert metadata_by_code["005930"]["parent_tr_code"] == response.tr_code
+    assert metadata_by_code["005930"]["parent_request_name"] == response.request_name
+    assert metadata_by_code["005930"]["synthetic_event"] is True
+    assert metadata_by_code["005930"]["row_index"] == 0
+    assert metadata_by_code["000660"]["parent_event_id"] == event.event_id
+    assert metadata_by_code["000660"]["parent_command_id"] == event.command_id
+    assert metadata_by_code["000660"]["parent_tr_code"] == response.tr_code
+    assert metadata_by_code["000660"]["parent_request_name"] == response.request_name
+    assert metadata_by_code["000660"]["synthetic_event"] is True
+    assert metadata_by_code["000660"]["row_index"] == 1
     assert watermark.last_event_id == event.event_id
 
 

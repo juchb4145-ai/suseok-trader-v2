@@ -960,6 +960,7 @@ def _ensure_market_data_exchange_schema(connection: sqlite3.Connection) -> None:
         {
             "exchange": "TEXT NOT NULL DEFAULT 'KRX'",
             "session": "TEXT NOT NULL DEFAULT 'REGULAR'",
+            "metadata_json": "TEXT NOT NULL DEFAULT '{}'",
         },
     )
     if _primary_key_columns(connection, "market_ticks_latest") != ["code", "exchange"]:
@@ -1365,7 +1366,8 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
             execution_strength REAL NOT NULL,
             event_ts TEXT NOT NULL,
             received_at TEXT NOT NULL,
-            source TEXT NOT NULL
+            source TEXT NOT NULL,
+            metadata_json TEXT NOT NULL DEFAULT '{}'
         )
         """
     )

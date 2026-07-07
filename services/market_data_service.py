@@ -792,9 +792,10 @@ def _process_price_tick(
             execution_strength,
             event_ts,
             received_at,
-            source
+            source,
+            metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             event.event_id,
@@ -810,6 +811,7 @@ def _process_price_tick(
             event_ts,
             received_at,
             event.source,
+            _price_tick_metadata_json(event.payload),
         ),
     )
     for interval_sec in settings.market_data_bar_intervals_sec:
@@ -963,21 +965,101 @@ def _process_tr_response(
             ),
         )
         inserted_count += 1
-    for tick_payload in candidate_quote_refresh_tick_payloads_from_tr_response(
+    for row_index, tick_payload in _candidate_quote_refresh_tick_payloads_with_row_index(
         event.payload,
         event_ts=event_ts,
     ):
+        tick = BrokerPriceTick.from_dict(tick_payload)
+        exchange = _price_tick_payload_exchange(tick_payload)
+        child_event_id = _synthetic_price_tick_event_id(
+            parent_event_id=event.event_id,
+            row_index=row_index,
+            code=tick.code,
+            exchange=exchange,
+        )
+        if _projection_exists(connection, "price_tick", child_event_id):
+            continue
+        synthetic_payload = _with_synthetic_price_tick_metadata(
+            tick_payload,
+            parent_event=event,
+            parent_response=response,
+            row_index=row_index,
+        )
         tick_event = GatewayEvent(
-            event_id=event.event_id,
+            event_id=child_event_id,
             event_type="price_tick",
             source=event.source,
             command_id=event.command_id,
             idempotency_key=event.idempotency_key,
             ts=parse_timestamp(event_ts, "event_ts"),
-            payload=tick_payload,
+            payload=synthetic_payload,
         )
         inserted_count += _process_price_tick(connection, tick_event, settings)
     return inserted_count
+
+
+def _candidate_quote_refresh_tick_payloads_with_row_index(
+    payload: Mapping[str, Any],
+    *,
+    event_ts: str,
+) -> list[tuple[int, dict[str, Any]]]:
+    rows = payload.get("rows")
+    if isinstance(rows, list):
+        source_rows = rows
+    else:
+        row = payload.get("row")
+        source_rows = [row] if isinstance(row, Mapping) else []
+
+    tick_payloads: list[tuple[int, dict[str, Any]]] = []
+    for row_index, row in enumerate(source_rows):
+        if not isinstance(row, Mapping):
+            continue
+        single_row_payload = dict(payload)
+        single_row_payload["rows"] = [row]
+        single_row_payload.pop("row", None)
+        for tick_payload in candidate_quote_refresh_tick_payloads_from_tr_response(
+            single_row_payload,
+            event_ts=event_ts,
+        ):
+            tick_payloads.append((row_index, tick_payload))
+    return tick_payloads
+
+
+def _synthetic_price_tick_event_id(
+    *,
+    parent_event_id: str,
+    row_index: int,
+    code: str,
+    exchange: str,
+) -> str:
+    return (
+        f"{parent_event_id}:synthetic_price_tick:"
+        f"{int(row_index)}:{validate_stock_code(code)}:{normalize_market_data_exchange(exchange)}"
+    )
+
+
+def _with_synthetic_price_tick_metadata(
+    payload: Mapping[str, Any],
+    *,
+    parent_event: GatewayEvent,
+    parent_response: BrokerTrResponse,
+    row_index: int,
+) -> dict[str, Any]:
+    enriched = dict(payload)
+    metadata = payload.get("metadata")
+    enriched_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    enriched_metadata.update(
+        {
+            "parent_event_id": parent_event.event_id,
+            "parent_command_id": parent_event.command_id,
+            "parent_tr_code": parent_response.tr_code,
+            "parent_request_name": parent_response.request_name,
+            "synthetic_event": True,
+            "row_index": int(row_index),
+        }
+    )
+    enriched["metadata"] = enriched_metadata
+    return enriched
 
 
 def _upsert_minute_bar(
@@ -1455,6 +1537,13 @@ def _price_tick_payload_real_type(payload: Mapping[str, Any]) -> str:
     if not isinstance(metadata, Mapping):
         return ""
     return str(metadata.get("real_type") or "").strip()
+
+
+def _price_tick_metadata_json(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return canonical_json({})
+    return canonical_json(metadata)
 
 
 def _price_tick_payload_exchange(payload: Mapping[str, Any]) -> str:

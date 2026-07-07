@@ -663,6 +663,7 @@ def test_candidate_quote_refresh_tr_response_updates_latest_tick(tmp_path) -> No
         event_id="evt_candidate_quote_refresh",
         event_type="tr_response",
         source="test-gateway",
+        command_id="cmd_candidate_quote_refresh",
         payload=response.to_dict(),
         ts=TS,
     )
@@ -676,6 +677,17 @@ def test_candidate_quote_refresh_tr_response_updates_latest_tick(tmp_path) -> No
     sample_count = connection.execute(
         "SELECT COUNT(*) AS count FROM market_tick_samples"
     ).fetchone()["count"]
+    sample = connection.execute(
+        """
+        SELECT event_id, metadata_json
+        FROM market_tick_samples
+        WHERE code = ?
+        """,
+        ("005930",),
+    ).fetchone()
+    projection_error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_projection_errors"
+    ).fetchone()["count"]
     connection.close()
 
     assert result.status == "APPLIED"
@@ -684,6 +696,16 @@ def test_candidate_quote_refresh_tr_response_updates_latest_tick(tmp_path) -> No
     assert latest["source"] == "test-gateway"
     assert snapshot_count == 1
     assert sample_count == 1
+    assert sample is not None
+    assert sample["event_id"] == "evt_candidate_quote_refresh:synthetic_price_tick:0:005930:KRX"
+    metadata = json.loads(sample["metadata_json"])
+    assert metadata["parent_event_id"] == event.event_id
+    assert metadata["parent_command_id"] == event.command_id
+    assert metadata["parent_tr_code"] == response.tr_code
+    assert metadata["parent_request_name"] == response.request_name
+    assert metadata["synthetic_event"] is True
+    assert metadata["row_index"] == 0
+    assert projection_error_count == 0
 
 
 def test_readiness_reports_missing_fresh_stale_and_bar_gaps(tmp_path) -> None:
