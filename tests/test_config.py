@@ -76,6 +76,12 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_data_append_only_dry_run_enabled is False
     assert settings.gateway_market_data_append_only_cutover_enabled is False
     assert settings.gateway_market_data_append_only_price_tick_cutover_enabled is False
+    assert settings.gateway_market_data_append_only_tr_response_dry_run_enabled is False
+    assert settings.gateway_market_data_append_only_tr_response_cutover_enabled is False
+    assert (
+        settings.gateway_market_data_append_only_tr_response_require_worker_side_effects
+        is True
+    )
     assert settings.gateway_market_data_append_only_cutover_event_types == ("price_tick",)
     assert settings.gateway_market_data_append_only_require_reconcile_pass is True
     assert settings.gateway_market_data_append_only_require_latest_reconcile_pass is True
@@ -508,6 +514,11 @@ def test_market_data_interval_settings_are_validated() -> None:
             "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_REQUIRE_WORKER_SIDE_EFFECTS": (
+                "false"
+            ),
             "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_EVENT_TYPES": "price_tick",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_LATEST_RECONCILE_PASS": "false",
@@ -524,6 +535,18 @@ def test_market_data_interval_settings_are_validated() -> None:
     assert (
         routing_settings.gateway_market_data_append_only_price_tick_cutover_enabled
         is True
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_tr_response_dry_run_enabled
+        is True
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_tr_response_cutover_enabled
+        is True
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_tr_response_require_worker_side_effects
+        is False
     )
     assert routing_settings.gateway_market_data_append_only_cutover_event_types == (
         "price_tick",

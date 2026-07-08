@@ -179,6 +179,9 @@ class Settings:
     gateway_market_data_append_only_dry_run_enabled: bool = False
     gateway_market_data_append_only_cutover_enabled: bool = False
     gateway_market_data_append_only_price_tick_cutover_enabled: bool = False
+    gateway_market_data_append_only_tr_response_dry_run_enabled: bool = False
+    gateway_market_data_append_only_tr_response_cutover_enabled: bool = False
+    gateway_market_data_append_only_tr_response_require_worker_side_effects: bool = True
     gateway_market_data_append_only_cutover_event_types: tuple[str, ...] = ("price_tick",)
     gateway_market_data_append_only_require_reconcile_pass: bool = True
     gateway_market_data_append_only_require_latest_reconcile_pass: bool = True
@@ -1699,6 +1702,26 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get(
                 "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED",
                 "false",
+            )
+        ),
+        gateway_market_data_append_only_tr_response_dry_run_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED",
+                "false",
+            )
+        ),
+        gateway_market_data_append_only_tr_response_cutover_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED",
+                "false",
+            )
+        ),
+        gateway_market_data_append_only_tr_response_require_worker_side_effects=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_REQUIRE_WORKER_SIDE_EFFECTS",
+                    "true",
+                )
             )
         ),
         gateway_market_data_append_only_cutover_event_types=tuple(

@@ -1440,6 +1440,10 @@ def _market_data_append_only_routing_summary(
     warnings = list(payload.get("warnings") or [])
     if "condition_event/tr_response inline projection remains enabled" not in warnings:
         warnings.append("condition_event/tr_response inline projection remains enabled")
+    if "PR-8: tr_response cutover is not enabled" not in warnings:
+        warnings.append("PR-8: tr_response cutover is not enabled")
+    if "condition_event remains inline" not in warnings:
+        warnings.append("condition_event remains inline")
     if "LIVE_REAL/order behavior unchanged" not in warnings:
         warnings.append("LIVE_REAL/order behavior unchanged")
     rollback_hint = payload.get("rollback_hint") or (
@@ -1455,9 +1459,20 @@ def _market_data_append_only_routing_summary(
     return {
         "pr": "PR-7",
         "cutover_status": "price_tick-only cutover",
+        "price_tick_cutover_status": "PRICE_TICK_ONLY",
+        "tr_response_side_effect_migration_status": "PREP_ONLY_INLINE_REQUIRED",
         "dry_run_enabled": bool(payload.get("dry_run_enabled")),
         "cutover_enabled": bool(payload.get("cutover_enabled")),
         "price_tick_cutover_enabled": bool(payload.get("price_tick_cutover_enabled")),
+        "tr_response_dry_run_enabled": bool(
+            payload.get("tr_response_dry_run_enabled")
+        ),
+        "tr_response_cutover_enabled": bool(
+            payload.get("tr_response_cutover_enabled")
+        ),
+        "tr_response_worker_side_effect_ready": bool(
+            payload.get("tr_response_worker_side_effect_ready")
+        ),
         "cutover_global_enabled": bool(payload.get("cutover_enabled")),
         "cutover_scope": payload.get("cutover_scope") or "price_tick_only",
         "worker_apply_enabled": bool(payload.get("worker_apply_enabled")),
@@ -1487,6 +1502,16 @@ def _market_data_append_only_routing_summary(
         "tr_response_effective_skip_count": int(
             payload.get("tr_response_effective_skip_count") or 0
         ),
+        "tr_response_would_skip_inline_count": int(
+            payload.get("tr_response_would_skip_inline_count") or 0
+        ),
+        "tr_response_deferred_enqueue_count": int(
+            payload.get("tr_response_deferred_side_effect_count") or 0
+        ),
+        "tr_response_deferred_enqueue_error_count": int(
+            payload.get("tr_response_deferred_side_effect_error_count") or 0
+        ),
+        "condition_event_inline_status": "INLINE_REQUIRED",
         "invalid_effective_skip_count": int(
             payload.get("invalid_effective_skip_count") or 0
         ),

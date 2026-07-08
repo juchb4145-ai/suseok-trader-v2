@@ -9,7 +9,6 @@ from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from services.candidate_quote_refresh import candidate_quote_refresh_codes_from_payload
 from services.condition_fusion import rebuild_condition_fusion_for_code
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
@@ -28,10 +27,10 @@ from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
     decide_market_data_projection_routing,
 )
-from services.runtime.incremental_evaluation import (
-    DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
-    enqueue_incremental_evaluation_for_code,
-    enqueue_incremental_evaluation_for_event,
+from services.runtime.market_data_projection_side_effects import (
+    enqueue_incremental_for_candidate_quote_refresh_tr_response,
+    enqueue_incremental_for_price_tick_projection,
+    legacy_gateway_candidate_quote_refresh_status,
 )
 from storage.event_store import (
     append_gateway_event,
@@ -255,15 +254,12 @@ def _enqueue_incremental_evaluation_for_price_tick(
     *,
     settings,
 ) -> str:
-    try:
-        result = enqueue_incremental_evaluation_for_event(
-            connection,
-            event,
-            settings=settings,
-        )
-    except Exception:
-        logger.exception("incremental evaluation enqueue failed")
-        return "ERROR"
+    result = enqueue_incremental_for_price_tick_projection(
+        connection,
+        event,
+        settings=settings,
+        source="gateway_inline_price_tick",
+    )
     return result.status
 
 
@@ -273,33 +269,13 @@ def _enqueue_incremental_evaluation_for_candidate_quote_refresh(
     *,
     settings,
 ) -> str | None:
-    codes = candidate_quote_refresh_codes_from_payload(event.payload)
-    if not codes:
-        return None
-    statuses: list[str] = []
-    for code in codes:
-        try:
-            result = enqueue_incremental_evaluation_for_code(
-                connection,
-                code,
-                reason=DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
-                source_event_id=event.event_id,
-                event_id=event.event_id,
-                priority=90,
-                settings=settings,
-            )
-        except Exception:
-            logger.exception("candidate quote refresh incremental enqueue failed")
-            statuses.append("ERROR")
-            continue
-        statuses.append(result.status)
-    if not statuses:
-        return None
-    if any(status == "ENQUEUED" for status in statuses):
-        return "ENQUEUED"
-    if any(status == "ERROR" for status in statuses):
-        return "ERROR"
-    return ",".join(sorted(set(statuses)))
+    result = enqueue_incremental_for_candidate_quote_refresh_tr_response(
+        connection,
+        event,
+        settings=settings,
+        source="gateway_inline_candidate_quote_refresh",
+    )
+    return legacy_gateway_candidate_quote_refresh_status(result)
 
 
 def _refresh_condition_fusion_for_condition_event(

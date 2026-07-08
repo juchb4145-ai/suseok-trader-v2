@@ -30,6 +30,9 @@ PR6_EFFECTIVE_SKIP_DISABLED_REASON = "EFFECTIVE_SKIP_DISABLED_IN_PR6"
 PR7_CUTOVER_SCOPE = "price_tick_only"
 PR7_ALLOWED_CUTOVER_EVENT_TYPE = "price_tick"
 PR7_FORCED_INLINE_EVENT_TYPES = frozenset({"condition_event", "tr_response"})
+PR8_TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_REASON = (
+    "TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_IN_PR8"
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -104,7 +107,18 @@ def decide_market_data_projection_routing(
     outbox_status: str | None = None,
 ) -> MarketDataAppendOnlyRoutingDecision:
     event_type = event.event_type.strip().lower()
+    tr_response_dry_run_enabled = bool(
+        settings.gateway_market_data_append_only_tr_response_dry_run_enabled
+    )
+    tr_response_cutover_enabled = bool(
+        settings.gateway_market_data_append_only_tr_response_cutover_enabled
+    )
+    tr_response_require_worker_side_effects = bool(
+        settings.gateway_market_data_append_only_tr_response_require_worker_side_effects
+    )
     dry_run_enabled = bool(settings.gateway_market_data_append_only_dry_run_enabled)
+    if event_type == "tr_response":
+        dry_run_enabled = dry_run_enabled or tr_response_dry_run_enabled
     cutover_enabled = bool(settings.gateway_market_data_append_only_cutover_enabled)
     price_tick_cutover_enabled = bool(
         settings.gateway_market_data_append_only_price_tick_cutover_enabled
@@ -155,6 +169,9 @@ def decide_market_data_projection_routing(
         settings.projection_outbox_apply_projection_enabled
         and settings.projection_outbox_market_data_apply_enabled
     )
+    tr_response_worker_side_effect_ready = (
+        worker_apply_enabled if tr_response_require_worker_side_effects else True
+    )
     skip_budget_limit = int(
         settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
     )
@@ -195,9 +212,21 @@ def decide_market_data_projection_routing(
     effective_skip_inline = False
     price_tick_identity = _price_tick_payload_identity(event.payload)
     effective_skip_reason = "FALLBACK_INLINE_PROJECTION"
-    if event_type in PR7_FORCED_INLINE_EVENT_TYPES and would_skip_inline:
+    if event_type == "tr_response" and would_skip_inline:
         reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
-        effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER")
+        reason_codes.append(PR8_TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_REASON)
+        reason_codes.append("TR_RESPONSE_CUTOVER_DISABLED_IN_PR8")
+        reason_codes.append(
+            "TR_RESPONSE_WORKER_SIDE_EFFECT_READY"
+            if tr_response_worker_side_effect_ready
+            else "TR_RESPONSE_WORKER_SIDE_EFFECT_NOT_READY"
+        )
+        effective_skip_reason = PR8_TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_REASON
+    elif event_type == "condition_event" and would_skip_inline:
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER")
+        effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER"
     elif event_type == PR7_ALLOWED_CUTOVER_EVENT_TYPE:
         if not would_skip_inline:
             effective_skip_reason = "WOULD_SKIP_INLINE_FALSE"
@@ -254,6 +283,7 @@ def decide_market_data_projection_routing(
             effective_skip_reason = "EFFECTIVE_SKIP_ALLOWED_PRICE_TICK"
     elif cutover_enabled and would_skip_inline:
         reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER")
         effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
 
     if (
@@ -266,10 +296,15 @@ def decide_market_data_projection_routing(
 
     evidence = {
         "pr": "PR-7",
+        "pr8_side_effect_migration": True,
         "cutover_scope": PR7_CUTOVER_SCOPE,
         "price_tick_only_cutover": True,
         "condition_event_cutover_enabled": False,
-        "tr_response_cutover_enabled": False,
+        "tr_response_dry_run_enabled": tr_response_dry_run_enabled,
+        "tr_response_cutover_enabled": tr_response_cutover_enabled,
+        "tr_response_worker_side_effect_ready": tr_response_worker_side_effect_ready,
+        "tr_response_effective_skip_disabled_in_pr8": True,
+        "tr_response_require_worker_side_effects": tr_response_require_worker_side_effects,
         "inline_projection_remains_enabled_for_non_price_tick": True,
         "fallback_inline_projection_expected": not effective_skip_inline,
         "price_tick_cutover_enabled": price_tick_cutover_enabled,
@@ -352,10 +387,23 @@ def get_latest_market_data_append_only_routing_status(
         connection,
         "tr_response",
     )
+    tr_response_would_skip_inline_count = _count_would_skip_by_event_type(
+        connection,
+        "tr_response",
+    )
     invalid_effective_skip_count = _count_invalid_effective_skips(connection)
     effective_skip_outbox_error_count = _count_effective_skip_outbox_errors(connection)
     deferred_incremental_enqueue_count = (
         _count_deferred_incremental_enqueue_records(connection)
+    )
+    tr_response_deferred_side_effect_count = (
+        _count_tr_response_deferred_side_effect_records(connection)
+    )
+    tr_response_deferred_side_effect_error_count = (
+        _count_tr_response_deferred_side_effect_errors(connection)
+    )
+    tr_response_duplicate_side_effect_count = (
+        _count_tr_response_duplicate_side_effect_records(connection)
     )
     blocked_reason_counts = _blocked_reason_code_counts(rows)
     fail_closed_reason_counts = _fail_closed_reason_code_counts(rows)
@@ -374,6 +422,12 @@ def get_latest_market_data_append_only_routing_status(
         resolved_settings.projection_outbox_apply_projection_enabled
         and resolved_settings.projection_outbox_market_data_apply_enabled
     )
+    tr_response_require_worker_side_effects = bool(
+        resolved_settings.gateway_market_data_append_only_tr_response_require_worker_side_effects
+    )
+    tr_response_worker_side_effect_ready = (
+        worker_apply_enabled if tr_response_require_worker_side_effects else True
+    )
     skip_budget_limit = int(
         resolved_settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
     )
@@ -385,6 +439,8 @@ def get_latest_market_data_append_only_routing_status(
     failures: list[str] = []
     warnings = [
         "condition_event/tr_response inline projection remains enabled",
+        "PR-8 prepares tr_response worker side-effects; tr_response inline remains enabled",
+        "condition_event inline remains enabled",
         "LIVE_REAL/order behavior unchanged",
         "rollback: disable gateway_market_data_append_only_price_tick_cutover_enabled",
     ]
@@ -398,6 +454,10 @@ def get_latest_market_data_append_only_routing_status(
         failures.append("PRICE_TICK_EFFECTIVE_SKIP_WITH_WORKER_APPLY_DISABLED")
     if effective_skip_outbox_error_count > 0:
         failures.append("EFFECTIVE_SKIP_OUTBOX_ERROR_OR_DEAD_LETTER")
+    if tr_response_deferred_side_effect_error_count > 0:
+        failures.append("TR_RESPONSE_DEFERRED_SIDE_EFFECT_ERROR")
+    if tr_response_duplicate_side_effect_count > 0:
+        failures.append("TR_RESPONSE_DUPLICATE_SIDE_EFFECT_FOR_INLINE_EVENT")
     if (
         resolved_settings.gateway_market_data_append_only_price_tick_cutover_enabled
         and skip_budget_limit <= 0
@@ -413,6 +473,14 @@ def get_latest_market_data_append_only_routing_status(
         "price_tick_cutover_enabled": bool(
             resolved_settings.gateway_market_data_append_only_price_tick_cutover_enabled
         ),
+        "tr_response_dry_run_enabled": bool(
+            resolved_settings.gateway_market_data_append_only_tr_response_dry_run_enabled
+        ),
+        "tr_response_cutover_enabled": bool(
+            resolved_settings.gateway_market_data_append_only_tr_response_cutover_enabled
+        ),
+        "tr_response_worker_side_effect_ready": tr_response_worker_side_effect_ready,
+        "tr_response_require_worker_side_effects": tr_response_require_worker_side_effects,
         "cutover_scope": PR7_CUTOVER_SCOPE,
         "cutover_event_types": list(
             resolved_settings.gateway_market_data_append_only_cutover_event_types
@@ -441,6 +509,12 @@ def get_latest_market_data_append_only_routing_status(
         "effective_price_tick_skip_count": effective_price_tick_skip_count,
         "condition_event_effective_skip_count": condition_event_effective_skip_count,
         "tr_response_effective_skip_count": tr_response_effective_skip_count,
+        "tr_response_would_skip_inline_count": tr_response_would_skip_inline_count,
+        "tr_response_deferred_side_effect_count": tr_response_deferred_side_effect_count,
+        "tr_response_deferred_side_effect_error_count": (
+            tr_response_deferred_side_effect_error_count
+        ),
+        "tr_response_duplicate_side_effect_count": tr_response_duplicate_side_effect_count,
         "invalid_effective_skip_count": invalid_effective_skip_count,
         "effective_skip_outbox_error_count": effective_skip_outbox_error_count,
         "deferred_incremental_enqueue_count": deferred_incremental_enqueue_count,
@@ -751,6 +825,21 @@ def _count_effective_skip_by_event_type(
     return int(row["count"])
 
 
+def _count_would_skip_by_event_type(
+    connection: sqlite3.Connection,
+    event_type: str,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE would_skip_inline = 1 AND event_type = ?
+        """,
+        (event_type,),
+    ).fetchone()
+    return int(row["count"])
+
+
 def _count_invalid_effective_skips(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         """
@@ -788,6 +877,68 @@ def _count_deferred_incremental_enqueue_records(
             post_apply_deferred_side_effects_json,
             '$.incremental_evaluation_enqueue_status'
         ) IS NOT NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_tr_response_deferred_side_effect_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'tr_response'
+            AND json_extract(
+                post_apply_deferred_side_effects_json,
+                '$.candidate_quote_refresh_enqueue_status'
+            ) IS NOT NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_tr_response_deferred_side_effect_errors(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'tr_response'
+            AND (
+                json_extract(
+                    post_apply_deferred_side_effects_json,
+                    '$.candidate_quote_refresh_error_count'
+                ) > 0
+                OR json_extract(
+                    post_apply_deferred_side_effects_json,
+                    '$.candidate_quote_refresh_enqueue_status'
+                ) IN ('ERROR', 'COMPLETED_WITH_ERRORS')
+            )
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_tr_response_duplicate_side_effect_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM projection_outbox
+        WHERE projection_name = 'market_data'
+            AND event_type = 'tr_response'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.apply_result'
+            ) = 'APPLIED_BY_VERIFY'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.post_apply_side_effects.candidate_quote_refresh_enqueue_status'
+            ) IS NOT NULL
         """
     ).fetchone()
     return int(row["count"])

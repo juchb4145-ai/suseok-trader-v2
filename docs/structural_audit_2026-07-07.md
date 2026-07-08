@@ -12,6 +12,7 @@
 - Market index parser의 `parser_status`는 latest row와 dashboard status에 노출된다. `PILOT_UNVERIFIED` 같은 상태를 감지할 수 있다. 근거: `services/market_index_service.py`, `gateway/kiwoom_client.py`.
 - Dashboard top theme 표시는 단순 latest sample만 쓰지 않고 state-filtered query를 별도로 사용한다. 기존 테스트가 DATA_WAIT 최신 표본 뒤에 숨은 LEADING/SPREADING 테마를 검증한다. 근거: `services/dashboard_service.py`, `tests/test_dashboard_service.py`.
 - Stale `DISPATCHED` order command는 timeout 후 `UNCONFIRMED`로 전환되고 운영자 종결 도구가 `command_started`/`command_ack`/CHEJAN/체결 evidence를 확인한다. 근거: `storage/gateway_command_store.py`, `tools/resolve_live_sim_order.py`.
+- P0-2는 수정 완료됐다. Candidate quote refresh `tr_response`의 synthetic `price_tick`은 `parent_event_id:synthetic_price_tick:row_index:code:exchange` 기반 deterministic child `event_id`를 사용하며, payload metadata에 parent event/command/TR/request/row 정보를 남긴다. 근거: `services/market_data_service.py`, `tests/test_structural_audit_guards.py`.
 
 ## P0-1 진행 상태
 
@@ -21,13 +22,14 @@
 - PR-5: `market_data` projection dual-run reconciliation을 추가했다. accepted `price_tick`/`condition_event`/`tr_response`와 inline projection artifact, `projection_outbox`, watermark, synthetic child event id를 대조해 append-only 전환 준비도를 `PASS`/`WARN`/`FAIL`로 리포트한다. 이 PR도 append-only 전환이 아니며 Gateway inline projection, worker default disabled, 주문/LIVE_SIM/LIVE_REAL 정책은 그대로 유지한다. 운영 절차는 `docs/runbook_market_data_projection_reconcile_ko.md`에 정리했다.
 - PR-6: `market_data` append-only dry-run routing decision을 추가했다. Gateway inline `process_gateway_event()`는 계속 실행되며, dry-run flag가 켜진 경우에만 reconcile PASS/outbox readiness 조건을 만족한 이벤트에 대해 `would_skip_inline=True`를 기록한다. `effective_skip_inline`은 PR-6에서 항상 `False`이며, cutover flag가 켜져도 `EFFECTIVE_SKIP_DISABLED_IN_PR6` evidence만 남긴다. 운영 절차는 `docs/runbook_market_data_append_only_routing_ko.md`에 정리했다.
 - PR-7: `price_tick`에 한정한 `market_data` inline skip을 엄격한 feature flag 뒤에 추가했다. 기본값에서는 `effective_skip_inline=False`이며, `dry_run + global cutover + price_tick cutover + worker apply enabled + reconcile PASS/fresh + outbox ready + per-minute skip budget > 0` 조건을 모두 만족해야만 Gateway request path의 `process_gateway_event()`를 건너뛴다. `condition_event`/`tr_response`는 계속 inline projection을 유지하며, skipped `price_tick`의 incremental evaluation enqueue는 `projection_outbox` worker가 market_data apply 성공 후 deferred side effect evidence로 기록한다. 운영 절차는 `docs/runbook_market_data_price_tick_cutover_ko.md`에 정리했다.
+- PR-8: `tr_response` candidate quote refresh incremental enqueue를 공통 side-effect 서비스로 분리하고, worker가 `market_data` `tr_response`를 직접 apply한 경우에만 deferred side-effect evidence를 기록하도록 준비했다. 이번 PR에서도 `tr_response`와 `condition_event`의 `effective_skip_inline`은 금지되어 있으며 Gateway inline projection은 유지된다. 운영 절차는 `docs/runbook_market_data_tr_response_side_effect_migration_ko.md`에 정리했다.
 
 ## P0
 
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
 |---|---|---|---|---|---|
 | P0-1 Gateway ingestion이 append-only가 아니라 request path에서 projection을 동기 처리 | `api/routes/gateway.py::post_gateway_event()`가 `_gateway_event_write_lock` 안에서 `append_gateway_event()` 후 `process_gateway_event()`, `process_market_symbols_event()`, `process_market_index_event()`, `rebuild_market_regime_snapshot()`, `process_market_scan_event()`, incremental enqueue, `handle_live_sim_gateway_event()`까지 호출한다. | 이벤트 POST latency가 projection 비용과 DB write lock에 묶인다. 한 projection 실패가 event ingest 응답과 같은 critical path에 들어온다. SQLite `BEGIN IMMEDIATE` 경합 시 Gateway callback 수집이 밀릴 수 있다. | POST는 raw append + outbox 기록까지만 수행한다. projection별 worker를 분리하고, 각 projection은 독립 watermark/error table을 갖는다. POST 응답에는 append 결과와 enqueue 결과만 반환한다. | `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_detects_event_id_collision`로 projection 실패가 append 이후 발생함을 확인. SQL: `SELECT event_id,status FROM gateway_events ORDER BY rowid DESC LIMIT 20;` |
-| P0-2 Candidate quote refresh TR response의 synthetic price_tick이 parent `event_id`를 재사용 | `services/market_data_service.py::_process_tr_response()`가 row별 synthetic `GatewayEvent(event_id=event.event_id, event_type="price_tick")`를 만들고, `_process_price_tick()`은 `market_tick_samples.event_id` PK에 그대로 INSERT한다. | 단일 TR response에 여러 code row가 있으면 두 번째 synthetic tick에서 `UNIQUE constraint failed: market_tick_samples.event_id`가 발생한다. transaction rollback 뒤 `market_projection_errors`만 남고 `market_data` watermark는 parent event까지 전진하므로 future incremental replay가 해당 accepted event를 건너뛸 수 있다. | synthetic tick에는 `parent_event_id:row_index:code` 기반 child event id를 부여하거나, `market_tick_samples` PK를 `(event_id, code, exchange)`로 바꾸고 parent event id를 별도 컬럼으로 둔다. projection error 시 watermark 전진 정책도 재검토한다. | 추가 테스트: `test_synthetic_tr_response_multiple_ticks_detects_event_id_collision`. SQL: `SELECT event_id,error_message FROM market_projection_errors WHERE event_id LIKE 'evt_candidate_quote_refresh%';` |
+| P0-2 Candidate quote refresh TR response synthetic price_tick `event_id` collision | 수정 완료. `_process_tr_response()`는 row별 synthetic child `GatewayEvent.event_id`를 deterministic하게 생성하고, parent metadata를 보존한다. 근거: `services/market_data_service.py::_synthetic_price_tick_event_id()`, `_with_synthetic_price_tick_metadata()`. | 다중 code row TR response가 `market_tick_samples.event_id` PK 충돌 없이 projection된다. | 유지보수 방향: child id 포맷과 metadata contract를 replay/reconcile 문서에 계속 고정한다. | 테스트: `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`. SQL: `SELECT event_id, metadata_json FROM market_tick_samples WHERE event_id LIKE '%synthetic_price_tick%';` |
 | P0-3 `runtime_execution_lock` TTL 만료 시 첫 owner 실행 중에도 두 번째 owner가 lock 획득 가능 | `services/runtime/evaluation_run_guard.py::_acquire_lock()`은 `expires_at <= now`이면 같은 `lock_name` row를 새 owner로 upsert한다. lock holder의 heartbeat/lease renewal/fencing token이 없다. `apps/core_api.py::lifespan()`은 시작 시 `clear_runtime_execution_locks()`로 모든 lock을 삭제한다. | long-running observe cycle/entry timing/LIVE_SIM loop가 TTL을 넘기면 incremental worker가 같은 `evaluation_pipeline`을 재획득할 수 있다. multi-process 배포에서 한 Core process startup이 다른 process의 active lock을 삭제할 수 있다. latest tables가 서로 다른 run의 결과로 덮인다. | lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 추가한다. 실행 중 lease renewal을 하고, startup clear는 expired/self-owned lock만 대상으로 제한한다. run write 시 fencing token을 검증한다. | 추가 테스트: `test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running`. SQL: `SELECT * FROM runtime_execution_locks;` |
 | P0-4 order command가 `DISPATCHED`로 claim된 뒤 Gateway가 SendOrder 전 죽으면 broker boundary 상태가 불명확 | `storage/gateway_command_store.py::_dispatch_ready_commands()`가 poll 시 `QUEUED -> DISPATCHED`를 커밋한다. `gateway/kiwoom_command_handlers.py::_handle_send_order()`에서 그 뒤 `command_started`, `order_pre_ack`, SendOrder, `command_ack` 순으로 이벤트가 생성된다. | Core에는 `DISPATCHED`만 남고 `order_pre_ack`가 없으면 broker 도달 전/후를 DB 상태만으로 구분하기 어렵다. timeout 후 `UNCONFIRMED`로 가더라도 operator가 broker absent 여부를 수동 확인해야 한다. | command 상태 모델에 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 분리한다. `order_pre_ack`를 file journal뿐 아니라 DB pre_ack table/unique key로 durable하게 저장한다. | 추가 테스트: `test_order_command_lifecycle_detects_dispatched_without_pre_ack`. SQL: `SELECT c.command_id FROM gateway_commands c WHERE c.status='DISPATCHED' AND c.command_type IN ('send_order','cancel_order') AND NOT EXISTS (SELECT 1 FROM gateway_events e WHERE e.command_id=c.command_id AND e.event_type='order_pre_ack');` |
 
@@ -106,10 +108,25 @@ PR-7 추가 테스트:
 - worker apply 후 `market_tick_samples`, `market_ticks_latest`, `incremental_evaluation_queue`와 deferred evidence 기록
 - operator status/dashboard/ops script가 invalid effective skip과 deferred enqueue 누락을 감지
 
+PR-8 추가 테스트:
+
+- `tests/test_market_data_tr_response_side_effects.py`
+- `tests/test_projection_outbox_tr_response_deferred_side_effect.py`
+- `tests/test_ops_market_data_tr_response_side_effect_check.py`
+
+핵심 검증:
+
+- candidate quote refresh `tr_response` side-effect 서비스가 code별 incremental queue를 생성하고 empty/partial error를 구분
+- Gateway inline `tr_response` projection과 기존 incremental enqueue 응답 의미 유지
+- worker가 직접 `tr_response` market_data projection을 적용한 경우에만 deferred candidate quote refresh side-effect 기록
+- inline already applied verify 경로에서는 duplicate side-effect 미실행
+- `tr_response`/`condition_event`는 cutover flag가 켜져도 `effective_skip_inline=0`
+- operator status/dashboard/ops script가 PR-8 금지 조건과 side-effect error를 감지
+
 ## 다음 PR 권장 순서
 
-1. PR-7을 실제 장중 소량 budget으로 검증하고, `price_tick` effective skip -> worker apply -> deferred incremental enqueue -> reconcile PASS가 반복되는지 확인한다.
-2. PR-8에서 `tr_response` quote refresh enqueue와 `condition_event` condition_fusion refresh를 worker side effect로 옮길 수 있는지 shadow migration을 설계한다.
+1. PR-8을 실제 장중 `tr_response` 구간에서 검증하고, `tr_response_effective_skip_count=0`, deferred side-effect error 0, outbox error/dead-letter 0을 확인한다.
+2. `condition_event` condition_fusion refresh를 worker side-effect로 옮길 수 있는지 별도 shadow migration을 설계한다.
 3. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 4. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
 5. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.

@@ -33,7 +33,10 @@ from services.market_data_service import (
 from services.runtime.gateway_projection_routing import (
     record_market_data_post_apply_deferred_side_effects,
 )
-from services.runtime.incremental_evaluation import enqueue_incremental_evaluation_for_event
+from services.runtime.market_data_projection_side_effects import (
+    enqueue_incremental_for_candidate_quote_refresh_tr_response,
+    enqueue_incremental_for_price_tick_projection,
+)
 
 APPLY_MODE_SHADOW_VERIFY_ONLY = "SHADOW_VERIFY_ONLY"
 APPLY_MODE_MARKET_DATA_APPLY = "MARKET_DATA_APPLY"
@@ -409,12 +412,47 @@ def _apply_market_data_projection(
         )
 
     post_apply_side_effects: dict[str, Any] = {}
-    if event_type == "price_tick" and projection_result.applied_count > 0:
+    if (
+        event_type == "price_tick"
+        and projection_result.status == "APPLIED"
+        and projection_result.applied_count > 0
+    ):
         post_apply_side_effects = _enqueue_deferred_incremental_evaluation_for_price_tick(
             connection,
             event,
             settings=settings,
         )
+        record_market_data_post_apply_deferred_side_effects(
+            connection,
+            event_id,
+            post_apply_side_effects,
+        )
+    elif (
+        event_type == "tr_response"
+        and projection_result.status == "APPLIED"
+        and projection_result.applied_count > 0
+    ):
+        post_apply_side_effects = _enqueue_deferred_candidate_quote_refresh_for_tr_response(
+            connection,
+            event,
+            settings=settings,
+        )
+        record_market_data_post_apply_deferred_side_effects(
+            connection,
+            event_id,
+            post_apply_side_effects,
+        )
+    elif event_type == "tr_response":
+        post_apply_side_effects = {
+            "candidate_quote_refresh_enqueue_status": "SKIPPED",
+            "reason": "PROJECTION_RESULT_NOT_APPLIED",
+            "projection_result_status": projection_result.status,
+            "projection_result_applied_count": projection_result.applied_count,
+            "source": "projection_outbox_worker_tr_response",
+            "deferred_from_gateway_path": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
         record_market_data_post_apply_deferred_side_effects(
             connection,
             event_id,
@@ -776,26 +814,51 @@ def _enqueue_deferred_incremental_evaluation_for_price_tick(
         connection,
         event.event_id,
     )
-    try:
-        result = enqueue_incremental_evaluation_for_event(
-            connection,
-            event,
-            settings=settings,
-        )
-    except Exception as exc:
-        return {
-            "incremental_evaluation_enqueue_status": "ERROR",
-            "error_message": str(exc),
-            "deferred_from_gateway_path": deferred_from_gateway_path,
-            "no_order_side_effects": True,
-        }
+    result = enqueue_incremental_for_price_tick_projection(
+        connection,
+        event,
+        settings=settings,
+        source="projection_outbox_worker_price_tick",
+    )
     return {
         "incremental_evaluation_enqueue_status": result.status,
         "enqueued_count": result.enqueued_count,
         "candidate_ids": list(result.candidate_ids),
-        "code": result.code,
+        "code": result.codes[0] if result.codes else None,
+        "error_count": result.error_count,
+        "source": result.source,
         "deferred_from_gateway_path": deferred_from_gateway_path,
         "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+        "evidence": result.to_dict(),
+    }
+
+
+def _enqueue_deferred_candidate_quote_refresh_for_tr_response(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    result = enqueue_incremental_for_candidate_quote_refresh_tr_response(
+        connection,
+        event,
+        settings=settings,
+        source="projection_outbox_worker_tr_response",
+    )
+    return {
+        "candidate_quote_refresh_enqueue_status": result.status,
+        "candidate_quote_refresh_code_count": result.code_count,
+        "candidate_quote_refresh_enqueued_count": result.enqueued_count,
+        "candidate_quote_refresh_error_count": result.error_count,
+        "candidate_quote_refresh_statuses": list(result.statuses),
+        "candidate_quote_refresh_codes": list(result.codes),
+        "candidate_quote_refresh_reason_codes": list(result.reason_codes),
+        "source": result.source,
+        "deferred_from_gateway_path": True,
+        "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+        "evidence": result.to_dict(),
     }
 
 
