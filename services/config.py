@@ -176,6 +176,16 @@ class Settings:
     market_data_max_recent_ticks: int = 1000
     market_data_premarket_snapshot_enabled: bool = False
     market_data_projection_reconcile_limit: int = 500
+    gateway_market_data_append_only_dry_run_enabled: bool = False
+    gateway_market_data_append_only_cutover_enabled: bool = False
+    gateway_market_data_append_only_require_reconcile_pass: bool = True
+    gateway_market_data_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_data_append_only_event_types: tuple[str, ...] = (
+        "price_tick",
+        "condition_event",
+        "tr_response",
+    )
+    gateway_market_data_append_only_min_outbox_status: str = "ENQUEUED"
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
     event_store_retention_batch_size: int = 5000
@@ -516,6 +526,30 @@ class Settings:
             )
         if self.market_data_projection_reconcile_limit < 1:
             raise ValueError("MARKET_DATA_PROJECTION_RECONCILE_LIMIT must be >= 1")
+        if self.gateway_market_data_append_only_reconcile_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
+        object.__setattr__(
+            self,
+            "gateway_market_data_append_only_event_types",
+            tuple(
+                event_type.strip().lower()
+                for event_type in self.gateway_market_data_append_only_event_types
+                if event_type.strip()
+            ),
+        )
+        if not self.gateway_market_data_append_only_event_types:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES must not be empty"
+            )
+        object.__setattr__(
+            self,
+            "gateway_market_data_append_only_min_outbox_status",
+            _normalize_non_empty(
+                self.gateway_market_data_append_only_min_outbox_status
+            ).upper(),
+        )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
         if self.market_scan_interval_sec < 1:
@@ -1634,6 +1668,33 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("MARKET_DATA_PROJECTION_RECONCILE_LIMIT", "500"),
             "MARKET_DATA_PROJECTION_RECONCILE_LIMIT",
             min_value=1,
+        ),
+        gateway_market_data_append_only_dry_run_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED", "false")
+        ),
+        gateway_market_data_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_data_append_only_require_reconcile_pass=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_RECONCILE_PASS", "true")
+        ),
+        gateway_market_data_append_only_reconcile_max_age_sec=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC", "300"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_data_append_only_event_types=tuple(
+            _parse_csv_list(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES",
+                    "price_tick,condition_event,tr_response",
+                ),
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES",
+            )
+        ),
+        gateway_market_data_append_only_min_outbox_status=env.get(
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MIN_OUTBOX_STATUS",
+            "ENQUEUED",
         ),
         event_store_retention_enabled=_parse_bool(
             env.get("EVENT_STORE_RETENTION_ENABLED", "false")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 APP_NAME = "suseok-trader-v2"
 
 
@@ -40,6 +40,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_event_retention_tables(connection)
     _create_market_data_tables(connection)
     _create_market_data_projection_reconcile_tables(connection)
+    _create_market_data_projection_routing_tables(connection)
     _create_market_reference_tables(connection)
     _create_market_index_tables(connection)
     _create_market_scan_tables(connection)
@@ -1694,6 +1695,61 @@ def _create_market_data_projection_reconcile_tables(
         """
         CREATE INDEX IF NOT EXISTS idx_market_data_reconcile_issues_reason
         ON market_data_projection_reconcile_issues (reason_code)
+        """
+    )
+
+
+def _create_market_data_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_data',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_projection_routing_event
+        ON market_data_projection_routing_decisions (event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_projection_routing_decided
+        ON market_data_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_projection_routing_would_skip
+        ON market_data_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_projection_routing_effective_skip
+        ON market_data_projection_routing_decisions (effective_skip_inline, decided_at)
         """
     )
 

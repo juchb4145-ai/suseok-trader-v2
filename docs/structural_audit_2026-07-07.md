@@ -19,6 +19,7 @@
 - PR-3: `projection_outbox` shadow verification worker를 추가했다. worker는 inline projection을 대체하지 않고 projection table을 직접 갱신하지 않으며, outbox job 상태만 `APPLIED`/`SKIPPED`/`ERROR`/`DEAD_LETTER`로 정리한다. background worker는 기본 disabled다.
 - PR-4: `projection_outbox` market_data-only apply pilot을 추가했다. 기본값은 disabled이며, `PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=true`와 `PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED=true`가 모두 켜지고 operator가 `apply_projection=true`로 run-once를 호출할 때만 `market_data` projection 재적용이 허용된다. `market_reference`/`market_index`/`market_regime`/`market_scan`/`condition_fusion` apply는 여전히 차단되고, Gateway POST inline projection과 주문/LIVE_SIM 동작은 변경하지 않았다. 운영 절차는 `docs/runbook_projection_outbox_apply_market_data_ko.md`에 정리했다.
 - PR-5: `market_data` projection dual-run reconciliation을 추가했다. accepted `price_tick`/`condition_event`/`tr_response`와 inline projection artifact, `projection_outbox`, watermark, synthetic child event id를 대조해 append-only 전환 준비도를 `PASS`/`WARN`/`FAIL`로 리포트한다. 이 PR도 append-only 전환이 아니며 Gateway inline projection, worker default disabled, 주문/LIVE_SIM/LIVE_REAL 정책은 그대로 유지한다. 운영 절차는 `docs/runbook_market_data_projection_reconcile_ko.md`에 정리했다.
+- PR-6: `market_data` append-only dry-run routing decision을 추가했다. Gateway inline `process_gateway_event()`는 계속 실행되며, dry-run flag가 켜진 경우에만 reconcile PASS/outbox readiness 조건을 만족한 이벤트에 대해 `would_skip_inline=True`를 기록한다. `effective_skip_inline`은 PR-6에서 항상 `False`이며, cutover flag가 켜져도 `EFFECTIVE_SKIP_DISABLED_IN_PR6` evidence만 남긴다. 운영 절차는 `docs/runbook_market_data_append_only_routing_ko.md`에 정리했다.
 
 ## P0
 
@@ -74,6 +75,20 @@ python -m pytest tests\test_structural_audit_guards.py -q
 ```text
 9 passed
 ```
+
+PR-6 추가 테스트:
+
+- `tests/test_gateway_market_data_append_only_routing.py`
+- `tests/test_ops_market_data_append_only_routing_check.py`
+
+핵심 검증:
+
+- dry-run disabled 기본 동작에서 inline projection 유지
+- reconcile PASS/outbox ready일 때만 `would_skip_inline=True`
+- reconcile missing/FAIL/stale이면 BLOCKED
+- cutover flag가 켜져도 PR-6에서는 `effective_skip_inline=False`
+- condition_event/tr_response도 allowlist 안에서 decision 기록
+- operator status/dashboard/ops script 판정 포함
 
 ## 다음 PR 권장 순서
 

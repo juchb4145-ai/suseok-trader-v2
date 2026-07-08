@@ -24,6 +24,10 @@ from services.market_regime_service import (
     should_rebuild_market_regime_snapshot,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
+from services.runtime.gateway_projection_routing import (
+    MarketDataAppendOnlyRoutingDecision,
+    decide_market_data_projection_routing,
+)
 from services.runtime.incremental_evaluation import (
     DIRTY_REASON_CANDIDATE_QUOTE_REFRESH,
     enqueue_incremental_evaluation_for_code,
@@ -75,6 +79,22 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                 if outbox_status is not None:
                     projection_statuses["projection_outbox"] = outbox_status
                 if event_type in MARKET_DATA_EVENT_TYPES:
+                    routing_decision = _decide_market_data_projection_routing(
+                        connection,
+                        event,
+                        settings=settings,
+                        outbox_status=outbox_status,
+                    )
+                    if routing_decision is None:
+                        projection_statuses["market_data_append_only_dry_run"] = "ERROR"
+                        projection_statuses["market_data_effective_skip_inline"] = "FALSE"
+                    else:
+                        projection_statuses["market_data_append_only_dry_run"] = (
+                            _market_data_append_only_dry_run_status(routing_decision)
+                        )
+                        projection_statuses["market_data_effective_skip_inline"] = (
+                            "TRUE" if routing_decision.effective_skip_inline else "FALSE"
+                        )
                     projection_result = process_gateway_event(
                         connection,
                         event,
@@ -179,6 +199,36 @@ def _enqueue_projection_outbox_jobs(connection, event: GatewayEvent) -> str | No
     if result.job_count <= 0:
         return None
     return result.status
+
+
+def _decide_market_data_projection_routing(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+    outbox_status: str | None,
+) -> MarketDataAppendOnlyRoutingDecision | None:
+    try:
+        return decide_market_data_projection_routing(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+        )
+    except Exception:
+        logger.exception("market_data append-only dry-run routing decision failed")
+        return None
+
+
+def _market_data_append_only_dry_run_status(
+    decision: MarketDataAppendOnlyRoutingDecision,
+) -> str:
+    reasons = set(decision.blocked_reason_codes)
+    if decision.would_skip_inline:
+        return "WOULD_SKIP_INLINE"
+    if "DRY_RUN_DISABLED" in reasons:
+        return "DISABLED"
+    return "BLOCKED"
 
 
 def _enqueue_incremental_evaluation_for_price_tick(

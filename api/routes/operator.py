@@ -16,6 +16,10 @@ from services.realtime_subscription import (
     run_realtime_subscription_once,
 )
 from services.runtime.evaluation_run_guard import EvaluationRunLockError
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+    list_market_data_append_only_routing_decisions,
+)
 from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
     process_incremental_evaluation_batch,
@@ -259,6 +263,38 @@ def operator_market_data_projection_reconcile_run_once(
         payload["read_only_projection"] = True
         payload["read_only"] = True
         return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-data-append-only-routing/status")
+def operator_market_data_append_only_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_data_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-data-append-only-routing/decisions")
+def operator_market_data_append_only_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return {
+            "decisions": list_market_data_append_only_routing_decisions(
+                connection,
+                limit=limit,
+            ),
+            "read_only": True,
+            "no_trading_side_effects": True,
+        }
     finally:
         connection.close()
 

@@ -115,6 +115,9 @@ from services.risk_gate import (
     list_risk_check_observations,
     list_risk_errors,
 )
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+)
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
@@ -161,6 +164,7 @@ DASHBOARD_SECTIONS = [
     "errors",
     "projection_outbox",
     "market_data_projection_reconcile",
+    "market_data_append_only_routing",
     "pipeline_summary",
 ]
 
@@ -262,6 +266,10 @@ def build_dashboard_snapshot(
         write_snapshot=False,
     ).to_dict()
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
+    market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
+        connection,
+        settings=settings,
+    )
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_cross_exchange = list_recent_cross_exchange_observations(
@@ -426,6 +434,7 @@ def build_dashboard_snapshot(
         condition_fusion_status=condition_fusion_section["status"],
         projection_outbox_status=projection_outbox_status,
         market_data_reconcile=market_data_reconcile,
+        market_data_append_only_routing=market_data_append_only_routing,
         settings=settings,
     )
 
@@ -457,6 +466,7 @@ def build_dashboard_snapshot(
         "realtime_subscription": realtime_subscription,
         "projection_outbox": projection_outbox_status,
         "market_data_projection_reconcile": market_data_reconcile,
+        "market_data_append_only_routing": market_data_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -1114,6 +1124,7 @@ def _pipeline_summary(
     condition_fusion_status: dict[str, Any],
     projection_outbox_status: dict[str, Any],
     market_data_reconcile: dict[str, Any],
+    market_data_append_only_routing: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1195,6 +1206,9 @@ def _pipeline_summary(
         },
         "market_data_projection_reconcile": _market_data_reconcile_summary(
             market_data_reconcile
+        ),
+        "market_data_append_only_routing": _market_data_append_only_routing_summary(
+            market_data_append_only_routing
         ),
         "themes": {
             "theme_count": theme_status["theme_count"],
@@ -1413,6 +1427,45 @@ def _market_data_reconcile_summary(payload: Mapping[str, Any]) -> dict[str, Any]
         "reason_codes": list(latest.get("reason_codes") or []),
         "latest_run_id": latest.get("run_id"),
         "latest_run_created_at": latest.get("created_at"),
+        "warnings": warnings,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
+
+
+def _market_data_append_only_routing_summary(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    effective_skip_count = int(payload.get("effective_skip_inline_count") or 0)
+    warnings = list(payload.get("warnings") or [])
+    if effective_skip_count:
+        warnings.insert(0, "PR-6 invariant violation: effective skip must remain 0")
+    elif "PR-6 dry-run only; inline projection remains enabled" not in warnings:
+        warnings.append("PR-6 dry-run only; inline projection remains enabled")
+    latest_reconcile = payload.get("latest_reconcile")
+    latest_reconcile_run = (
+        latest_reconcile.get("latest_run")
+        if isinstance(latest_reconcile, Mapping)
+        else None
+    )
+    latest_decision = payload.get("latest_decision")
+    return {
+        "dry_run_enabled": bool(payload.get("dry_run_enabled")),
+        "cutover_enabled": bool(payload.get("cutover_enabled")),
+        "latest_reconcile_status": (
+            latest_reconcile_run.get("status")
+            if isinstance(latest_reconcile_run, Mapping)
+            else None
+        ),
+        "append_only_ready": bool(payload.get("append_only_ready")),
+        "would_skip_inline_count": int(payload.get("would_skip_inline_count") or 0),
+        "effective_skip_inline_count": effective_skip_count,
+        "blocked_count": int(payload.get("blocked_count") or 0),
+        "blocked_reason_code_counts": dict(
+            payload.get("blocked_reason_code_counts") or {}
+        ),
+        "latest_decision": latest_decision if isinstance(latest_decision, Mapping) else None,
+        "effective_skip_disabled_in_pr6": True,
         "warnings": warnings,
         "read_only": True,
         "no_trading_side_effects": True,

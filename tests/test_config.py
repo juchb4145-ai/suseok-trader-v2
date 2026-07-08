@@ -73,6 +73,16 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
     assert settings.market_data_premarket_snapshot_enabled is False
     assert settings.market_data_projection_reconcile_limit == 500
+    assert settings.gateway_market_data_append_only_dry_run_enabled is False
+    assert settings.gateway_market_data_append_only_cutover_enabled is False
+    assert settings.gateway_market_data_append_only_require_reconcile_pass is True
+    assert settings.gateway_market_data_append_only_reconcile_max_age_sec == 300
+    assert settings.gateway_market_data_append_only_event_types == (
+        "price_tick",
+        "condition_event",
+        "tr_response",
+    )
+    assert settings.gateway_market_data_append_only_min_outbox_status == "ENQUEUED"
     assert settings.event_store_retention_enabled is False
     assert settings.event_store_retention_days == 30
     assert settings.event_store_retention_batch_size == 5000
@@ -487,12 +497,39 @@ def test_market_data_interval_settings_are_validated() -> None:
     settings = load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "25"})
     assert settings.market_data_projection_reconcile_limit == 25
 
+    routing_settings = load_settings(
+        {
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "60",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES": "price_tick,tr_response",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MIN_OUTBOX_STATUS": "enqueued",
+        }
+    )
+    assert routing_settings.gateway_market_data_append_only_dry_run_enabled is True
+    assert routing_settings.gateway_market_data_append_only_cutover_enabled is True
+    assert routing_settings.gateway_market_data_append_only_require_reconcile_pass is False
+    assert routing_settings.gateway_market_data_append_only_reconcile_max_age_sec == 60
+    assert routing_settings.gateway_market_data_append_only_event_types == (
+        "price_tick",
+        "tr_response",
+    )
+    assert routing_settings.gateway_market_data_append_only_min_outbox_status == "ENQUEUED"
+
     try:
         load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "0"})
     except ValueError as exc:
         assert "MARKET_DATA_PROJECTION_RECONCILE_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid market data reconcile limit")
+
+    try:
+        load_settings({"GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0"})
+    except ValueError as exc:
+        assert "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid append-only routing max age")
 
 
 def test_realtime_subscription_settings_are_validated() -> None:
