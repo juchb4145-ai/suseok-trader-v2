@@ -116,6 +116,9 @@ from services.risk_gate import (
     list_risk_errors,
 )
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
+from services.runtime.market_data_projection_reconcile import (
+    get_latest_market_data_projection_reconcile,
+)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
 )
@@ -157,6 +160,7 @@ DASHBOARD_SECTIONS = [
     "recent_events",
     "errors",
     "projection_outbox",
+    "market_data_projection_reconcile",
     "pipeline_summary",
 ]
 
@@ -257,6 +261,7 @@ def build_dashboard_snapshot(
         limit=min(bounded_limit, settings.no_buy_sentinel_top_near_miss_limit),
         write_snapshot=False,
     ).to_dict()
+    market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_cross_exchange = list_recent_cross_exchange_observations(
@@ -420,6 +425,7 @@ def build_dashboard_snapshot(
         latest_observe_cycle=latest_observe_cycle,
         condition_fusion_status=condition_fusion_section["status"],
         projection_outbox_status=projection_outbox_status,
+        market_data_reconcile=market_data_reconcile,
         settings=settings,
     )
 
@@ -450,6 +456,7 @@ def build_dashboard_snapshot(
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "projection_outbox": projection_outbox_status,
+        "market_data_projection_reconcile": market_data_reconcile,
         "themes": {
             "status": {
                 **theme_status,
@@ -1106,6 +1113,7 @@ def _pipeline_summary(
     latest_observe_cycle: dict[str, Any] | None,
     condition_fusion_status: dict[str, Any],
     projection_outbox_status: dict[str, Any],
+    market_data_reconcile: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1185,6 +1193,9 @@ def _pipeline_summary(
             "warnings": projection_outbox_status["warnings"],
             "read_only": True,
         },
+        "market_data_projection_reconcile": _market_data_reconcile_summary(
+            market_data_reconcile
+        ),
         "themes": {
             "theme_count": theme_status["theme_count"],
             "latest_snapshot_count": theme_status["latest_snapshot_count"],
@@ -1359,6 +1370,52 @@ def _pipeline_summary(
                 "count": 1 if no_buy_sentinel.get("no_buy_detected") else 0,
             },
         ],
+    }
+
+
+def _market_data_reconcile_summary(payload: Mapping[str, Any]) -> dict[str, Any]:
+    latest = payload.get("latest_run")
+    if not isinstance(latest, Mapping):
+        return {
+            "latest_status": None,
+            "append_only_ready": False,
+            "checked_event_count": 0,
+            "missing_projection_count": 0,
+            "outbox_error_count": 0,
+            "dead_letter_count": 0,
+            "watermark_risk_count": 0,
+            "synthetic_child_event_issue_count": 0,
+            "reason_codes": [],
+            "latest_run_id": None,
+            "latest_run_created_at": None,
+            "warnings": [
+                "market_data append-only 전환 보류",
+                "Gateway inline projection remains enabled",
+            ],
+            "read_only": True,
+            "no_trading_side_effects": True,
+        }
+    append_only_ready = bool(latest.get("append_only_ready"))
+    warnings = ["Gateway inline projection remains enabled"]
+    if not append_only_ready:
+        warnings.insert(0, "market_data append-only 전환 보류")
+    return {
+        "latest_status": latest.get("status"),
+        "append_only_ready": append_only_ready,
+        "checked_event_count": int(latest.get("checked_event_count") or 0),
+        "missing_projection_count": int(latest.get("missing_projection_count") or 0),
+        "outbox_error_count": int(latest.get("outbox_error_count") or 0),
+        "dead_letter_count": int(latest.get("outbox_dead_letter_count") or 0),
+        "watermark_risk_count": int(latest.get("watermark_risk_count") or 0),
+        "synthetic_child_event_issue_count": int(
+            latest.get("synthetic_child_event_issue_count") or 0
+        ),
+        "reason_codes": list(latest.get("reason_codes") or []),
+        "latest_run_id": latest.get("run_id"),
+        "latest_run_created_at": latest.get("created_at"),
+        "warnings": warnings,
+        "read_only": True,
+        "no_trading_side_effects": True,
     }
 
 

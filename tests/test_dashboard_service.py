@@ -90,6 +90,13 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         ]
         is False
     )
+    assert snapshot["market_data_projection_reconcile"]["latest_run"] is None
+    assert (
+        snapshot["pipeline_summary"]["market_data_projection_reconcile"][
+            "append_only_ready"
+        ]
+        is False
+    )
 
 
 def test_dashboard_snapshot_includes_projection_outbox_status(tmp_path) -> None:

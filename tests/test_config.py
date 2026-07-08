@@ -72,6 +72,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_degraded_tick_stale_sec == 30
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
     assert settings.market_data_premarket_snapshot_enabled is False
+    assert settings.market_data_projection_reconcile_limit == 500
     assert settings.event_store_retention_enabled is False
     assert settings.event_store_retention_days == 30
     assert settings.event_store_retention_batch_size == 5000
@@ -482,6 +483,16 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "minute-aligned" in str(exc)
     else:
         raise AssertionError("expected invalid market data interval configuration")
+
+    settings = load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "25"})
+    assert settings.market_data_projection_reconcile_limit == 25
+
+    try:
+        load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "0"})
+    except ValueError as exc:
+        assert "MARKET_DATA_PROJECTION_RECONCILE_LIMIT" in str(exc)
+    else:
+        raise AssertionError("expected invalid market data reconcile limit")
 
 
 def test_realtime_subscription_settings_are_validated() -> None:

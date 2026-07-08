@@ -175,6 +175,7 @@ class Settings:
     market_data_rebuild_batch_size: int = 500
     market_data_max_recent_ticks: int = 1000
     market_data_premarket_snapshot_enabled: bool = False
+    market_data_projection_reconcile_limit: int = 500
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
     event_store_retention_batch_size: int = 5000
@@ -513,6 +514,8 @@ class Settings:
             raise ValueError(
                 "MARKET_DATA_DEGRADED_TICK_STALE_SEC must be >= MARKET_DATA_TICK_STALE_SEC"
             )
+        if self.market_data_projection_reconcile_limit < 1:
+            raise ValueError("MARKET_DATA_PROJECTION_RECONCILE_LIMIT must be >= 1")
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
         if self.market_scan_interval_sec < 1:
@@ -1626,6 +1629,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         market_data_premarket_snapshot_enabled=_parse_bool(
             env.get("MARKET_DATA_PREMARKET_SNAPSHOT_ENABLED", "false")
+        ),
+        market_data_projection_reconcile_limit=_parse_int(
+            env.get("MARKET_DATA_PROJECTION_RECONCILE_LIMIT", "500"),
+            "MARKET_DATA_PROJECTION_RECONCILE_LIMIT",
+            min_value=1,
         ),
         event_store_retention_enabled=_parse_bool(
             env.get("EVENT_STORE_RETENTION_ENABLED", "false")
