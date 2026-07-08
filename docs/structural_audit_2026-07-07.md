@@ -120,13 +120,26 @@ PR-8 추가 테스트:
 - Gateway inline `tr_response` projection과 기존 incremental enqueue 응답 의미 유지
 - worker가 직접 `tr_response` market_data projection을 적용한 경우에만 deferred candidate quote refresh side-effect 기록
 - inline already applied verify 경로에서는 duplicate side-effect 미실행
-- `tr_response`/`condition_event`는 cutover flag가 켜져도 `effective_skip_inline=0`
+- PR-8 기준에서는 `tr_response`/`condition_event` cutover flag가 켜져도 `effective_skip_inline=0`
 - operator status/dashboard/ops script가 PR-8 금지 조건과 side-effect error를 감지
+
+PR-9 진행 상태:
+
+- `tr_response` 한정 market_data inline skip을 strict feature flags, fresh reconcile PASS, worker apply enabled, synthetic child guard, per-minute budget 뒤에서 허용
+- 기본값은 `GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED=false`, `GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE=0`으로 production behavior 변경 없음
+- `condition_event`는 PR-9에서도 inline 유지, effective skip 발견 시 reconcile/operator check에서 FAIL
+- skipped `tr_response`의 candidate quote refresh enqueue는 projection_outbox worker가 market_data apply 성공 후 deferred side-effect로 수행
+- operator status/dashboard/reconcile/ops script에 tr_response budget, pending worker, worker applied, deferred quote refresh, invalid skip counters 추가
+- 추가 테스트:
+  - `tests/test_gateway_market_data_tr_response_cutover.py`
+  - `tests/test_projection_outbox_tr_response_cutover_worker.py`
+  - `tests/test_market_data_reconcile_tr_response_cutover.py`
+  - `tests/test_ops_market_data_tr_response_cutover_check.py`
 
 ## 다음 PR 권장 순서
 
-1. PR-8을 실제 장중 `tr_response` 구간에서 검증하고, `tr_response_effective_skip_count=0`, deferred side-effect error 0, outbox error/dead-letter 0을 확인한다.
-2. `condition_event` condition_fusion refresh를 worker side-effect로 옮길 수 있는지 별도 shadow migration을 설계한다.
+1. PR-9를 실제 장중 `tr_response` 소량 budget으로 검증하고, worker apply/deferred quote refresh/reconcile PASS를 확인한다.
+2. PR-10에서 `condition_event` condition_fusion refresh를 worker side-effect로 옮길 수 있는지 shadow migration을 설계한다.
 3. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 4. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
 5. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.

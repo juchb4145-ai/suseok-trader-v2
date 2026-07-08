@@ -1438,16 +1438,16 @@ def _market_data_append_only_routing_summary(
 ) -> dict[str, Any]:
     effective_skip_count = int(payload.get("effective_skip_inline_count") or 0)
     warnings = list(payload.get("warnings") or [])
-    if "condition_event/tr_response inline projection remains enabled" not in warnings:
-        warnings.append("condition_event/tr_response inline projection remains enabled")
-    if "PR-8: tr_response cutover is not enabled" not in warnings:
-        warnings.append("PR-8: tr_response cutover is not enabled")
+    if "condition_event inline projection remains enabled" not in warnings:
+        warnings.append("condition_event inline projection remains enabled")
+    if "PR-9 tr_response limited cutover is feature-flagged" not in warnings:
+        warnings.append("PR-9 tr_response limited cutover is feature-flagged")
     if "condition_event remains inline" not in warnings:
         warnings.append("condition_event remains inline")
     if "LIVE_REAL/order behavior unchanged" not in warnings:
         warnings.append("LIVE_REAL/order behavior unchanged")
     rollback_hint = payload.get("rollback_hint") or (
-        "disable gateway_market_data_append_only_price_tick_cutover_enabled"
+        "disable gateway_market_data_append_only_tr_response_cutover_enabled"
     )
     latest_reconcile = payload.get("latest_reconcile")
     latest_reconcile_run = (
@@ -1457,10 +1457,11 @@ def _market_data_append_only_routing_summary(
     )
     latest_decision = payload.get("latest_decision")
     return {
-        "pr": "PR-7",
-        "cutover_status": "price_tick-only cutover",
-        "price_tick_cutover_status": "PRICE_TICK_ONLY",
-        "tr_response_side_effect_migration_status": "PREP_ONLY_INLINE_REQUIRED",
+        "pr": "PR-9",
+        "cutover_status": "price_tick + tr_response limited cutover",
+        "pr9_tr_response_limited_cutover": True,
+        "price_tick_cutover_status": "UNCHANGED_PR7",
+        "tr_response_side_effect_migration_status": "WORKER_DEFERRED_READY",
         "dry_run_enabled": bool(payload.get("dry_run_enabled")),
         "cutover_enabled": bool(payload.get("cutover_enabled")),
         "price_tick_cutover_enabled": bool(payload.get("price_tick_cutover_enabled")),
@@ -1491,6 +1492,15 @@ def _market_data_append_only_routing_summary(
         "skip_budget_remaining": int(
             payload.get("skip_budget_remaining_current_minute") or 0
         ),
+        "tr_response_skip_budget_limit_per_minute": int(
+            payload.get("tr_response_skip_budget_limit_per_minute") or 0
+        ),
+        "tr_response_skip_budget_used_current_minute": int(
+            payload.get("tr_response_skip_budget_used_current_minute") or 0
+        ),
+        "tr_response_skip_budget_remaining": int(
+            payload.get("tr_response_skip_budget_remaining_current_minute") or 0
+        ),
         "would_skip_inline_count": int(payload.get("would_skip_inline_count") or 0),
         "effective_skip_inline_count": effective_skip_count,
         "effective_price_tick_skip_count": int(
@@ -1511,6 +1521,19 @@ def _market_data_append_only_routing_summary(
         "tr_response_deferred_enqueue_error_count": int(
             payload.get("tr_response_deferred_side_effect_error_count") or 0
         ),
+        "tr_response_pending_worker_count": int(
+            payload.get("tr_response_pending_worker_count") or 0
+        ),
+        "tr_response_worker_applied_count": int(
+            payload.get("tr_response_worker_applied_count") or 0
+        ),
+        "tr_response_deferred_quote_refresh_count": int(
+            payload.get("tr_response_deferred_quote_refresh_count") or 0
+        ),
+        "tr_response_deferred_quote_refresh_error_count": int(
+            payload.get("tr_response_deferred_quote_refresh_error_count") or 0
+        ),
+        "synthetic_child_guard_status": payload.get("synthetic_child_guard_status"),
         "condition_event_inline_status": "INLINE_REQUIRED",
         "invalid_effective_skip_count": int(
             payload.get("invalid_effective_skip_count") or 0

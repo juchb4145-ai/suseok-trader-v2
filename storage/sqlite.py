@@ -1652,6 +1652,13 @@ def _create_market_data_projection_reconcile_tables(
             duplicate_or_conflict_count INTEGER NOT NULL,
             synthetic_child_event_issue_count INTEGER NOT NULL,
             watermark_risk_count INTEGER NOT NULL,
+            tr_response_effective_skip_count INTEGER NOT NULL DEFAULT 0,
+            tr_response_pending_within_sla_count INTEGER NOT NULL DEFAULT 0,
+            tr_response_worker_applied_count INTEGER NOT NULL DEFAULT 0,
+            tr_response_deferred_quote_refresh_count INTEGER NOT NULL DEFAULT 0,
+            tr_response_deferred_quote_refresh_error_count INTEGER NOT NULL DEFAULT 0,
+            condition_event_effective_skip_count INTEGER NOT NULL DEFAULT 0,
+            invalid_effective_skip_count INTEGER NOT NULL DEFAULT 0,
             event_rowid_min INTEGER,
             event_rowid_max INTEGER,
             append_only_ready INTEGER NOT NULL DEFAULT 0,
@@ -1697,6 +1704,19 @@ def _create_market_data_projection_reconcile_tables(
         ON market_data_projection_reconcile_issues (reason_code)
         """
     )
+    _ensure_columns(
+        connection,
+        "market_data_projection_reconcile_runs",
+        {
+            "tr_response_effective_skip_count": "INTEGER NOT NULL DEFAULT 0",
+            "tr_response_pending_within_sla_count": "INTEGER NOT NULL DEFAULT 0",
+            "tr_response_worker_applied_count": "INTEGER NOT NULL DEFAULT 0",
+            "tr_response_deferred_quote_refresh_count": "INTEGER NOT NULL DEFAULT 0",
+            "tr_response_deferred_quote_refresh_error_count": "INTEGER NOT NULL DEFAULT 0",
+            "condition_event_effective_skip_count": "INTEGER NOT NULL DEFAULT 0",
+            "invalid_effective_skip_count": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
 
 
 def _create_market_data_projection_routing_tables(
@@ -1727,6 +1747,13 @@ def _create_market_data_projection_routing_tables(
             skip_budget_remaining INTEGER,
             worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
             fallback_inline_projection_expected INTEGER NOT NULL DEFAULT 1,
+            tr_response_rows_count INTEGER,
+            tr_response_skip_budget_limit INTEGER,
+            tr_response_skip_budget_used INTEGER,
+            tr_response_skip_budget_remaining INTEGER,
+            synthetic_child_guard_status TEXT,
+            worker_side_effect_ready INTEGER,
+            deferred_side_effect_required INTEGER,
             post_apply_deferred_side_effects_json TEXT NOT NULL DEFAULT '{}',
             blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
@@ -1745,6 +1772,13 @@ def _create_market_data_projection_routing_tables(
             "skip_budget_remaining": "INTEGER",
             "worker_apply_enabled": "INTEGER NOT NULL DEFAULT 0",
             "fallback_inline_projection_expected": "INTEGER NOT NULL DEFAULT 1",
+            "tr_response_rows_count": "INTEGER",
+            "tr_response_skip_budget_limit": "INTEGER",
+            "tr_response_skip_budget_used": "INTEGER",
+            "tr_response_skip_budget_remaining": "INTEGER",
+            "synthetic_child_guard_status": "TEXT",
+            "worker_side_effect_ready": "INTEGER",
+            "deferred_side_effect_required": "INTEGER",
             "post_apply_deferred_side_effects_json": "TEXT NOT NULL DEFAULT '{}'",
         },
     )

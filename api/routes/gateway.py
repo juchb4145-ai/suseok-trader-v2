@@ -97,12 +97,22 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         )
                         market_data_routing = routing_decision.to_dict()
                     if routing_decision is not None and routing_decision.effective_skip_inline:
-                        projection_status = "SKIPPED_INLINE_APPEND_ONLY_PRICE_TICK"
+                        if event_type == "tr_response":
+                            projection_status = (
+                                "SKIPPED_INLINE_APPEND_ONLY_TR_RESPONSE"
+                            )
+                            incremental_status = (
+                                "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_TR_RESPONSE"
+                            )
+                        elif event_type == "price_tick":
+                            projection_status = "SKIPPED_INLINE_APPEND_ONLY_PRICE_TICK"
+                            incremental_status = "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
+                        else:
+                            projection_status = "SKIPPED_INLINE_APPEND_ONLY_MARKET_DATA"
+                            incremental_status = "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
                         projection_statuses["market_data"] = projection_status
                         projection_statuses["market_data_effective_skip_inline"] = "TRUE"
-                        projection_statuses["incremental_evaluation"] = (
-                            "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
-                        )
+                        projection_statuses["incremental_evaluation"] = incremental_status
                     else:
                         projection_result = process_gateway_event(
                             connection,

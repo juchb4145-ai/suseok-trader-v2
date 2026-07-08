@@ -18,6 +18,7 @@ from domain.broker.utils import (
 from storage.gateway_command_store import canonical_json
 
 from services.candidate_quote_refresh import (
+    candidate_quote_refresh_codes_from_payload,
     candidate_quote_refresh_tick_payloads_from_tr_response,
 )
 from services.config import Settings, load_settings
@@ -89,6 +90,13 @@ class MarketDataProjectionReconcileRunResult:
     watermark_risk_count: int
     event_rowid_min: int | None
     event_rowid_max: int | None
+    tr_response_effective_skip_count: int = 0
+    tr_response_pending_within_sla_count: int = 0
+    tr_response_worker_applied_count: int = 0
+    tr_response_deferred_quote_refresh_count: int = 0
+    tr_response_deferred_quote_refresh_error_count: int = 0
+    condition_event_effective_skip_count: int = 0
+    invalid_effective_skip_count: int = 0
     reason_codes: Sequence[str]
     issues: Sequence[MarketDataProjectionReconcileIssue]
     created_at: str
@@ -116,6 +124,21 @@ class MarketDataProjectionReconcileRunResult:
             "duplicate_or_conflict_count": self.duplicate_or_conflict_count,
             "synthetic_child_event_issue_count": self.synthetic_child_event_issue_count,
             "watermark_risk_count": self.watermark_risk_count,
+            "tr_response_effective_skip_count": self.tr_response_effective_skip_count,
+            "tr_response_pending_within_sla_count": (
+                self.tr_response_pending_within_sla_count
+            ),
+            "tr_response_worker_applied_count": self.tr_response_worker_applied_count,
+            "tr_response_deferred_quote_refresh_count": (
+                self.tr_response_deferred_quote_refresh_count
+            ),
+            "tr_response_deferred_quote_refresh_error_count": (
+                self.tr_response_deferred_quote_refresh_error_count
+            ),
+            "condition_event_effective_skip_count": (
+                self.condition_event_effective_skip_count
+            ),
+            "invalid_effective_skip_count": self.invalid_effective_skip_count,
             "event_rowid_min": self.event_rowid_min,
             "event_rowid_max": self.event_rowid_max,
             "append_only_ready": self.append_only_ready,
@@ -159,6 +182,40 @@ def run_market_data_projection_reconcile(
         payload = _json_object(row["payload_json"])
         counters["checked_event_count"] += 1
         counters[f"checked_{event_type}_count"] += 1
+        routing_decision = _market_data_routing_decision(connection, event_id)
+        effective_skip_inline = bool(
+            routing_decision is not None and routing_decision["effective_skip_inline"]
+        )
+        if effective_skip_inline:
+            if event_type == "tr_response":
+                counters["tr_response_effective_skip_count"] += 1
+            elif event_type == "condition_event":
+                counters["condition_event_effective_skip_count"] += 1
+                counters["invalid_effective_skip_count"] += 1
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="FAIL",
+                    reason_code="CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN",
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_rowid=event_rowid,
+                    message="condition_event market_data inline projection was skipped",
+                    evidence={"routing_decision": _row_to_plain_dict(routing_decision)},
+                )
+            elif event_type != "price_tick":
+                counters["invalid_effective_skip_count"] += 1
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="FAIL",
+                    reason_code="INVALID_MARKET_DATA_EFFECTIVE_SKIP_EVENT_TYPE",
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_rowid=event_rowid,
+                    message="unsupported market_data event type skipped inline projection",
+                    evidence={"routing_decision": _row_to_plain_dict(routing_decision)},
+                )
 
         inline_errors = _projection_errors(connection, event_id)
         if inline_errors:
@@ -186,7 +243,52 @@ def run_market_data_projection_reconcile(
             run_id=run_id,
         )
         if not artifact_exists and not inline_errors:
-            if _missing_artifact_is_allowed_by_outbox_skip(outbox):
+            if (
+                event_type == "tr_response"
+                and effective_skip_inline
+                and _outbox_pending_or_processing_within_sla(
+                    outbox,
+                    settings=resolved_settings,
+                )
+            ):
+                counters["tr_response_pending_within_sla_count"] += 1
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="WARN",
+                    reason_code="MARKET_DATA_APPEND_ONLY_TR_RESPONSE_PENDING_WITHIN_SLA",
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_rowid=event_rowid,
+                    message=(
+                        "effective skipped tr_response is waiting for the "
+                        "projection_outbox worker within SLA"
+                    ),
+                    evidence={"outbox": _row_to_plain_dict(outbox)},
+                )
+            elif (
+                event_type == "tr_response"
+                and effective_skip_inline
+                and _outbox_terminal_status(outbox) in {"APPLIED", "SKIPPED"}
+            ):
+                counters["missing_projection_count"] += 1
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="FAIL",
+                    reason_code=(
+                        "MARKET_DATA_APPEND_ONLY_TR_RESPONSE_ARTIFACT_MISSING_AFTER_WORKER"
+                    ),
+                    event_id=event_id,
+                    event_type=event_type,
+                    event_rowid=event_rowid,
+                    message=(
+                        "effective skipped tr_response reached a terminal worker "
+                        "state without market_tr_snapshots"
+                    ),
+                    evidence={"outbox": _row_to_plain_dict(outbox)},
+                )
+            elif _missing_artifact_is_allowed_by_outbox_skip(outbox):
                 pass
             elif _missing_artifact_is_allowed(event_type, payload):
                 _add_issue(
@@ -246,13 +348,33 @@ def run_market_data_projection_reconcile(
             counters["outbox_job_count"] += 1
             outbox_status = str(outbox["status"]).upper()
             outbox_counts[outbox_status] += 1
-            _check_outbox_status(
-                outbox,
-                row,
-                settings=resolved_settings,
-                run_id=run_id,
-                issues=issues,
-            )
+            if not (
+                event_type == "tr_response"
+                and effective_skip_inline
+                and _outbox_pending_or_processing_within_sla(
+                    outbox,
+                    settings=resolved_settings,
+                )
+            ):
+                _check_outbox_status(
+                    outbox,
+                    row,
+                    settings=resolved_settings,
+                    run_id=run_id,
+                    issues=issues,
+                )
+            if event_type == "tr_response" and effective_skip_inline:
+                _check_effective_tr_response_side_effects(
+                    connection,
+                    outbox,
+                    row,
+                    payload=payload,
+                    artifact_exists=artifact_exists,
+                    settings=resolved_settings,
+                    run_id=run_id,
+                    issues=issues,
+                    counters=counters,
+                )
 
         if event_type == "tr_response":
             before_count = len(issues)
@@ -321,6 +443,25 @@ def run_market_data_projection_reconcile(
         watermark_risk_count=int(counters["watermark_risk_count"]),
         event_rowid_min=_event_rowid_min(events),
         event_rowid_max=_event_rowid_max(events),
+        tr_response_effective_skip_count=int(
+            counters["tr_response_effective_skip_count"]
+        ),
+        tr_response_pending_within_sla_count=int(
+            counters["tr_response_pending_within_sla_count"]
+        ),
+        tr_response_worker_applied_count=int(
+            counters["tr_response_worker_applied_count"]
+        ),
+        tr_response_deferred_quote_refresh_count=int(
+            counters["tr_response_deferred_quote_refresh_count"]
+        ),
+        tr_response_deferred_quote_refresh_error_count=int(
+            counters["tr_response_deferred_quote_refresh_error_count"]
+        ),
+        condition_event_effective_skip_count=int(
+            counters["condition_event_effective_skip_count"]
+        ),
+        invalid_effective_skip_count=int(counters["invalid_effective_skip_count"]),
         append_only_ready=status == "PASS",
         reason_codes=tuple(reason_codes),
         issues=tuple(issues),
@@ -363,6 +504,13 @@ def persist_market_data_projection_reconcile_result(
             duplicate_or_conflict_count,
             synthetic_child_event_issue_count,
             watermark_risk_count,
+            tr_response_effective_skip_count,
+            tr_response_pending_within_sla_count,
+            tr_response_worker_applied_count,
+            tr_response_deferred_quote_refresh_count,
+            tr_response_deferred_quote_refresh_error_count,
+            condition_event_effective_skip_count,
+            invalid_effective_skip_count,
             event_rowid_min,
             event_rowid_max,
             append_only_ready,
@@ -371,7 +519,7 @@ def persist_market_data_projection_reconcile_result(
             created_at,
             no_trading_side_effects
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.run_id,
@@ -393,6 +541,13 @@ def persist_market_data_projection_reconcile_result(
             result.duplicate_or_conflict_count,
             result.synthetic_child_event_issue_count,
             result.watermark_risk_count,
+            result.tr_response_effective_skip_count,
+            result.tr_response_pending_within_sla_count,
+            result.tr_response_worker_applied_count,
+            result.tr_response_deferred_quote_refresh_count,
+            result.tr_response_deferred_quote_refresh_error_count,
+            result.condition_event_effective_skip_count,
+            result.invalid_effective_skip_count,
             result.event_rowid_min,
             result.event_rowid_max,
             1 if result.append_only_ready else 0,
@@ -715,6 +870,87 @@ def _check_outbox_status(
         )
 
 
+def _check_effective_tr_response_side_effects(
+    connection: sqlite3.Connection,
+    outbox: Mapping[str, Any],
+    event: Mapping[str, Any],
+    *,
+    payload: Mapping[str, Any],
+    artifact_exists: bool,
+    settings: Settings,
+    run_id: str,
+    issues: list[MarketDataProjectionReconcileIssue],
+    counters: Counter[str],
+) -> None:
+    del connection, settings
+    status = str(outbox["status"]).upper()
+    metadata = _json_object(outbox["metadata_json"])
+    evidence = metadata.get("last_worker_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    if evidence.get("apply_result") == "APPLIED_BY_WORKER":
+        counters["tr_response_worker_applied_count"] += 1
+    if status in {"PENDING", "PROCESSING"}:
+        return
+    if status in {"ERROR", "DEAD_LETTER"}:
+        return
+    side_effects = evidence.get("post_apply_side_effects")
+    side_effects = side_effects if isinstance(side_effects, Mapping) else {}
+    code_count = len(candidate_quote_refresh_codes_from_payload(payload))
+    if side_effects:
+        counters["tr_response_deferred_quote_refresh_count"] += 1
+    error_count = int(side_effects.get("candidate_quote_refresh_error_count") or 0)
+    side_effect_status = str(
+        side_effects.get("candidate_quote_refresh_enqueue_status") or ""
+    )
+    if error_count > 0 or side_effect_status in {"ERROR", "COMPLETED_WITH_ERRORS"}:
+        counters["tr_response_deferred_quote_refresh_error_count"] += 1
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="TR_RESPONSE_DEFERRED_QUOTE_REFRESH_ERROR",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message="effective skipped tr_response deferred quote refresh failed",
+            evidence={"side_effects": dict(side_effects), "outbox": _row_to_plain_dict(outbox)},
+        )
+        return
+    if artifact_exists and code_count > 0 and not side_effects:
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="TR_RESPONSE_DEFERRED_QUOTE_REFRESH_MISSING",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message=(
+                "effective skipped tr_response has market_data artifacts but no "
+                "deferred candidate quote refresh evidence"
+            ),
+            evidence={
+                "candidate_quote_refresh_code_count": code_count,
+                "outbox": _row_to_plain_dict(outbox),
+            },
+        )
+    elif artifact_exists and code_count == 0 and not side_effects:
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="WARN",
+            reason_code="TR_RESPONSE_DEFERRED_QUOTE_REFRESH_MISSING",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message=(
+                "effective skipped tr_response has no candidate quote refresh codes "
+                "and no deferred side-effect evidence"
+            ),
+            evidence={"outbox": _row_to_plain_dict(outbox)},
+        )
+
+
 def _check_synthetic_child_events(
     connection: sqlite3.Connection,
     event: Mapping[str, Any],
@@ -879,6 +1115,45 @@ def _market_data_outbox_job(
         """,
         (event_id,),
     ).fetchone()
+
+
+def _market_data_routing_decision(
+    connection: sqlite3.Connection,
+    event_id: str,
+) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT *
+        FROM market_data_projection_routing_decisions
+        WHERE projection_name = 'market_data' AND event_id = ?
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+
+
+def _outbox_pending_or_processing_within_sla(
+    outbox: Mapping[str, Any] | None,
+    *,
+    settings: Settings,
+) -> bool:
+    if outbox is None:
+        return False
+    status = str(outbox["status"]).upper()
+    if status == "PENDING":
+        age = _age_seconds(outbox["created_at"])
+    elif status == "PROCESSING":
+        age = _age_seconds(outbox["locked_at"])
+    else:
+        return False
+    return age is None or age < settings.projection_outbox_processing_ttl_sec
+
+
+def _outbox_terminal_status(outbox: Mapping[str, Any] | None) -> str | None:
+    if outbox is None:
+        return None
+    status = str(outbox["status"]).upper()
+    return status if status in {"APPLIED", "SKIPPED", "ERROR", "DEAD_LETTER"} else None
 
 
 def _market_data_watermark_rowid(connection: sqlite3.Connection) -> int | None:
@@ -1082,6 +1357,12 @@ def _json_object(value: object) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return dict(loaded) if isinstance(loaded, Mapping) else {}
+
+
+def _row_to_plain_dict(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    return {str(key): row[key] for key in row.keys()}
 
 
 def _json_array(value: object) -> list[Any]:

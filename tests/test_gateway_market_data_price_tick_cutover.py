@@ -148,10 +148,10 @@ def test_condition_and_tr_response_remain_inline_even_with_cutover_flags(
     assert tr_response_response.json()["projection_statuses"]["market_data"] == "APPLIED"
     assert condition_decision["effective_skip_inline"] == 0
     assert tr_decision["effective_skip_inline"] == 0
-    assert "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER" in (
+    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9" in (
         condition_decision["blocked_reason_codes_json"]
     )
-    assert "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER" in (
+    assert "TR_RESPONSE_CUTOVER_DISABLED" in (
         tr_decision["blocked_reason_codes_json"]
     )
     assert condition_signal_count == 1

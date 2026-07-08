@@ -61,7 +61,7 @@ def test_worker_apply_tr_response_enqueues_deferred_candidate_quote_refresh(
 
     assert decision.would_skip_inline is True
     assert decision.effective_skip_inline is False
-    assert "TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_IN_PR8" in decision.blocked_reason_codes
+    assert "TR_RESPONSE_CUTOVER_DISABLED" in decision.blocked_reason_codes
     assert result.status == "COMPLETED"
     assert result.applied_by_worker_count == 1
     assert snapshot_count == 1
@@ -141,8 +141,9 @@ def test_tr_response_effective_skip_is_forbidden_even_with_cutover_flags(tmp_pat
 
     assert decision.would_skip_inline is True
     assert decision.effective_skip_inline is False
-    assert "TR_RESPONSE_EFFECTIVE_SKIP_DISABLED_IN_PR8" in decision.blocked_reason_codes
-    assert "TR_RESPONSE_CUTOVER_DISABLED_IN_PR8" in decision.blocked_reason_codes
+    assert "TR_RESPONSE_SYNTHETIC_CHILD_GUARD_NOT_READY" in (
+        decision.blocked_reason_codes
+    )
     assert status["tr_response_effective_skip_count"] == 0
     assert status["invalid_effective_skip_count"] == 0
 
@@ -172,7 +173,7 @@ def test_condition_event_effective_skip_remains_forbidden(tmp_path) -> None:
 
     assert decision.would_skip_inline is True
     assert decision.effective_skip_inline is False
-    assert "EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER" in decision.blocked_reason_codes
+    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9" in decision.blocked_reason_codes
     assert status["condition_event_effective_skip_count"] == 0
     assert status["invalid_effective_skip_count"] == 0
 

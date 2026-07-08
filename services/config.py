@@ -182,6 +182,10 @@ class Settings:
     gateway_market_data_append_only_tr_response_dry_run_enabled: bool = False
     gateway_market_data_append_only_tr_response_cutover_enabled: bool = False
     gateway_market_data_append_only_tr_response_require_worker_side_effects: bool = True
+    gateway_market_data_append_only_tr_response_max_skip_per_minute: int = 0
+    gateway_market_data_append_only_tr_response_require_synthetic_child_guard: bool = True
+    gateway_market_data_append_only_tr_response_max_rows_per_event: int = 50
+    gateway_market_data_append_only_tr_response_fail_closed_on_side_effect_error: bool = True
     gateway_market_data_append_only_cutover_event_types: tuple[str, ...] = ("price_tick",)
     gateway_market_data_append_only_require_reconcile_pass: bool = True
     gateway_market_data_append_only_require_latest_reconcile_pass: bool = True
@@ -565,6 +569,16 @@ class Settings:
             raise ValueError(
                 "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE "
                 "must be >= 0"
+            )
+        if self.gateway_market_data_append_only_tr_response_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE "
+                "must be >= 0"
+            )
+        if self.gateway_market_data_append_only_tr_response_max_rows_per_event < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_ROWS_PER_EVENT "
+                "must be >= 1"
             )
         object.__setattr__(
             self,
@@ -1720,6 +1734,38 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             _parse_bool(
                 env.get(
                     "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_REQUIRE_WORKER_SIDE_EFFECTS",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_data_append_only_tr_response_max_skip_per_minute=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE",
+                "0",
+            ),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_data_append_only_tr_response_require_synthetic_child_guard=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_REQUIRE_SYNTHETIC_CHILD_GUARD",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_data_append_only_tr_response_max_rows_per_event=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_ROWS_PER_EVENT",
+                "50",
+            ),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_ROWS_PER_EVENT",
+            min_value=1,
+        ),
+        gateway_market_data_append_only_tr_response_fail_closed_on_side_effect_error=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_FAIL_CLOSED_ON_SIDE_EFFECT_ERROR",
                     "true",
                 )
             )
