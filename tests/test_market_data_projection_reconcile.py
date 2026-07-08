@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from apps.core_api import app
 from domain.broker.conditions import BrokerConditionEvent
@@ -70,6 +70,42 @@ def test_reconcile_fails_when_price_tick_sample_and_error_are_missing(tmp_path) 
     assert result.append_only_ready is False
     assert result.missing_projection_count == 1
     assert "MARKET_DATA_PRICE_TICK_PROJECTION_MISSING" in result.reason_codes
+
+
+def test_reconcile_allows_price_tick_skipped_as_older_than_latest(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "reconcile-older-price-skip.sqlite3")
+    settings = Settings()
+    older_event = _price_tick_event("evt_reconcile_older_price", ts=TS)
+    latest_event = _price_tick_event(
+        "evt_reconcile_latest_price",
+        ts=TS + timedelta(seconds=1),
+    )
+    append_gateway_event(connection, older_event)
+    enqueue_projection_jobs_for_gateway_event(connection, older_event)
+    append_gateway_event(connection, latest_event)
+    enqueue_projection_jobs_for_gateway_event(connection, latest_event)
+    process_gateway_event(connection, latest_event, settings=settings)
+    _mark_market_data_outbox(
+        connection,
+        older_event.event_id,
+        "SKIPPED",
+        reason="MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST",
+    )
+    _mark_market_data_outbox(connection, latest_event.event_id, "APPLIED")
+
+    result = run_market_data_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=10,
+    )
+    connection.close()
+
+    assert result.status == "PASS"
+    assert result.append_only_ready is True
+    assert result.checked_price_tick_count == 2
+    assert result.missing_projection_count == 0
+    assert result.outbox_skipped_count == 1
+    assert "MARKET_DATA_PRICE_TICK_PROJECTION_MISSING" not in result.reason_codes
 
 
 def test_reconcile_allows_empty_tr_response_with_skipped_outbox(tmp_path) -> None:
@@ -258,7 +294,7 @@ def test_dashboard_snapshot_includes_latest_reconcile_result(tmp_path) -> None:
     assert "Gateway inline projection remains enabled" in summary["warnings"]
 
 
-def _price_tick_event(event_id: str):
+def _price_tick_event(event_id: str, *, ts: datetime = TS):
     tick = BrokerPriceTick(
         code="005930",
         name="삼성전자",
@@ -272,8 +308,8 @@ def _price_tick_event(event_id: str):
         spread_ticks=1,
         day_high=70_500,
         day_low=69_500,
-        trade_time=TS,
-        ts=TS,
+        trade_time=ts,
+        ts=ts,
     )
     from domain.broker.events import GatewayEvent
 
@@ -282,7 +318,7 @@ def _price_tick_event(event_id: str):
         event_type="price_tick",
         source="test-gateway",
         payload=tick.to_dict(),
-        ts=TS,
+        ts=ts,
     )
 
 

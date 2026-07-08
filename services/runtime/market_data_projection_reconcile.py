@@ -175,6 +175,7 @@ def run_market_data_projection_reconcile(
                 evidence={"errors": inline_errors},
             )
 
+        outbox = _market_data_outbox_job(connection, event_id)
         artifact_exists = _market_data_artifact_exists(
             connection,
             event_id=event_id,
@@ -185,7 +186,9 @@ def run_market_data_projection_reconcile(
             run_id=run_id,
         )
         if not artifact_exists and not inline_errors:
-            if _missing_artifact_is_allowed(event_type, payload):
+            if _missing_artifact_is_allowed_by_outbox_skip(outbox):
+                pass
+            elif _missing_artifact_is_allowed(event_type, payload):
                 _add_issue(
                     issues,
                     run_id=run_id,
@@ -227,7 +230,6 @@ def run_market_data_projection_reconcile(
                         evidence={"watermark_rowid": watermark},
                     )
 
-        outbox = _market_data_outbox_job(connection, event_id)
         if outbox is None:
             _add_issue(
                 issues,
@@ -923,6 +925,16 @@ def _allowed_missing_reason(event_type: str, payload: Mapping[str, Any]) -> str:
     if event_type == "tr_response":
         return "MARKET_DATA_TR_RESPONSE_EMPTY_ROWS_SKIPPED"
     return "MARKET_DATA_PROJECTION_ARTIFACT_MISSING_ALLOWED"
+
+
+def _missing_artifact_is_allowed_by_outbox_skip(
+    outbox: Mapping[str, Any] | None,
+) -> bool:
+    if outbox is None:
+        return False
+    if str(outbox["status"]).upper() != "SKIPPED":
+        return False
+    return _outbox_skip_is_justified(outbox)
 
 
 def _missing_projection_reason(event_type: str) -> str:
