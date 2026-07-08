@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 APP_NAME = "suseok-trader-v2"
 
 
@@ -39,6 +39,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_projection_outbox_tables(connection)
     _create_event_retention_tables(connection)
     _create_market_data_tables(connection)
+    _create_market_data_projection_reconcile_tables(connection)
     _create_market_reference_tables(connection)
     _create_market_index_tables(connection)
     _create_market_scan_tables(connection)
@@ -1621,6 +1622,78 @@ def _create_market_data_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_projection_errors_created_at
         ON market_projection_errors (created_at)
+        """
+    )
+
+
+def _create_market_data_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            checked_price_tick_count INTEGER NOT NULL,
+            checked_condition_event_count INTEGER NOT NULL,
+            checked_tr_response_count INTEGER NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            missing_projection_count INTEGER NOT NULL,
+            inline_projection_error_count INTEGER NOT NULL,
+            outbox_error_issue_count INTEGER NOT NULL,
+            duplicate_or_conflict_count INTEGER NOT NULL,
+            synthetic_child_event_issue_count INTEGER NOT NULL,
+            watermark_risk_count INTEGER NOT NULL,
+            event_rowid_min INTEGER,
+            event_rowid_max INTEGER,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            event_type TEXT,
+            event_rowid INTEGER,
+            projection_name TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_reconcile_runs_created
+        ON market_data_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_reconcile_issues_run
+        ON market_data_projection_reconcile_issues (run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_reconcile_issues_reason
+        ON market_data_projection_reconcile_issues (reason_code)
         """
     )
 

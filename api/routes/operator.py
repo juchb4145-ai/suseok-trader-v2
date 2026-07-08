@@ -20,6 +20,10 @@ from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
     process_incremental_evaluation_batch,
 )
+from services.runtime.market_data_projection_reconcile import (
+    get_latest_market_data_projection_reconcile,
+    run_market_data_projection_reconcile,
+)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
@@ -215,6 +219,45 @@ def operator_projection_outbox_run_once(
         )
         payload = result.to_dict()
         payload["read_only_projection"] = not payload["projection_side_effects_allowed"]
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-data-projection-reconcile/latest")
+def operator_market_data_projection_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_data_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-data-projection-reconcile/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_data_projection_reconcile_run_once(
+    limit: int = Query(default=500, ge=1, le=5000),
+    min_event_rowid: int | None = Query(default=None, ge=1),
+    max_event_rowid: int | None = Query(default=None, ge=1),
+    persist: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_market_data_projection_reconcile(
+            connection,
+            settings=settings,
+            limit=limit,
+            min_event_rowid=min_event_rowid,
+            max_event_rowid=max_event_rowid,
+            persist=persist,
+        )
+        payload = result.to_dict()
+        payload["read_only_projection"] = True
+        payload["read_only"] = True
         return payload
     finally:
         connection.close()
