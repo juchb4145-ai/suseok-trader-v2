@@ -1,0 +1,40 @@
+[
+  {
+    "attempts": 0,
+    "available_at": "2026-07-08T03:39:35.558009Z",
+    "created_at": "2026-07-08T03:39:35.558009Z",
+    "event_id": "evt_0e22d118b5c74666b4b5ec16104a0eb1",
+    "event_rowid": 4988273,
+    "event_type": "price_tick",
+    "last_error": null,
+    "locked_at": null,
+    "locked_by": null,
+    "metadata_json": "{\"last_worker_evidence\":{\"apply_mode\":\"MARKET_DATA_APPLY\",\"apply_projection\":true,\"apply_projection_enabled\":true,\"apply_projection_requested\":true,\"apply_result\":\"SKIPPED_BY_VERIFY\",\"code\":\"000660\",\"event_id\":\"evt_0e22d118b5c74666b4b5ec16104a0eb1\",\"event_type\":\"price_tick\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_e6a2e1eb5e88431e9acfffac7367a92a\",\"latest_event_ts\":\"2026-07-08T03:40:08.108318Z\",\"market_data_apply_enabled\":true,\"no_trading_side_effects\":true,\"projection_name\":\"market_data\",\"projection_side_effects_allowed\":true,\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"shadow_mode\":true,\"source_event_ts\":\"2026-07-08T03:39:35.430028Z\",\"verification_before_apply\":{\"error_message\":null,\"evidence\":{\"code\":\"000660\",\"event_id\":\"evt_0e22d118b5c74666b4b5ec16104a0eb1\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_e6a2e1eb5e88431e9acfffac7367a92a\",\"latest_event_ts\":\"2026-07-08T03:40:08.108318Z\",\"source_event_ts\":\"2026-07-08T03:39:35.430028Z\"},\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"status\":\"SKIPPED\"},\"verification_reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"worker_run_id\":\"projection_outbox_shadow_8cc7fab6fbc949bf9c4074a55f371f38\"},\"last_worker_status\":\"SKIPPED\",\"shadow_mode\":true,\"source_command_id\":null,\"source_event_id\":\"evt_0e22d118b5c74666b4b5ec16104a0eb1\",\"source_event_type\":\"price_tick\",\"source_idempotency_key\":null,\"worker_enabled\":false,\"worker_history\":[{\"evidence\":{\"apply_mode\":\"MARKET_DATA_APPLY\",\"apply_projection\":true,\"apply_projection_enabled\":true,\"apply_projection_requested\":true,\"apply_result\":\"SKIPPED_BY_VERIFY\",\"code\":\"000660\",\"event_id\":\"evt_0e22d118b5c74666b4b5ec16104a0eb1\",\"event_type\":\"price_tick\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_e6a2e1eb5e88431e9acfffac7367a92a\",\"latest_event_ts\":\"2026-07-08T03:40:08.108318Z\",\"market_data_apply_enabled\":true,\"no_trading_side_effects\":true,\"projection_name\":\"market_data\",\"projection_side_effects_allowed\":true,\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"shadow_mode\":true,\"source_event_ts\":\"2026-07-08T03:39:35.430028Z\",\"verification_before_apply\":{\"error_message\":null,\"evidence\":{\"code\":\"000660\",\"event_id\":\"evt_0e22d118b5c74666b4b5ec16104a0eb1\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_e6a2e1eb5e88431e9acfffac7367a92a\",\"latest_event_ts\":\"2026-07-08T03:40:08.108318Z\",\"source_event_ts\":\"2026-07-08T03:39:35.430028Z\"},\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"status\":\"SKIPPED\"},\"verification_reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"worker_run_id\":\"projection_outbox_shadow_8cc7fab6fbc949bf9c4074a55f371f38\"},\"marked_at\":\"2026-07-08T03:40:31.604629Z\",\"status\":\"SKIPPED\"}]}",
+    "outbox_id": "market_data:evt_0e22d118b5c74666b4b5ec16104a0eb1",
+    "priority": 0,
+    "processed_at": "2026-07-08T03:40:31.604629Z",
+    "projection_name": "market_data",
+    "source": "kiwoom_gateway",
+    "status": "SKIPPED",
+    "updated_at": "2026-07-08T03:40:31.604629Z"
+  },
+  {
+    "attempts": 0,
+    "available_at": "2026-07-08T03:40:00.014847Z",
+    "created_at": "2026-07-08T03:40:00.014847Z",
+    "event_id": "evt_8caa07e19bd94a06b7be4d19e8cac377",
+    "event_rowid": 4989683,
+    "event_type": "price_tick",
+    "last_error": null,
+    "locked_at": null,
+    "locked_by": null,
+    "metadata_json": "{\"last_worker_evidence\":{\"apply_mode\":\"MARKET_DATA_APPLY\",\"apply_projection\":true,\"apply_projection_enabled\":true,\"apply_projection_requested\":true,\"apply_result\":\"SKIPPED_BY_VERIFY\",\"code\":\"005930\",\"event_id\":\"evt_8caa07e19bd94a06b7be4d19e8cac377\",\"event_type\":\"price_tick\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_aa8e5c96c63d4141a5bd83cf59adb72b\",\"latest_event_ts\":\"2026-07-08T03:40:08.495189Z\",\"market_data_apply_enabled\":true,\"no_trading_side_effects\":true,\"projection_name\":\"market_data\",\"projection_side_effects_allowed\":true,\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"shadow_mode\":true,\"source_event_ts\":\"2026-07-08T03:39:59.103384Z\",\"verification_before_apply\":{\"error_message\":null,\"evidence\":{\"code\":\"005930\",\"event_id\":\"evt_8caa07e19bd94a06b7be4d19e8cac377\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_aa8e5c96c63d4141a5bd83cf59adb72b\",\"latest_event_ts\":\"2026-07-08T03:40:08.495189Z\",\"source_event_ts\":\"2026-07-08T03:39:59.103384Z\"},\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"status\":\"SKIPPED\"},\"verification_reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"worker_run_id\":\"projection_outbox_shadow_13d8051f71084235a531d39b267e1bb9\"},\"last_worker_status\":\"SKIPPED\",\"shadow_mode\":true,\"source_command_id\":null,\"source_event_id\":\"evt_8caa07e19bd94a06b7be4d19e8cac377\",\"source_event_type\":\"price_tick\",\"source_idempotency_key\":null,\"worker_enabled\":false,\"worker_history\":[{\"evidence\":{\"apply_mode\":\"MARKET_DATA_APPLY\",\"apply_projection\":true,\"apply_projection_enabled\":true,\"apply_projection_requested\":true,\"apply_result\":\"SKIPPED_BY_VERIFY\",\"code\":\"005930\",\"event_id\":\"evt_8caa07e19bd94a06b7be4d19e8cac377\",\"event_type\":\"price_tick\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_aa8e5c96c63d4141a5bd83cf59adb72b\",\"latest_event_ts\":\"2026-07-08T03:40:08.495189Z\",\"market_data_apply_enabled\":true,\"no_trading_side_effects\":true,\"projection_name\":\"market_data\",\"projection_side_effects_allowed\":true,\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"shadow_mode\":true,\"source_event_ts\":\"2026-07-08T03:39:59.103384Z\",\"verification_before_apply\":{\"error_message\":null,\"evidence\":{\"code\":\"005930\",\"event_id\":\"evt_8caa07e19bd94a06b7be4d19e8cac377\",\"exchange\":\"KRX\",\"latest_event_id\":\"evt_aa8e5c96c63d4141a5bd83cf59adb72b\",\"latest_event_ts\":\"2026-07-08T03:40:08.495189Z\",\"source_event_ts\":\"2026-07-08T03:39:59.103384Z\"},\"reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"status\":\"SKIPPED\"},\"verification_reason\":\"MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST\",\"worker_run_id\":\"projection_outbox_shadow_13d8051f71084235a531d39b267e1bb9\"},\"marked_at\":\"2026-07-08T03:40:35.835486Z\",\"status\":\"SKIPPED\"}]}",
+    "outbox_id": "market_data:evt_8caa07e19bd94a06b7be4d19e8cac377",
+    "priority": 0,
+    "processed_at": "2026-07-08T03:40:35.835486Z",
+    "projection_name": "market_data",
+    "source": "kiwoom_gateway",
+    "status": "SKIPPED",
+    "updated_at": "2026-07-08T03:40:35.835486Z"
+  }
+]

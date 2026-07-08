@@ -7,6 +7,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 from gateway.event_factory import make_price_tick_event
 from services.config import Settings
+from services.market_data_service import process_gateway_event
 from services.runtime.gateway_projection_routing import decide_market_data_projection_routing
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from storage.event_store import append_gateway_event
@@ -83,6 +84,73 @@ def test_worker_apply_price_tick_enqueues_deferred_incremental_evaluation(
     assert side_effects["no_order_side_effects"] is True
     assert routing_side_effects["incremental_evaluation_enqueue_status"] == "ENQUEUED"
     assert routing_side_effects["deferred_from_gateway_path"] is True
+
+
+def test_worker_applies_effective_skip_price_tick_even_after_newer_inline_tick(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "price-cutover-worker-newer.sqlite3")
+    settings = _cutover_apply_settings()
+    _insert_strategy_fixture(connection)
+    _insert_reconcile_run_on_connection(connection, status="PASS", append_only_ready=True)
+    skipped_event = _price_tick_event("evt_price_cutover_worker_older")
+    append_gateway_event(connection, skipped_event)
+    outbox_result = enqueue_projection_jobs_for_gateway_event(connection, skipped_event)
+    decision = decide_market_data_projection_routing(
+        connection,
+        skipped_event,
+        settings=settings,
+        outbox_status=outbox_result.status,
+    )
+    newer_event = _price_tick_event("evt_price_cutover_worker_newer")
+    append_gateway_event(connection, newer_event)
+    process_gateway_event(connection, newer_event, settings=settings)
+
+    result = process_projection_outbox_batch(
+        connection,
+        settings=settings,
+        limit=1,
+        apply_projection=True,
+    )
+
+    skipped_sample_count = _table_event_count(
+        connection,
+        "market_tick_samples",
+        skipped_event.event_id,
+    )
+    latest = connection.execute(
+        """
+        SELECT event_id
+        FROM market_ticks_latest
+        WHERE code = '005930' AND exchange = 'KRX'
+        """
+    ).fetchone()
+    queue = connection.execute(
+        """
+        SELECT source_event_id
+        FROM incremental_evaluation_queue
+        WHERE source_event_id = ?
+        """,
+        (skipped_event.event_id,),
+    ).fetchone()
+    outbox = _outbox_row(connection, f"market_data:{skipped_event.event_id}")
+    metadata = json.loads(outbox["metadata_json"])
+    connection.close()
+
+    assert decision.effective_skip_inline is True
+    assert result.applied_by_worker_count == 1
+    assert result.skipped_count == 0
+    assert skipped_sample_count == 1
+    assert latest["event_id"] == newer_event.event_id
+    assert queue["source_event_id"] == skipped_event.event_id
+    evidence = metadata["last_worker_evidence"]
+    assert evidence["verification_before_apply"]["reason"] == (
+        "MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST"
+    )
+    assert evidence["apply_result"] == "APPLIED_BY_WORKER"
+    assert evidence["post_apply_side_effects"][
+        "incremental_evaluation_enqueue_status"
+    ] == "ENQUEUED"
 
 
 def _cutover_apply_settings() -> Settings:

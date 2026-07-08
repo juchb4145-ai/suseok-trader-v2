@@ -349,6 +349,10 @@ def _apply_market_data_projection(
     event_type = str(job.get("event_type") or "").lower()
     verification_before = verify_projection_outbox_job(connection, job, settings=settings)
     verification_before_payload = verification_before.to_dict()
+    effective_gateway_skip = (
+        event_type == "price_tick"
+        and _routing_decision_effective_skip_inline(connection, event_id)
+    )
     if verification_before.status == "APPLIED":
         return _verification_applied(
             "MARKET_DATA_ALREADY_APPLIED_BY_INLINE",
@@ -358,7 +362,10 @@ def _apply_market_data_projection(
             verification_before_apply=verification_before_payload,
             projection_result_status=None,
         )
-    if verification_before.status == "SKIPPED":
+    if verification_before.status == "SKIPPED" and not (
+        effective_gateway_skip
+        and verification_before.reason == "MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST"
+    ):
         return _verification_skipped(
             verification_before.reason,
             **dict(verification_before.evidence),
