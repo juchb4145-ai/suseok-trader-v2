@@ -1721,12 +1721,32 @@ def _create_market_data_projection_routing_tables(
             outbox_job_present INTEGER NOT NULL DEFAULT 0,
             would_skip_inline INTEGER NOT NULL DEFAULT 0,
             effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            cutover_scope TEXT,
+            skip_budget_limit INTEGER,
+            skip_budget_used INTEGER,
+            skip_budget_remaining INTEGER,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            fallback_inline_projection_expected INTEGER NOT NULL DEFAULT 1,
+            post_apply_deferred_side_effects_json TEXT NOT NULL DEFAULT '{}',
             blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             decided_at TEXT NOT NULL DEFAULT (datetime('now')),
             UNIQUE(event_id, projection_name)
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "market_data_projection_routing_decisions",
+        {
+            "cutover_scope": "TEXT",
+            "skip_budget_limit": "INTEGER",
+            "skip_budget_used": "INTEGER",
+            "skip_budget_remaining": "INTEGER",
+            "worker_apply_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "fallback_inline_projection_expected": "INTEGER NOT NULL DEFAULT 1",
+            "post_apply_deferred_side_effects_json": "TEXT NOT NULL DEFAULT '{}'",
+        },
     )
     connection.execute(
         """

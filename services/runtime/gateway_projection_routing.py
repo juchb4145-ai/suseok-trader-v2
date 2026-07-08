@@ -8,17 +8,28 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
+from domain.broker.utils import (
+    datetime_to_wire,
+    parse_timestamp,
+    utc_now,
+    validate_stock_code,
+)
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
-from services.market_data_service import MARKET_DATA_EVENT_TYPES
+from services.market_data_service import (
+    MARKET_DATA_EVENT_TYPES,
+    normalize_market_data_exchange,
+)
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
 
 PROJECTION_NAME_MARKET_DATA = "market_data"
 PR6_EFFECTIVE_SKIP_DISABLED_REASON = "EFFECTIVE_SKIP_DISABLED_IN_PR6"
+PR7_CUTOVER_SCOPE = "price_tick_only"
+PR7_ALLOWED_CUTOVER_EVENT_TYPE = "price_tick"
+PR7_FORCED_INLINE_EVENT_TYPES = frozenset({"condition_event", "tr_response"})
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -37,9 +48,16 @@ class MarketDataAppendOnlyRoutingDecision:
     outbox_job_present: bool
     would_skip_inline: bool
     effective_skip_inline: bool
+    cutover_scope: str | None
+    skip_budget_limit: int | None
+    skip_budget_used: int | None
+    skip_budget_remaining: int | None
+    worker_apply_enabled: bool
+    fallback_inline_projection_expected: bool
     blocked_reason_codes: Sequence[str]
     decided_at: str
     projection_name: str = PROJECTION_NAME_MARKET_DATA
+    post_apply_deferred_side_effects: Mapping[str, Any] = field(default_factory=dict)
     evidence: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -59,6 +77,17 @@ class MarketDataAppendOnlyRoutingDecision:
             "outbox_job_present": self.outbox_job_present,
             "would_skip_inline": self.would_skip_inline,
             "effective_skip_inline": self.effective_skip_inline,
+            "cutover_scope": self.cutover_scope,
+            "skip_budget_limit": self.skip_budget_limit,
+            "skip_budget_used": self.skip_budget_used,
+            "skip_budget_remaining": self.skip_budget_remaining,
+            "worker_apply_enabled": self.worker_apply_enabled,
+            "fallback_inline_projection_expected": (
+                self.fallback_inline_projection_expected
+            ),
+            "post_apply_deferred_side_effects": dict(
+                self.post_apply_deferred_side_effects
+            ),
             "blocked_reason_codes": list(self.blocked_reason_codes),
             "evidence": dict(self.evidence),
             "decided_at": self.decided_at,
@@ -77,8 +106,20 @@ def decide_market_data_projection_routing(
     event_type = event.event_type.strip().lower()
     dry_run_enabled = bool(settings.gateway_market_data_append_only_dry_run_enabled)
     cutover_enabled = bool(settings.gateway_market_data_append_only_cutover_enabled)
+    price_tick_cutover_enabled = bool(
+        settings.gateway_market_data_append_only_price_tick_cutover_enabled
+    )
     reconcile_required = bool(
         settings.gateway_market_data_append_only_require_reconcile_pass
+    )
+    latest_reconcile_required = bool(
+        settings.gateway_market_data_append_only_require_latest_reconcile_pass
+    )
+    worker_apply_required = bool(
+        settings.gateway_market_data_append_only_require_worker_apply_enabled
+    )
+    fail_closed_on_routing_error = bool(
+        settings.gateway_market_data_append_only_fail_closed_on_routing_error
     )
     decided_at = datetime_to_wire(utc_now())
     latest_reconcile = get_latest_market_data_projection_reconcile(connection)
@@ -101,10 +142,27 @@ def decide_market_data_projection_routing(
     normalized_outbox_status = _normalize_outbox_status(
         outbox_status or (outbox_job["status"] if outbox_job is not None else None)
     )
+    source_event_status = _gateway_event_status(connection, event.event_id)
     allowed_event_types = {
         str(value).strip().lower()
         for value in settings.gateway_market_data_append_only_event_types
     }
+    cutover_event_types = {
+        str(value).strip().lower()
+        for value in settings.gateway_market_data_append_only_cutover_event_types
+    }
+    worker_apply_enabled = bool(
+        settings.projection_outbox_apply_projection_enabled
+        and settings.projection_outbox_market_data_apply_enabled
+    )
+    skip_budget_limit = int(
+        settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
+    )
+    skip_budget_used = _price_tick_skip_count_in_current_minute(connection)
+    skip_budget_remaining = _price_tick_skip_budget_remaining(
+        connection,
+        settings=settings,
+    )
 
     reason_codes: list[str] = []
     would_skip_inline = False
@@ -135,20 +193,102 @@ def decide_market_data_projection_routing(
         reason_codes.append("DRY_RUN_WOULD_SKIP_INLINE")
 
     effective_skip_inline = False
-    if cutover_enabled:
-        reason_codes.append(PR6_EFFECTIVE_SKIP_DISABLED_REASON)
+    price_tick_identity = _price_tick_payload_identity(event.payload)
+    effective_skip_reason = "FALLBACK_INLINE_PROJECTION"
+    if event_type in PR7_FORCED_INLINE_EVENT_TYPES and would_skip_inline:
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
+        effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
+    elif event_type == PR7_ALLOWED_CUTOVER_EVENT_TYPE:
+        if not would_skip_inline:
+            effective_skip_reason = "WOULD_SKIP_INLINE_FALSE"
+        elif not cutover_enabled or not price_tick_cutover_enabled:
+            reason_codes.append("PRICE_TICK_CUTOVER_DISABLED")
+            if cutover_enabled and not price_tick_cutover_enabled:
+                reason_codes.append(PR6_EFFECTIVE_SKIP_DISABLED_REASON)
+            effective_skip_reason = "PRICE_TICK_CUTOVER_DISABLED"
+        elif PR7_ALLOWED_CUTOVER_EVENT_TYPE not in cutover_event_types:
+            reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
+            effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
+        elif skip_budget_limit <= 0 or skip_budget_remaining <= 0:
+            reason_codes.append("PRICE_TICK_SKIP_BUDGET_EXHAUSTED")
+            effective_skip_reason = "PRICE_TICK_SKIP_BUDGET_EXHAUSTED"
+        elif worker_apply_required and not worker_apply_enabled:
+            reason_codes.append("WORKER_APPLY_NOT_ENABLED")
+            effective_skip_reason = "WORKER_APPLY_NOT_ENABLED"
+        elif not worker_apply_enabled:
+            reason_codes.append("WORKER_APPLY_NOT_ENABLED")
+            effective_skip_reason = "WORKER_APPLY_NOT_ENABLED"
+        elif latest_reconcile_required and latest_run is None:
+            reason_codes.append("MARKET_DATA_RECONCILE_MISSING")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_MISSING"
+        elif latest_reconcile_required and latest_status != "PASS":
+            reason_codes.append("MARKET_DATA_RECONCILE_NOT_PASS")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_NOT_PASS"
+        elif latest_reconcile_required and not append_only_ready:
+            reason_codes.append("MARKET_DATA_RECONCILE_NOT_PASS")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_NOT_PASS"
+        elif (
+            latest_reconcile_required
+            and latest_age_sec is not None
+            and latest_age_sec
+            > settings.gateway_market_data_append_only_reconcile_max_age_sec
+        ):
+            reason_codes.append("MARKET_DATA_RECONCILE_STALE")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_STALE"
+        elif not _outbox_is_ready(
+            outbox_status=normalized_outbox_status,
+            outbox_job_present=outbox_job_present,
+            min_outbox_status=settings.gateway_market_data_append_only_min_outbox_status,
+        ):
+            reason_codes.append("MARKET_DATA_OUTBOX_NOT_READY")
+            effective_skip_reason = "MARKET_DATA_OUTBOX_NOT_READY"
+        elif source_event_status != "ACCEPTED":
+            reason_codes.append("SOURCE_GATEWAY_EVENT_NOT_ACCEPTED")
+            effective_skip_reason = "SOURCE_GATEWAY_EVENT_NOT_ACCEPTED"
+        elif price_tick_identity is None:
+            reason_codes.append("PRICE_TICK_PAYLOAD_INVALID")
+            effective_skip_reason = "PRICE_TICK_PAYLOAD_INVALID"
+        else:
+            effective_skip_inline = True
+            reason_codes.append("EFFECTIVE_SKIP_ALLOWED_PRICE_TICK")
+            effective_skip_reason = "EFFECTIVE_SKIP_ALLOWED_PRICE_TICK"
+    elif cutover_enabled and would_skip_inline:
+        reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER")
+        effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
+
+    if (
+        fail_closed_on_routing_error
+        and would_skip_inline
+        and not effective_skip_inline
+        and "EFFECTIVE_SKIP_ALLOWED_PRICE_TICK" not in reason_codes
+    ):
+        reason_codes.append("EFFECTIVE_SKIP_BLOCKED_FAIL_CLOSED")
 
     evidence = {
-        "pr": "PR-6",
-        "dry_run_only": True,
-        "inline_projection_remains_enabled": True,
-        "effective_skip_disabled_in_pr6": True,
+        "pr": "PR-7",
+        "cutover_scope": PR7_CUTOVER_SCOPE,
+        "price_tick_only_cutover": True,
+        "condition_event_cutover_enabled": False,
+        "tr_response_cutover_enabled": False,
+        "inline_projection_remains_enabled_for_non_price_tick": True,
+        "fallback_inline_projection_expected": not effective_skip_inline,
+        "price_tick_cutover_enabled": price_tick_cutover_enabled,
+        "worker_apply_required": worker_apply_required,
+        "worker_apply_enabled": worker_apply_enabled,
+        "fail_closed_on_routing_error": fail_closed_on_routing_error,
+        "skip_budget_limit_per_minute": skip_budget_limit,
+        "skip_budget_used_per_minute": skip_budget_used,
+        "skip_budget_remaining": skip_budget_remaining,
+        "effective_skip_reason": effective_skip_reason,
         "allowed_event_types": sorted(allowed_event_types),
+        "cutover_event_types": sorted(cutover_event_types),
         "configured_min_outbox_status": (
             settings.gateway_market_data_append_only_min_outbox_status
         ),
         "outbox_enqueue_status": _normalize_outbox_status(outbox_status),
         "outbox_job_status": None if outbox_job is None else outbox_job["status"],
+        "source_event_status": source_event_status,
+        "price_tick_identity": price_tick_identity,
         "latest_reconcile": (
             None
             if not isinstance(latest_run, Mapping)
@@ -176,6 +316,12 @@ def decide_market_data_projection_routing(
         outbox_job_present=outbox_job_present,
         would_skip_inline=would_skip_inline,
         effective_skip_inline=effective_skip_inline,
+        cutover_scope=PR7_CUTOVER_SCOPE,
+        skip_budget_limit=skip_budget_limit,
+        skip_budget_used=skip_budget_used,
+        skip_budget_remaining=skip_budget_remaining,
+        worker_apply_enabled=worker_apply_enabled,
+        fallback_inline_projection_expected=not effective_skip_inline,
         blocked_reason_codes=tuple(reason_codes),
         evidence=evidence,
         decided_at=decided_at,
@@ -194,7 +340,25 @@ def get_latest_market_data_append_only_routing_status(
     total_count = _count_all_decisions(connection)
     would_skip_count = _count_decisions(connection, "would_skip_inline")
     effective_skip_count = _count_decisions(connection, "effective_skip_inline")
+    effective_price_tick_skip_count = _count_effective_skip_by_event_type(
+        connection,
+        "price_tick",
+    )
+    condition_event_effective_skip_count = _count_effective_skip_by_event_type(
+        connection,
+        "condition_event",
+    )
+    tr_response_effective_skip_count = _count_effective_skip_by_event_type(
+        connection,
+        "tr_response",
+    )
+    invalid_effective_skip_count = _count_invalid_effective_skips(connection)
+    effective_skip_outbox_error_count = _count_effective_skip_outbox_errors(connection)
+    deferred_incremental_enqueue_count = (
+        _count_deferred_incremental_enqueue_records(connection)
+    )
     blocked_reason_counts = _blocked_reason_code_counts(rows)
+    fail_closed_reason_counts = _fail_closed_reason_code_counts(rows)
     blocked_count = sum(
         1
         for row in rows
@@ -206,9 +370,39 @@ def get_latest_market_data_append_only_routing_status(
     append_only_ready = bool(
         latest_run.get("append_only_ready") if isinstance(latest_run, Mapping) else False
     )
-    warnings = ["PR-6 dry-run only; inline projection remains enabled"]
-    if effective_skip_count:
-        warnings.append("PR-6 violation: effective_skip_inline_count must remain 0")
+    worker_apply_enabled = bool(
+        resolved_settings.projection_outbox_apply_projection_enabled
+        and resolved_settings.projection_outbox_market_data_apply_enabled
+    )
+    skip_budget_limit = int(
+        resolved_settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
+    )
+    skip_budget_used = _price_tick_skip_count_in_current_minute(connection)
+    skip_budget_remaining = _price_tick_skip_budget_remaining(
+        connection,
+        settings=resolved_settings,
+    )
+    failures: list[str] = []
+    warnings = [
+        "condition_event/tr_response inline projection remains enabled",
+        "LIVE_REAL/order behavior unchanged",
+        "rollback: disable gateway_market_data_append_only_price_tick_cutover_enabled",
+    ]
+    if condition_event_effective_skip_count > 0:
+        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
+    if tr_response_effective_skip_count > 0:
+        failures.append("TR_RESPONSE_EFFECTIVE_SKIP_FORBIDDEN")
+    if invalid_effective_skip_count > 0:
+        failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
+    if effective_price_tick_skip_count > 0 and not worker_apply_enabled:
+        failures.append("PRICE_TICK_EFFECTIVE_SKIP_WITH_WORKER_APPLY_DISABLED")
+    if effective_skip_outbox_error_count > 0:
+        failures.append("EFFECTIVE_SKIP_OUTBOX_ERROR_OR_DEAD_LETTER")
+    if (
+        resolved_settings.gateway_market_data_append_only_price_tick_cutover_enabled
+        and skip_budget_limit <= 0
+    ):
+        warnings.append("price_tick cutover flag enabled but skip budget is 0")
     return {
         "dry_run_enabled": bool(
             resolved_settings.gateway_market_data_append_only_dry_run_enabled
@@ -216,8 +410,21 @@ def get_latest_market_data_append_only_routing_status(
         "cutover_enabled": bool(
             resolved_settings.gateway_market_data_append_only_cutover_enabled
         ),
+        "price_tick_cutover_enabled": bool(
+            resolved_settings.gateway_market_data_append_only_price_tick_cutover_enabled
+        ),
+        "cutover_scope": PR7_CUTOVER_SCOPE,
+        "cutover_event_types": list(
+            resolved_settings.gateway_market_data_append_only_cutover_event_types
+        ),
+        "skip_budget_limit_per_minute": skip_budget_limit,
+        "skip_budget_used_current_minute": skip_budget_used,
+        "skip_budget_remaining_current_minute": skip_budget_remaining,
         "reconcile_required": bool(
             resolved_settings.gateway_market_data_append_only_require_reconcile_pass
+        ),
+        "latest_reconcile_required": bool(
+            resolved_settings.gateway_market_data_append_only_require_latest_reconcile_pass
         ),
         "reconcile_max_age_sec": int(
             resolved_settings.gateway_market_data_append_only_reconcile_max_age_sec
@@ -231,12 +438,33 @@ def get_latest_market_data_append_only_routing_status(
         "total_decision_count": total_count,
         "would_skip_inline_count": would_skip_count,
         "effective_skip_inline_count": effective_skip_count,
+        "effective_price_tick_skip_count": effective_price_tick_skip_count,
+        "condition_event_effective_skip_count": condition_event_effective_skip_count,
+        "tr_response_effective_skip_count": tr_response_effective_skip_count,
+        "invalid_effective_skip_count": invalid_effective_skip_count,
+        "effective_skip_outbox_error_count": effective_skip_outbox_error_count,
+        "deferred_incremental_enqueue_count": deferred_incremental_enqueue_count,
         "blocked_count": blocked_count,
         "blocked_reason_code_counts": blocked_reason_counts,
+        "fail_closed_reason_counts": fail_closed_reason_counts,
         "latest_decision": rows[0] if rows else None,
         "latest_reconcile": latest_reconcile,
+        "latest_reconcile_status": (
+            latest_run.get("status") if isinstance(latest_run, Mapping) else None
+        ),
         "append_only_ready": append_only_ready,
-        "effective_skip_disabled_in_pr6": True,
+        "worker_apply_enabled": worker_apply_enabled,
+        "worker_apply_required": bool(
+            resolved_settings.gateway_market_data_append_only_require_worker_apply_enabled
+        ),
+        "fail_closed_on_routing_error": bool(
+            resolved_settings.gateway_market_data_append_only_fail_closed_on_routing_error
+        ),
+        "rollback_hint": (
+            "Set GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED=false "
+            "or GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED=false."
+        ),
+        "failures": failures,
         "warnings": warnings,
         "read_only": True,
         "no_trading_side_effects": True,
@@ -282,11 +510,18 @@ def _persist_market_data_projection_routing_decision(
             outbox_job_present,
             would_skip_inline,
             effective_skip_inline,
+            cutover_scope,
+            skip_budget_limit,
+            skip_budget_used,
+            skip_budget_remaining,
+            worker_apply_enabled,
+            fallback_inline_projection_expected,
+            post_apply_deferred_side_effects_json,
             blocked_reason_codes_json,
             evidence_json,
             decided_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(event_id, projection_name) DO UPDATE SET
             event_type = excluded.event_type,
             dry_run_enabled = excluded.dry_run_enabled,
@@ -301,6 +536,13 @@ def _persist_market_data_projection_routing_decision(
             outbox_job_present = excluded.outbox_job_present,
             would_skip_inline = excluded.would_skip_inline,
             effective_skip_inline = excluded.effective_skip_inline,
+            cutover_scope = excluded.cutover_scope,
+            skip_budget_limit = excluded.skip_budget_limit,
+            skip_budget_used = excluded.skip_budget_used,
+            skip_budget_remaining = excluded.skip_budget_remaining,
+            worker_apply_enabled = excluded.worker_apply_enabled,
+            fallback_inline_projection_expected = excluded.fallback_inline_projection_expected,
+            post_apply_deferred_side_effects_json = excluded.post_apply_deferred_side_effects_json,
             blocked_reason_codes_json = excluded.blocked_reason_codes_json,
             evidence_json = excluded.evidence_json,
             decided_at = excluded.decided_at
@@ -321,6 +563,13 @@ def _persist_market_data_projection_routing_decision(
             int(decision.outbox_job_present),
             int(decision.would_skip_inline),
             int(decision.effective_skip_inline),
+            decision.cutover_scope,
+            decision.skip_budget_limit,
+            decision.skip_budget_used,
+            decision.skip_budget_remaining,
+            int(decision.worker_apply_enabled),
+            int(decision.fallback_inline_projection_expected),
+            canonical_json(decision.post_apply_deferred_side_effects),
             json.dumps(
                 list(decision.blocked_reason_codes),
                 ensure_ascii=False,
@@ -374,6 +623,99 @@ def _outbox_is_ready(
     return normalized == required
 
 
+def record_market_data_post_apply_deferred_side_effects(
+    connection: sqlite3.Connection,
+    event_id: str,
+    side_effects: Mapping[str, Any],
+) -> None:
+    row = connection.execute(
+        """
+        SELECT evidence_json
+        FROM market_data_projection_routing_decisions
+        WHERE event_id = ? AND projection_name = 'market_data'
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+    if row is None:
+        return
+    payload = dict(side_effects)
+    evidence = _json_object(row["evidence_json"])
+    evidence["post_apply_deferred_side_effects"] = payload
+    connection.execute(
+        """
+        UPDATE market_data_projection_routing_decisions
+        SET
+            post_apply_deferred_side_effects_json = ?,
+            evidence_json = ?
+        WHERE event_id = ? AND projection_name = 'market_data'
+        """,
+        (canonical_json(payload), canonical_json(evidence), event_id),
+    )
+    connection.commit()
+
+
+def _gateway_event_status(
+    connection: sqlite3.Connection,
+    event_id: str,
+) -> str | None:
+    row = connection.execute(
+        """
+        SELECT status
+        FROM gateway_events
+        WHERE event_id = ?
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+    return None if row is None else _string_or_none(row["status"])
+
+
+def _price_tick_payload_identity(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+    try:
+        code = validate_stock_code(payload.get("code"))
+        exchange = _price_tick_payload_exchange(payload)
+    except Exception:
+        return None
+    return {"code": code, "exchange": exchange}
+
+
+def _price_tick_payload_exchange(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("exchange") is not None:
+        return normalize_market_data_exchange(metadata.get("exchange"))
+    if payload.get("exchange") is not None:
+        return normalize_market_data_exchange(payload.get("exchange"))
+    return "KRX"
+
+
+def _price_tick_skip_count_in_current_minute(connection: sqlite3.Connection) -> int:
+    minute_start = datetime_to_wire(utc_now().replace(second=0, microsecond=0))
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'price_tick'
+            AND effective_skip_inline = 1
+            AND julianday(decided_at) >= julianday(?)
+        """,
+        (minute_start,),
+    ).fetchone()
+    return int(row["count"])
+
+
+def _price_tick_skip_budget_remaining(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> int:
+    limit = int(settings.gateway_market_data_append_only_price_tick_max_skip_per_minute)
+    if limit <= 0:
+        return 0
+    used = _price_tick_skip_count_in_current_minute(connection)
+    return max(limit - used, 0)
+
+
 def _count_all_decisions(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         "SELECT COUNT(*) AS count FROM market_data_projection_routing_decisions"
@@ -394,12 +736,84 @@ def _count_decisions(connection: sqlite3.Connection, column: str) -> int:
     return int(row["count"])
 
 
+def _count_effective_skip_by_event_type(
+    connection: sqlite3.Connection,
+    event_type: str,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE effective_skip_inline = 1 AND event_type = ?
+        """,
+        (event_type,),
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_invalid_effective_skips(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE effective_skip_inline = 1 AND event_type <> 'price_tick'
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_effective_skip_outbox_errors(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions AS d
+        JOIN projection_outbox AS po
+            ON po.projection_name = d.projection_name
+            AND po.event_id = d.event_id
+        WHERE d.effective_skip_inline = 1
+            AND po.status IN ('ERROR', 'DEAD_LETTER')
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_deferred_incremental_enqueue_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE json_extract(
+            post_apply_deferred_side_effects_json,
+            '$.incremental_evaluation_enqueue_status'
+        ) IS NOT NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
 def _blocked_reason_code_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     counter: Counter[str] = Counter()
     for row in rows:
         for reason in row.get("blocked_reason_codes", []):
             if reason != "DRY_RUN_WOULD_SKIP_INLINE":
                 counter[str(reason)] += 1
+    return dict(sorted(counter.items()))
+
+
+def _fail_closed_reason_code_counts(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for row in rows:
+        reasons = [str(reason) for reason in row.get("blocked_reason_codes", [])]
+        if "EFFECTIVE_SKIP_BLOCKED_FAIL_CLOSED" not in reasons:
+            continue
+        for reason in reasons:
+            if reason not in {
+                "DRY_RUN_WOULD_SKIP_INLINE",
+                "EFFECTIVE_SKIP_BLOCKED_FAIL_CLOSED",
+            }:
+                counter[reason] += 1
     return dict(sorted(counter.items()))
 
 
@@ -412,6 +826,13 @@ def _routing_row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
     payload["outbox_job_present"] = bool(payload["outbox_job_present"])
     payload["would_skip_inline"] = bool(payload["would_skip_inline"])
     payload["effective_skip_inline"] = bool(payload["effective_skip_inline"])
+    payload["worker_apply_enabled"] = bool(payload.get("worker_apply_enabled"))
+    payload["fallback_inline_projection_expected"] = bool(
+        payload.get("fallback_inline_projection_expected", True)
+    )
+    payload["post_apply_deferred_side_effects"] = _json_object(
+        payload.pop("post_apply_deferred_side_effects_json", "{}")
+    )
     payload["blocked_reason_codes"] = _json_array(
         payload.pop("blocked_reason_codes_json", "[]")
     )

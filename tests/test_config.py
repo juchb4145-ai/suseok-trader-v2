@@ -75,7 +75,13 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_projection_reconcile_limit == 500
     assert settings.gateway_market_data_append_only_dry_run_enabled is False
     assert settings.gateway_market_data_append_only_cutover_enabled is False
+    assert settings.gateway_market_data_append_only_price_tick_cutover_enabled is False
+    assert settings.gateway_market_data_append_only_cutover_event_types == ("price_tick",)
     assert settings.gateway_market_data_append_only_require_reconcile_pass is True
+    assert settings.gateway_market_data_append_only_require_latest_reconcile_pass is True
+    assert settings.gateway_market_data_append_only_require_worker_apply_enabled is True
+    assert settings.gateway_market_data_append_only_fail_closed_on_routing_error is True
+    assert settings.gateway_market_data_append_only_price_tick_max_skip_per_minute == 0
     assert settings.gateway_market_data_append_only_reconcile_max_age_sec == 300
     assert settings.gateway_market_data_append_only_event_types == (
         "price_tick",
@@ -501,7 +507,13 @@ def test_market_data_interval_settings_are_validated() -> None:
         {
             "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_EVENT_TYPES": "price_tick",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_LATEST_RECONCILE_PASS": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_WORKER_APPLY_ENABLED": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_FAIL_CLOSED_ON_ROUTING_ERROR": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE": "3",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "60",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES": "price_tick,tr_response",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_MIN_OUTBOX_STATUS": "enqueued",
@@ -509,7 +521,30 @@ def test_market_data_interval_settings_are_validated() -> None:
     )
     assert routing_settings.gateway_market_data_append_only_dry_run_enabled is True
     assert routing_settings.gateway_market_data_append_only_cutover_enabled is True
+    assert (
+        routing_settings.gateway_market_data_append_only_price_tick_cutover_enabled
+        is True
+    )
+    assert routing_settings.gateway_market_data_append_only_cutover_event_types == (
+        "price_tick",
+    )
     assert routing_settings.gateway_market_data_append_only_require_reconcile_pass is False
+    assert (
+        routing_settings.gateway_market_data_append_only_require_latest_reconcile_pass
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_require_worker_apply_enabled
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_fail_closed_on_routing_error
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
+        == 3
+    )
     assert routing_settings.gateway_market_data_append_only_reconcile_max_age_sec == 60
     assert routing_settings.gateway_market_data_append_only_event_types == (
         "price_tick",

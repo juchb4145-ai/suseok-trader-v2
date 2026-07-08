@@ -30,6 +30,10 @@ from services.market_data_service import (
     normalize_market_data_exchange,
     process_gateway_event,
 )
+from services.runtime.gateway_projection_routing import (
+    record_market_data_post_apply_deferred_side_effects,
+)
+from services.runtime.incremental_evaluation import enqueue_incremental_evaluation_for_event
 
 APPLY_MODE_SHADOW_VERIFY_ONLY = "SHADOW_VERIFY_ONLY"
 APPLY_MODE_MARKET_DATA_APPLY = "MARKET_DATA_APPLY"
@@ -397,6 +401,19 @@ def _apply_market_data_projection(
             projection_result=projection_result_payload,
         )
 
+    post_apply_side_effects: dict[str, Any] = {}
+    if event_type == "price_tick" and projection_result.applied_count > 0:
+        post_apply_side_effects = _enqueue_deferred_incremental_evaluation_for_price_tick(
+            connection,
+            event,
+            settings=settings,
+        )
+        record_market_data_post_apply_deferred_side_effects(
+            connection,
+            event_id,
+            post_apply_side_effects,
+        )
+
     verification_after = verify_projection_outbox_job(connection, job, settings=settings)
     evidence = {
         "event_id": event_id,
@@ -405,6 +422,7 @@ def _apply_market_data_projection(
         "verification_after_apply": verification_after.to_dict(),
         "projection_result_status": projection_result_status,
         "projection_result": projection_result_payload,
+        "post_apply_side_effects": post_apply_side_effects,
     }
     if verification_after.status == "APPLIED":
         if projection_result.applied_count > 0:
@@ -739,6 +757,55 @@ def _gateway_event_from_row(row: Mapping[str, Any]) -> GatewayEvent:
         ts=parse_timestamp(row["event_ts"], "event_ts"),
         payload=_json_object(str(row["payload_json"])),
     )
+
+
+def _enqueue_deferred_incremental_evaluation_for_price_tick(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    deferred_from_gateway_path = _routing_decision_effective_skip_inline(
+        connection,
+        event.event_id,
+    )
+    try:
+        result = enqueue_incremental_evaluation_for_event(
+            connection,
+            event,
+            settings=settings,
+        )
+    except Exception as exc:
+        return {
+            "incremental_evaluation_enqueue_status": "ERROR",
+            "error_message": str(exc),
+            "deferred_from_gateway_path": deferred_from_gateway_path,
+            "no_order_side_effects": True,
+        }
+    return {
+        "incremental_evaluation_enqueue_status": result.status,
+        "enqueued_count": result.enqueued_count,
+        "candidate_ids": list(result.candidate_ids),
+        "code": result.code,
+        "deferred_from_gateway_path": deferred_from_gateway_path,
+        "no_order_side_effects": True,
+    }
+
+
+def _routing_decision_effective_skip_inline(
+    connection: sqlite3.Connection,
+    event_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT effective_skip_inline
+        FROM market_data_projection_routing_decisions
+        WHERE event_id = ? AND projection_name = 'market_data'
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+    return bool(row is not None and row["effective_skip_inline"])
 
 
 def _classify_missing_price_tick_sample(

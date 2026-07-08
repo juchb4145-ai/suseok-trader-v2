@@ -1438,10 +1438,13 @@ def _market_data_append_only_routing_summary(
 ) -> dict[str, Any]:
     effective_skip_count = int(payload.get("effective_skip_inline_count") or 0)
     warnings = list(payload.get("warnings") or [])
-    if effective_skip_count:
-        warnings.insert(0, "PR-6 invariant violation: effective skip must remain 0")
-    elif "PR-6 dry-run only; inline projection remains enabled" not in warnings:
-        warnings.append("PR-6 dry-run only; inline projection remains enabled")
+    if "condition_event/tr_response inline projection remains enabled" not in warnings:
+        warnings.append("condition_event/tr_response inline projection remains enabled")
+    if "LIVE_REAL/order behavior unchanged" not in warnings:
+        warnings.append("LIVE_REAL/order behavior unchanged")
+    rollback_hint = payload.get("rollback_hint") or (
+        "disable gateway_market_data_append_only_price_tick_cutover_enabled"
+    )
     latest_reconcile = payload.get("latest_reconcile")
     latest_reconcile_run = (
         latest_reconcile.get("latest_run")
@@ -1450,22 +1453,54 @@ def _market_data_append_only_routing_summary(
     )
     latest_decision = payload.get("latest_decision")
     return {
+        "pr": "PR-7",
+        "cutover_status": "price_tick-only cutover",
         "dry_run_enabled": bool(payload.get("dry_run_enabled")),
         "cutover_enabled": bool(payload.get("cutover_enabled")),
+        "price_tick_cutover_enabled": bool(payload.get("price_tick_cutover_enabled")),
+        "cutover_global_enabled": bool(payload.get("cutover_enabled")),
+        "cutover_scope": payload.get("cutover_scope") or "price_tick_only",
+        "worker_apply_enabled": bool(payload.get("worker_apply_enabled")),
         "latest_reconcile_status": (
             latest_reconcile_run.get("status")
             if isinstance(latest_reconcile_run, Mapping)
             else None
         ),
         "append_only_ready": bool(payload.get("append_only_ready")),
+        "skip_budget_limit_per_minute": int(
+            payload.get("skip_budget_limit_per_minute") or 0
+        ),
+        "skip_budget_used_current_minute": int(
+            payload.get("skip_budget_used_current_minute") or 0
+        ),
+        "skip_budget_remaining": int(
+            payload.get("skip_budget_remaining_current_minute") or 0
+        ),
         "would_skip_inline_count": int(payload.get("would_skip_inline_count") or 0),
         "effective_skip_inline_count": effective_skip_count,
+        "effective_price_tick_skip_count": int(
+            payload.get("effective_price_tick_skip_count") or 0
+        ),
+        "condition_event_effective_skip_count": int(
+            payload.get("condition_event_effective_skip_count") or 0
+        ),
+        "tr_response_effective_skip_count": int(
+            payload.get("tr_response_effective_skip_count") or 0
+        ),
+        "invalid_effective_skip_count": int(
+            payload.get("invalid_effective_skip_count") or 0
+        ),
+        "deferred_incremental_enqueue_count": int(
+            payload.get("deferred_incremental_enqueue_count") or 0
+        ),
         "blocked_count": int(payload.get("blocked_count") or 0),
         "blocked_reason_code_counts": dict(
             payload.get("blocked_reason_code_counts") or {}
         ),
+        "fail_closed_reason_counts": dict(payload.get("fail_closed_reason_counts") or {}),
         "latest_decision": latest_decision if isinstance(latest_decision, Mapping) else None,
-        "effective_skip_disabled_in_pr6": True,
+        "rollback_hint": rollback_hint,
+        "failures": list(payload.get("failures") or []),
         "warnings": warnings,
         "read_only": True,
         "no_trading_side_effects": True,

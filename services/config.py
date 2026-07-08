@@ -178,7 +178,13 @@ class Settings:
     market_data_projection_reconcile_limit: int = 500
     gateway_market_data_append_only_dry_run_enabled: bool = False
     gateway_market_data_append_only_cutover_enabled: bool = False
+    gateway_market_data_append_only_price_tick_cutover_enabled: bool = False
+    gateway_market_data_append_only_cutover_event_types: tuple[str, ...] = ("price_tick",)
     gateway_market_data_append_only_require_reconcile_pass: bool = True
+    gateway_market_data_append_only_require_latest_reconcile_pass: bool = True
+    gateway_market_data_append_only_require_worker_apply_enabled: bool = True
+    gateway_market_data_append_only_fail_closed_on_routing_error: bool = True
+    gateway_market_data_append_only_price_tick_max_skip_per_minute: int = 0
     gateway_market_data_append_only_reconcile_max_age_sec: int = 300
     gateway_market_data_append_only_event_types: tuple[str, ...] = (
         "price_tick",
@@ -542,6 +548,20 @@ class Settings:
         if not self.gateway_market_data_append_only_event_types:
             raise ValueError(
                 "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES must not be empty"
+            )
+        object.__setattr__(
+            self,
+            "gateway_market_data_append_only_cutover_event_types",
+            tuple(
+                event_type.strip().lower()
+                for event_type in self.gateway_market_data_append_only_cutover_event_types
+                if event_type.strip()
+            ),
+        )
+        if self.gateway_market_data_append_only_price_tick_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE "
+                "must be >= 0"
             )
         object.__setattr__(
             self,
@@ -1675,8 +1695,49 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_data_append_only_cutover_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED", "false")
         ),
+        gateway_market_data_append_only_price_tick_cutover_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED",
+                "false",
+            )
+        ),
+        gateway_market_data_append_only_cutover_event_types=tuple(
+            _parse_csv_list(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_EVENT_TYPES",
+                    "price_tick",
+                ),
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_EVENT_TYPES",
+            )
+        ),
         gateway_market_data_append_only_require_reconcile_pass=_parse_bool(
             env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_RECONCILE_PASS", "true")
+        ),
+        gateway_market_data_append_only_require_latest_reconcile_pass=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_LATEST_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_data_append_only_require_worker_apply_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_WORKER_APPLY_ENABLED",
+                "true",
+            )
+        ),
+        gateway_market_data_append_only_fail_closed_on_routing_error=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_FAIL_CLOSED_ON_ROUTING_ERROR",
+                "true",
+            )
+        ),
+        gateway_market_data_append_only_price_tick_max_skip_per_minute=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE",
+                "0",
+            ),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE",
+            min_value=0,
         ),
         gateway_market_data_append_only_reconcile_max_age_sec=_parse_int(
             env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC", "300"),

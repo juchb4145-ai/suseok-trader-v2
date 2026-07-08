@@ -70,6 +70,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     projection_status: str | None = None
     projection_statuses: dict[str, str] = {}
+    market_data_routing: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
             result = append_gateway_event(connection, event)
@@ -95,45 +96,60 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         projection_statuses["market_data_effective_skip_inline"] = (
                             "TRUE" if routing_decision.effective_skip_inline else "FALSE"
                         )
-                    projection_result = process_gateway_event(
-                        connection,
-                        event,
-                        settings=settings,
-                    )
-                    projection_status = projection_result.status
-                    projection_statuses["market_data"] = projection_result.status
-                    if event_type == "price_tick" and projection_result.status == "APPLIED":
+                        market_data_routing = routing_decision.to_dict()
+                    if routing_decision is not None and routing_decision.effective_skip_inline:
+                        projection_status = "SKIPPED_INLINE_APPEND_ONLY_PRICE_TICK"
+                        projection_statuses["market_data"] = projection_status
+                        projection_statuses["market_data_effective_skip_inline"] = "TRUE"
                         projection_statuses["incremental_evaluation"] = (
-                            _enqueue_incremental_evaluation_for_price_tick(
-                                connection,
-                                event,
-                                settings=settings,
-                            )
+                            "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
                         )
-                    if event_type == "tr_response" and projection_result.status == "APPLIED":
-                        quote_refresh_status = (
-                            _enqueue_incremental_evaluation_for_candidate_quote_refresh(
-                                connection,
-                                event,
-                                settings=settings,
-                            )
+                    else:
+                        projection_result = process_gateway_event(
+                            connection,
+                            event,
+                            settings=settings,
                         )
-                        if quote_refresh_status is not None:
+                        projection_status = projection_result.status
+                        projection_statuses["market_data"] = projection_result.status
+                        if (
+                            event_type == "price_tick"
+                            and projection_result.status == "APPLIED"
+                        ):
                             projection_statuses["incremental_evaluation"] = (
-                                quote_refresh_status
+                                _enqueue_incremental_evaluation_for_price_tick(
+                                    connection,
+                                    event,
+                                    settings=settings,
+                                )
                             )
-                    if (
-                        event_type == "condition_event"
-                        and projection_result.status == "APPLIED"
-                        and settings.condition_fusion_event_incremental_enabled
-                    ):
-                        projection_statuses["condition_fusion"] = (
-                            _refresh_condition_fusion_for_condition_event(
-                                connection,
-                                event,
-                                settings=settings,
+                        if (
+                            event_type == "tr_response"
+                            and projection_result.status == "APPLIED"
+                        ):
+                            quote_refresh_status = (
+                                _enqueue_incremental_evaluation_for_candidate_quote_refresh(
+                                    connection,
+                                    event,
+                                    settings=settings,
+                                )
                             )
-                        )
+                            if quote_refresh_status is not None:
+                                projection_statuses["incremental_evaluation"] = (
+                                    quote_refresh_status
+                                )
+                        if (
+                            event_type == "condition_event"
+                            and projection_result.status == "APPLIED"
+                            and settings.condition_fusion_event_incremental_enabled
+                        ):
+                            projection_statuses["condition_fusion"] = (
+                                _refresh_condition_fusion_for_condition_event(
+                                    connection,
+                                    event,
+                                    settings=settings,
+                                )
+                            )
                 if event_type in MARKET_SYMBOL_EVENT_TYPES:
                     reference_result = process_market_symbols_event(connection, event)
                     projection_statuses["market_reference"] = reference_result.status
@@ -187,6 +203,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["projection_status"] = projection_status
     if projection_statuses:
         response["projection_statuses"] = projection_statuses
+    if market_data_routing is not None:
+        response["market_data_append_only_routing"] = market_data_routing
     return response
 
 

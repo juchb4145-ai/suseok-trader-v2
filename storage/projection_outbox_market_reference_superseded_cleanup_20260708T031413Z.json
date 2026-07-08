@@ -1,0 +1,40 @@
+[
+  {
+    "attempts": 1,
+    "available_at": "2026-07-08T01:53:07.831304Z",
+    "created_at": "2026-07-08T01:53:07.831304Z",
+    "event_id": "evt_9e78b2bf449347beacaac849bbd84313",
+    "event_rowid": 4966449,
+    "event_type": "market_symbols",
+    "last_error": "MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_9e78b2bf449347beacaac849bbd84313",
+    "locked_at": null,
+    "locked_by": null,
+    "metadata_json": "{\"last_worker_error\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_9e78b2bf449347beacaac849bbd84313\",\"last_worker_evidence\":{\"apply_mode\":\"SHADOW_VERIFY_ONLY\",\"apply_projection\":false,\"apply_projection_enabled\":false,\"apply_projection_requested\":false,\"event_id\":\"evt_9e78b2bf449347beacaac849bbd84313\",\"event_type\":\"market_symbols\",\"market_data_apply_enabled\":false,\"no_trading_side_effects\":true,\"projection_name\":\"market_reference\",\"projection_side_effects_allowed\":false,\"reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"shadow_mode\":true,\"verification_reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"worker_run_id\":\"projection_outbox_shadow_31d2282d1d304169ba2c7ee504a3955a\"},\"last_worker_status\":\"ERROR\",\"shadow_mode\":true,\"source_command_id\":null,\"source_event_id\":\"evt_9e78b2bf449347beacaac849bbd84313\",\"source_event_type\":\"market_symbols\",\"source_idempotency_key\":null,\"worker_enabled\":false,\"worker_history\":[{\"error_message\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_9e78b2bf449347beacaac849bbd84313\",\"evidence\":{\"apply_mode\":\"SHADOW_VERIFY_ONLY\",\"apply_projection\":false,\"apply_projection_enabled\":false,\"apply_projection_requested\":false,\"event_id\":\"evt_9e78b2bf449347beacaac849bbd84313\",\"event_type\":\"market_symbols\",\"market_data_apply_enabled\":false,\"no_trading_side_effects\":true,\"projection_name\":\"market_reference\",\"projection_side_effects_allowed\":false,\"reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"shadow_mode\":true,\"verification_reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"worker_run_id\":\"projection_outbox_shadow_31d2282d1d304169ba2c7ee504a3955a\"},\"marked_at\":\"2026-07-08T03:13:05.327705Z\",\"status\":\"ERROR\"}]}",
+    "outbox_id": "market_reference:evt_9e78b2bf449347beacaac849bbd84313",
+    "priority": 0,
+    "processed_at": null,
+    "projection_name": "market_reference",
+    "source": "kiwoom_gateway",
+    "status": "ERROR",
+    "updated_at": "2026-07-08T03:13:05.327705Z"
+  },
+  {
+    "attempts": 1,
+    "available_at": "2026-07-08T02:21:32.076496Z",
+    "created_at": "2026-07-08T02:21:32.076496Z",
+    "event_id": "evt_c48374cab4834a86827e2e40a6828ad2",
+    "event_rowid": 4969981,
+    "event_type": "market_symbols",
+    "last_error": "MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_c48374cab4834a86827e2e40a6828ad2",
+    "locked_at": null,
+    "locked_by": null,
+    "metadata_json": "{\"last_worker_error\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_c48374cab4834a86827e2e40a6828ad2\",\"last_worker_evidence\":{\"apply_mode\":\"SHADOW_VERIFY_ONLY\",\"apply_projection\":false,\"apply_projection_enabled\":false,\"apply_projection_requested\":false,\"event_id\":\"evt_c48374cab4834a86827e2e40a6828ad2\",\"event_type\":\"market_symbols\",\"market_data_apply_enabled\":false,\"no_trading_side_effects\":true,\"projection_name\":\"market_reference\",\"projection_side_effects_allowed\":false,\"reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"shadow_mode\":true,\"verification_reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"worker_run_id\":\"projection_outbox_shadow_5ca9a361d24445df847fddc45a749c6d\"},\"last_worker_status\":\"ERROR\",\"shadow_mode\":true,\"source_command_id\":null,\"source_event_id\":\"evt_c48374cab4834a86827e2e40a6828ad2\",\"source_event_type\":\"market_symbols\",\"source_idempotency_key\":null,\"worker_enabled\":false,\"worker_history\":[{\"error_message\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING: market_symbol_memberships missing for event_id=evt_c48374cab4834a86827e2e40a6828ad2\",\"evidence\":{\"apply_mode\":\"SHADOW_VERIFY_ONLY\",\"apply_projection\":false,\"apply_projection_enabled\":false,\"apply_projection_requested\":false,\"event_id\":\"evt_c48374cab4834a86827e2e40a6828ad2\",\"event_type\":\"market_symbols\",\"market_data_apply_enabled\":false,\"no_trading_side_effects\":true,\"projection_name\":\"market_reference\",\"projection_side_effects_allowed\":false,\"reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"shadow_mode\":true,\"verification_reason\":\"MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING\",\"worker_run_id\":\"projection_outbox_shadow_5ca9a361d24445df847fddc45a749c6d\"},\"marked_at\":\"2026-07-08T03:13:09.858051Z\",\"status\":\"ERROR\"}]}",
+    "outbox_id": "market_reference:evt_c48374cab4834a86827e2e40a6828ad2",
+    "priority": 0,
+    "processed_at": null,
+    "projection_name": "market_reference",
+    "source": "kiwoom_gateway",
+    "status": "ERROR",
+    "updated_at": "2026-07-08T03:13:09.858051Z"
+  }
+]

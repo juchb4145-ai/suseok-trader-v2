@@ -20,6 +20,7 @@
 - PR-4: `projection_outbox` market_data-only apply pilot을 추가했다. 기본값은 disabled이며, `PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=true`와 `PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED=true`가 모두 켜지고 operator가 `apply_projection=true`로 run-once를 호출할 때만 `market_data` projection 재적용이 허용된다. `market_reference`/`market_index`/`market_regime`/`market_scan`/`condition_fusion` apply는 여전히 차단되고, Gateway POST inline projection과 주문/LIVE_SIM 동작은 변경하지 않았다. 운영 절차는 `docs/runbook_projection_outbox_apply_market_data_ko.md`에 정리했다.
 - PR-5: `market_data` projection dual-run reconciliation을 추가했다. accepted `price_tick`/`condition_event`/`tr_response`와 inline projection artifact, `projection_outbox`, watermark, synthetic child event id를 대조해 append-only 전환 준비도를 `PASS`/`WARN`/`FAIL`로 리포트한다. 이 PR도 append-only 전환이 아니며 Gateway inline projection, worker default disabled, 주문/LIVE_SIM/LIVE_REAL 정책은 그대로 유지한다. 운영 절차는 `docs/runbook_market_data_projection_reconcile_ko.md`에 정리했다.
 - PR-6: `market_data` append-only dry-run routing decision을 추가했다. Gateway inline `process_gateway_event()`는 계속 실행되며, dry-run flag가 켜진 경우에만 reconcile PASS/outbox readiness 조건을 만족한 이벤트에 대해 `would_skip_inline=True`를 기록한다. `effective_skip_inline`은 PR-6에서 항상 `False`이며, cutover flag가 켜져도 `EFFECTIVE_SKIP_DISABLED_IN_PR6` evidence만 남긴다. 운영 절차는 `docs/runbook_market_data_append_only_routing_ko.md`에 정리했다.
+- PR-7: `price_tick`에 한정한 `market_data` inline skip을 엄격한 feature flag 뒤에 추가했다. 기본값에서는 `effective_skip_inline=False`이며, `dry_run + global cutover + price_tick cutover + worker apply enabled + reconcile PASS/fresh + outbox ready + per-minute skip budget > 0` 조건을 모두 만족해야만 Gateway request path의 `process_gateway_event()`를 건너뛴다. `condition_event`/`tr_response`는 계속 inline projection을 유지하며, skipped `price_tick`의 incremental evaluation enqueue는 `projection_outbox` worker가 market_data apply 성공 후 deferred side effect evidence로 기록한다. 운영 절차는 `docs/runbook_market_data_price_tick_cutover_ko.md`에 정리했다.
 
 ## P0
 
@@ -90,11 +91,27 @@ PR-6 추가 테스트:
 - condition_event/tr_response도 allowlist 안에서 decision 기록
 - operator status/dashboard/ops script 판정 포함
 
+PR-7 추가 테스트:
+
+- `tests/test_gateway_market_data_price_tick_cutover.py`
+- `tests/test_projection_outbox_price_tick_deferred_incremental.py`
+- `tests/test_ops_market_data_price_tick_cutover_check.py`
+
+핵심 검증:
+
+- 기본 설정에서는 `price_tick`도 inline projection 유지
+- strict flags, fresh reconcile PASS, worker apply enabled, skip budget 조건에서만 `price_tick` effective skip 발생
+- `condition_event`/`tr_response`는 cutover flag가 켜져도 inline projection 유지
+- budget exhausted, reconcile fail, worker apply disabled 시 inline fallback
+- worker apply 후 `market_tick_samples`, `market_ticks_latest`, `incremental_evaluation_queue`와 deferred evidence 기록
+- operator status/dashboard/ops script가 invalid effective skip과 deferred enqueue 누락을 감지
+
 ## 다음 PR 권장 순서
 
-1. Gateway ingest를 append-only + projection outbox/worker로 분리하고, projection별 watermark/error/retry 정책을 확정한다.
-2. market data TR synthetic tick child event id 또는 sample PK를 수정하고, error watermark와 success watermark를 분리한다.
-3. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
-4. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.
-5. incremental evaluation과 EntryTiming/OrderPlan의 source metadata를 연결하고 dashboard coherency section을 추가한다.
-6. market_context snapshot을 공통화하고 candidate context는 snapshot id를 참조하도록 바꾼다.
+1. PR-7을 실제 장중 소량 budget으로 검증하고, `price_tick` effective skip -> worker apply -> deferred incremental enqueue -> reconcile PASS가 반복되는지 확인한다.
+2. PR-8에서 `tr_response` quote refresh enqueue와 `condition_event` condition_fusion refresh를 worker side effect로 옮길 수 있는지 shadow migration을 설계한다.
+3. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
+4. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
+5. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.
+6. incremental evaluation과 EntryTiming/OrderPlan의 source metadata를 연결하고 dashboard coherency section을 추가한다.
+7. market_context snapshot을 공통화하고 candidate context는 snapshot id를 참조하도록 바꾼다.

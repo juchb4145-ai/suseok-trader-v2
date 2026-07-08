@@ -398,7 +398,10 @@ def test_market_data_append_only_routing_dashboard_snapshot_includes_status(
     assert status["would_skip_inline_count"] == 1
     assert summary["would_skip_inline_count"] == 1
     assert summary["effective_skip_inline_count"] == 0
-    assert "PR-6 dry-run only; inline projection remains enabled" in summary["warnings"]
+    assert (
+        "condition_event/tr_response inline projection remains enabled"
+        in summary["warnings"]
+    )
     assert snapshot["market_data_append_only_routing"]["read_only"] is True
 
 
