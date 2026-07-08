@@ -473,7 +473,9 @@ def test_price_tick_duplicate_and_negative_delta_are_not_double_counted(tmp_path
     assert bar["tick_count"] == 2
 
 
-def test_older_price_tick_is_ignored_without_rewinding_projection(tmp_path) -> None:
+def test_older_price_tick_appends_sample_without_rewinding_latest_or_bars(
+    tmp_path,
+) -> None:
     connection = initialize_database(tmp_path / "market.sqlite3")
     newer = price_tick_event(
         "evt_tick_newer",
@@ -498,18 +500,31 @@ def test_older_price_tick_is_ignored_without_rewinding_projection(tmp_path) -> N
 
     latest = get_latest_tick(connection, "005930")
     sample_rows = connection.execute(
-        "SELECT event_id FROM market_tick_samples ORDER BY event_ts"
+        """
+        SELECT event_id, volume_delta, trade_value_delta
+        FROM market_tick_samples
+        ORDER BY event_ts
+        """
     ).fetchall()
     bar = list_bars(connection, "005930", interval_sec=60)[0]
+    projection_error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM market_projection_errors"
+    ).fetchone()["count"]
     connection.close()
 
-    assert result.status == "IGNORED"
+    assert result.status == "APPLIED"
     assert latest is not None
     assert latest["event_id"] == "evt_tick_newer"
     assert latest["price"] == 70100
-    assert [row["event_id"] for row in sample_rows] == ["evt_tick_newer"]
+    assert [row["event_id"] for row in sample_rows] == [
+        "evt_tick_older",
+        "evt_tick_newer",
+    ]
+    assert sample_rows[0]["volume_delta"] == 0
+    assert sample_rows[0]["trade_value_delta"] == 0
     assert bar["close"] == 70100
     assert bar["tick_count"] == 1
+    assert projection_error_count == 0
 
 
 def test_price_missing_tick_is_ignored_without_polluting_latest_or_bars(tmp_path) -> None:

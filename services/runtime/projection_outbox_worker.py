@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from domain.broker.conditions import BrokerConditionEvent
-from domain.broker.utils import datetime_to_wire, new_message_id, utc_now
+from domain.broker.utils import (
+    datetime_to_wire,
+    new_message_id,
+    parse_timestamp,
+    utc_now,
+    validate_stock_code,
+)
 from storage.projection_outbox import (
     claim_projection_outbox_jobs,
     get_projection_outbox_status,
@@ -17,6 +23,7 @@ from storage.projection_outbox import (
 )
 
 from services.config import Settings, load_settings
+from services.market_data_service import QUOTE_ONLY_REAL_TYPES, normalize_market_data_exchange
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -201,7 +208,7 @@ def verify_projection_outbox_job(
 
     payload = _json_object(source_event["payload_json"])
     if projection_name == "market_data":
-        return _verify_market_data(connection, event_id, event_type, payload)
+        return _verify_market_data(connection, event_id, event_type, payload, source_event)
     if projection_name == "condition_fusion":
         return _verify_condition_fusion(
             connection,
@@ -229,6 +236,7 @@ def _verify_market_data(
     event_id: str,
     event_type: str,
     payload: Mapping[str, Any],
+    source_event: Mapping[str, Any],
 ) -> ProjectionOutboxVerificationResult:
     inline_error = _market_data_inline_error(connection, event_id)
     if inline_error is not None:
@@ -239,12 +247,23 @@ def _verify_market_data(
             inline_error=inline_error,
         )
     if event_type == "price_tick":
-        return _verify_event_id_table(
+        if _event_id_exists(connection, "market_tick_samples", event_id):
+            return _verification_applied(
+                "MARKET_DATA_PRICE_TICK_SAMPLE_OBSERVED",
+                event_id=event_id,
+                table="market_tick_samples",
+            )
+        skipped = _classify_missing_price_tick_sample(
             connection,
-            "market_tick_samples",
             event_id,
-            success_reason="MARKET_DATA_PRICE_TICK_SAMPLE_OBSERVED",
-            error_reason="MARKET_DATA_PRICE_TICK_SAMPLE_MISSING",
+            payload,
+            source_event,
+        )
+        if skipped is not None:
+            return skipped
+        return _verification_error(
+            "MARKET_DATA_PRICE_TICK_SAMPLE_MISSING",
+            f"market_tick_samples missing for event_id={event_id}",
         )
     if event_type == "condition_event":
         return _verify_event_id_table(
@@ -441,12 +460,80 @@ def _gateway_event_row(
 ) -> sqlite3.Row | None:
     return connection.execute(
         """
-        SELECT event_id, event_type, status, payload_json
+        SELECT event_id, event_type, status, event_ts, payload_json
         FROM gateway_events
         WHERE event_id = ?
         """,
         (event_id,),
     ).fetchone()
+
+
+def _classify_missing_price_tick_sample(
+    connection: sqlite3.Connection,
+    event_id: str,
+    payload: Mapping[str, Any],
+    source_event: Mapping[str, Any],
+) -> ProjectionOutboxVerificationResult | None:
+    real_type = _price_tick_payload_real_type(payload)
+    if real_type in QUOTE_ONLY_REAL_TYPES:
+        return _verification_skipped(
+            "MARKET_DATA_PRICE_TICK_QUOTE_ONLY",
+            event_id=event_id,
+            real_type=real_type,
+        )
+    try:
+        code = validate_stock_code(payload.get("code"))
+        exchange = _price_tick_payload_exchange(payload)
+    except ValueError:
+        return None
+    latest = connection.execute(
+        """
+        SELECT event_id, event_ts
+        FROM market_ticks_latest
+        WHERE code = ? AND exchange = ?
+        """,
+        (code, exchange),
+    ).fetchone()
+    if latest is None:
+        return None
+    source_event_ts = str(source_event["event_ts"] or "")
+    if source_event_ts and _timestamp_is_before(source_event_ts, str(latest["event_ts"])):
+        return _verification_skipped(
+            "MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST",
+            event_id=event_id,
+            code=code,
+            exchange=exchange,
+            source_event_ts=source_event_ts,
+            latest_event_id=latest["event_id"],
+            latest_event_ts=latest["event_ts"],
+        )
+    return None
+
+
+def _price_tick_payload_real_type(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ""
+    return str(metadata.get("real_type") or "").strip()
+
+
+def _price_tick_payload_exchange(payload: Mapping[str, Any]) -> str:
+    metadata = payload.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get("exchange") is not None:
+        return normalize_market_data_exchange(metadata.get("exchange"))
+    if payload.get("exchange") is not None:
+        return normalize_market_data_exchange(payload.get("exchange"))
+    return "KRX"
+
+
+def _timestamp_is_before(incoming: str, current: str) -> bool:
+    try:
+        return parse_timestamp(incoming, "incoming_event_ts") < parse_timestamp(
+            current,
+            "current_event_ts",
+        )
+    except ValueError:
+        return str(incoming) < str(current)
 
 
 def _market_data_inline_error(

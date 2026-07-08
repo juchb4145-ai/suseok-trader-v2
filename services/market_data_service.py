@@ -167,19 +167,6 @@ def process_gateway_event(
             ),
             commit=True,
         )
-    if event_type == "price_tick" and _is_older_than_latest_price_tick(connection, event):
-        return _with_market_data_watermark(
-            connection,
-            event,
-            MarketDataProcessResult(
-                event_id=event.event_id,
-                event_type=event_type,
-                status="IGNORED",
-                ignored_count=1,
-            ),
-            commit=True,
-        )
-
     try:
         connection.execute("BEGIN IMMEDIATE")
         if event_type == "price_tick":
@@ -689,6 +676,7 @@ def _process_price_tick(
         return 0
 
     event_ts, received_at = _event_store_times(connection, event)
+    older_than_latest = _is_older_than_latest_price_tick(connection, event)
     previous = connection.execute(
         """
         SELECT cumulative_volume, cumulative_trade_value
@@ -704,6 +692,46 @@ def _process_price_tick(
         volume_delta = max(tick.volume - int(previous["cumulative_volume"]), 0)
         previous_trade_value = float(previous["cumulative_trade_value"])
         trade_value_delta = max(float(tick.trade_value) - previous_trade_value, 0.0)
+
+    connection.execute(
+        """
+        INSERT INTO market_tick_samples (
+            event_id,
+            code,
+            exchange,
+            session,
+            price,
+            cumulative_volume,
+            cumulative_trade_value,
+            volume_delta,
+            trade_value_delta,
+            execution_strength,
+            event_ts,
+            received_at,
+            source,
+            metadata_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            event.event_id,
+            tick.code,
+            exchange,
+            session,
+            tick.price,
+            tick.volume,
+            float(tick.trade_value),
+            volume_delta,
+            trade_value_delta,
+            tick.execution_strength,
+            event_ts,
+            received_at,
+            event.source,
+            _price_tick_metadata_json(event.payload),
+        ),
+    )
+    if older_than_latest:
+        return 1
 
     now = datetime_to_wire(utc_now())
     connection.execute(
@@ -775,43 +803,6 @@ def _process_price_tick(
             event.event_id,
             quality_status.value,
             now,
-        ),
-    )
-    connection.execute(
-        """
-        INSERT INTO market_tick_samples (
-            event_id,
-            code,
-            exchange,
-            session,
-            price,
-            cumulative_volume,
-            cumulative_trade_value,
-            volume_delta,
-            trade_value_delta,
-            execution_strength,
-            event_ts,
-            received_at,
-            source,
-            metadata_json
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event.event_id,
-            tick.code,
-            exchange,
-            session,
-            tick.price,
-            tick.volume,
-            float(tick.trade_value),
-            volume_delta,
-            trade_value_delta,
-            tick.execution_strength,
-            event_ts,
-            received_at,
-            event.source,
-            _price_tick_metadata_json(event.payload),
         ),
     )
     for interval_sec in settings.market_data_bar_intervals_sec:

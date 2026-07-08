@@ -50,6 +50,41 @@ def test_worker_marks_price_tick_job_applied_without_projection_mutation(tmp_pat
     assert after_counts == before_counts
 
 
+def test_worker_skips_legacy_older_price_tick_missing_sample(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "projection-outbox-older-price.sqlite3")
+    settings = Settings(projection_outbox_shadow_min_age_sec=0)
+    newer = _price_tick_event(
+        "evt_worker_newer_price_tick",
+        price=70_100,
+        volume=1_010,
+        trade_value=70_801_000,
+        ts=TS + timedelta(seconds=10),
+    )
+    older = _price_tick_event(
+        "evt_worker_older_price_tick",
+        price=69_900,
+        volume=1_000,
+        trade_value=69_900_000,
+        ts=TS + timedelta(seconds=5),
+    )
+    append_gateway_event(connection, newer)
+    process_gateway_event(connection, newer, settings=settings)
+    append_gateway_event(connection, older)
+    enqueue_projection_jobs_for_gateway_event(connection, older)
+
+    result = process_projection_outbox_batch(connection, settings=settings, limit=1)
+    row = _outbox_row(connection, "market_data:evt_worker_older_price_tick")
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.claimed_count == 1
+    assert result.applied_count == 0
+    assert result.skipped_count == 1
+    assert result.error_count == 0
+    assert row["status"] == "SKIPPED"
+    assert "MARKET_DATA_PRICE_TICK_OLDER_THAN_LATEST" in row["metadata_json"]
+
+
 def test_worker_marks_tr_response_job_applied_from_inline_snapshot(tmp_path) -> None:
     connection = initialize_database(tmp_path / "projection-outbox-tr.sqlite3")
     settings = Settings(projection_outbox_shadow_min_age_sec=0)
@@ -276,29 +311,36 @@ def test_projection_outbox_run_once_api_requires_token_and_is_shadow_only(
     assert row["status"] == "APPLIED"
 
 
-def _price_tick_event(event_id: str) -> GatewayEvent:
+def _price_tick_event(
+    event_id: str,
+    *,
+    price: int = 70_000,
+    volume: int = 1_000,
+    trade_value: int = 70_000_000,
+    ts: datetime = TS,
+) -> GatewayEvent:
     tick = BrokerPriceTick(
         code="005930",
         name="삼성전자",
-        price=70_000,
+        price=price,
         change_rate=0.1,
-        volume=1_000,
-        trade_value=70_000_000,
+        volume=volume,
+        trade_value=trade_value,
         execution_strength=101.5,
-        best_bid=69_900,
-        best_ask=70_000,
+        best_bid=max(price - 100, 1),
+        best_ask=price,
         spread_ticks=1,
-        day_high=70_500,
-        day_low=69_500,
-        trade_time=TS,
-        ts=TS,
+        day_high=price + 500,
+        day_low=max(price - 500, 1),
+        trade_time=ts,
+        ts=ts,
     )
     return GatewayEvent(
         event_id=event_id,
         event_type="price_tick",
         source="test-gateway",
         payload=tick.to_dict(),
-        ts=TS,
+        ts=ts,
     )
 
 
