@@ -202,6 +202,7 @@ def operator_projection_outbox_status() -> dict[str, Any]:
 @router.post("/projection-outbox/run-once", dependencies=[Depends(require_local_token)])
 def operator_projection_outbox_run_once(
     limit: int | None = Query(default=None, ge=1, le=500),
+    apply_projection: bool = Query(default=False),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -210,9 +211,10 @@ def operator_projection_outbox_run_once(
             connection,
             settings=settings,
             limit=limit,
+            apply_projection=apply_projection,
         )
         payload = result.to_dict()
-        payload["read_only_projection"] = True
+        payload["read_only_projection"] = not payload["projection_side_effects_allowed"]
         return payload
     finally:
         connection.close()

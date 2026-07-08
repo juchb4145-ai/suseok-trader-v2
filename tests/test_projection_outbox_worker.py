@@ -305,6 +305,11 @@ def test_projection_outbox_run_once_api_requires_token_and_is_shadow_only(
     assert run_once.status_code == 200
     assert run_once.json()["shadow_mode"] is True
     assert run_once.json()["apply_projection"] is False
+    assert run_once.json()["apply_projection_requested"] is False
+    assert run_once.json()["apply_projection_effective"] is False
+    assert run_once.json()["projection_side_effects_allowed"] is False
+    assert run_once.json()["read_only_projection"] is True
+    assert run_once.json()["mutated_projection_names"] == []
     assert run_once.json()["no_trading_side_effects"] is True
     assert run_once.json()["claimed_count"] == 1
     assert run_once.json()["applied_count"] == 1

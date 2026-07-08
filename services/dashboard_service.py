@@ -1165,14 +1165,24 @@ def _pipeline_summary(
             "apply_projection_enabled": projection_outbox_status[
                 "apply_projection_enabled"
             ],
+            "market_data_apply_enabled": projection_outbox_status[
+                "market_data_apply_enabled"
+            ],
+            "projection_side_effects_allowed": projection_outbox_status[
+                "projection_side_effects_allowed"
+            ],
             "total_count": projection_outbox_status["total_count"],
             "pending_count": projection_outbox_status["pending_count"],
             "processing_count": projection_outbox_status["processing_count"],
+            "applied_count": projection_outbox_status["applied_count"],
+            "skipped_count": projection_outbox_status["skipped_count"],
             "error_count": projection_outbox_status["error_count"],
             "dead_letter_count": projection_outbox_status["dead_letter_count"],
             "oldest_pending_at": projection_outbox_status["oldest_pending_at"],
             "latest_error": projection_outbox_status["latest_error"],
             "by_projection_name": projection_outbox_status["by_projection_name"],
+            "last_apply_mode": projection_outbox_status["last_apply_mode"],
+            "warnings": projection_outbox_status["warnings"],
             "read_only": True,
         },
         "themes": {

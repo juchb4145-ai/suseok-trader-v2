@@ -399,6 +399,21 @@ def get_projection_outbox_status(
         LIMIT 1
         """
     ).fetchone()
+    last_apply_mode = connection.execute(
+        """
+        SELECT json_extract(metadata_json, '$.last_worker_evidence.apply_mode') AS apply_mode
+        FROM projection_outbox
+        WHERE json_extract(metadata_json, '$.last_worker_evidence.apply_mode') IS NOT NULL
+        ORDER BY updated_at DESC, created_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    apply_enabled = bool(
+        getattr(settings, "projection_outbox_apply_projection_enabled", False)
+    )
+    market_data_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_data_apply_enabled", False)
+    )
     return {
         "enabled": True,
         "shadow_mode": bool(getattr(settings, "projection_outbox_shadow_mode", True)),
@@ -408,7 +423,11 @@ def get_projection_outbox_status(
         "apply_projection_enabled": bool(
             getattr(settings, "projection_outbox_apply_projection_enabled", False)
         ),
+        "market_data_apply_enabled": market_data_apply_enabled,
         "batch_size": int(getattr(settings, "projection_outbox_batch_size", 100)),
+        "apply_batch_size": int(
+            getattr(settings, "projection_outbox_apply_batch_size", 50)
+        ),
         "retry_limit": int(getattr(settings, "projection_outbox_retry_limit", 3)),
         "processing_ttl_sec": int(
             getattr(settings, "projection_outbox_processing_ttl_sec", 60)
@@ -416,7 +435,17 @@ def get_projection_outbox_status(
         "shadow_min_age_sec": float(
             getattr(settings, "projection_outbox_shadow_min_age_sec", 0.5)
         ),
+        "apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_apply_min_age_sec", 1.0)
+        ),
         "read_only": True,
+        "projection_side_effects_allowed": apply_enabled and market_data_apply_enabled,
+        "last_apply_mode": None if last_apply_mode is None else last_apply_mode["apply_mode"],
+        "warnings": [
+            "market_data apply worker is disabled by default",
+            "inline projection remains enabled",
+            "append-only gateway mode is not enabled",
+        ],
         "total_count": total_count,
         **counts,
         "oldest_pending_at": (

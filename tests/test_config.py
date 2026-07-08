@@ -116,6 +116,11 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.incremental_evaluation_worker_interval_sec == 1.0
     assert settings.incremental_evaluation_batch_size == 20
     assert settings.incremental_evaluation_retry_limit == 3
+    assert settings.projection_outbox_worker_enabled is False
+    assert settings.projection_outbox_apply_projection_enabled is False
+    assert settings.projection_outbox_market_data_apply_enabled is False
+    assert settings.projection_outbox_apply_batch_size == 50
+    assert settings.projection_outbox_apply_min_age_sec == 1.0
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -287,6 +292,36 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dashboard_max_limit == 200
     assert settings.dashboard_show_raw_json is True
     assert settings.dashboard_route_enabled is True
+
+
+def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> None:
+    settings = load_settings(
+        {
+            "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED": "true",
+            "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED": "true",
+            "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "7",
+            "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "0.25",
+        }
+    )
+
+    assert settings.projection_outbox_apply_projection_enabled is True
+    assert settings.projection_outbox_market_data_apply_enabled is True
+    assert settings.projection_outbox_apply_batch_size == 7
+    assert settings.projection_outbox_apply_min_age_sec == 0.25
+
+
+def test_projection_outbox_apply_settings_are_validated() -> None:
+    invalid_cases = {
+        "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "0",
+        "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "-0.1",
+    }
+    for key, value in invalid_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid projection outbox setting: {key}")
 
 
 def test_trading_profile_capability_matrix() -> None:

@@ -259,6 +259,9 @@ class Settings:
     projection_outbox_processing_ttl_sec: int = 60
     projection_outbox_shadow_mode: bool = True
     projection_outbox_apply_projection_enabled: bool = False
+    projection_outbox_market_data_apply_enabled: bool = False
+    projection_outbox_apply_batch_size: int = 50
+    projection_outbox_apply_min_age_sec: float = 1.0
     projection_outbox_shadow_min_age_sec: float = 0.5
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
@@ -641,6 +644,7 @@ class Settings:
             raise ValueError("PROJECTION_OUTBOX_WORKER_INTERVAL_SEC must be > 0")
         for field_name in (
             "projection_outbox_batch_size",
+            "projection_outbox_apply_batch_size",
             "projection_outbox_retry_limit",
             "projection_outbox_processing_ttl_sec",
         ):
@@ -648,10 +652,10 @@ class Settings:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
         if self.projection_outbox_shadow_min_age_sec < 0:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC must be >= 0")
+        if self.projection_outbox_apply_min_age_sec < 0:
+            raise ValueError("PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC must be >= 0")
         if not self.projection_outbox_shadow_mode:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
-        if self.projection_outbox_apply_projection_enabled:
-            raise ValueError("PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED must remain false")
         _validate_timezone(self.candidate_trade_date_timezone)
         for field_name in (
             "candidate_source_stale_sec",
@@ -1917,6 +1921,19 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         projection_outbox_apply_projection_enabled=_parse_bool(
             env.get("PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED", "false")
+        ),
+        projection_outbox_market_data_apply_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED", "false")
+        ),
+        projection_outbox_apply_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_APPLY_BATCH_SIZE", "50"),
+            "PROJECTION_OUTBOX_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_apply_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC", "1.0"),
+            "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC",
+            min_value=0.0,
         ),
         projection_outbox_shadow_min_age_sec=_parse_float(
             env.get("PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC", "0.5"),
