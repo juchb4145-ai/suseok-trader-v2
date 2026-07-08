@@ -133,7 +133,7 @@ def test_reconcile_fails_if_condition_event_effective_skip_is_seen(tmp_path) -> 
     assert result.status == "FAIL"
     assert result.condition_event_effective_skip_count == 1
     assert result.invalid_effective_skip_count == 1
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN" in result.reason_codes
+    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN_IN_PR10" in result.reason_codes
 
 
 def _mark_market_data_outbox(connection, event_id: str, status: str) -> None:

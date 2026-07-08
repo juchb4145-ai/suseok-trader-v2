@@ -1442,6 +1442,12 @@ def _market_data_append_only_routing_summary(
         warnings.append("condition_event inline projection remains enabled")
     if "PR-9 tr_response limited cutover is feature-flagged" not in warnings:
         warnings.append("PR-9 tr_response limited cutover is feature-flagged")
+    if "PR-10: condition_event cutover is not enabled" not in warnings:
+        warnings.append("PR-10: condition_event cutover is not enabled")
+    if "condition_fusion worker-side refresh is prepare-only" not in warnings:
+        warnings.append("condition_fusion worker-side refresh is prepare-only")
+    if "candidate ingest remains in existing pipeline" not in warnings:
+        warnings.append("candidate ingest remains in existing pipeline")
     if "condition_event remains inline" not in warnings:
         warnings.append("condition_event remains inline")
     if "LIVE_REAL/order behavior unchanged" not in warnings:
@@ -1457,10 +1463,15 @@ def _market_data_append_only_routing_summary(
     )
     latest_decision = payload.get("latest_decision")
     return {
-        "pr": "PR-9",
+        "pr": "PR-10",
+        "price_tick_pr": "PR-7",
+        "tr_response_pr": "PR-9",
+        "condition_event_pr": "PR-10",
         "cutover_status": "price_tick + tr_response limited cutover",
         "pr9_tr_response_limited_cutover": True,
         "price_tick_cutover_status": "UNCHANGED_PR7",
+        "tr_response_cutover_status": "LIMITED_PR9",
+        "condition_event_side_effect_migration_status": "PREP_ONLY_INLINE_REQUIRED",
         "tr_response_side_effect_migration_status": "WORKER_DEFERRED_READY",
         "dry_run_enabled": bool(payload.get("dry_run_enabled")),
         "cutover_enabled": bool(payload.get("cutover_enabled")),
@@ -1473,6 +1484,18 @@ def _market_data_append_only_routing_summary(
         ),
         "tr_response_worker_side_effect_ready": bool(
             payload.get("tr_response_worker_side_effect_ready")
+        ),
+        "condition_event_dry_run_enabled": bool(
+            payload.get("condition_event_dry_run_enabled")
+        ),
+        "condition_event_cutover_enabled": bool(
+            payload.get("condition_event_cutover_enabled")
+        ),
+        "condition_event_worker_side_effect_ready": bool(
+            payload.get("condition_event_worker_side_effect_ready")
+        ),
+        "condition_event_fusion_enabled": bool(
+            payload.get("condition_event_fusion_enabled")
         ),
         "cutover_global_enabled": bool(payload.get("cutover_enabled")),
         "cutover_scope": payload.get("cutover_scope") or "price_tick_only",
@@ -1508,6 +1531,22 @@ def _market_data_append_only_routing_summary(
         ),
         "condition_event_effective_skip_count": int(
             payload.get("condition_event_effective_skip_count") or 0
+        ),
+        "condition_event_would_skip_inline_count": int(
+            payload.get("condition_event_would_skip_inline_count") or 0
+        ),
+        "condition_event_deferred_fusion_refresh_count": int(
+            payload.get("condition_event_deferred_fusion_refresh_count") or 0
+        ),
+        "condition_event_deferred_fusion_refresh_error_count": int(
+            payload.get("condition_event_deferred_fusion_refresh_error_count") or 0
+        ),
+        "condition_event_candidate_ingest_status": "NOT_IN_WORKER",
+        "condition_event_candidate_ingest_executed_count": int(
+            payload.get("condition_event_candidate_ingest_executed_count") or 0
+        ),
+        "condition_event_side_effect_duplicate_count": int(
+            payload.get("condition_event_side_effect_duplicate_count") or 0
         ),
         "tr_response_effective_skip_count": int(
             payload.get("tr_response_effective_skip_count") or 0

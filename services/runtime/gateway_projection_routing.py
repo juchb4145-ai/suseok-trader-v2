@@ -29,6 +29,7 @@ PROJECTION_NAME_MARKET_DATA = "market_data"
 PR6_EFFECTIVE_SKIP_DISABLED_REASON = "EFFECTIVE_SKIP_DISABLED_IN_PR6"
 PR7_CUTOVER_SCOPE = "price_tick_only"
 PR9_CUTOVER_SCOPE = "price_tick_and_tr_response"
+PR10_CONDITION_EVENT_SCOPE = "condition_event_side_effect_prepare_only"
 PR7_ALLOWED_CUTOVER_EVENT_TYPE = "price_tick"
 PR7_FORCED_INLINE_EVENT_TYPES = frozenset({"condition_event"})
 
@@ -139,9 +140,23 @@ def decide_market_data_projection_routing(
     tr_response_require_synthetic_child_guard = bool(
         settings.gateway_market_data_append_only_tr_response_require_synthetic_child_guard
     )
+    condition_event_dry_run_enabled = bool(
+        settings.gateway_market_data_append_only_condition_event_dry_run_enabled
+    )
+    condition_event_cutover_enabled = bool(
+        settings.gateway_market_data_append_only_condition_event_cutover_enabled
+    )
+    condition_event_require_worker_side_effects = bool(
+        settings.gateway_market_data_append_only_condition_event_require_worker_side_effects
+    )
+    condition_event_require_fusion_enabled = bool(
+        settings.gateway_market_data_append_only_condition_event_require_fusion_enabled
+    )
     dry_run_enabled = bool(settings.gateway_market_data_append_only_dry_run_enabled)
     if event_type == "tr_response":
         dry_run_enabled = dry_run_enabled or tr_response_dry_run_enabled
+    if event_type == "condition_event":
+        dry_run_enabled = dry_run_enabled or condition_event_dry_run_enabled
     cutover_enabled = bool(settings.gateway_market_data_append_only_cutover_enabled)
     price_tick_cutover_enabled = bool(
         settings.gateway_market_data_append_only_price_tick_cutover_enabled
@@ -194,6 +209,16 @@ def decide_market_data_projection_routing(
     )
     tr_response_worker_side_effect_ready = (
         worker_apply_enabled if tr_response_require_worker_side_effects else True
+    )
+    condition_event_fusion_enabled = bool(settings.condition_fusion_event_incremental_enabled)
+    condition_event_worker_side_effect_ready = (
+        worker_apply_enabled
+        and (
+            condition_event_fusion_enabled
+            or not condition_event_require_fusion_enabled
+        )
+        if condition_event_require_worker_side_effects
+        else True
     )
     tr_response_rows_count = (
         len(_tr_response_rows(event.payload)) if event_type == "tr_response" else None
@@ -333,8 +358,16 @@ def decide_market_data_projection_routing(
             else "TR_RESPONSE_WORKER_SIDE_EFFECT_NOT_READY"
         )
     elif event_type == "condition_event" and would_skip_inline:
-        reason_codes.append("CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9")
-        effective_skip_reason = "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9"
+        reason_codes.append("CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10")
+        reason_codes.append("CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10")
+        reason_codes.append(
+            "CONDITION_EVENT_WORKER_SIDE_EFFECT_READY"
+            if condition_event_worker_side_effect_ready
+            else "CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY"
+        )
+        if not condition_event_fusion_enabled:
+            reason_codes.append("CONDITION_FUSION_INCREMENTAL_DISABLED")
+        effective_skip_reason = "CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10"
     elif event_type == PR7_ALLOWED_CUTOVER_EVENT_TYPE:
         if not would_skip_inline:
             effective_skip_reason = "WOULD_SKIP_INLINE_FALSE"
@@ -404,15 +437,36 @@ def decide_market_data_projection_routing(
         reason_codes.append("EFFECTIVE_SKIP_BLOCKED_FAIL_CLOSED")
 
     decision_cutover_scope = (
-        PR7_CUTOVER_SCOPE if event_type == "price_tick" else PR9_CUTOVER_SCOPE
+        PR7_CUTOVER_SCOPE
+        if event_type == "price_tick"
+        else PR10_CONDITION_EVENT_SCOPE
+        if event_type == "condition_event"
+        else PR9_CUTOVER_SCOPE
     )
     evidence = {
-        "pr": "PR-9",
+        "pr": "PR-10",
+        "price_tick_pr": "PR-7",
+        "tr_response_pr": "PR-9",
+        "condition_event_pr": "PR-10",
         "pr8_side_effect_migration": True,
         "cutover_scope": decision_cutover_scope,
         "price_tick_only_cutover": False,
         "tr_response_limited_cutover": True,
+        "condition_event_side_effect_prepare_only": True,
+        "condition_event_dry_run_enabled": condition_event_dry_run_enabled,
         "condition_event_cutover_enabled": False,
+        "condition_event_configured_cutover_enabled": condition_event_cutover_enabled,
+        "condition_event_worker_side_effect_ready": (
+            condition_event_worker_side_effect_ready
+        ),
+        "condition_event_fusion_enabled": condition_event_fusion_enabled,
+        "condition_event_effective_skip_disabled_in_pr10": True,
+        "condition_event_require_worker_side_effects": (
+            condition_event_require_worker_side_effects
+        ),
+        "condition_event_require_fusion_enabled": (
+            condition_event_require_fusion_enabled
+        ),
         "tr_response_dry_run_enabled": tr_response_dry_run_enabled,
         "tr_response_cutover_enabled": tr_response_cutover_enabled,
         "tr_response_worker_side_effect_ready": tr_response_worker_side_effect_ready,
@@ -525,6 +579,10 @@ def get_latest_market_data_append_only_routing_status(
         connection,
         "condition_event",
     )
+    condition_event_would_skip_inline_count = _count_would_skip_by_event_type(
+        connection,
+        "condition_event",
+    )
     tr_response_effective_skip_count = _count_effective_skip_by_event_type(
         connection,
         "tr_response",
@@ -546,6 +604,18 @@ def get_latest_market_data_append_only_routing_status(
     )
     tr_response_duplicate_side_effect_count = (
         _count_tr_response_duplicate_side_effect_records(connection)
+    )
+    condition_event_deferred_side_effect_count = (
+        _count_condition_event_deferred_side_effect_records(connection)
+    )
+    condition_event_deferred_side_effect_error_count = (
+        _count_condition_event_deferred_side_effect_errors(connection)
+    )
+    condition_event_candidate_ingest_executed_count = (
+        _count_condition_event_candidate_ingest_executed_records(connection)
+    )
+    condition_event_duplicate_side_effect_count = (
+        _count_condition_event_duplicate_side_effect_records(connection)
     )
     blocked_reason_counts = _blocked_reason_code_counts(rows)
     fail_closed_reason_counts = _fail_closed_reason_code_counts(rows)
@@ -569,6 +639,24 @@ def get_latest_market_data_append_only_routing_status(
     )
     tr_response_worker_side_effect_ready = (
         worker_apply_enabled if tr_response_require_worker_side_effects else True
+    )
+    condition_event_fusion_enabled = bool(
+        resolved_settings.condition_fusion_event_incremental_enabled
+    )
+    condition_event_require_worker_side_effects = bool(
+        resolved_settings.gateway_market_data_append_only_condition_event_require_worker_side_effects
+    )
+    condition_event_require_fusion_enabled = bool(
+        resolved_settings.gateway_market_data_append_only_condition_event_require_fusion_enabled
+    )
+    condition_event_worker_side_effect_ready = (
+        worker_apply_enabled
+        and (
+            condition_event_fusion_enabled
+            or not condition_event_require_fusion_enabled
+        )
+        if condition_event_require_worker_side_effects
+        else True
     )
     skip_budget_limit = int(
         resolved_settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
@@ -612,12 +700,20 @@ def get_latest_market_data_append_only_routing_status(
     warnings = [
         "condition_event inline projection remains enabled",
         "PR-9 tr_response limited cutover requires strict flags and budget",
+        "PR-10 prepares condition_event worker side-effects; condition_event inline remains enabled",
+        "candidate ingest remains outside projection_outbox worker",
         "condition_event inline remains enabled",
         "LIVE_REAL/order behavior unchanged",
         "rollback: disable gateway_market_data_append_only_tr_response_cutover_enabled",
     ]
     if condition_event_effective_skip_count > 0:
         failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
+    if condition_event_candidate_ingest_executed_count > 0:
+        failures.append("CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER_FORBIDDEN")
+    if condition_event_deferred_side_effect_error_count > 0:
+        failures.append("CONDITION_EVENT_DEFERRED_SIDE_EFFECT_ERROR")
+    if condition_event_duplicate_side_effect_count > 0:
+        failures.append("CONDITION_EVENT_DUPLICATE_SIDE_EFFECT_FOR_INLINE_EVENT")
     if invalid_effective_skip_count > 0:
         failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
     if tr_response_effective_skip_count > 0 and not worker_apply_enabled:
@@ -641,6 +737,10 @@ def get_latest_market_data_append_only_routing_status(
     ):
         warnings.append("tr_response cutover flag enabled but skip budget is 0")
     return {
+        "pr": "PR-10",
+        "price_tick_pr": "PR-7",
+        "tr_response_pr": "PR-9",
+        "condition_event_pr": "PR-10",
         "dry_run_enabled": bool(
             resolved_settings.gateway_market_data_append_only_dry_run_enabled
         ),
@@ -658,7 +758,20 @@ def get_latest_market_data_append_only_routing_status(
         ),
         "tr_response_worker_side_effect_ready": tr_response_worker_side_effect_ready,
         "tr_response_require_worker_side_effects": tr_response_require_worker_side_effects,
+        "condition_event_dry_run_enabled": bool(
+            resolved_settings.gateway_market_data_append_only_condition_event_dry_run_enabled
+        ),
+        "condition_event_cutover_enabled": bool(
+            resolved_settings.gateway_market_data_append_only_condition_event_cutover_enabled
+        ),
+        "condition_event_fusion_enabled": condition_event_fusion_enabled,
+        "condition_event_worker_side_effect_ready": condition_event_worker_side_effect_ready,
+        "condition_event_require_worker_side_effects": (
+            condition_event_require_worker_side_effects
+        ),
+        "condition_event_require_fusion_enabled": condition_event_require_fusion_enabled,
         "cutover_scope": PR9_CUTOVER_SCOPE,
+        "condition_event_cutover_scope": PR10_CONDITION_EVENT_SCOPE,
         "cutover_event_types": list(
             resolved_settings.gateway_market_data_append_only_cutover_event_types
         ),
@@ -689,7 +802,29 @@ def get_latest_market_data_append_only_routing_status(
         "would_skip_inline_count": would_skip_count,
         "effective_skip_inline_count": effective_skip_count,
         "effective_price_tick_skip_count": effective_price_tick_skip_count,
+        "price_tick_effective_skip_count": effective_price_tick_skip_count,
         "condition_event_effective_skip_count": condition_event_effective_skip_count,
+        "condition_event_would_skip_inline_count": (
+            condition_event_would_skip_inline_count
+        ),
+        "condition_event_deferred_side_effect_count": (
+            condition_event_deferred_side_effect_count
+        ),
+        "condition_event_deferred_side_effect_error_count": (
+            condition_event_deferred_side_effect_error_count
+        ),
+        "condition_event_deferred_fusion_refresh_count": (
+            condition_event_deferred_side_effect_count
+        ),
+        "condition_event_deferred_fusion_refresh_error_count": (
+            condition_event_deferred_side_effect_error_count
+        ),
+        "condition_event_candidate_ingest_executed_count": (
+            condition_event_candidate_ingest_executed_count
+        ),
+        "condition_event_side_effect_duplicate_count": (
+            condition_event_duplicate_side_effect_count
+        ),
         "tr_response_effective_skip_count": tr_response_effective_skip_count,
         "tr_response_would_skip_inline_count": tr_response_would_skip_inline_count,
         "tr_response_deferred_side_effect_count": tr_response_deferred_side_effect_count,
@@ -1244,6 +1379,86 @@ def _count_tr_response_duplicate_side_effect_records(
             AND json_extract(
                 metadata_json,
                 '$.last_worker_evidence.post_apply_side_effects.candidate_quote_refresh_enqueue_status'
+            ) IS NOT NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_deferred_side_effect_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'condition_event'
+            AND json_extract(
+                post_apply_deferred_side_effects_json,
+                '$.condition_fusion_refresh_status'
+            ) IS NOT NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_deferred_side_effect_errors(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'condition_event'
+            AND (
+                json_extract(
+                    post_apply_deferred_side_effects_json,
+                    '$.condition_fusion_error_count'
+                ) > 0
+                OR json_extract(
+                    post_apply_deferred_side_effects_json,
+                    '$.condition_fusion_refresh_status'
+                ) IN ('ERROR', 'COMPLETED_WITH_ERRORS')
+            )
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_candidate_ingest_executed_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM projection_outbox
+        WHERE projection_name = 'market_data'
+            AND event_type = 'condition_event'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.post_apply_side_effects.candidate_ingest_executed'
+            ) = 1
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_duplicate_side_effect_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM projection_outbox
+        WHERE projection_name = 'market_data'
+            AND event_type = 'condition_event'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.apply_result'
+            ) = 'APPLIED_BY_VERIFY'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.post_apply_side_effects.condition_fusion_refresh_status'
             ) IS NOT NULL
         """
     ).fetchone()

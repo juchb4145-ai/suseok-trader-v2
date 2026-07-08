@@ -96,6 +96,11 @@ class MarketDataProjectionReconcileRunResult:
     tr_response_deferred_quote_refresh_count: int = 0
     tr_response_deferred_quote_refresh_error_count: int = 0
     condition_event_effective_skip_count: int = 0
+    condition_event_worker_applied_count: int = 0
+    condition_event_deferred_fusion_refresh_count: int = 0
+    condition_event_deferred_fusion_refresh_error_count: int = 0
+    condition_event_side_effect_duplicate_count: int = 0
+    condition_event_candidate_ingest_in_worker_count: int = 0
     invalid_effective_skip_count: int = 0
     reason_codes: Sequence[str]
     issues: Sequence[MarketDataProjectionReconcileIssue]
@@ -137,6 +142,21 @@ class MarketDataProjectionReconcileRunResult:
             ),
             "condition_event_effective_skip_count": (
                 self.condition_event_effective_skip_count
+            ),
+            "condition_event_worker_applied_count": (
+                self.condition_event_worker_applied_count
+            ),
+            "condition_event_deferred_fusion_refresh_count": (
+                self.condition_event_deferred_fusion_refresh_count
+            ),
+            "condition_event_deferred_fusion_refresh_error_count": (
+                self.condition_event_deferred_fusion_refresh_error_count
+            ),
+            "condition_event_side_effect_duplicate_count": (
+                self.condition_event_side_effect_duplicate_count
+            ),
+            "condition_event_candidate_ingest_in_worker_count": (
+                self.condition_event_candidate_ingest_in_worker_count
             ),
             "invalid_effective_skip_count": self.invalid_effective_skip_count,
             "event_rowid_min": self.event_rowid_min,
@@ -196,7 +216,7 @@ def run_market_data_projection_reconcile(
                     issues,
                     run_id=run_id,
                     severity="FAIL",
-                    reason_code="CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN",
+                    reason_code="CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN_IN_PR10",
                     event_id=event_id,
                     event_type=event_type,
                     event_rowid=event_rowid,
@@ -375,6 +395,17 @@ def run_market_data_projection_reconcile(
                     issues=issues,
                     counters=counters,
                 )
+            if event_type == "condition_event":
+                _check_condition_event_worker_side_effects(
+                    outbox,
+                    row,
+                    effective_skip_inline=effective_skip_inline,
+                    artifact_exists=artifact_exists,
+                    settings=resolved_settings,
+                    run_id=run_id,
+                    issues=issues,
+                    counters=counters,
+                )
 
         if event_type == "tr_response":
             before_count = len(issues)
@@ -461,6 +492,21 @@ def run_market_data_projection_reconcile(
         condition_event_effective_skip_count=int(
             counters["condition_event_effective_skip_count"]
         ),
+        condition_event_worker_applied_count=int(
+            counters["condition_event_worker_applied_count"]
+        ),
+        condition_event_deferred_fusion_refresh_count=int(
+            counters["condition_event_deferred_fusion_refresh_count"]
+        ),
+        condition_event_deferred_fusion_refresh_error_count=int(
+            counters["condition_event_deferred_fusion_refresh_error_count"]
+        ),
+        condition_event_side_effect_duplicate_count=int(
+            counters["condition_event_side_effect_duplicate_count"]
+        ),
+        condition_event_candidate_ingest_in_worker_count=int(
+            counters["condition_event_candidate_ingest_in_worker_count"]
+        ),
         invalid_effective_skip_count=int(counters["invalid_effective_skip_count"]),
         append_only_ready=status == "PASS",
         reason_codes=tuple(reason_codes),
@@ -510,6 +556,11 @@ def persist_market_data_projection_reconcile_result(
             tr_response_deferred_quote_refresh_count,
             tr_response_deferred_quote_refresh_error_count,
             condition_event_effective_skip_count,
+            condition_event_worker_applied_count,
+            condition_event_deferred_fusion_refresh_count,
+            condition_event_deferred_fusion_refresh_error_count,
+            condition_event_side_effect_duplicate_count,
+            condition_event_candidate_ingest_in_worker_count,
             invalid_effective_skip_count,
             event_rowid_min,
             event_rowid_max,
@@ -519,7 +570,7 @@ def persist_market_data_projection_reconcile_result(
             created_at,
             no_trading_side_effects
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             result.run_id,
@@ -547,6 +598,11 @@ def persist_market_data_projection_reconcile_result(
             result.tr_response_deferred_quote_refresh_count,
             result.tr_response_deferred_quote_refresh_error_count,
             result.condition_event_effective_skip_count,
+            result.condition_event_worker_applied_count,
+            result.condition_event_deferred_fusion_refresh_count,
+            result.condition_event_deferred_fusion_refresh_error_count,
+            result.condition_event_side_effect_duplicate_count,
+            result.condition_event_candidate_ingest_in_worker_count,
             result.invalid_effective_skip_count,
             result.event_rowid_min,
             result.event_rowid_max,
@@ -947,6 +1003,86 @@ def _check_effective_tr_response_side_effects(
                 "effective skipped tr_response has no candidate quote refresh codes "
                 "and no deferred side-effect evidence"
             ),
+            evidence={"outbox": _row_to_plain_dict(outbox)},
+        )
+
+
+def _check_condition_event_worker_side_effects(
+    outbox: Mapping[str, Any],
+    event: Mapping[str, Any],
+    *,
+    effective_skip_inline: bool,
+    artifact_exists: bool,
+    settings: Settings,
+    run_id: str,
+    issues: list[MarketDataProjectionReconcileIssue],
+    counters: Counter[str],
+) -> None:
+    metadata = _json_object(outbox["metadata_json"])
+    evidence = metadata.get("last_worker_evidence")
+    evidence = evidence if isinstance(evidence, Mapping) else {}
+    apply_result = str(evidence.get("apply_result") or "")
+    side_effects = evidence.get("post_apply_side_effects")
+    side_effects = side_effects if isinstance(side_effects, Mapping) else {}
+    if apply_result == "APPLIED_BY_WORKER":
+        counters["condition_event_worker_applied_count"] += 1
+    if not side_effects:
+        return
+
+    counters["condition_event_deferred_fusion_refresh_count"] += 1
+    if not effective_skip_inline and apply_result != "APPLIED_BY_WORKER":
+        counters["condition_event_side_effect_duplicate_count"] += 1
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="CONDITION_EVENT_SIDE_EFFECT_DUPLICATED",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message="inline processed condition_event has worker condition_fusion side-effect evidence",
+            evidence={"outbox": _row_to_plain_dict(outbox), "side_effects": dict(side_effects)},
+        )
+    if bool(side_effects.get("candidate_ingest_executed")):
+        counters["condition_event_candidate_ingest_in_worker_count"] += 1
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER_FORBIDDEN",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message="projection_outbox worker must not run candidate ingest for condition_event",
+            evidence={"side_effects": dict(side_effects)},
+        )
+    status = str(side_effects.get("condition_fusion_refresh_status") or "")
+    error_count = int(side_effects.get("condition_fusion_error_count") or 0)
+    if error_count > 0 or status in {"ERROR", "COMPLETED_WITH_ERRORS"}:
+        counters["condition_event_deferred_fusion_refresh_error_count"] += 1
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="CONDITION_EVENT_DEFERRED_FUSION_REFRESH_ERROR",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message="condition_event worker condition_fusion refresh failed",
+            evidence={"side_effects": dict(side_effects)},
+        )
+    if status == "SKIPPED" and not settings.condition_fusion_event_incremental_enabled:
+        return
+    if apply_result == "APPLIED_BY_WORKER" and not artifact_exists:
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="FAIL",
+            reason_code="CONDITION_EVENT_WORKER_APPLIED_SIGNAL_MISSING",
+            event_id=str(event["event_id"]),
+            event_type=str(event["event_type"]),
+            event_rowid=int(event["rowid"]),
+            message="worker-applied condition_event has no market_condition_signals artifact",
             evidence={"outbox": _row_to_plain_dict(outbox)},
         )
 

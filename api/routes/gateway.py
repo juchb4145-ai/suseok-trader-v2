@@ -5,11 +5,9 @@ import logging
 import threading
 from typing import Any
 
-from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from services.condition_fusion import rebuild_condition_fusion_for_code
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
@@ -31,6 +29,7 @@ from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
     enqueue_incremental_for_price_tick_projection,
     legacy_gateway_candidate_quote_refresh_status,
+    refresh_condition_fusion_for_condition_event_projection,
 )
 from storage.event_store import (
     append_gateway_event,
@@ -294,17 +293,15 @@ def _refresh_condition_fusion_for_condition_event(
     *,
     settings,
 ) -> str:
-    try:
-        condition = BrokerConditionEvent.from_dict(event.payload)
-        result = rebuild_condition_fusion_for_code(
-            connection,
-            condition.code,
-            settings=settings,
-        )
-    except Exception:
-        logger.exception("condition fusion incremental refresh failed")
+    result = refresh_condition_fusion_for_condition_event_projection(
+        connection,
+        event,
+        settings=settings,
+        source="gateway_inline_condition_event",
+    )
+    if result.status == "ERROR":
         return "ERROR"
-    return "APPLIED" if result.fused_code_count else "IGNORED_NO_PROFILE"
+    return result.status
 
 
 @router.get("/commands", dependencies=[Depends(require_local_token)])

@@ -234,7 +234,7 @@ def test_condition_event_remains_inline_with_tr_response_cutover_flags(
 
     assert response.json()["projection_statuses"]["market_data"] == "APPLIED"
     assert decision["effective_skip_inline"] == 0
-    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9" in decision[
+    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10" in decision[
         "blocked_reason_codes_json"
     ]
     assert signal_count == 1

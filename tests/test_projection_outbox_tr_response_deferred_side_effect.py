@@ -173,7 +173,7 @@ def test_condition_event_effective_skip_remains_forbidden(tmp_path) -> None:
 
     assert decision.would_skip_inline is True
     assert decision.effective_skip_inline is False
-    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR9" in decision.blocked_reason_codes
+    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10" in decision.blocked_reason_codes
     assert status["condition_event_effective_skip_count"] == 0
     assert status["invalid_effective_skip_count"] == 0
 

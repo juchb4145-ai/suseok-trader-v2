@@ -82,6 +82,22 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
         settings.gateway_market_data_append_only_tr_response_require_worker_side_effects
         is True
     )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_dry_run_enabled
+        is False
+    )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_cutover_enabled
+        is False
+    )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_require_worker_side_effects
+        is True
+    )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_require_fusion_enabled
+        is True
+    )
     assert settings.gateway_market_data_append_only_cutover_event_types == ("price_tick",)
     assert settings.gateway_market_data_append_only_require_reconcile_pass is True
     assert settings.gateway_market_data_append_only_require_latest_reconcile_pass is True

@@ -136,10 +136,26 @@ PR-9 진행 상태:
   - `tests/test_market_data_reconcile_tr_response_cutover.py`
   - `tests/test_ops_market_data_tr_response_cutover_check.py`
 
+PR-10 진행 상태:
+
+- `condition_event`의 후속 `condition_fusion` refresh를 `services/runtime/market_data_projection_side_effects.py` service로 분리
+- Gateway inline `condition_event` projection과 `condition_fusion` refresh는 그대로 유지
+- projection_outbox worker가 직접 `condition_event` market_data projection을 적용한 경우에만 deferred `condition_fusion` refresh evidence를 기록
+- inline already-applied `condition_event`는 worker verify-only로 처리하며 side-effect를 중복 실행하지 않음
+- worker evidence에 `candidate_ingest_executed=false`, `no_order_side_effects=true`, `no_trading_side_effects=true`를 기록
+- `condition_event effective_skip_inline`은 PR-10에서도 금지되며, 발견 시 operator/reconcile/ops script에서 FAIL
+- `candidate_service.ingest_condition_sources()`는 worker에서 호출하지 않으며 후보 ingest는 기존 pipeline에 남김
+- operator status/dashboard/reconcile/ops script에 condition_event worker-side readiness, deferred fusion refresh, duplicate side-effect, candidate ingest guard counters 추가
+- 추가 테스트:
+  - `tests/test_market_data_condition_event_side_effects.py`
+  - `tests/test_projection_outbox_condition_event_deferred_side_effect.py`
+  - `tests/test_market_data_reconcile_condition_event_side_effect.py`
+  - `tests/test_ops_market_data_condition_event_side_effect_check.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-9를 실제 장중 `tr_response` 소량 budget으로 검증하고, worker apply/deferred quote refresh/reconcile PASS를 확인한다.
-2. PR-10에서 `condition_event` condition_fusion refresh를 worker side-effect로 옮길 수 있는지 shadow migration을 설계한다.
+1. PR-10을 실제 장중 `condition_event`/worker run-once/reconcile로 검증하고 deferred `condition_fusion` refresh evidence가 정상인지 확인한다.
+2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness 뒤에서 검토한다.
 3. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 4. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
 5. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.

@@ -36,6 +36,7 @@ from services.runtime.gateway_projection_routing import (
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
     enqueue_incremental_for_price_tick_projection,
+    refresh_condition_fusion_for_condition_event_projection,
 )
 
 APPLY_MODE_SHADOW_VERIFY_ONLY = "SHADOW_VERIFY_ONLY"
@@ -442,6 +443,21 @@ def _apply_market_data_projection(
             event_id,
             post_apply_side_effects,
         )
+    elif (
+        event_type == "condition_event"
+        and projection_result.status == "APPLIED"
+        and projection_result.applied_count > 0
+    ):
+        post_apply_side_effects = _refresh_deferred_condition_fusion_for_condition_event(
+            connection,
+            event,
+            settings=settings,
+        )
+        record_market_data_post_apply_deferred_side_effects(
+            connection,
+            event_id,
+            post_apply_side_effects,
+        )
     elif event_type == "tr_response":
         post_apply_side_effects = {
             "candidate_quote_refresh_enqueue_status": "SKIPPED",
@@ -450,6 +466,23 @@ def _apply_market_data_projection(
             "projection_result_applied_count": projection_result.applied_count,
             "source": "projection_outbox_worker_tr_response",
             "deferred_from_gateway_path": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
+        record_market_data_post_apply_deferred_side_effects(
+            connection,
+            event_id,
+            post_apply_side_effects,
+        )
+    elif event_type == "condition_event":
+        post_apply_side_effects = {
+            "condition_fusion_refresh_status": "SKIPPED",
+            "reason": "PROJECTION_RESULT_NOT_APPLIED",
+            "projection_result_status": projection_result.status,
+            "projection_result_applied_count": projection_result.applied_count,
+            "source": "projection_outbox_worker_condition_event",
+            "deferred_from_gateway_path": True,
+            "candidate_ingest_executed": False,
             "no_order_side_effects": True,
             "no_trading_side_effects": True,
         }
@@ -481,6 +514,31 @@ def _apply_market_data_projection(
             return _verification_error(
                 "TR_RESPONSE_DEFERRED_QUOTE_REFRESH_SIDE_EFFECT_ERROR",
                 "tr_response deferred candidate quote refresh side-effect failed",
+                event_id=event_id,
+                event_type=event_type,
+                apply_result="APPLY_ERROR",
+                verification_before_apply=verification_before_payload,
+                projection_result_status=projection_result_status,
+                projection_result=projection_result_payload,
+                post_apply_side_effects=post_apply_side_effects,
+                append_only_cutover=append_only_cutover,
+            )
+    if event_type == "condition_event" and post_apply_side_effects:
+        post_apply_side_effects.setdefault(
+            "deferred_from_gateway_path",
+            bool(append_only_cutover.get("gateway_inline_skipped")),
+        )
+        post_apply_side_effects.setdefault(
+            "source",
+            "projection_outbox_worker_condition_event",
+        )
+        post_apply_side_effects.setdefault("candidate_ingest_executed", False)
+        post_apply_side_effects.setdefault("no_order_side_effects", True)
+        post_apply_side_effects.setdefault("no_trading_side_effects", True)
+        if _condition_event_side_effect_failed(post_apply_side_effects):
+            return _verification_error(
+                "CONDITION_EVENT_DEFERRED_FUSION_REFRESH_SIDE_EFFECT_ERROR",
+                "condition_event deferred condition_fusion refresh failed",
                 event_id=event_id,
                 event_type=event_type,
                 apply_result="APPLY_ERROR",
@@ -895,6 +953,34 @@ def _enqueue_deferred_candidate_quote_refresh_for_tr_response(
     }
 
 
+def _refresh_deferred_condition_fusion_for_condition_event(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    *,
+    settings: Settings,
+) -> dict[str, Any]:
+    result = refresh_condition_fusion_for_condition_event_projection(
+        connection,
+        event,
+        settings=settings,
+        source="projection_outbox_worker_condition_event",
+    )
+    return {
+        "condition_fusion_refresh_status": result.status,
+        "condition_fusion_processed_event_count": result.processed_count,
+        "condition_fusion_fused_code_count": result.applied_count,
+        "condition_code": result.code,
+        "condition_fusion_error_count": result.error_count,
+        "condition_fusion_reason_codes": list(result.reason_codes),
+        "source": result.source,
+        "deferred_from_gateway_path": True,
+        "candidate_ingest_executed": False,
+        "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+        "evidence": result.to_dict(),
+    }
+
+
 def _routing_decision_effective_skip_inline(
     connection: sqlite3.Connection,
     event_id: str,
@@ -942,6 +1028,14 @@ def _append_only_cutover_evidence(
 def _tr_response_side_effect_failed(side_effects: Mapping[str, Any]) -> bool:
     status = str(side_effects.get("candidate_quote_refresh_enqueue_status") or "")
     return int(side_effects.get("candidate_quote_refresh_error_count") or 0) > 0 or status in {
+        "ERROR",
+        "COMPLETED_WITH_ERRORS",
+    }
+
+
+def _condition_event_side_effect_failed(side_effects: Mapping[str, Any]) -> bool:
+    status = str(side_effects.get("condition_fusion_refresh_status") or "")
+    return int(side_effects.get("condition_fusion_error_count") or 0) > 0 or status in {
         "ERROR",
         "COMPLETED_WITH_ERRORS",
     }

@@ -186,6 +186,10 @@ class Settings:
     gateway_market_data_append_only_tr_response_require_synthetic_child_guard: bool = True
     gateway_market_data_append_only_tr_response_max_rows_per_event: int = 50
     gateway_market_data_append_only_tr_response_fail_closed_on_side_effect_error: bool = True
+    gateway_market_data_append_only_condition_event_dry_run_enabled: bool = False
+    gateway_market_data_append_only_condition_event_cutover_enabled: bool = False
+    gateway_market_data_append_only_condition_event_require_worker_side_effects: bool = True
+    gateway_market_data_append_only_condition_event_require_fusion_enabled: bool = True
     gateway_market_data_append_only_cutover_event_types: tuple[str, ...] = ("price_tick",)
     gateway_market_data_append_only_require_reconcile_pass: bool = True
     gateway_market_data_append_only_require_latest_reconcile_pass: bool = True
@@ -1766,6 +1770,34 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             _parse_bool(
                 env.get(
                     "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_FAIL_CLOSED_ON_SIDE_EFFECT_ERROR",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_data_append_only_condition_event_dry_run_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_DRY_RUN_ENABLED",
+                "false",
+            )
+        ),
+        gateway_market_data_append_only_condition_event_cutover_enabled=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED",
+                "false",
+            )
+        ),
+        gateway_market_data_append_only_condition_event_require_worker_side_effects=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_REQUIRE_WORKER_SIDE_EFFECTS",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_data_append_only_condition_event_require_fusion_enabled=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_REQUIRE_FUSION_ENABLED",
                     "true",
                 )
             )
