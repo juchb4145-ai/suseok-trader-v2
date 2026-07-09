@@ -152,9 +152,21 @@ PR-10 진행 상태:
   - `tests/test_market_data_reconcile_condition_event_side_effect.py`
   - `tests/test_ops_market_data_condition_event_side_effect_check.py`
 
+PR-10.5 진행 상태:
+
+- Dashboard snapshot API가 `sections`, `fast`, `timeout_budget_ms` query를 지원하도록 추가했다.
+- `sections`/`fast=true` 요청은 필요한 read-only 섹션만 계산하는 fast path를 사용한다. 기존 full dashboard snapshot은 호환 유지된다.
+- cache key는 `db_path/detail/limit/sections/fast` 기준으로 분리했고, cache lock은 read/write 순간에만 잡는다.
+- PR-10 ops script는 targeted fast snapshot을 사용하며, core condition_event/outbox/reconcile 실패와 dashboard API timeout을 verdict에서 분리한다.
+- 주문/LIVE_SIM/LIVE_REAL, market_data projection routing, cutover 정책은 변경하지 않았다.
+- 추가 테스트:
+  - `tests/test_dashboard_snapshot_sections.py`
+  - `tests/test_dashboard_snapshot_fast_path.py`
+  - `tests/test_ops_dashboard_timeout_handling.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-10을 실제 장중 `condition_event`/worker run-once/reconcile로 검증하고 deferred `condition_fusion` refresh evidence가 정상인지 확인한다.
+1. PR-10.5 dashboard fast snapshot을 실제 장중 ops script로 확인하고, dashboard timeout이 core 검증 FAIL로 섞이지 않는지 확인한다.
 2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness 뒤에서 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.

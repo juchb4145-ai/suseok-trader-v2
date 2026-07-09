@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections import Counter
 from collections.abc import Mapping
 from typing import Any, Literal
@@ -168,6 +169,40 @@ DASHBOARD_SECTIONS = [
     "pipeline_summary",
 ]
 
+FAST_DASHBOARD_DEFAULT_SECTIONS = (
+    "system",
+    "gateway",
+    "market_data",
+    "projection_outbox",
+    "market_data_projection_reconcile",
+    "market_data_append_only_routing",
+    "pipeline_summary",
+    "errors",
+)
+
+FAST_DASHBOARD_SUPPORTED_SECTIONS = {
+    "safety",
+    "system",
+    "gateway",
+    "condition_fusion",
+    "market_data",
+    "market_indexes",
+    "market_regime",
+    "realtime_subscription",
+    "recent_events",
+    "errors",
+    "projection_outbox",
+    "market_data_projection_reconcile",
+    "market_data_append_only_routing",
+    "pipeline_summary",
+}
+
+FAST_DASHBOARD_REQUIRED_SECTIONS = {
+    "gateway",
+    "projection_outbox",
+    "market_data_append_only_routing",
+}
+
 GATEWAY_HEARTBEAT_STALE_SEC = 120.0
 
 COMMAND_STATUSES = (
@@ -204,6 +239,7 @@ def build_dashboard_snapshot(
     detail: DashboardDetail = "summary",
     limit: int | None = None,
 ) -> dict[str, Any]:
+    started_at = time.monotonic()
     bounded_limit = _bounded_limit(limit, settings)
     include_detail = detail == "full"
     generated_at = _now()
@@ -442,6 +478,14 @@ def build_dashboard_snapshot(
         "generated_at": generated_at,
         "detail": detail,
         "limit": bounded_limit,
+        "fast_path": False,
+        "requested_sections": None,
+        "included_sections": list(DASHBOARD_SECTIONS),
+        "skipped_sections": [],
+        "section_latency_ms": {},
+        "total_latency_ms": round((time.monotonic() - started_at) * 1000, 3),
+        "timeout_budget_ms": None,
+        "warnings": [],
         "safety": build_safety_section(settings),
         "system": _system_section(settings, generated_at),
         "gateway": gateway_status,
@@ -676,6 +720,367 @@ def build_dashboard_snapshot(
     }
 
 
+def parse_dashboard_sections(raw: str | None) -> set[str] | None:
+    if raw is None:
+        return None
+    sections = {
+        section.strip().lower().replace("-", "_")
+        for section in raw.split(",")
+        if section.strip()
+    }
+    return sections or None
+
+
+def build_dashboard_snapshot_sections(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    detail: DashboardDetail = "summary",
+    limit: int | None = None,
+    sections: set[str],
+    timeout_budget_ms: int | None = None,
+) -> dict[str, Any]:
+    bounded_limit = _bounded_limit(limit, settings)
+    generated_at = _now()
+    started_at = time.monotonic()
+    ordered_sections = _ordered_requested_sections(sections)
+    known_sections = set(DASHBOARD_SECTIONS)
+    warnings: list[str] = []
+    included_sections: list[str] = []
+    skipped_sections: list[dict[str, str]] = []
+    section_latency_ms: dict[str, float] = {}
+    context: dict[str, Any] = {"snapshot": {}}
+
+    for section in ordered_sections:
+        if section not in known_sections:
+            warnings.append(f"UNKNOWN_DASHBOARD_SECTION:{section}")
+            skipped_sections.append(
+                {"section": section, "reason": "UNKNOWN_DASHBOARD_SECTION"}
+            )
+            continue
+        if section not in FAST_DASHBOARD_SUPPORTED_SECTIONS:
+            warnings.append(f"UNSUPPORTED_DASHBOARD_FAST_SECTION:{section}")
+            skipped_sections.append(
+                {
+                    "section": section,
+                    "reason": "UNSUPPORTED_DASHBOARD_FAST_SECTION",
+                }
+            )
+            continue
+        if _dashboard_timeout_budget_exceeded(started_at, timeout_budget_ms) and (
+            section not in FAST_DASHBOARD_REQUIRED_SECTIONS
+        ):
+            warnings.append(f"SKIPPED_TIMEOUT_BUDGET:{section}")
+            skipped_sections.append(
+                {"section": section, "reason": "SKIPPED_TIMEOUT_BUDGET"}
+            )
+            continue
+
+        section_started_at = time.monotonic()
+        try:
+            value = _build_dashboard_fast_section(
+                connection,
+                settings,
+                section=section,
+                detail=detail,
+                bounded_limit=bounded_limit,
+                generated_at=generated_at,
+                context=context,
+            )
+        finally:
+            section_latency_ms[section] = round(
+                (time.monotonic() - section_started_at) * 1000,
+                3,
+            )
+        context["snapshot"][section] = value
+        included_sections.append(section)
+
+    total_latency_ms = round((time.monotonic() - started_at) * 1000, 3)
+    snapshot = context["snapshot"]
+    snapshot.update(
+        {
+            "generated_at": generated_at,
+            "detail": detail,
+            "limit": bounded_limit,
+            "fast_path": True,
+            "requested_sections": ordered_sections,
+            "included_sections": included_sections,
+            "skipped_sections": skipped_sections,
+            "section_latency_ms": section_latency_ms,
+            "total_latency_ms": total_latency_ms,
+            "timeout_budget_ms": timeout_budget_ms,
+            "warnings": warnings,
+        }
+    )
+    return snapshot
+
+
+def build_dashboard_pipeline_summary_fast(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    gateway_status: dict[str, Any],
+    market_data_status: dict[str, Any],
+    projection_outbox_status: dict[str, Any],
+    market_data_reconcile: dict[str, Any],
+    market_data_append_only_routing: dict[str, Any],
+) -> dict[str, Any]:
+    command_type_counts = _command_type_counts(connection)
+    order_command_count = _order_command_count(command_type_counts)
+    return {
+        "fast_path": True,
+        "read_only": True,
+        "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+        "gateway": {
+            "recent_event_count": int(gateway_status.get("recent_event_count") or 0),
+            "queued_command_count": int(gateway_status.get("queued_command_count") or 0),
+            "failed_command_count": int(gateway_status.get("failed_command_count") or 0),
+        },
+        "market_data": {
+            "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
+            "bar_count": int(market_data_status.get("bar_count") or 0),
+            "projection_error_count": int(
+                market_data_status.get("projection_error_count") or 0
+            ),
+        },
+        "projection_outbox": {
+            "enabled": bool(projection_outbox_status.get("enabled")),
+            "shadow_mode": bool(projection_outbox_status.get("shadow_mode")),
+            "worker_enabled": bool(projection_outbox_status.get("worker_enabled")),
+            "apply_projection_enabled": bool(
+                projection_outbox_status.get("apply_projection_enabled")
+            ),
+            "market_data_apply_enabled": bool(
+                projection_outbox_status.get("market_data_apply_enabled")
+            ),
+            "projection_side_effects_allowed": bool(
+                projection_outbox_status.get("projection_side_effects_allowed")
+            ),
+            "total_count": int(projection_outbox_status.get("total_count") or 0),
+            "pending_count": int(projection_outbox_status.get("pending_count") or 0),
+            "processing_count": int(
+                projection_outbox_status.get("processing_count") or 0
+            ),
+            "applied_count": int(projection_outbox_status.get("applied_count") or 0),
+            "skipped_count": int(projection_outbox_status.get("skipped_count") or 0),
+            "error_count": int(projection_outbox_status.get("error_count") or 0),
+            "dead_letter_count": int(
+                projection_outbox_status.get("dead_letter_count") or 0
+            ),
+            "oldest_pending_at": projection_outbox_status.get("oldest_pending_at"),
+            "latest_error": projection_outbox_status.get("latest_error"),
+            "by_projection_name": projection_outbox_status.get("by_projection_name", {}),
+            "last_apply_mode": projection_outbox_status.get("last_apply_mode"),
+            "warnings": list(projection_outbox_status.get("warnings") or []),
+            "read_only": True,
+        },
+        "market_data_projection_reconcile": _market_data_reconcile_summary(
+            market_data_reconcile
+        ),
+        "market_data_append_only_routing": _market_data_append_only_routing_summary(
+            market_data_append_only_routing
+        ),
+        "order_safety": {
+            "order_command_count": order_command_count,
+            "command_type_counts": command_type_counts,
+            "order_commands_allowed": False,
+            "read_only": True,
+        },
+        "stage_statuses": [
+            {
+                "stage": "Core",
+                "status": "PASS",
+                "endpoint": "/health",
+                "reason_codes": [],
+                "last_updated_at": _now(),
+            },
+            _gateway_stage_status(gateway_status),
+            _market_data_stage_status(market_data_status),
+            {
+                "stage": "OrderSafety",
+                "status": "PASS",
+                "endpoint": "/api/gateway/commands/status",
+                "count": order_command_count,
+                "reason_codes": [],
+                "last_updated_at": _now(),
+            },
+        ],
+    }
+
+
+def _ordered_requested_sections(sections: set[str]) -> list[str]:
+    ordered = [section for section in DASHBOARD_SECTIONS if section in sections]
+    extras = sorted(section for section in sections if section not in DASHBOARD_SECTIONS)
+    return ordered + extras
+
+
+def _dashboard_timeout_budget_exceeded(
+    started_at: float,
+    timeout_budget_ms: int | None,
+) -> bool:
+    if timeout_budget_ms is None:
+        return False
+    return (time.monotonic() - started_at) * 1000 >= float(timeout_budget_ms)
+
+
+def _build_dashboard_fast_section(
+    connection: sqlite3.Connection,
+    settings: Settings,
+    *,
+    section: str,
+    detail: DashboardDetail,
+    bounded_limit: int,
+    generated_at: str,
+    context: dict[str, Any],
+) -> Any:
+    del detail
+
+    def gateway_status() -> dict[str, Any]:
+        if "gateway_status" not in context:
+            gateway_events = list_recent_gateway_events(connection, limit=bounded_limit)
+            context["gateway_events"] = gateway_events
+            command_counts = _command_status_counts(connection)
+            context["command_counts"] = command_counts
+            context["command_type_counts"] = _command_type_counts(connection)
+            context["gateway_status"] = _gateway_status_section(
+                settings,
+                get_gateway_status_values(connection),
+                command_counts,
+                recent_event_count=count_recent_gateway_events(connection),
+                latest_heartbeat_payload=_latest_gateway_heartbeat_payload(
+                    gateway_events
+                ),
+            )
+        return context["gateway_status"]
+
+    def gateway_events() -> list[dict[str, Any]]:
+        if "gateway_events" not in context:
+            context["gateway_events"] = list_recent_gateway_events(
+                connection,
+                limit=bounded_limit,
+            )
+        return context["gateway_events"]
+
+    def market_data_status() -> dict[str, Any]:
+        if "market_data_status" not in context:
+            context["market_data_status"] = get_market_data_status(
+                connection,
+                settings=settings,
+            )
+        return context["market_data_status"]
+
+    def projection_outbox_status() -> dict[str, Any]:
+        if "projection_outbox_status" not in context:
+            context["projection_outbox_status"] = get_projection_outbox_status(
+                connection,
+                settings=settings,
+            )
+        return context["projection_outbox_status"]
+
+    def market_data_reconcile() -> dict[str, Any]:
+        if "market_data_reconcile" not in context:
+            context["market_data_reconcile"] = (
+                get_latest_market_data_projection_reconcile(connection)
+            )
+        return context["market_data_reconcile"]
+
+    def market_data_append_only_routing() -> dict[str, Any]:
+        if "market_data_append_only_routing" not in context:
+            context["market_data_append_only_routing"] = (
+                get_latest_market_data_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_data_append_only_routing"]
+
+    if section == "safety":
+        return build_safety_section(settings)
+    if section == "system":
+        return _system_section(settings, generated_at)
+    if section == "gateway":
+        return gateway_status()
+    if section == "condition_fusion":
+        status = gateway_status()
+        rows = list_condition_fusion(
+            connection,
+            settings=settings,
+            registered_codes=status["realtime_registered_codes"],
+            limit=bounded_limit,
+        )
+        profiles = get_condition_profile_metrics(
+            connection,
+            settings=settings,
+            limit=bounded_limit,
+        )
+        return _condition_fusion_section(
+            rows,
+            profiles,
+            fallback_profiles=status.get("condition_profile_metrics", []),
+        )
+    if section == "market_data":
+        return {
+            "status": market_data_status(),
+            "latest_ticks": list_latest_ticks(connection, limit=bounded_limit),
+            "cross_exchange": {
+                "read_only": True,
+                "enabled": settings.risk_cross_exchange_divergence_bp > 0,
+                "threshold_bp": settings.risk_cross_exchange_divergence_bp,
+                "latest_observations": list_recent_cross_exchange_observations(
+                    connection,
+                    limit=min(bounded_limit, 10),
+                ),
+            },
+        }
+    if section == "market_indexes":
+        latest_ticks = list_latest_market_index_ticks(
+            connection,
+            limit=bounded_limit,
+        )
+        return {
+            "status": get_market_index_status(connection, settings=settings),
+            "latest_ticks": latest_ticks,
+            "latest_by_code": _market_index_latest_by_code(latest_ticks),
+            "gateway_adapter": _market_index_gateway_adapter_section(gateway_status()),
+        }
+    if section == "market_regime":
+        return get_market_regime_status(connection, settings=settings)
+    if section == "realtime_subscription":
+        return build_realtime_subscription_plan(
+            connection,
+            settings=settings,
+            registered_codes=gateway_status()["realtime_registered_codes"],
+            queue_commands=False,
+        ).to_dict()
+    if section == "recent_events":
+        return {"gateway_events": gateway_events()}
+    if section == "errors":
+        return build_dashboard_errors(
+            connection,
+            settings=settings,
+            limit=min(bounded_limit, 20),
+        )
+    if section == "projection_outbox":
+        return projection_outbox_status()
+    if section == "market_data_projection_reconcile":
+        return market_data_reconcile()
+    if section == "market_data_append_only_routing":
+        return market_data_append_only_routing()
+    if section == "pipeline_summary":
+        return build_dashboard_pipeline_summary_fast(
+            connection,
+            settings,
+            gateway_status=gateway_status(),
+            market_data_status=market_data_status(),
+            projection_outbox_status=projection_outbox_status(),
+            market_data_reconcile=market_data_reconcile(),
+            market_data_append_only_routing=market_data_append_only_routing(),
+        )
+
+    raise ValueError(f"unsupported dashboard fast section: {section}")
+
+
 def build_dashboard_status(settings: Settings) -> dict[str, Any]:
     return {
         "enabled": settings.dashboard_enabled,
@@ -687,8 +1092,17 @@ def build_dashboard_status(settings: Settings) -> dict[str, Any]:
         "refresh_sec": settings.dashboard_refresh_sec,
         "snapshot_default_limit": settings.dashboard_snapshot_default_limit,
         "max_limit": settings.dashboard_max_limit,
+        "snapshot_sections_enabled": settings.dashboard_snapshot_sections_enabled,
+        "snapshot_fast_cache_ttl_sec": settings.dashboard_snapshot_fast_cache_ttl_sec,
+        "snapshot_fast_default_limit": settings.dashboard_snapshot_fast_default_limit,
+        "snapshot_fast_timeout_budget_ms": (
+            settings.dashboard_snapshot_fast_timeout_budget_ms
+        ),
+        "snapshot_warn_latency_ms": settings.dashboard_snapshot_warn_latency_ms,
+        "snapshot_fail_latency_ms": settings.dashboard_snapshot_fail_latency_ms,
         "show_raw_json": settings.dashboard_show_raw_json,
         "sections": DASHBOARD_SECTIONS,
+        "fast_sections": sorted(FAST_DASHBOARD_SUPPORTED_SECTIONS),
     }
 
 

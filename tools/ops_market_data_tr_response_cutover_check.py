@@ -80,7 +80,9 @@ def run_cutover_report(
     dashboard_params = {
         "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
         "detail": "summary",
-        "limit": "1",
+        "limit": "20",
+        "fast": "true",
+        "timeout_budget_ms": "5000",
     }
     report = {
         "generated_at": datetime.now(UTC)

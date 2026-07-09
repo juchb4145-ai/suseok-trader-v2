@@ -12,64 +12,105 @@ from services.dashboard_ai_explanations import (
     filter_ai_explanation_cards,
 )
 from services.dashboard_service import (
+    FAST_DASHBOARD_DEFAULT_SECTIONS,
     build_dashboard_errors,
     build_dashboard_snapshot,
+    build_dashboard_snapshot_sections,
     build_dashboard_status,
+    parse_dashboard_sections,
 )
 from storage.sqlite import open_connection
 
 router = APIRouter(prefix="/api/dashboard")
 _SUMMARY_CACHE_LOCK = Lock()
-_SUMMARY_CACHE: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+_SUMMARY_CACHE: dict[tuple[str, str, int, str, bool], tuple[float, dict[str, Any]]] = {}
 
 
 @router.get("/snapshot")
 def dashboard_snapshot(
     detail: Literal["summary", "full"] = "summary",
     limit: int | None = Query(default=None, ge=1, le=200),
+    sections: str | None = Query(default=None),
+    fast: bool = Query(default=False),
+    timeout_budget_ms: int | None = Query(default=None, ge=100, le=30000),
 ) -> dict[str, Any]:
     settings = load_settings()
+    requested_sections = (
+        parse_dashboard_sections(sections)
+        if settings.dashboard_snapshot_sections_enabled
+        else None
+    )
+    use_fast_path = bool(fast or requested_sections)
+    if use_fast_path and requested_sections is None:
+        requested_sections = set(FAST_DASHBOARD_DEFAULT_SECTIONS)
+
+    cache_limit = _dashboard_cache_limit(settings, limit, fast=use_fast_path)
+    sections_key = _dashboard_sections_cache_key(requested_sections)
+    cache_key = (
+        str(settings.trading_db_path),
+        detail,
+        cache_limit,
+        sections_key,
+        use_fast_path,
+    )
     if detail == "summary":
-        cache_limit = _dashboard_cache_limit(settings, limit)
-        cache_key = (str(settings.trading_db_path), cache_limit)
         now = time.monotonic()
         with _SUMMARY_CACHE_LOCK:
             cached = _SUMMARY_CACHE.get(cache_key)
-            if cached is not None and now - cached[0] <= _dashboard_summary_cache_ttl(
-                settings
-            ):
+            ttl_sec = _dashboard_summary_cache_ttl(settings, fast=use_fast_path)
+            if cached is not None and now - cached[0] <= ttl_sec:
                 return cached[1]
-            connection = open_connection(settings.trading_db_path)
-            try:
-                snapshot = build_dashboard_snapshot(
-                    connection,
-                    settings,
-                    detail=detail,
-                    limit=limit,
-                )
-            finally:
-                connection.close()
-            _SUMMARY_CACHE[cache_key] = (time.monotonic(), snapshot)
-            return snapshot
 
     connection = open_connection(settings.trading_db_path)
     try:
-        return build_dashboard_snapshot(
-            connection,
-            settings,
-            detail=detail,
-            limit=limit,
-        )
+        if use_fast_path:
+            snapshot = build_dashboard_snapshot_sections(
+                connection,
+                settings,
+                detail=detail,
+                limit=cache_limit,
+                sections=requested_sections or set(FAST_DASHBOARD_DEFAULT_SECTIONS),
+                timeout_budget_ms=(
+                    timeout_budget_ms
+                    if timeout_budget_ms is not None
+                    else settings.dashboard_snapshot_fast_timeout_budget_ms
+                ),
+            )
+        else:
+            snapshot = build_dashboard_snapshot(
+                connection,
+                settings,
+                detail=detail,
+                limit=limit,
+            )
     finally:
         connection.close()
 
+    if detail == "summary":
+        with _SUMMARY_CACHE_LOCK:
+            _SUMMARY_CACHE[cache_key] = (time.monotonic(), snapshot)
+        return snapshot
 
-def _dashboard_cache_limit(settings, limit: int | None) -> int:
-    value = settings.dashboard_snapshot_default_limit if limit is None else int(limit)
+    return snapshot
+
+
+def _dashboard_sections_cache_key(sections: set[str] | None) -> str:
+    if not sections:
+        return ""
+    return ",".join(sorted(sections))
+
+
+def _dashboard_cache_limit(settings, limit: int | None, *, fast: bool = False) -> int:
+    if limit is None and fast:
+        value = settings.dashboard_snapshot_fast_default_limit
+    else:
+        value = settings.dashboard_snapshot_default_limit if limit is None else int(limit)
     return min(max(value, 1), settings.dashboard_max_limit)
 
 
-def _dashboard_summary_cache_ttl(settings) -> float:
+def _dashboard_summary_cache_ttl(settings, *, fast: bool = False) -> float:
+    if fast:
+        return max(float(settings.dashboard_snapshot_fast_cache_ttl_sec), 0.0)
     return min(max(float(settings.dashboard_refresh_sec) - 1.0, 1.0), 5.0)
 
 

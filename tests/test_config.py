@@ -331,6 +331,12 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.dashboard_max_limit == 200
     assert settings.dashboard_show_raw_json is True
     assert settings.dashboard_route_enabled is True
+    assert settings.dashboard_snapshot_sections_enabled is True
+    assert settings.dashboard_snapshot_fast_cache_ttl_sec == 2.0
+    assert settings.dashboard_snapshot_fast_default_limit == 20
+    assert settings.dashboard_snapshot_fast_timeout_budget_ms == 5000
+    assert settings.dashboard_snapshot_warn_latency_ms == 3000
+    assert settings.dashboard_snapshot_fail_latency_ms == 10000
 
 
 def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> None:
@@ -1003,24 +1009,46 @@ def test_live_sim_operating_loop_settings_are_validated() -> None:
 
 
 def test_dashboard_settings_are_validated() -> None:
-    try:
-        load_settings({"DASHBOARD_REFRESH_SEC": "0"})
-    except ValueError as exc:
-        assert "DASHBOARD_REFRESH_SEC" in str(exc)
-    else:
-        raise AssertionError("expected invalid dashboard refresh setting")
-
-    try:
-        load_settings(
+    invalid_cases = [
+        ({"DASHBOARD_REFRESH_SEC": "0"}, "DASHBOARD_REFRESH_SEC"),
+        (
             {
                 "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT": "201",
                 "DASHBOARD_MAX_LIMIT": "200",
-            }
-        )
-    except ValueError as exc:
-        assert "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT" in str(exc)
-    else:
-        raise AssertionError("expected invalid dashboard limit setting")
+            },
+            "DASHBOARD_SNAPSHOT_DEFAULT_LIMIT",
+        ),
+        (
+            {"DASHBOARD_SNAPSHOT_FAST_CACHE_TTL_SEC": "-1"},
+            "DASHBOARD_SNAPSHOT_FAST_CACHE_TTL_SEC",
+        ),
+        (
+            {"DASHBOARD_SNAPSHOT_FAST_DEFAULT_LIMIT": "0"},
+            "DASHBOARD_SNAPSHOT_FAST_DEFAULT_LIMIT",
+        ),
+        (
+            {"DASHBOARD_SNAPSHOT_FAST_TIMEOUT_BUDGET_MS": "99"},
+            "DASHBOARD_SNAPSHOT_FAST_TIMEOUT_BUDGET_MS",
+        ),
+        (
+            {"DASHBOARD_SNAPSHOT_WARN_LATENCY_MS": "0"},
+            "DASHBOARD_SNAPSHOT_WARN_LATENCY_MS",
+        ),
+        (
+            {
+                "DASHBOARD_SNAPSHOT_WARN_LATENCY_MS": "3000",
+                "DASHBOARD_SNAPSHOT_FAIL_LATENCY_MS": "2000",
+            },
+            "DASHBOARD_SNAPSHOT_FAIL_LATENCY_MS",
+        ),
+    ]
+    for env, expected in invalid_cases:
+        try:
+            load_settings(env)
+        except ValueError as exc:
+            assert expected in str(exc)
+        else:
+            raise AssertionError(f"expected invalid dashboard setting: {expected}")
 
 
 def test_dry_run_oms_settings_are_validated() -> None:

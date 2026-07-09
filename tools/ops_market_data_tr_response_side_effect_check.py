@@ -105,7 +105,9 @@ def run_side_effect_report(
     dashboard_params = {
         "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
         "detail": "summary",
-        "limit": "1",
+        "limit": "20",
+        "fast": "true",
+        "timeout_budget_ms": "5000",
     }
     dashboard_payload = fetch_json(
         f"{base_url}/api/dashboard/snapshot?{urllib.parse.urlencode(dashboard_params)}",

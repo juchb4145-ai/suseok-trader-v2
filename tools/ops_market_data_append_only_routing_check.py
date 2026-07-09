@@ -81,8 +81,15 @@ def run_routing_report(
         method="GET",
         timeout_sec=timeout_sec,
     )
+    dashboard_params = {
+        "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
+        "detail": "summary",
+        "limit": "20",
+        "fast": "true",
+        "timeout_budget_ms": "5000",
+    }
     dashboard_payload = fetch_json(
-        f"{base_url}/api/dashboard/snapshot?detail=summary&limit=1",
+        f"{base_url}/api/dashboard/snapshot?{urllib.parse.urlencode(dashboard_params)}",
         token=token,
         method="GET",
         timeout_sec=timeout_sec,

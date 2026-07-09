@@ -80,7 +80,9 @@ def run_side_effect_report(
     dashboard_params = {
         "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
         "detail": "summary",
-        "limit": "1",
+        "limit": "20",
+        "fast": "true",
+        "timeout_budget_ms": "5000",
     }
     report = {
         "generated_at": datetime.now(UTC)
@@ -127,11 +129,16 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "routing_status",
         "projection_outbox",
         "latest_reconcile",
-        "dashboard_snapshot",
     ):
         payload = report.get(key) or {}
         if not payload.get("ok"):
             failures.append(f"{key.upper()}_API_ERROR")
+    dashboard_payload = report.get("dashboard_snapshot") or {}
+    dashboard_ok = bool(dashboard_payload.get("ok"))
+    dashboard_blocker = False
+    if not dashboard_ok:
+        warnings.append("DASHBOARD_SNAPSHOT_API_ERROR")
+        dashboard_blocker = True
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
@@ -179,11 +186,28 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         failures.append("PROJECTION_OUTBOX_ERROR_OR_DEAD_LETTER")
     if isinstance(latest_run, dict) and latest_run.get("status") == "FAIL":
         failures.append("LATEST_RECONCILE_FAIL")
-    if (
+    if dashboard_ok and (
         int(dashboard_routing.get("condition_event_effective_skip_count") or 0)
         != condition_effective
     ):
         failures.append("DASHBOARD_CONDITION_EVENT_ROUTING_STATUS_MISMATCH")
+    if dashboard_ok:
+        dashboard_warnings = [
+            str(warning) for warning in dashboard.get("warnings", []) if warning
+        ]
+        skipped_timeout = any(
+            "SKIPPED_TIMEOUT_BUDGET" in warning for warning in dashboard_warnings
+        ) or any(
+            str(item.get("reason")) == "SKIPPED_TIMEOUT_BUDGET"
+            for item in dashboard.get("skipped_sections", [])
+            if isinstance(item, dict)
+        )
+        if skipped_timeout:
+            warnings.append("DASHBOARD_SECTION_SKIPPED_TIMEOUT_BUDGET")
+            dashboard_blocker = True
+        dashboard_latency_ms = float(dashboard.get("total_latency_ms") or 0)
+        if dashboard_latency_ms > 3000:
+            warnings.append("DASHBOARD_SNAPSHOT_LATENCY_WARN")
 
     if not bool(status.get("condition_event_worker_side_effect_ready")):
         warnings.append("CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY")
@@ -205,6 +229,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
+        "block_next_pr": bool(failures or dashboard_blocker),
     }
 
 
@@ -230,6 +255,7 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         "",
         f"- generated_at: `{report.get('generated_at')}`",
         f"- verdict: `{verdict.get('status')}`",
+        f"- block_next_pr: `{verdict.get('block_next_pr')}`",
         _summary_line(status, "condition_event_worker_side_effect_ready"),
         _summary_line(status, "condition_event_fusion_enabled"),
         _summary_line(status, "condition_event_would_skip_inline_count"),

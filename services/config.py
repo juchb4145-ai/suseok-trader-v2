@@ -534,6 +534,12 @@ class Settings:
     dashboard_max_limit: int = 200
     dashboard_show_raw_json: bool = True
     dashboard_route_enabled: bool = True
+    dashboard_snapshot_sections_enabled: bool = True
+    dashboard_snapshot_fast_cache_ttl_sec: float = 2.0
+    dashboard_snapshot_fast_default_limit: int = 20
+    dashboard_snapshot_fast_timeout_budget_ms: int = 5000
+    dashboard_snapshot_warn_latency_ms: int = 3000
+    dashboard_snapshot_fail_latency_ms: int = 10000
     deprecated_flag_warnings: tuple[DeprecatedFlagWarning, ...] = ()
 
     def __post_init__(self) -> None:
@@ -1193,6 +1199,19 @@ class Settings:
             raise ValueError("DASHBOARD_MAX_LIMIT must be >= 1")
         if self.dashboard_snapshot_default_limit > self.dashboard_max_limit:
             raise ValueError("DASHBOARD_SNAPSHOT_DEFAULT_LIMIT must be <= DASHBOARD_MAX_LIMIT")
+        if self.dashboard_snapshot_fast_cache_ttl_sec < 0:
+            raise ValueError("DASHBOARD_SNAPSHOT_FAST_CACHE_TTL_SEC must be >= 0")
+        if self.dashboard_snapshot_fast_default_limit < 1:
+            raise ValueError("DASHBOARD_SNAPSHOT_FAST_DEFAULT_LIMIT must be >= 1")
+        if self.dashboard_snapshot_fast_timeout_budget_ms < 100:
+            raise ValueError("DASHBOARD_SNAPSHOT_FAST_TIMEOUT_BUDGET_MS must be >= 100")
+        if self.dashboard_snapshot_warn_latency_ms < 1:
+            raise ValueError("DASHBOARD_SNAPSHOT_WARN_LATENCY_MS must be >= 1")
+        if self.dashboard_snapshot_fail_latency_ms < self.dashboard_snapshot_warn_latency_ms:
+            raise ValueError(
+                "DASHBOARD_SNAPSHOT_FAIL_LATENCY_MS must be >= "
+                "DASHBOARD_SNAPSHOT_WARN_LATENCY_MS"
+            )
         for field_name in ("ai_sidecar_context_default_limit", "ai_sidecar_context_max_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -3020,6 +3039,34 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         dashboard_show_raw_json=_parse_bool(env.get("DASHBOARD_SHOW_RAW_JSON", "true")),
         dashboard_route_enabled=_parse_bool(env.get("DASHBOARD_ROUTE_ENABLED", "true")),
+        dashboard_snapshot_sections_enabled=_parse_bool(
+            env.get("DASHBOARD_SNAPSHOT_SECTIONS_ENABLED", "true")
+        ),
+        dashboard_snapshot_fast_cache_ttl_sec=_parse_float(
+            env.get("DASHBOARD_SNAPSHOT_FAST_CACHE_TTL_SEC", "2.0"),
+            "DASHBOARD_SNAPSHOT_FAST_CACHE_TTL_SEC",
+            min_value=0.0,
+        ),
+        dashboard_snapshot_fast_default_limit=_parse_int(
+            env.get("DASHBOARD_SNAPSHOT_FAST_DEFAULT_LIMIT", "20"),
+            "DASHBOARD_SNAPSHOT_FAST_DEFAULT_LIMIT",
+            min_value=1,
+        ),
+        dashboard_snapshot_fast_timeout_budget_ms=_parse_int(
+            env.get("DASHBOARD_SNAPSHOT_FAST_TIMEOUT_BUDGET_MS", "5000"),
+            "DASHBOARD_SNAPSHOT_FAST_TIMEOUT_BUDGET_MS",
+            min_value=100,
+        ),
+        dashboard_snapshot_warn_latency_ms=_parse_int(
+            env.get("DASHBOARD_SNAPSHOT_WARN_LATENCY_MS", "3000"),
+            "DASHBOARD_SNAPSHOT_WARN_LATENCY_MS",
+            min_value=1,
+        ),
+        dashboard_snapshot_fail_latency_ms=_parse_int(
+            env.get("DASHBOARD_SNAPSHOT_FAIL_LATENCY_MS", "10000"),
+            "DASHBOARD_SNAPSHOT_FAIL_LATENCY_MS",
+            min_value=1,
+        ),
         deprecated_flag_warnings=_deprecated_flag_warnings(env),
     )
 
