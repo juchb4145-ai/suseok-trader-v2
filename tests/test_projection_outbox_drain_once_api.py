@@ -75,6 +75,80 @@ def test_projection_outbox_drain_once_locked_retryable_is_not_500(
     assert payload["no_trading_side_effects"] is True
 
 
+def test_projection_outbox_bulk_retire_api_dry_run_and_apply(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "bulk-retire-api.sqlite3"
+    connection = initialize_database(db_path)
+    settings = Settings(projection_outbox_shadow_min_age_sec=0)
+    event = _price_tick_event("evt_bulk_retire_api")
+    append_gateway_event(connection, event)
+    enqueue_projection_jobs_for_gateway_event(connection, event)
+    process_gateway_event(connection, event, settings=settings)
+    connection.close()
+    _set_env(monkeypatch, db_path)
+
+    with TestClient(app) as client:
+        dry_response = client.post(
+            "/api/operator/projection-outbox/bulk-retire?"
+            "limit=10&dry_run=true&older_than_sec=0&live_safe=true",
+            headers={"X-Local-Token": "secret-token"},
+        )
+        apply_response = client.post(
+            "/api/operator/projection-outbox/bulk-retire?"
+            "limit=10&dry_run=false&older_than_sec=0&live_safe=true",
+            headers={"X-Local-Token": "secret-token"},
+        )
+
+    assert dry_response.status_code == 200
+    dry_payload = dry_response.json()
+    assert dry_payload["dry_run"] is True
+    assert dry_payload["retired_count"] == 1
+    assert dry_payload["pending_before"] == 1
+    assert dry_payload["pending_after"] == 1
+    assert dry_payload["projection_side_effects_allowed"] is False
+
+    assert apply_response.status_code == 200
+    apply_payload = apply_response.json()
+    assert apply_payload["dry_run"] is False
+    assert apply_payload["retired_count"] == 1
+    assert apply_payload["applied_count"] == 1
+    assert apply_payload["pending_before"] == 1
+    assert apply_payload["pending_after"] == 0
+    assert apply_payload["no_trading_side_effects"] is True
+    assert apply_payload["projection_side_effects_allowed"] is False
+    assert _outbox_status(db_path, "market_data:evt_bulk_retire_api") == "APPLIED"
+
+
+def test_projection_outbox_bulk_retire_locked_retryable_is_not_500(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "bulk-retire-locked.sqlite3"
+    initialize_database(db_path).close()
+    _set_env(monkeypatch, db_path)
+
+    def raise_locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr("api.routes.operator.bulk_retire_projection_outbox", raise_locked)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/operator/projection-outbox/bulk-retire?"
+            "limit=10&dry_run=true&older_than_sec=0&live_safe=true",
+            headers={"X-Local-Token": "secret-token"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "LOCKED_RETRYABLE"
+    assert payload["retryable"] is True
+    assert "SQLITE_DATABASE_LOCKED" in payload["reason_codes"]
+    assert payload["no_trading_side_effects"] is True
+
+
 def _set_env(monkeypatch, db_path) -> None:
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
     monkeypatch.setenv("TRADING_CORE_TOKEN", "secret-token")
@@ -89,6 +163,19 @@ def _set_env(monkeypatch, db_path) -> None:
     monkeypatch.setenv("OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS", "3")
     monkeypatch.setenv("OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC", "0")
     monkeypatch.setenv("OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC", "0")
+
+
+def _outbox_status(db_path, outbox_id: str) -> str:
+    connection = initialize_database(db_path)
+    try:
+        row = connection.execute(
+            "SELECT status FROM projection_outbox WHERE outbox_id = ?",
+            (outbox_id,),
+        ).fetchone()
+        assert row is not None
+        return str(row["status"])
+    finally:
+        connection.close()
 
 
 def _price_tick_event(event_id: str) -> GatewayEvent:

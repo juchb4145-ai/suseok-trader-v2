@@ -40,6 +40,9 @@ from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
     projection_outbox_backlog_summary_fields,
 )
+from services.runtime.projection_outbox_bulk_retire import (
+    bulk_retire_projection_outbox,
+)
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
@@ -435,6 +438,78 @@ def operator_projection_outbox_drain_once(
         connection.close()
 
 
+@router.post("/projection-outbox/bulk-retire", dependencies=[Depends(require_local_token)])
+def operator_projection_outbox_bulk_retire(
+    limit: int = Query(default=5000, ge=1, le=20000),
+    dry_run: bool = Query(default=True),
+    older_than_sec: int = Query(default=60, ge=0, le=86400),
+    include_projection_names: str | None = Query(default=None),
+    exclude_recent_condition_events: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: bulk_retire_projection_outbox(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    dry_run=dry_run,
+                    older_than_sec=older_than_sec,
+                    include_projection_names=_parse_csv_query(include_projection_names),
+                    exclude_recent_condition_events=exclude_recent_condition_events,
+                    live_safe=live_safe,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                payload = _locked_retryable_operator_payload(
+                    settings=settings,
+                    endpoint="projection_outbox_bulk_retire",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action=(
+                        "retry bulk retire later or run dry_run while live ingest pressure drops"
+                    ),
+                )
+                payload.update(
+                    {
+                        "dry_run": bool(dry_run),
+                        "no_trading_side_effects": True,
+                        "projection_side_effects_allowed": False,
+                    }
+                )
+                return payload
+            raise
+        payload = result.to_dict()
+        payload["locked_retry_count"] = int(payload.get("locked_retry_count") or 0) + (
+            locked_retry_count
+        )
+        payload["read_only_projection"] = True
+        payload["retryable"] = False
+        return payload
+    finally:
+        connection.close()
+
+
 @router.get("/market-data-projection-reconcile/latest")
 def operator_market_data_projection_reconcile_latest() -> dict[str, Any]:
     settings = load_settings()
@@ -778,3 +853,10 @@ def _configure_operator_run_once_connection(
         connection,
         timeout_ms=int(getattr(settings, "operator_sqlite_busy_timeout_ms", 500)),
     )
+
+
+def _parse_csv_query(value: str | None) -> list[str] | None:
+    if value is None:
+        return None
+    parsed = [item.strip() for item in value.split(",") if item.strip()]
+    return parsed or None

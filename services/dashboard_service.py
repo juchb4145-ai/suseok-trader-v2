@@ -902,14 +902,30 @@ def build_dashboard_pipeline_summary_fast(
             "recent_pending_count": int(
                 projection_outbox_backlog.get("recent_pending_count") or 0
             ),
+            "blocking_pending_count": int(
+                projection_outbox_backlog.get("blocking_pending_count") or 0
+            ),
+            "non_blocking_shadow_pending_count": int(
+                projection_outbox_backlog.get("non_blocking_shadow_pending_count") or 0
+            ),
+            "bulk_retire_eligible_count": int(
+                projection_outbox_backlog.get("bulk_retire_eligible_count") or 0
+            ),
             "condition_event_pending_count": int(
                 projection_outbox_backlog.get("condition_event_pending_count") or 0
+            ),
+            "condition_event_blocking_pending_count": int(
+                projection_outbox_backlog.get("condition_event_blocking_pending_count")
+                or 0
             ),
             "stale_processing_count": int(
                 projection_outbox_backlog.get("stale_processing_count") or 0
             ),
             "operator_actions": list(
                 projection_outbox_backlog.get("operator_actions") or []
+            ),
+            "recommended_action": _projection_outbox_backlog_recommended_action(
+                projection_outbox_backlog
             ),
             "read_only": True,
         },
@@ -1686,14 +1702,30 @@ def _pipeline_summary(
             "recent_pending_count": int(
                 projection_outbox_backlog.get("recent_pending_count") or 0
             ),
+            "blocking_pending_count": int(
+                projection_outbox_backlog.get("blocking_pending_count") or 0
+            ),
+            "non_blocking_shadow_pending_count": int(
+                projection_outbox_backlog.get("non_blocking_shadow_pending_count") or 0
+            ),
+            "bulk_retire_eligible_count": int(
+                projection_outbox_backlog.get("bulk_retire_eligible_count") or 0
+            ),
             "condition_event_pending_count": int(
                 projection_outbox_backlog.get("condition_event_pending_count") or 0
+            ),
+            "condition_event_blocking_pending_count": int(
+                projection_outbox_backlog.get("condition_event_blocking_pending_count")
+                or 0
             ),
             "stale_processing_count": int(
                 projection_outbox_backlog.get("stale_processing_count") or 0
             ),
             "operator_actions": list(
                 projection_outbox_backlog.get("operator_actions") or []
+            ),
+            "recommended_action": _projection_outbox_backlog_recommended_action(
+                projection_outbox_backlog
             ),
             "read_only": True,
         },
@@ -2085,6 +2117,18 @@ def _market_data_append_only_routing_summary(
         "read_only": True,
         "no_trading_side_effects": True,
     }
+
+
+def _projection_outbox_backlog_recommended_action(
+    backlog: Mapping[str, Any],
+) -> str:
+    if bool(backlog.get("pr11_condition_event_cutover_ready")):
+        return "READY_FOR_PR11"
+    if int(backlog.get("bulk_retire_eligible_count") or 0) > 0:
+        return "RUN_BULK_RETIRE_DRY_RUN"
+    if int(backlog.get("blocking_pending_count") or 0) > 0:
+        return "DRAIN_REQUIRED"
+    return "RUN_BULK_RETIRE_APPLY_AFTER_GATEWAY_STOP"
 
 
 def _condition_fusion_section(

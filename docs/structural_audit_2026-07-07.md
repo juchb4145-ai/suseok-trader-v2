@@ -194,9 +194,28 @@ PR-10.7 진행 상태:
   - `tests/test_ops_projection_outbox_backlog_drain.py`
   - `tests/test_dashboard_snapshot_fast_path.py`
 
+PR-10.8 진행 상태:
+
+- `projection_outbox` bulk shadow retire를 추가했다. 이미 Gateway inline projection artifact 또는 projection error로 처리 여부를 확인할 수 있는 old shadow job만 `APPLIED`/`SKIPPED`로 terminal 처리한다.
+- bulk retire는 projection table을 생성/수정하지 않고 `projection_outbox.status`, `processed_at`, `updated_at`, `metadata_json`만 갱신한다.
+- `effective_skip_inline=True`, prior error attempt, missing/failed gateway event, artifact/error/skip-safe evidence가 없는 job은 bulk retire 대상에서 제외한다.
+- backlog readiness를 raw pending 중심에서 `blocking_pending_count`, `non_blocking_shadow_pending_count`, `bulk_retire_eligible_count`, `condition_event_blocking_pending_count`, `effective_skip_pending_count` 기준으로 분리했다.
+- PR-11 `condition_event` cutover readiness는 전체 pending이 아니라 blocking pending, recent pending, effective skip, latest reconcile, error/dead_letter 기준으로 판단한다.
+- `/api/operator/projection-outbox/bulk-retire`와 `tools/ops_projection_outbox_bulk_retire.py`를 추가했다. 기본값은 dry-run이며, apply도 주문/LIVE_SIM/LIVE_REAL side effect 없이 outbox metadata/status만 갱신한다.
+- dashboard fast path/pipeline_summary에 bulk retire eligibility, blocking backlog, recommended action을 노출한다.
+- 운영 절차는 `docs/runbook_projection_outbox_bulk_retire_ko.md`에 정리했다.
+- 2026-07-09 장중 실제 Kiwoom 데이터로 OBSERVE safe env(`TRADING_MODE=OBSERVE`, `TRADING_ALLOW_LIVE_SIM=false`, `TRADING_ALLOW_LIVE_REAL=false`)에서 검증했다. dry-run 500건, apply 500건이 완료됐고 apply 결과는 `APPLIED=498`, `SKIPPED=2`, net pending `-370`이었다. `market_projection_errors`/`market_index_projection_errors` 최근 10분 0건, recent gateway command 0건이었다. 단, live ingest 유입으로 `RECENT_OUTBOX_BACKLOG`, `CONDITION_EVENT_*_BACKLOG`가 남아 PR-11 readiness는 계속 `FAIL`이다.
+- 주문/LIVE_SIM/LIVE_REAL, safety gate, buy gate, price_tick/tr_response/condition_event cutover policy, Gateway ingest path는 변경하지 않았다.
+- 추가 테스트:
+  - `tests/test_projection_outbox_bulk_retire.py`
+  - `tests/test_projection_outbox_backlog_blocking_readiness.py`
+  - `tests/test_projection_outbox_drain_once_api.py`
+  - `tests/test_ops_projection_outbox_bulk_retire.py`
+  - `tests/test_ops_projection_outbox_backlog_drain.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-10.7 backlog readiness를 실제 장중 `tools.ops_projection_outbox_backlog_drain`으로 검증하고, `pr11_condition_event_cutover_ready=true` 조건을 확인한다.
+1. PR-10.8 bulk retire를 실제 장중 dry-run/apply로 검증하고, `blocking_pending_count`, `effective_skip_pending_count`, `condition_event_blocking_pending_count`, `pr11_condition_event_cutover_ready`를 확인한다.
 2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness, backlog readiness 뒤에서 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.

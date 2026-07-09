@@ -176,11 +176,13 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         if is_locked_retryable_payload(payload) or status == "LOCKED_RETRYABLE":
             warnings.append("PROJECTION_OUTBOX_DRAIN_LOCKED_RETRYABLE")
             locked_or_partial = True
-        if status == "PARTIAL":
+        elif status == "PARTIAL":
             warnings.append("PROJECTION_OUTBOX_DRAIN_PARTIAL")
             locked_or_partial = True
-        if not payload.get("ok"):
+        elif not payload.get("ok"):
             failures.append("PROJECTION_OUTBOX_DRAIN_API_ERROR")
+    if int(final.get("bulk_retire_eligible_count") or 0) > 0:
+        warnings.append("PROJECTION_OUTBOX_BULK_RETIRE_RECOMMENDED")
     if bool(report.get("drain_requested")) and not locked_or_partial:
         before = int(initial.get("pending_count") or initial.get("total_pending_count") or 0)
         after = int(final.get("pending_count") or final.get("total_pending_count") or 0)
@@ -234,6 +236,8 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         f"- pending_count: `{final.get('pending_count')}`",
         f"- recent_pending_count: `{final.get('recent_pending_count')}`",
         f"- condition_event_pending_count: `{final.get('condition_event_pending_count')}`",
+        f"- blocking_pending_count: `{final.get('blocking_pending_count')}`",
+        f"- bulk_retire_eligible_count: `{final.get('bulk_retire_eligible_count')}`",
         f"- stale_processing_count: `{final.get('stale_processing_count')}`",
         f"- error_count: `{final.get('error_count')}`",
         f"- dead_letter_count: `{final.get('dead_letter_count')}`",
@@ -258,6 +262,8 @@ def render_console_summary(report: dict[str, Any]) -> str:
         f"{verdict.get('status')} "
         f"readiness={final.get('readiness_status')} "
         f"pending={final.get('pending_count')} "
+        f"blocking={final.get('blocking_pending_count')} "
+        f"bulk_eligible={final.get('bulk_retire_eligible_count')} "
         f"recent={final.get('recent_pending_count')} "
         f"condition_pending={final.get('condition_event_pending_count')} "
         f"pr11_ready={final.get('pr11_condition_event_cutover_ready')}"

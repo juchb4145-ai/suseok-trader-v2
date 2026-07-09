@@ -45,7 +45,7 @@ def test_old_pending_backlog_warns_without_recent_pressure(tmp_path) -> None:
 
     assert status.readiness_status == "WARN"
     assert status.recent_pending_count == 0
-    assert "OUTBOX_BACKLOG_DRAIN_RECOMMENDED" in status.reason_codes
+    assert "OUTBOX_BLOCKING_BACKLOG_DRAIN_RECOMMENDED" in status.reason_codes
     assert "RUN_PROJECTION_OUTBOX_BACKLOG_DRAIN" in status.operator_actions
 
 
@@ -90,7 +90,7 @@ def test_condition_event_pending_blocks_pr11_ready(tmp_path) -> None:
 
     assert status.readiness_status == "FAIL"
     assert status.pr11_condition_event_cutover_ready is False
-    assert "CONDITION_EVENT_OUTBOX_BACKLOG" in status.reason_codes
+    assert "CONDITION_EVENT_BLOCKING_OUTBOX_BACKLOG" in status.reason_codes
 
 
 def test_error_and_dead_letter_backlog_fails(tmp_path) -> None:

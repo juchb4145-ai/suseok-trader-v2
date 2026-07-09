@@ -16,6 +16,7 @@ from services.runtime.gateway_projection_routing import (
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
+from services.runtime.projection_outbox_bulk_retire import count_blocking_pending
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -81,8 +82,13 @@ class ProjectionOutboxBacklogStatus:
     recent_pending_count: int
     recent_pending_age_sec_threshold: int
     eligible_pending_count: int
+    blocking_pending_count: int
+    non_blocking_shadow_pending_count: int
+    bulk_retire_eligible_count: int
     condition_event_pending_count: int
     condition_event_recent_pending_count: int
+    condition_event_blocking_pending_count: int
+    effective_skip_pending_count: int
     live_ingest_detected: bool
     latest_reconcile_status: str | None
     latest_reconcile_run_id: str | None
@@ -122,10 +128,19 @@ class ProjectionOutboxBacklogStatus:
             "recent_pending_count": self.recent_pending_count,
             "recent_pending_age_sec_threshold": self.recent_pending_age_sec_threshold,
             "eligible_pending_count": self.eligible_pending_count,
+            "blocking_pending_count": self.blocking_pending_count,
+            "non_blocking_shadow_pending_count": (
+                self.non_blocking_shadow_pending_count
+            ),
+            "bulk_retire_eligible_count": self.bulk_retire_eligible_count,
             "condition_event_pending_count": self.condition_event_pending_count,
             "condition_event_recent_pending_count": (
                 self.condition_event_recent_pending_count
             ),
+            "condition_event_blocking_pending_count": (
+                self.condition_event_blocking_pending_count
+            ),
+            "effective_skip_pending_count": self.effective_skip_pending_count,
             "live_ingest_detected": self.live_ingest_detected,
             "latest_reconcile_status": self.latest_reconcile_status,
             "latest_reconcile_run_id": self.latest_reconcile_run_id,
@@ -174,6 +189,12 @@ def build_projection_outbox_backlog_status(
     recent_pending_count = _count_pending_since(connection, recent_cutoff)
     eligible_pending_count = _count_eligible_pending(connection, generated_at)
     stale_processing_count = _count_stale_processing(connection, stale_cutoff)
+    blocking_counts = count_blocking_pending(
+        connection,
+        older_than_sec=60,
+        exclude_recent_condition_events=True,
+        limit=20000,
+    )
     condition_event_pending_count = _count_condition_event_pending(connection)
     condition_event_recent_pending_count = _count_condition_event_pending(
         connection,
@@ -213,12 +234,17 @@ def build_projection_outbox_backlog_status(
     )
     readiness = evaluate_projection_outbox_readiness(
         total_pending_count=status_counts["PENDING"],
+        blocking_pending_count=int(blocking_counts["blocking_pending_count"]),
         total_error_count=status_counts["ERROR"],
         total_dead_letter_count=status_counts["DEAD_LETTER"],
         stale_processing_count=stale_processing_count,
         recent_pending_count=recent_pending_count,
         condition_event_pending_count=condition_event_pending_count,
         condition_event_recent_pending_count=condition_event_recent_pending_count,
+        condition_event_blocking_pending_count=int(
+            blocking_counts["condition_event_blocking_pending_count"]
+        ),
+        effective_skip_pending_count=int(blocking_counts["effective_skip_pending_count"]),
         live_ingest_detected=live_ingest_detected,
         latest_reconcile_status=latest_reconcile_status,
         condition_event_effective_skip_count=condition_event_effective_skip_count,
@@ -245,8 +271,17 @@ def build_projection_outbox_backlog_status(
         recent_pending_count=recent_pending_count,
         recent_pending_age_sec_threshold=recent_window_sec,
         eligible_pending_count=eligible_pending_count,
+        blocking_pending_count=int(blocking_counts["blocking_pending_count"]),
+        non_blocking_shadow_pending_count=int(
+            blocking_counts["non_blocking_shadow_pending_count"]
+        ),
+        bulk_retire_eligible_count=int(blocking_counts["bulk_retire_eligible_count"]),
         condition_event_pending_count=condition_event_pending_count,
         condition_event_recent_pending_count=condition_event_recent_pending_count,
+        condition_event_blocking_pending_count=int(
+            blocking_counts["condition_event_blocking_pending_count"]
+        ),
+        effective_skip_pending_count=int(blocking_counts["effective_skip_pending_count"]),
         live_ingest_detected=live_ingest_detected,
         latest_reconcile_status=latest_reconcile_status,
         latest_reconcile_run_id=latest_reconcile_run_id,
@@ -264,12 +299,15 @@ def build_projection_outbox_backlog_status(
 def evaluate_projection_outbox_readiness(
     *,
     total_pending_count: int,
+    blocking_pending_count: int,
     total_error_count: int,
     total_dead_letter_count: int,
     stale_processing_count: int,
     recent_pending_count: int,
     condition_event_pending_count: int,
     condition_event_recent_pending_count: int,
+    condition_event_blocking_pending_count: int,
+    effective_skip_pending_count: int,
     live_ingest_detected: bool,
     latest_reconcile_status: str | None,
     condition_event_effective_skip_count: int,
@@ -293,15 +331,18 @@ def evaluate_projection_outbox_readiness(
     ):
         fail_reasons.append("RECENT_OUTBOX_BACKLOG")
         actions.append("RUN_PROJECTION_OUTBOX_DRAIN_ONCE")
-    if total_pending_count >= int(
+    if blocking_pending_count >= int(
         settings.projection_outbox_backlog_fail_pending_count
     ):
-        fail_reasons.append("OUTBOX_PENDING_FAIL_THRESHOLD")
+        fail_reasons.append("OUTBOX_BLOCKING_PENDING_FAIL_THRESHOLD")
         actions.append("RUN_PROJECTION_OUTBOX_BACKLOG_DRAIN")
-    if condition_event_pending_count > int(
+    if effective_skip_pending_count > 0:
+        fail_reasons.append("EFFECTIVE_SKIP_PENDING_BACKLOG")
+        actions.append("RUN_PROJECTION_OUTBOX_DRAIN_ONCE")
+    if condition_event_blocking_pending_count > int(
         settings.projection_outbox_backlog_condition_event_ready_max_pending
     ):
-        fail_reasons.append("CONDITION_EVENT_OUTBOX_BACKLOG")
+        fail_reasons.append("CONDITION_EVENT_BLOCKING_OUTBOX_BACKLOG")
         actions.append("DRAIN_CONDITION_EVENT_OUTBOX_BEFORE_PR11")
     if condition_event_recent_pending_count > int(
         settings.projection_outbox_backlog_condition_event_ready_recent_max_pending
@@ -322,11 +363,16 @@ def evaluate_projection_outbox_readiness(
         actions.append("CHECK_APPEND_ONLY_ROUTING_GUARD")
 
     if not fail_reasons:
-        if total_pending_count >= int(
+        if blocking_pending_count >= int(
             settings.projection_outbox_backlog_warn_pending_count
         ):
-            warn_reasons.append("OUTBOX_BACKLOG_DRAIN_RECOMMENDED")
+            warn_reasons.append("OUTBOX_BLOCKING_BACKLOG_DRAIN_RECOMMENDED")
             actions.append("RUN_PROJECTION_OUTBOX_BACKLOG_DRAIN")
+        elif total_pending_count >= int(
+            settings.projection_outbox_backlog_warn_pending_count
+        ):
+            warn_reasons.append("NON_BLOCKING_SHADOW_BACKLOG_BULK_RETIRE_RECOMMENDED")
+            actions.append("RUN_BULK_RETIRE_DRY_RUN")
         if live_ingest_detected and recent_pending_count > 0:
             warn_reasons.append("LIVE_INGEST_PENDING_BACKLOG")
             actions.append("RUN_SMALL_LIVE_SAFE_DRAIN_BATCHES")
@@ -335,13 +381,14 @@ def evaluate_projection_outbox_readiness(
 
     readiness_status = "FAIL" if fail_reasons else "WARN" if warn_reasons else "PASS"
     pr11_ready = (
-        readiness_status == "PASS"
-        and condition_event_pending_count
+        readiness_status in {"PASS", "WARN"}
+        and condition_event_blocking_pending_count
         <= int(settings.projection_outbox_backlog_condition_event_ready_max_pending)
         and condition_event_recent_pending_count
         <= int(
             settings.projection_outbox_backlog_condition_event_ready_recent_max_pending
         )
+        and effective_skip_pending_count == 0
         and condition_event_effective_skip_count == 0
         and latest_reconcile_status == "PASS"
         and total_error_count == 0
@@ -368,10 +415,20 @@ def projection_outbox_backlog_summary_fields(
         "pr11_condition_event_cutover_ready": bool(
             status.get("pr11_condition_event_cutover_ready")
         ),
+        "blocking_pending_count": int(status.get("blocking_pending_count") or 0),
+        "non_blocking_shadow_pending_count": int(
+            status.get("non_blocking_shadow_pending_count") or 0
+        ),
+        "bulk_retire_eligible_count": int(
+            status.get("bulk_retire_eligible_count") or 0
+        ),
         "recent_pending_count": int(status.get("recent_pending_count") or 0),
         "stale_processing_count": int(status.get("stale_processing_count") or 0),
         "condition_event_pending_count": int(
             status.get("condition_event_pending_count") or 0
+        ),
+        "condition_event_blocking_pending_count": int(
+            status.get("condition_event_blocking_pending_count") or 0
         ),
         "operator_actions": list(status.get("operator_actions") or []),
     }
