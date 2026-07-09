@@ -156,8 +156,27 @@ PR-10 진행 상태:
 
 1. PR-10을 실제 장중 `condition_event`/worker run-once/reconcile로 검증하고 deferred `condition_fusion` refresh evidence가 정상인지 확인한다.
 2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness 뒤에서 검토한다.
-3. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
-4. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
-5. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.
-6. incremental evaluation과 EntryTiming/OrderPlan의 source metadata를 연결하고 dashboard coherency section을 추가한다.
-7. market_context snapshot을 공통화하고 candidate context는 snapshot id를 참조하도록 바꾼다.
+3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
+4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
+5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.
+6. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
+7. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.
+8. incremental evaluation과 EntryTiming/OrderPlan의 source metadata를 연결하고 dashboard coherency section을 추가한다.
+9. market_context snapshot을 공통화하고 candidate context는 snapshot id를 참조하도록 바꾼다.
+
+## Replay 검증 계획 (순서 3)
+
+- 목적: cutover PR 검증이 "장중 run-once + reconcile" 1일 1회 사이클에 묶이지 않도록, 기록된 이벤트를 오프라인에서 재주입해 하루에 여러 PR을 검증할 수 있게 한다.
+- 방식: `raw_events`/`gateway_events`에서 하루치 이벤트를 export하고, 격리된 replay DB에 두 경로를 재실행한다 — (a) Gateway POST inline projection 경로, (b) `projection_outbox` worker apply 경로. 결과는 기존 `market_data` dual-run reconcile(PR-5)로 대조한다.
+- 산출물: event export/재주입 스크립트, replay 전용 DB fixture, `docs/runbook_market_data_replay_verification_ko.md`.
+- 안전 제약: replay는 검증 전용이며 production DB에 쓰지 않는다. 주문/LIVE_SIM/LIVE_REAL side effect는 replay에서 항상 차단한다. 안전 원칙(주문 정책 완화 없음)은 replay 환경에도 동일 적용한다.
+- 연계: P1-2 projection watermark/retention 정책과 event export 포맷을 공유한다. retention gating이 확정되기 전에는 replay 대상 이벤트가 삭제되지 않도록 export를 먼저 수행한다.
+
+## Flag 정리 계획 (순서 5)
+
+- 전제 조건 (exit criteria): `price_tick`/`tr_response`/`condition_event` cutover가 모두 기본 경로로 동작하고, 연속 10거래일 reconcile PASS, invalid effective skip 0건, deferred side-effect 누락 0건.
+- 1단계: `GATEWAY_MARKET_DATA_APPEND_ONLY_*` 계열 scaffolding flag(dry-run, per-type cutover, budget, require-*, reconcile max age 등 약 20개)와 `PROJECTION_OUTBOX_SHADOW_MODE`/`PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED`/`PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED` apply 게이트를 제거하고, append-only를 기본 동작으로 만든다. inline projection 경로는 긴급 rollback용 단일 flag 하나 뒤에만 유지한다.
+- 2단계: 안정 확인 후 inline projection 코드 경로와 rollback flag를 삭제한다. 이 시점이 P0-1의 최종 상태(POST는 raw append + outbox enqueue만 수행)다.
+- 유지 대상: worker 운영 파라미터(`PROJECTION_OUTBOX_WORKER_ENABLED`, `PROJECTION_OUTBOX_WORKER_INTERVAL_SEC`, `PROJECTION_OUTBOX_BATCH_SIZE`, `PROJECTION_OUTBOX_RETRY_LIMIT`, `PROJECTION_OUTBOX_PROCESSING_TTL_SEC`)는 flag가 아니라 운영 설정으로 남긴다.
+- 각 제거 PR은 해당 flag를 참조하는 runbook(현재 6개), ops script, operator status/dashboard counter를 함께 정리한다. flag만 지우고 죽은 runbook/counter를 남기지 않는다.
+- 후속: flag 정리 완료 후 dual-run reconcile은 상시 운영 체크에서 replay 검증 도구로 역할을 좁힌다.
