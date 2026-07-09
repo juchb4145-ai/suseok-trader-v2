@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 42
+SCHEMA_VERSION = 43
 APP_NAME = "suseok-trader-v2"
 
 
@@ -1276,6 +1276,12 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_gateway_events_received_at
         ON gateway_events (received_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_events_type_status
+        ON gateway_events (event_type, status)
         """
     )
 

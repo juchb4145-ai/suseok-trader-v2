@@ -95,6 +95,7 @@ class ProjectionOutboxBatchResult:
     max_wall_ms_exceeded: bool = False
     effective_limit: int | None = None
     requested_limit: int | None = None
+    projection_name_filter: str | None = None
     live_safe: bool = False
     stale_processing_reset_count: int = 0
     reason_codes: tuple[str, ...] = ()
@@ -132,6 +133,7 @@ class ProjectionOutboxBatchResult:
             "max_wall_ms_exceeded": self.max_wall_ms_exceeded,
             "effective_limit": self.effective_limit,
             "requested_limit": self.requested_limit,
+            "projection_name_filter": self.projection_name_filter,
             "live_safe": self.live_safe,
             "stale_processing_reset_count": self.stale_processing_reset_count,
             "reason_codes": list(self.reason_codes),
@@ -151,11 +153,17 @@ def process_projection_outbox_batch(
     owner_id: str | None = None,
     apply_projection: bool | None = None,
     live_safe: bool = False,
+    projection_name: str | None = None,
 ) -> ProjectionOutboxBatchResult:
     resolved_settings = settings or load_settings()
     started_at = time.monotonic()
     run_id = new_message_id("projection_outbox_shadow")
     resolved_owner_id = owner_id or run_id
+    normalized_projection_name = (
+        None if projection_name is None else str(projection_name).strip().lower()
+    )
+    if normalized_projection_name == "":
+        raise ValueError("projection_name must not be empty")
     apply_requested = (
         bool(resolved_settings.projection_outbox_apply_projection_enabled)
         if apply_projection is None
@@ -216,6 +224,7 @@ def process_projection_outbox_batch(
             limit=bounded_limit,
             processing_ttl_sec=resolved_settings.projection_outbox_processing_ttl_sec,
             min_age_sec=min_age_sec,
+            projection_name=normalized_projection_name,
         ),
         attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
         base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
@@ -405,6 +414,7 @@ def process_projection_outbox_batch(
         max_wall_ms_exceeded=max_wall_ms_exceeded,
         effective_limit=int(bounded_limit),
         requested_limit=None if requested_limit is None else int(requested_limit),
+        projection_name_filter=normalized_projection_name,
         live_safe=bool(live_safe),
         stale_processing_reset_count=stale_processing_reset_count,
         reason_codes=tuple(reason_codes),

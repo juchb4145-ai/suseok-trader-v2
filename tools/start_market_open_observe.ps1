@@ -20,6 +20,7 @@ param(
     [int]$ThemeRefreshRequestTimeoutSec = 120,
     [int]$CoreWaitSeconds = 30,
     [int]$GatewayWaitSeconds = 30,
+    [switch]$MarketReferenceProjectionValidation,
     [switch]$RunObserveCycle,
     [switch]$RunCore,
     [switch]$RunGateway,
@@ -148,6 +149,13 @@ function Write-ObserveEnvOverrideFile {
         "LIVE_SIM_OPERATING_LOOP_ENABLED=$($env:LIVE_SIM_OPERATING_LOOP_ENABLED)",
         "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS=$($env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS)",
         "LIVE_SIM_KILL_SWITCH=$($env:LIVE_SIM_KILL_SWITCH)",
+        "PROJECTION_OUTBOX_WORKER_ENABLED=$($env:PROJECTION_OUTBOX_WORKER_ENABLED)",
+        "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=$($env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED)",
+        "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED)",
+        "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13)",
         "AI_EXTERNAL_LLM_ALLOW_NETWORK=$($env:AI_EXTERNAL_LLM_ALLOW_NETWORK)",
         "AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS=$($env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS)"
     )
@@ -156,6 +164,13 @@ function Write-ObserveEnvOverrideFile {
     }
     if (-not [string]::IsNullOrWhiteSpace($env:GATEWAY_CORE_TOKEN)) {
         $OverrideLines += "GATEWAY_CORE_TOKEN=$($env:GATEWAY_CORE_TOKEN)"
+    }
+    if ($MarketReferenceProjectionValidation) {
+        $OverrideLines += @(
+            "CONDITION_FUSION_SWEEP_ENABLED=$($env:CONDITION_FUSION_SWEEP_ENABLED)",
+            "INCREMENTAL_EVALUATION_WORKER_ENABLED=$($env:INCREMENTAL_EVALUATION_WORKER_ENABLED)",
+            "EVENT_STORE_RETENTION_ENABLED=$($env:EVENT_STORE_RETENTION_ENABLED)"
+        )
     }
 
     Set-Content `
@@ -320,6 +335,18 @@ $env:LIVE_SIM_OPERATING_CYCLE_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
+$env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"
+$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
+$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"
+$env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = "false"
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = "true"
+if ($MarketReferenceProjectionValidation) {
+    $env:CONDITION_FUSION_SWEEP_ENABLED = "false"
+    $env:INCREMENTAL_EVALUATION_WORKER_ENABLED = "false"
+    $env:EVENT_STORE_RETENTION_ENABLED = "false"
+}
 $env:AI_EXTERNAL_LLM_ALLOW_NETWORK = "false"
 $env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS = "false"
 
@@ -392,6 +419,7 @@ $ConditionMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfile
 
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
+Write-Host "Market reference projection validation: $($MarketReferenceProjectionValidation.IsPresent)"
 Write-Host "Core URL: $CoreUrl"
 Write-Host "Dashboard URL: $CoreUrl/dashboard"
 Write-Host "Condition mode: $ConditionMode"

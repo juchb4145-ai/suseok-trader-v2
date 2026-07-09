@@ -91,8 +91,20 @@ FAIL 예:
 1. OBSERVE-safe 환경 확인:
 
 ```powershell
+./tools/start_market_open_observe.ps1 `
+  -RunCore `
+  -RunGateway `
+  -RealtimeExchange nxt `
+  -MarketReferenceProjectionValidation
+
 Invoke-RestMethod http://127.0.0.1:8000/health
 ```
+
+`-MarketReferenceProjectionValidation`은 background worker와 market_data apply를
+끄고, market_reference 수동 run-once apply와 dry-run routing만 활성화한다.
+operator batch와 SQLite lock을 경쟁하지 않도록 이 검증 모드에서만 periodic
+condition-fusion sweep, incremental worker, retention worker도 중지한다.
+KRX 정규장에서는 `-RealtimeExchange krx`, NXT 세션에서는 `nxt`를 사용한다.
 
 2. reconcile run-once:
 
@@ -102,7 +114,18 @@ Invoke-RestMethod -Method Post `
   -Headers @{"X-Local-Token"=$env:TRADING_CORE_TOKEN}
 ```
 
-3. latest reconcile 확인:
+3. market_reference 전용 worker run-once:
+
+```powershell
+Invoke-RestMethod -Method Post `
+  -Uri "http://127.0.0.1:8000/api/operator/projection-outbox/run-once?projection_name=market_reference&limit=1&apply_projection=true&live_safe=true" `
+  -Headers @{"X-Local-Token"=$env:TRADING_CORE_TOKEN}
+```
+
+`projection_name=market_reference`는 오래된 market_data backlog를 claim하거나
+terminal 처리하지 않고 reference job만 선택한다.
+
+4. reconcile을 다시 실행한 뒤 latest reconcile 확인:
 
 ```powershell
 Invoke-RestMethod `
@@ -110,7 +133,7 @@ Invoke-RestMethod `
   -Headers @{"X-Local-Token"=$env:TRADING_CORE_TOKEN}
 ```
 
-4. routing status 확인:
+5. routing status 확인:
 
 ```powershell
 Invoke-RestMethod `
@@ -118,7 +141,7 @@ Invoke-RestMethod `
   -Headers @{"X-Local-Token"=$env:TRADING_CORE_TOKEN}
 ```
 
-5. dashboard fast path 확인:
+6. dashboard fast path 확인:
 
 ```powershell
 Invoke-RestMethod `
@@ -126,7 +149,7 @@ Invoke-RestMethod `
   -Headers @{"X-Local-Token"=$env:TRADING_CORE_TOKEN}
 ```
 
-6. ops script 실행:
+7. ops script 실행:
 
 ```powershell
 python -m tools.ops_market_reference_projection_check `

@@ -32,6 +32,33 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "--no-market-index-tr-bootstrap-enabled" in script
     assert "RunAll" in script
     assert "RunGateway" in script
+    assert "MarketReferenceProjectionValidation" in script
+    assert '$env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"' in script
+    assert '$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"' in script
+    assert (
+        '$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if '
+        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+    ) in script
+    assert (
+        '$env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if '
+        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+    ) in script
+    assert (
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if '
+        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+    ) in script
+    assert '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = "false"' in script
+    assert (
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = "true"'
+        in script
+    )
+    assert '$env:CONDITION_FUSION_SWEEP_ENABLED = "false"' in script
+    assert '$env:INCREMENTAL_EVALUATION_WORKER_ENABLED = "false"' in script
+    assert '$env:EVENT_STORE_RETENTION_ENABLED = "false"' in script
+    assert (
+        '"INCREMENTAL_EVALUATION_WORKER_ENABLED='
+        '$($env:INCREMENTAL_EVALUATION_WORKER_ENABLED)"'
+    ) in script
     assert "RunThemeRefreshLoop" in script
     assert "start_kiwoom_gateway_visible.ps1" in script
     assert "start_theme_refresh_loop.ps1" in script

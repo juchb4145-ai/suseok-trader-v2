@@ -318,6 +318,12 @@ def build_market_reference_status(
         settings=resolved_settings,
     )
     outbox_counts = _market_reference_outbox_counts(connection)
+    latest_outbox_job = (
+        None
+        if latest_event is None
+        else _market_reference_outbox_job(connection, str(latest_event["event_id"]))
+    )
+    latest_outbox_payload = _market_reference_outbox_job_payload(latest_outbox_job)
     membership_count = _membership_count(connection)
     missing_membership_count = int(
         latest_run.get("missing_membership_count") or 0
@@ -346,6 +352,7 @@ def build_market_reference_status(
         ),
         "missing_membership_count": missing_membership_count,
         "outbox": outbox_counts,
+        "latest_outbox_job": latest_outbox_payload,
         "append_only_routing": routing_status,
         "append_only_dry_run_would_skip_count": int(
             routing_status.get("would_skip_inline_count") or 0
@@ -459,6 +466,16 @@ def _market_reference_outbox_job(
         (event_id,),
     ).fetchone()
     return None if row is None else dict(row)
+
+
+def _market_reference_outbox_job_payload(
+    row: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["metadata"] = _json_object(payload.pop("metadata_json", "{}"))
+    return payload
 
 
 def _market_reference_outbox_counts(connection: sqlite3.Connection) -> dict[str, int]:

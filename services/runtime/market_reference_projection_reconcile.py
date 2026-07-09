@@ -126,7 +126,9 @@ def run_market_reference_projection_reconcile(
     counters: Counter[str] = Counter()
     outbox_counts: Counter[str] = Counter()
     payload_shape_counts: Counter[str] = Counter()
-    membership_count = _stored_membership_count(connection)
+    memberships = _market_reference_memberships(connection)
+    membership_count = len(memberships)
+    outbox_rollout_rowid = _market_reference_outbox_rollout_rowid(connection)
 
     if not events:
         _add_issue(
@@ -146,15 +148,38 @@ def run_market_reference_projection_reconcile(
         counters["checked_event_count"] += 1
         outbox = _market_reference_outbox_job(connection, event_id)
         if outbox is None:
-            _add_issue(
-                issues,
-                run_id=run_id,
-                severity="FAIL",
-                reason_code="MARKET_REFERENCE_OUTBOX_JOB_MISSING",
-                event_id=event_id,
-                message="accepted market_symbols event has no market_reference outbox job",
-                evidence={"event_rowid": row["rowid"]},
+            event_rowid = int(row["rowid"])
+            is_legacy_event = bool(
+                event_id != latest_event_id
+                and outbox_rollout_rowid is not None
+                and event_rowid < outbox_rollout_rowid
             )
+            if is_legacy_event:
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="INFO",
+                    reason_code="MARKET_REFERENCE_LEGACY_EVENT_WITHOUT_OUTBOX",
+                    event_id=event_id,
+                    message="market_symbols event predates market_reference outbox rollout",
+                    evidence={
+                        "event_rowid": event_rowid,
+                        "outbox_rollout_rowid": outbox_rollout_rowid,
+                    },
+                )
+            else:
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="FAIL",
+                    reason_code="MARKET_REFERENCE_OUTBOX_JOB_MISSING",
+                    event_id=event_id,
+                    message="accepted market_symbols event has no market_reference outbox job",
+                    evidence={
+                        "event_rowid": event_rowid,
+                        "outbox_rollout_rowid": outbox_rollout_rowid,
+                    },
+                )
         else:
             counters["outbox_job_count"] += 1
             outbox_status = str(outbox["status"]).upper()
@@ -195,10 +220,10 @@ def run_market_reference_projection_reconcile(
 
         counters["checked_symbol_count"] += len(symbols)
         _check_symbol_coverage(
-            connection,
             event_id=event_id,
             symbols=symbols,
             latest_event_id=latest_event_id,
+            memberships=memberships,
             run_id=run_id,
             issues=issues,
             counters=counters,
@@ -453,30 +478,28 @@ def _select_market_reference_events(
 
 
 def _check_symbol_coverage(
-    connection: sqlite3.Connection,
     *,
     event_id: str,
     symbols: Sequence[Mapping[str, Any]],
     latest_event_id: str | None,
+    memberships: Mapping[str, Mapping[str, Any]],
     run_id: str,
     issues: list[MarketReferenceProjectionReconcileIssue],
     counters: Counter[str],
     outbox: Mapping[str, Any] | None,
 ) -> None:
     terminal_status = _outbox_terminal_status(outbox)
+    superseded_symbol_count = 0
+    historical_missing_symbol_count = 0
+    superseding_event_ids: Counter[str] = Counter()
     for symbol in symbols:
         code = str(symbol.get("code") or "")
         market = str(symbol.get("market") or "")
-        row = connection.execute(
-            """
-            SELECT code, market, event_id, event_ts, updated_at
-            FROM market_symbol_memberships
-            WHERE code = ?
-            LIMIT 1
-            """,
-            (code,),
-        ).fetchone()
+        row = memberships.get(code)
         if row is None:
+            if event_id != latest_event_id:
+                historical_missing_symbol_count += 1
+                continue
             counters["missing_membership_count"] += 1
             _add_issue(
                 issues,
@@ -492,6 +515,10 @@ def _check_symbol_coverage(
             continue
         stored_market = str(row["market"])
         stored_event_id = str(row["event_id"])
+        if event_id != latest_event_id and stored_event_id != event_id:
+            superseded_symbol_count += 1
+            superseding_event_ids[stored_event_id] += 1
+            continue
         if stored_market != market:
             counters["missing_membership_count"] += 1
             _add_issue(
@@ -509,47 +536,53 @@ def _check_symbol_coverage(
                 },
             )
         if stored_event_id != event_id:
-            if event_id == latest_event_id:
-                counters["missing_membership_count"] += 1
-                _add_issue(
-                    issues,
-                    run_id=run_id,
-                    severity="FAIL",
-                    reason_code="MARKET_REFERENCE_MEMBERSHIP_EVENT_ID_MISMATCH",
-                    event_id=event_id,
-                    code=code,
-                    market=market,
-                    message="latest market_symbols event is not reflected by event_id",
-                    evidence={
-                        "stored_event_id": stored_event_id,
-                        "outbox_status": terminal_status,
-                    },
-                )
-            else:
-                _add_issue(
-                    issues,
-                    run_id=run_id,
-                    severity="INFO",
-                    reason_code="MARKET_REFERENCE_MEMBERSHIP_SUPERSEDED",
-                    event_id=event_id,
-                    code=code,
-                    market=market,
-                    message="older market_symbols membership was superseded by a newer event",
-                    evidence={"stored_event_id": stored_event_id},
-                )
+            counters["missing_membership_count"] += 1
+            _add_issue(
+                issues,
+                run_id=run_id,
+                severity="FAIL",
+                reason_code="MARKET_REFERENCE_MEMBERSHIP_EVENT_ID_MISMATCH",
+                event_id=event_id,
+                code=code,
+                market=market,
+                message="latest market_symbols event is not reflected by event_id",
+                evidence={
+                    "stored_event_id": stored_event_id,
+                    "outbox_status": terminal_status,
+                },
+            )
         if terminal_status in {"APPLIED", "SKIPPED"} and stored_event_id != event_id:
-            if event_id == latest_event_id:
-                _add_issue(
-                    issues,
-                    run_id=run_id,
-                    severity="FAIL",
-                    reason_code="MARKET_REFERENCE_ARTIFACT_MISSING_AFTER_TERMINAL_OUTBOX",
-                    event_id=event_id,
-                    code=code,
-                    market=market,
-                    message="terminal market_reference outbox state has no matching artifact",
-                    evidence={"outbox_status": terminal_status},
-                )
+            _add_issue(
+                issues,
+                run_id=run_id,
+                severity="FAIL",
+                reason_code="MARKET_REFERENCE_ARTIFACT_MISSING_AFTER_TERMINAL_OUTBOX",
+                event_id=event_id,
+                code=code,
+                market=market,
+                message="terminal market_reference outbox state has no matching artifact",
+                evidence={"outbox_status": terminal_status},
+            )
+
+    if event_id != latest_event_id and (
+        superseded_symbol_count or historical_missing_symbol_count
+    ):
+        _add_issue(
+            issues,
+            run_id=run_id,
+            severity="INFO",
+            reason_code="MARKET_REFERENCE_MEMBERSHIP_SUPERSEDED",
+            event_id=event_id,
+            message="older market_symbols membership snapshot was superseded",
+            evidence={
+                "superseded_symbol_count": superseded_symbol_count,
+                "historical_missing_symbol_count": historical_missing_symbol_count,
+                "superseding_event_ids": [
+                    stored_event_id
+                    for stored_event_id, _ in superseding_event_ids.most_common(5)
+                ],
+            },
+        )
 
 
 def _check_outbox_status(
@@ -651,11 +684,31 @@ def _market_reference_outbox_job(
     return None if row is None else dict(row)
 
 
-def _stored_membership_count(connection: sqlite3.Connection) -> int:
+def _market_reference_outbox_rollout_rowid(
+    connection: sqlite3.Connection,
+) -> int | None:
     row = connection.execute(
-        "SELECT COUNT(*) AS count FROM market_symbol_memberships"
+        """
+        SELECT MIN(event_rowid) AS rollout_rowid
+        FROM projection_outbox
+        WHERE projection_name = 'market_reference' AND event_rowid IS NOT NULL
+        """
     ).fetchone()
-    return 0 if row is None else int(row["count"])
+    if row is None or row["rollout_rowid"] is None:
+        return None
+    return int(row["rollout_rowid"])
+
+
+def _market_reference_memberships(
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT code, market, event_id, event_ts, updated_at
+        FROM market_symbol_memberships
+        """
+    ).fetchall()
+    return {str(row["code"]): dict(row) for row in rows}
 
 
 def _outbox_terminal_status(outbox: Mapping[str, Any] | None) -> str | None:

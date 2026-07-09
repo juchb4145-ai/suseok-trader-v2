@@ -258,7 +258,10 @@ def test_reconcile_latest_api_and_run_once_api(tmp_path, monkeypatch) -> None:
                 "/api/operator/market-data-projection-reconcile/run-once?limit=1"
             )
             run_once = client.post(
-                "/api/operator/market-data-projection-reconcile/run-once?limit=1",
+                (
+                    "/api/operator/market-data-projection-reconcile/run-once"
+                    "?limit=1&persist=true"
+                ),
                 headers={"X-Local-Token": "test-token"},
             )
             latest = client.get("/api/operator/market-data-projection-reconcile/latest")
@@ -269,6 +272,7 @@ def test_reconcile_latest_api_and_run_once_api(tmp_path, monkeypatch) -> None:
     assert run_once.status_code == 200
     assert run_once.json()["status"] == "PASS"
     assert run_once.json()["read_only"] is True
+    assert run_once.json()["persist_requested"] is True
     assert run_once.json()["no_trading_side_effects"] is True
     assert latest.status_code == 200
     assert latest.json()["latest_run"]["status"] == "PASS"

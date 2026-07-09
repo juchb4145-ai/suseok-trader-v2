@@ -178,6 +178,23 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         or 0
     )
     reconcile_status = str(run_payload.get("status") or "").upper()
+    latest_outbox_job = reference_status.get("latest_outbox_job")
+    latest_outbox_job = (
+        latest_outbox_job if isinstance(latest_outbox_job, Mapping) else {}
+    )
+    latest_outbox_metadata = latest_outbox_job.get("metadata")
+    latest_outbox_metadata = (
+        latest_outbox_metadata
+        if isinstance(latest_outbox_metadata, Mapping)
+        else {}
+    )
+    worker_evidence = latest_outbox_metadata.get("last_worker_evidence")
+    worker_evidence = worker_evidence if isinstance(worker_evidence, Mapping) else {}
+    worker_apply_mode = str(worker_evidence.get("apply_mode") or "")
+    worker_apply_result = str(worker_evidence.get("apply_result") or "")
+    worker_no_trading_side_effects = bool(
+        worker_evidence.get("no_trading_side_effects")
+    )
 
     if membership_count <= 0:
         failures.append("MARKET_REFERENCE_MEMBERSHIP_COUNT_ZERO")
@@ -191,6 +208,15 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         failures.append("MARKET_REFERENCE_EFFECTIVE_SKIP_FORBIDDEN_IN_PR13")
     if _terminal_artifact_missing(run_payload):
         failures.append("MARKET_REFERENCE_TERMINAL_ARTIFACT_MISSING")
+    if not worker_evidence:
+        warnings.append("MARKET_REFERENCE_WORKER_EVIDENCE_MISSING")
+    else:
+        if worker_apply_mode != "MARKET_REFERENCE_APPLY":
+            failures.append("MARKET_REFERENCE_WORKER_APPLY_MODE_INVALID")
+        if worker_apply_result not in {"APPLIED_BY_VERIFY", "APPLIED_BY_WORKER"}:
+            failures.append("MARKET_REFERENCE_WORKER_APPLY_RESULT_INVALID")
+        if not worker_no_trading_side_effects:
+            failures.append("MARKET_REFERENCE_WORKER_TRADING_SIDE_EFFECT_GUARD_MISSING")
 
     if reconcile_status == "WARN":
         warnings.append("MARKET_REFERENCE_RECONCILE_WARN")
@@ -208,18 +234,22 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     ) > 0:
         failures.append("DASHBOARD_MARKET_REFERENCE_EFFECTIVE_SKIP")
 
+    worker_evidence_missing = "MARKET_REFERENCE_WORKER_EVIDENCE_MISSING" in warnings
     verdict = "FAIL" if failures else "WARN" if warnings else "PASS"
     return {
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
-        "block_pr14": bool(failures),
+        "block_pr14": bool(failures or worker_evidence_missing),
         "membership_count": membership_count,
         "missing_membership_count": missing_membership_count,
         "outbox_error_count": outbox_error_count,
         "outbox_dead_letter_count": outbox_dead_letter_count,
         "effective_skip_inline_count": effective_skip_count,
         "reconcile_status": reconcile_status,
+        "worker_apply_mode": worker_apply_mode or None,
+        "worker_apply_result": worker_apply_result or None,
+        "worker_no_trading_side_effects": worker_no_trading_side_effects,
     }
 
 
@@ -262,6 +292,9 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
             f"- outbox_error_count: `{verdict.get('outbox_error_count')}`",
             f"- outbox_dead_letter_count: `{verdict.get('outbox_dead_letter_count')}`",
             f"- effective_skip_inline_count: `{verdict.get('effective_skip_inline_count')}`",
+            f"- worker_apply_mode: `{verdict.get('worker_apply_mode')}`",
+            f"- worker_apply_result: `{verdict.get('worker_apply_result')}`",
+            f"- worker_no_trading_side_effects: `{verdict.get('worker_no_trading_side_effects')}`",
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",
             f"- warnings: `{', '.join(verdict.get('warnings') or []) or '-'}`",
             "",

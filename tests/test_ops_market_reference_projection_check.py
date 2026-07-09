@@ -23,6 +23,17 @@ def test_ops_market_reference_projection_check_fails_missing_membership() -> Non
     assert verdict["block_pr14"] is True
 
 
+def test_ops_market_reference_projection_check_blocks_pr14_without_worker_evidence() -> None:
+    report = _report()
+    report["market_reference_status"]["data"]["latest_outbox_job"] = None
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "WARN"
+    assert "MARKET_REFERENCE_WORKER_EVIDENCE_MISSING" in verdict["warnings"]
+    assert verdict["block_pr14"] is True
+
+
 def _report() -> dict:
     latest_run = {
         "status": "PASS",
@@ -51,6 +62,16 @@ def _report() -> dict:
                 "membership_count": 120,
                 "missing_membership_count": 0,
                 "effective_skip_inline_count": 0,
+                "latest_outbox_job": {
+                    "status": "APPLIED",
+                    "metadata": {
+                        "last_worker_evidence": {
+                            "apply_mode": "MARKET_REFERENCE_APPLY",
+                            "apply_result": "APPLIED_BY_VERIFY",
+                            "no_trading_side_effects": True,
+                        }
+                    },
+                },
             },
         },
         "projection_outbox": {

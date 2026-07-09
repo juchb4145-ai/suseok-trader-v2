@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (`PR-13` 구현 반영, 장중 검증은 `PR-12`까지 완료)
+최종 업데이트: 2026-07-10 (`PR-13` NXT 장중 OBSERVE-safe 검증 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -30,7 +30,7 @@
 - PR-11: `condition_event` limited inline skip과 worker-side deferred `condition_fusion` refresh를 strict flag, reconcile/backlog readiness, per-minute budget 뒤에서 허용했다. worker의 candidate ingest는 계속 금지한다.
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
-- 현재 판정: MarketData는 PR-12 API matrix까지 장중 OBSERVE-safe 검증을 완료했다. MarketReference는 PR-13 구현/회귀 테스트까지 완료했으며, 장중 API dry-run 및 짧은 worker apply batch 검증 후에만 PR-14 진입을 검토한다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-13의 장중 OBSERVE-safe 검증을 완료했다. PR-14 market_reference limited cutover는 작은 budget과 strict rollback gate 뒤에서 구현할 수 있다.
 
 ## P0
 
@@ -264,8 +264,13 @@ PR-13 진행 상태:
 - `market_reference` append-only dry-run routing decision을 추가했다. 조건이 모두 맞으면 `would_skip_inline=True` evidence만 남기고, cutover flag가 켜져도 `MARKET_REFERENCE_EFFECTIVE_SKIP_DISABLED_IN_PR13` reason과 함께 inline fallback을 유지한다.
 - operator API, dashboard fast path, `tools/ops_market_reference_projection_check.py`, `docs/runbook_market_reference_projection_ko.md`를 추가했다.
 - market_data append-only controller/price_tick/tr_response/condition_event, market_index/regime/scan/live_sim Gateway handling, 주문/LIVE_SIM/LIVE_REAL, safety/buy gate는 변경하지 않았다.
-- 구현 후 market_reference targeted test 5개 파일 `14 passed`와 관련 Gateway/dashboard/controller/structural/config/worker 회귀 배치를 모두 통과했다.
-- 저장된 운영 report 기준으로 PR-13 장중 API matrix는 아직 수행 전이다. 따라서 market_reference limited cutover와 PR-14 진입 판정은 보류하며, `effective_skip_inline`은 계속 `0`이어야 한다.
+- OBSERVE 런처가 LIVE_SIM 파일럿 `.env`의 operating/cancel/exit/reprice 플래그를 상속하지 않도록 모든 주문 side-effect 플래그를 process-local override에서 강제로 차단했다. PR-13 검증 모드에서는 background projection worker, market_data apply, periodic fusion/incremental/retention worker도 끄고 reference 수동 run-once만 허용한다.
+- 대용량 운영 DB reconcile을 위해 `gateway_events(event_type,status)` index를 추가하고 membership을 한 번만 preload한다. 과거 snapshot의 superseded evidence는 종목별이 아니라 event별로 집계하며, outbox rollout 이전 event는 legacy INFO로 분리한다. 실제 reconcile latency는 30초 timeout 초과에서 약 `348ms`로 줄었다.
+- `/api/operator/projection-outbox/run-once`에 optional `projection_name` filter를 추가했다. `projection_name=market_reference` batch는 오래된 market_data backlog를 claim하거나 terminal 처리하지 않는다.
+- 2026-07-10 08:22 KST NXT 세션에서 실제 Kiwoom Gateway `exchange=NXT`, login/heartbeat, realtime callback을 확인했다. latest routing은 `would_skip_inline=true`, `effective_skip_inline=false`, 주문 command queue `0`, `order_commands_allowed=false`였다.
+- reference-only worker `limit=1` 결과는 `APPLIED_BY_VERIFY=1`, error/dead-letter `0`, `no_trading_side_effects=true`였다. 후속 reconcile은 `PASS/append_only_ready=true`, membership `4053`, missing `0`, outbox `APPLIED=7`, `SKIPPED=15`, `ERROR/DEAD_LETTER=0/0`이었다.
+- 공식 ops report는 `PASS`이며 worker mode/result까지 포함한다. 근거: `reports/market_reference_projection/20260709T232734Z/summary.md`.
+- market_reference 및 관련 outbox/Gateway/dashboard/controller/structural/config/SQLite 18개 테스트 파일 회귀 배치를 통과했다.
 - 추가 테스트:
   - `tests/test_market_reference_projection_worker.py`
   - `tests/test_market_reference_projection_reconcile.py`
@@ -275,15 +280,20 @@ PR-13 진행 상태:
 
 ## 다음 PR 권장 순서
 
-1. Core를 OBSERVE-safe로 띄워 PR-13을 API 기준 장중 검증한다. dry-run routing 후 `apply_projection=true` worker run-once를 짧은 batch로 실행하고, market_reference reconcile `PASS`, `append_only_ready`, membership 생성/coverage, outbox `ERROR/DEAD_LETTER=0`, `effective_skip_inline_count=0`을 확인한다.
-2. PR-14에서만 market_reference limited cutover를 검토한다. 이때도 작은 skip budget, fresh reconcile PASS, worker apply enabled, rollback 절차를 선행 조건으로 둔다.
-3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
-4. market_index/regime/scan 등 나머지 projection을 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
-5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.
-6. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
-7. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.
-8. incremental evaluation과 EntryTiming/OrderPlan의 source metadata를 연결하고 dashboard coherency section을 추가한다.
-9. market_context snapshot을 공통화하고 candidate context는 snapshot id를 참조하도록 바꾼다.
+1. PR-14에서 market_reference limited cutover를 구현한다. `1/min` skip budget, fresh reconcile PASS, reference-only worker apply, membership coverage, outbox readiness, 즉시 inline rollback을 선행 조건으로 둔다.
+2. runtime lock에 heartbeat/lease renewal/fencing token을 추가하고 startup clear를 expired/self-owned lock으로 제한한다.
+3. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
+4. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
+5. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
+6. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+7. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+8. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+9. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+10. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+11. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+12. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+13. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+14. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 계획 (순서 3)
 

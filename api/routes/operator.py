@@ -263,6 +263,7 @@ def operator_projection_outbox_run_once(
     limit: int | None = Query(default=None, ge=1, le=500),
     apply_projection: bool = Query(default=False),
     live_safe: bool = Query(default=True),
+    projection_name: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -284,6 +285,7 @@ def operator_projection_outbox_run_once(
                     limit=limit,
                     apply_projection=apply_projection,
                     live_safe=live_safe,
+                    projection_name=projection_name,
                 ),
                 attempts=settings.operator_sqlite_lock_retry_attempts,
                 base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,

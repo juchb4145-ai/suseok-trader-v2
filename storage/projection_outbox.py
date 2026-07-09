@@ -185,6 +185,7 @@ def claim_projection_outbox_jobs(
     limit: int,
     processing_ttl_sec: int,
     min_age_sec: float = 0.0,
+    projection_name: str | None = None,
 ) -> list[dict[str, Any]]:
     del processing_ttl_sec
     normalized_owner_id = _require_non_empty(owner_id, "owner_id")
@@ -192,6 +193,17 @@ def claim_projection_outbox_jobs(
     now = utc_now()
     now_wire = datetime_to_wire(now)
     min_created_at = datetime_to_wire(now - timedelta(seconds=max(float(min_age_sec), 0.0)))
+    normalized_projection_name = (
+        None
+        if projection_name is None
+        else _require_non_empty(projection_name, "projection_name").lower()
+    )
+    projection_clause = ""
+    candidate_params: list[Any] = [now_wire, min_created_at]
+    if normalized_projection_name is not None:
+        projection_clause = "AND projection_name = ?"
+        candidate_params.append(normalized_projection_name)
+    candidate_params.append(bounded_limit)
     claimed: list[dict[str, Any]] = []
     try:
         connection.execute("BEGIN IMMEDIATE")
@@ -202,10 +214,11 @@ def claim_projection_outbox_jobs(
             WHERE status = 'PENDING'
                 AND (available_at IS NULL OR julianday(available_at) <= julianday(?))
                 AND julianday(created_at) <= julianday(?)
+                {projection_clause}
             ORDER BY priority DESC, event_rowid ASC, created_at ASC
             LIMIT ?
-            """,
-            (now_wire, min_created_at, bounded_limit),
+            """.format(projection_clause=projection_clause),
+            tuple(candidate_params),
         ).fetchall()
         for candidate in candidates:
             cursor = connection.execute(
