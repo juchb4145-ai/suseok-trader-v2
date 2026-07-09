@@ -26,6 +26,11 @@ from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
     process_incremental_evaluation_batch,
 )
+from services.runtime.market_data_append_only_controller import (
+    build_market_data_append_only_controller_status,
+    list_market_data_append_only_auto_rollback_events,
+    persist_market_data_append_only_controller_snapshot,
+)
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
     run_market_data_projection_reconcile,
@@ -35,7 +40,6 @@ from services.runtime.market_open_observe_cycle import (
     list_market_open_observe_cycle_runs,
     run_market_open_observe_cycle_once,
 )
-from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
     projection_outbox_backlog_summary_fields,
@@ -43,6 +47,7 @@ from services.runtime.projection_outbox_backlog import (
 from services.runtime.projection_outbox_bulk_retire import (
     bulk_retire_projection_outbox,
 )
+from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
@@ -290,7 +295,9 @@ def operator_projection_outbox_run_once(
                         and settings.projection_outbox_apply_projection_enabled
                         and settings.projection_outbox_market_data_apply_enabled
                     ),
-                    operator_action="retry with a smaller live_safe batch after ingest pressure drops",
+                    operator_action=(
+                        "retry with a smaller live_safe batch after ingest pressure drops"
+                    ),
                 )
             raise
         payload = result.to_dict()
@@ -637,7 +644,9 @@ def operator_market_data_projection_reconcile_run_once(
                     elapsed_ms=(time.monotonic() - started_at) * 1000,
                     locked_retry_count=locked_retry_count,
                     read_only_projection=True,
-                    operator_action="retry later or call with persist=false during live ingest pressure",
+                    operator_action=(
+                        "retry later or call with persist=false during live ingest pressure"
+                    ),
                 )
             raise
         payload = result.to_dict()
@@ -661,6 +670,67 @@ def operator_market_data_append_only_routing_status() -> dict[str, Any]:
             connection,
             settings=settings,
         )
+    finally:
+        connection.close()
+
+
+@router.get("/market-data-append-only/controller/status")
+def operator_market_data_append_only_controller_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        payload = build_market_data_append_only_controller_status(
+            connection,
+            settings=settings,
+        ).to_dict()
+        payload["read_only"] = True
+        payload["no_trading_side_effects"] = True
+        return payload
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-data-append-only/controller/snapshot",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_data_append_only_controller_snapshot() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        status = build_market_data_append_only_controller_status(
+            connection,
+            settings=settings,
+        )
+        snapshot_id = persist_market_data_append_only_controller_snapshot(
+            connection,
+            status,
+        )
+        payload = status.to_dict()
+        payload["snapshot_id"] = snapshot_id
+        payload["config_changed"] = False
+        payload["read_only"] = True
+        payload["no_trading_side_effects"] = True
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-data-append-only/controller/rollback-events")
+def operator_market_data_append_only_controller_rollback_events(
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return {
+            "events": list_market_data_append_only_auto_rollback_events(
+                connection,
+                limit=limit,
+            ),
+            "read_only": True,
+            "no_trading_side_effects": True,
+        }
     finally:
         connection.close()
 

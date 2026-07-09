@@ -230,10 +230,25 @@ PR-11 진행 상태:
   - `tests/test_market_data_reconcile_condition_event_cutover.py`
   - `tests/test_ops_market_data_condition_event_cutover_check.py`
 
+PR-12 진행 상태:
+
+- MarketData append-only controller를 추가해 `price_tick`/`tr_response`/`condition_event` limited cutover를 `OFF`/`DRY_RUN`/event-only/`MARKET_DATA_LIMITED`/`MARKET_DATA_FULL_GUARDED` operating mode 아래에서 중앙 제어한다.
+- 기본값은 `GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE=OFF`, `GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH=true`, `GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE=0`으로 유지해 production behavior는 변하지 않는다.
+- global kill switch와 auto rollback gate는 event-specific cutover flag보다 우선하며, controller가 PASS하지 않으면 routing service가 effective skip을 막고 inline fallback으로 되돌린다.
+- auto rollback은 projection outbox ERROR/DEAD_LETTER, invalid effective skip, candidate ingest in worker, reconcile FAIL, append_only_not_ready after skip, backlog FAIL, stale PROCESSING, deferred side-effect error를 DB event로 기록한다. 설정 파일은 자동 수정하지 않는다.
+- operator API와 dashboard fast path에 `market_data_append_only_controller` status, event-type gate, global budget, rollback hint, no trading/order side-effect evidence를 추가했다.
+- 신규 ops script `tools/ops_market_data_append_only_controller_check.py`와 운영 절차 `docs/runbook_market_data_append_only_controller_ko.md`를 추가했다.
+- price_tick PR-7, tr_response PR-9, condition_event PR-11 개별 cutover는 유지하되 중앙 controller를 통과해야 한다. market_reference/index/regime/scan 분리, `handle_live_sim_gateway_event`, 주문/LIVE_SIM/LIVE_REAL, safety/buy gate는 변경하지 않았다.
+- 추가 테스트:
+  - `tests/test_market_data_append_only_controller.py`
+  - `tests/test_gateway_market_data_append_only_controller_routing.py`
+  - `tests/test_dashboard_market_data_append_only_controller.py`
+  - `tests/test_ops_market_data_append_only_controller_check.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-11 condition_event limited cutover를 실제 장중 소량 budget으로 검증하고, worker applied, deferred fusion refresh, candidate ingest 0, artifact missing 0, reconcile PASS를 확인한다.
-2. PR-12에서 market_reference/index/regime 등 비-market_data projection 분리와 append-only worker 적용 가능성을 검토한다.
+1. PR-12 controller 아래에서 condition_event limited cutover를 실제 장중 소량 budget으로 검증하고, worker applied, deferred fusion refresh, candidate ingest 0, outbox ERROR/DEAD_LETTER 0, reconcile PASS를 확인한다.
+2. PR-13에서 market_data append-only controller 장중 PASS 이후 market_reference/index/regime 등 non-market_data projection 분리와 append-only worker 적용 가능성을 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.

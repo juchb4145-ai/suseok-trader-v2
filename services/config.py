@@ -187,6 +187,18 @@ class Settings:
     ops_script_locked_retry_sleep_sec: float = 1.0
     gateway_market_data_append_only_dry_run_enabled: bool = False
     gateway_market_data_append_only_cutover_enabled: bool = False
+    gateway_market_data_append_only_operating_mode: str = "OFF"
+    gateway_market_data_append_only_global_kill_switch: bool = True
+    gateway_market_data_append_only_auto_rollback_enabled: bool = True
+    gateway_market_data_append_only_global_max_skip_per_minute: int = 0
+    gateway_market_data_append_only_max_error_count: int = 0
+    gateway_market_data_append_only_max_dead_letter_count: int = 0
+    gateway_market_data_append_only_max_pending_within_sla: int = 100
+    gateway_market_data_append_only_max_condition_event_pending_within_sla: int = 10
+    gateway_market_data_append_only_require_dashboard_fast_ok: bool = True
+    gateway_market_data_append_only_require_backlog_ready: bool = True
+    gateway_market_data_append_only_auto_rollback_cooldown_sec: int = 300
+    gateway_market_data_append_only_health_stale_sec: int = 60
     gateway_market_data_append_only_price_tick_cutover_enabled: bool = False
     gateway_market_data_append_only_tr_response_dry_run_enabled: bool = False
     gateway_market_data_append_only_tr_response_cutover_enabled: bool = False
@@ -602,6 +614,43 @@ class Settings:
             raise ValueError(
                 "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
             )
+        normalized_operating_mode = (
+            self.gateway_market_data_append_only_operating_mode.strip().upper()
+        )
+        allowed_operating_modes = {
+            "OFF",
+            "DRY_RUN",
+            "PRICE_TICK_ONLY",
+            "TR_RESPONSE_ONLY",
+            "CONDITION_EVENT_ONLY",
+            "MARKET_DATA_LIMITED",
+            "MARKET_DATA_FULL_GUARDED",
+        }
+        if normalized_operating_mode not in allowed_operating_modes:
+            raise ValueError(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE must be one of "
+                f"{sorted(allowed_operating_modes)}"
+            )
+        object.__setattr__(
+            self,
+            "gateway_market_data_append_only_operating_mode",
+            normalized_operating_mode,
+        )
+        for field_name in (
+            "gateway_market_data_append_only_global_max_skip_per_minute",
+            "gateway_market_data_append_only_max_error_count",
+            "gateway_market_data_append_only_max_dead_letter_count",
+            "gateway_market_data_append_only_max_pending_within_sla",
+            "gateway_market_data_append_only_max_condition_event_pending_within_sla",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        for field_name in (
+            "gateway_market_data_append_only_auto_rollback_cooldown_sec",
+            "gateway_market_data_append_only_health_stale_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
         object.__setattr__(
             self,
             "gateway_market_data_append_only_event_types",
@@ -1843,6 +1892,68 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         gateway_market_data_append_only_cutover_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_data_append_only_operating_mode=env.get(
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE",
+            "OFF",
+        ),
+        gateway_market_data_append_only_global_kill_switch=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH", "true")
+        ),
+        gateway_market_data_append_only_auto_rollback_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_ENABLED", "true")
+        ),
+        gateway_market_data_append_only_global_max_skip_per_minute=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE", "0"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_data_append_only_max_error_count=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_ERROR_COUNT", "0"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_ERROR_COUNT",
+            min_value=0,
+        ),
+        gateway_market_data_append_only_max_dead_letter_count=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_DEAD_LETTER_COUNT", "0"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_DEAD_LETTER_COUNT",
+            min_value=0,
+        ),
+        gateway_market_data_append_only_max_pending_within_sla=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_PENDING_WITHIN_SLA", "100"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=0,
+        ),
+        gateway_market_data_append_only_max_condition_event_pending_within_sla=(
+            _parse_int(
+                env.get(
+                    "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_CONDITION_EVENT_PENDING_WITHIN_SLA",
+                    "10",
+                ),
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_CONDITION_EVENT_PENDING_WITHIN_SLA",
+                min_value=0,
+            )
+        ),
+        gateway_market_data_append_only_require_dashboard_fast_ok=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_DASHBOARD_FAST_OK",
+                "true",
+            )
+        ),
+        gateway_market_data_append_only_require_backlog_ready=_parse_bool(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_BACKLOG_READY", "true")
+        ),
+        gateway_market_data_append_only_auto_rollback_cooldown_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_COOLDOWN_SEC",
+                "300",
+            ),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_COOLDOWN_SEC",
+            min_value=1,
+        ),
+        gateway_market_data_append_only_health_stale_sec=_parse_int(
+            env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_HEALTH_STALE_SEC", "60"),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_HEALTH_STALE_SEC",
+            min_value=1,
         ),
         gateway_market_data_append_only_price_tick_cutover_enabled=_parse_bool(
             env.get(

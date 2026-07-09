@@ -84,6 +84,21 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.ops_script_locked_retry_sleep_sec == 1.0
     assert settings.gateway_market_data_append_only_dry_run_enabled is False
     assert settings.gateway_market_data_append_only_cutover_enabled is False
+    assert settings.gateway_market_data_append_only_operating_mode == "OFF"
+    assert settings.gateway_market_data_append_only_global_kill_switch is True
+    assert settings.gateway_market_data_append_only_auto_rollback_enabled is True
+    assert settings.gateway_market_data_append_only_global_max_skip_per_minute == 0
+    assert settings.gateway_market_data_append_only_max_error_count == 0
+    assert settings.gateway_market_data_append_only_max_dead_letter_count == 0
+    assert settings.gateway_market_data_append_only_max_pending_within_sla == 100
+    assert (
+        settings.gateway_market_data_append_only_max_condition_event_pending_within_sla
+        == 10
+    )
+    assert settings.gateway_market_data_append_only_require_dashboard_fast_ok is True
+    assert settings.gateway_market_data_append_only_require_backlog_ready is True
+    assert settings.gateway_market_data_append_only_auto_rollback_cooldown_sec == 300
+    assert settings.gateway_market_data_append_only_health_stale_sec == 60
     assert settings.gateway_market_data_append_only_price_tick_cutover_enabled is False
     assert settings.gateway_market_data_append_only_tr_response_dry_run_enabled is False
     assert settings.gateway_market_data_append_only_tr_response_cutover_enabled is False
@@ -588,6 +603,20 @@ def test_market_data_interval_settings_are_validated() -> None:
         {
             "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE": "market_data_limited",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_ENABLED": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE": "7",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_ERROR_COUNT": "1",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_DEAD_LETTER_COUNT": "2",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "80",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_CONDITION_EVENT_PENDING_WITHIN_SLA": (
+                "4"
+            ),
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_DASHBOARD_FAST_OK": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_REQUIRE_BACKLOG_READY": "false",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_COOLDOWN_SEC": "120",
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_HEALTH_STALE_SEC": "30",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED": "true",
@@ -607,6 +636,42 @@ def test_market_data_interval_settings_are_validated() -> None:
     )
     assert routing_settings.gateway_market_data_append_only_dry_run_enabled is True
     assert routing_settings.gateway_market_data_append_only_cutover_enabled is True
+    assert (
+        routing_settings.gateway_market_data_append_only_operating_mode
+        == "MARKET_DATA_LIMITED"
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_global_kill_switch
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_auto_rollback_enabled
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_global_max_skip_per_minute
+        == 7
+    )
+    assert routing_settings.gateway_market_data_append_only_max_error_count == 1
+    assert routing_settings.gateway_market_data_append_only_max_dead_letter_count == 2
+    assert routing_settings.gateway_market_data_append_only_max_pending_within_sla == 80
+    assert (
+        routing_settings.gateway_market_data_append_only_max_condition_event_pending_within_sla
+        == 4
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_require_dashboard_fast_ok
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_require_backlog_ready
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_data_append_only_auto_rollback_cooldown_sec
+        == 120
+    )
+    assert routing_settings.gateway_market_data_append_only_health_stale_sec == 30
     assert (
         routing_settings.gateway_market_data_append_only_price_tick_cutover_enabled
         is True
@@ -713,6 +778,23 @@ def test_market_data_interval_settings_are_validated() -> None:
         )
     else:
         raise AssertionError("expected invalid condition_event max payload age")
+    invalid_controller_cases = {
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE": "LIVE",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE": "-1",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_ERROR_COUNT": "-1",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_DEAD_LETTER_COUNT": "-1",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "-1",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_CONDITION_EVENT_PENDING_WITHIN_SLA": "-1",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_COOLDOWN_SEC": "0",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_HEALTH_STALE_SEC": "0",
+    }
+    for key, value in invalid_controller_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid controller setting for {key}")
 
 
 def test_realtime_subscription_settings_are_validated() -> None:

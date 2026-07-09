@@ -120,6 +120,9 @@ from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
+from services.runtime.market_data_append_only_controller import (
+    build_market_data_append_only_controller_status,
+)
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
@@ -171,6 +174,7 @@ DASHBOARD_SECTIONS = [
     "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
+    "market_data_append_only_controller",
     "pipeline_summary",
 ]
 
@@ -182,6 +186,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
+    "market_data_append_only_controller",
     "pipeline_summary",
     "errors",
 )
@@ -201,6 +206,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
+    "market_data_append_only_controller",
     "pipeline_summary",
 }
 
@@ -208,6 +214,7 @@ FAST_DASHBOARD_REQUIRED_SECTIONS = {
     "gateway",
     "projection_outbox",
     "market_data_append_only_routing",
+    "market_data_append_only_controller",
 }
 
 GATEWAY_HEARTBEAT_STALE_SEC = 120.0
@@ -304,6 +311,12 @@ def build_dashboard_snapshot(
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
         connection,
         settings=settings,
+    )
+    market_data_append_only_controller = (
+        build_market_data_append_only_controller_status(
+            connection,
+            settings=settings,
+        ).to_dict()
     )
     projection_outbox_backlog = build_projection_outbox_backlog_status(
         connection,
@@ -489,6 +502,7 @@ def build_dashboard_snapshot(
         projection_outbox_backlog=projection_outbox_backlog,
         market_data_reconcile=market_data_reconcile,
         market_data_append_only_routing=market_data_append_only_routing,
+        market_data_append_only_controller=market_data_append_only_controller,
         settings=settings,
     )
 
@@ -530,6 +544,7 @@ def build_dashboard_snapshot(
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
+        "market_data_append_only_controller": market_data_append_only_controller,
         "themes": {
             "status": {
                 **theme_status,
@@ -844,6 +859,7 @@ def build_dashboard_pipeline_summary_fast(
     projection_outbox_backlog: dict[str, Any],
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
+    market_data_append_only_controller: dict[str, Any],
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
@@ -934,6 +950,11 @@ def build_dashboard_pipeline_summary_fast(
         ),
         "market_data_append_only_routing": _market_data_append_only_routing_summary(
             market_data_append_only_routing
+        ),
+        "market_data_append_only_controller": (
+            _market_data_append_only_controller_summary(
+                market_data_append_only_controller
+            )
         ),
         "order_safety": {
             "order_command_count": order_command_count,
@@ -1049,6 +1070,16 @@ def _build_dashboard_fast_section(
             )
         return context["market_data_append_only_routing"]
 
+    def market_data_append_only_controller() -> dict[str, Any]:
+        if "market_data_append_only_controller" not in context:
+            context["market_data_append_only_controller"] = (
+                build_market_data_append_only_controller_status(
+                    connection,
+                    settings=settings,
+                ).to_dict()
+            )
+        return context["market_data_append_only_controller"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1142,6 +1173,8 @@ def _build_dashboard_fast_section(
         return market_data_reconcile()
     if section == "market_data_append_only_routing":
         return market_data_append_only_routing()
+    if section == "market_data_append_only_controller":
+        return market_data_append_only_controller()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,
@@ -1152,6 +1185,7 @@ def _build_dashboard_fast_section(
             projection_outbox_backlog=projection_outbox_backlog(),
             market_data_reconcile=market_data_reconcile(),
             market_data_append_only_routing=market_data_append_only_routing(),
+            market_data_append_only_controller=market_data_append_only_controller(),
         )
 
     raise ValueError(f"unsupported dashboard fast section: {section}")
@@ -1616,6 +1650,7 @@ def _pipeline_summary(
     projection_outbox_backlog: dict[str, Any],
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
+    market_data_append_only_controller: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1734,6 +1769,11 @@ def _pipeline_summary(
         ),
         "market_data_append_only_routing": _market_data_append_only_routing_summary(
             market_data_append_only_routing
+        ),
+        "market_data_append_only_controller": (
+            _market_data_append_only_controller_summary(
+                market_data_append_only_controller
+            )
         ),
         "themes": {
             "theme_count": theme_status["theme_count"],
@@ -2162,6 +2202,70 @@ def _projection_outbox_backlog_recommended_action(
     if int(backlog.get("blocking_pending_count") or 0) > 0:
         return "DRAIN_REQUIRED"
     return "RUN_BULK_RETIRE_APPLY_AFTER_GATEWAY_STOP"
+
+
+def _market_data_append_only_controller_summary(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    warnings: list[str] = []
+    operating_mode = str(payload.get("operating_mode") or "OFF")
+    global_kill_switch = bool(payload.get("global_kill_switch"))
+    auto_rollback_required = bool(payload.get("auto_rollback_required"))
+    if operating_mode == "OFF":
+        warnings.append("MarketData append-only controller is OFF")
+    if global_kill_switch:
+        warnings.append("Global kill switch active")
+    if auto_rollback_required:
+        warnings.append("Auto rollback required: inline fallback enforced")
+    warnings.append("LIVE_REAL/order behavior unchanged")
+    for warning in payload.get("warnings") or []:
+        if warning not in warnings:
+            warnings.append(str(warning))
+    return {
+        "status": payload.get("status"),
+        "operating_mode": operating_mode,
+        "global_kill_switch": global_kill_switch,
+        "effective_cutover_enabled": bool(payload.get("effective_cutover_enabled")),
+        "auto_rollback_required": auto_rollback_required,
+        "auto_rollback_reason_codes": list(
+            payload.get("auto_rollback_reason_codes") or []
+        ),
+        "allowed_event_types": list(payload.get("allowed_event_types") or []),
+        "global_budget_limit": int(payload.get("global_skip_budget_limit") or 0),
+        "global_budget_used": int(payload.get("global_skip_budget_used") or 0),
+        "global_budget_remaining": int(
+            payload.get("global_skip_budget_remaining") or 0
+        ),
+        "price_tick_gate": dict(payload.get("price_tick_gate") or {}),
+        "tr_response_gate": dict(payload.get("tr_response_gate") or {}),
+        "condition_event_gate": dict(payload.get("condition_event_gate") or {}),
+        "latest_reconcile_status": payload.get("latest_reconcile_status"),
+        "latest_reconcile_append_only_ready": bool(
+            payload.get("latest_reconcile_append_only_ready")
+        ),
+        "backlog_readiness_status": payload.get("backlog_readiness_status"),
+        "pr11_condition_event_cutover_ready": bool(
+            payload.get("pr11_condition_event_cutover_ready")
+        ),
+        "projection_outbox_pending_count": int(
+            payload.get("projection_outbox_pending_count") or 0
+        ),
+        "projection_outbox_error_count": int(
+            payload.get("projection_outbox_error_count") or 0
+        ),
+        "projection_outbox_dead_letter_count": int(
+            payload.get("projection_outbox_dead_letter_count") or 0
+        ),
+        "invalid_effective_skip_count": int(
+            payload.get("invalid_effective_skip_count") or 0
+        ),
+        "rollback_hint": payload.get("rollback_hint"),
+        "warnings": warnings,
+        "read_only": True,
+        "no_trading_side_effects": True,
+        "order_behavior_changed": bool(payload.get("order_behavior_changed")),
+        "live_real_allowed": bool(payload.get("live_real_allowed")),
+    }
 
 
 def _condition_fusion_section(

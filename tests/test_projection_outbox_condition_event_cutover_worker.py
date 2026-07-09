@@ -75,6 +75,9 @@ def _cutover_settings(**overrides) -> Settings:
     values = {
         "gateway_market_data_append_only_dry_run_enabled": True,
         "gateway_market_data_append_only_cutover_enabled": True,
+        "gateway_market_data_append_only_operating_mode": "CONDITION_EVENT_ONLY",
+        "gateway_market_data_append_only_global_kill_switch": False,
+        "gateway_market_data_append_only_global_max_skip_per_minute": 10,
         "gateway_market_data_append_only_condition_event_cutover_enabled": True,
         "gateway_market_data_append_only_condition_event_max_skip_per_minute": 10,
         "projection_outbox_shadow_min_age_sec": 0,

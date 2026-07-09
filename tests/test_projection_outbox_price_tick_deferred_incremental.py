@@ -157,6 +157,9 @@ def _cutover_apply_settings() -> Settings:
     return Settings(
         gateway_market_data_append_only_dry_run_enabled=True,
         gateway_market_data_append_only_cutover_enabled=True,
+        gateway_market_data_append_only_operating_mode="PRICE_TICK_ONLY",
+        gateway_market_data_append_only_global_kill_switch=False,
+        gateway_market_data_append_only_global_max_skip_per_minute=10,
         gateway_market_data_append_only_price_tick_cutover_enabled=True,
         gateway_market_data_append_only_cutover_event_types=("price_tick",),
         gateway_market_data_append_only_price_tick_max_skip_per_minute=10,

@@ -22,6 +22,10 @@ from services.market_data_service import (
     MARKET_DATA_EVENT_TYPES,
     normalize_market_data_exchange,
 )
+from services.runtime.market_data_append_only_controller import (
+    build_market_data_append_only_controller_status,
+    record_market_data_append_only_auto_rollback_event,
+)
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
@@ -578,6 +582,34 @@ def decide_market_data_projection_routing(
         reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER")
         effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
 
+    controller_status = build_market_data_append_only_controller_status(
+        connection,
+        settings=settings,
+    )
+    controller_rollback_event_id = None
+    if controller_status.auto_rollback_required:
+        controller_rollback_event_id = (
+            record_market_data_append_only_auto_rollback_event(
+                connection,
+                controller_status,
+                settings=settings,
+            )
+        )
+    if effective_skip_inline:
+        controller_gate = controller_status.gate_for_event_type(event_type)
+        if controller_gate is None or not controller_gate.effective_skip_allowed:
+            effective_skip_inline = False
+            effective_skip_reason = "MARKET_DATA_APPEND_ONLY_CONTROLLER_NOT_READY"
+            reason_codes.append("MARKET_DATA_APPEND_ONLY_CONTROLLER_NOT_READY")
+            if controller_gate is not None:
+                reason_codes.extend(controller_gate.blocked_reason_codes)
+            else:
+                reason_codes.append(
+                    "MARKET_DATA_APPEND_ONLY_MODE_DOES_NOT_ALLOW_EVENT_TYPE"
+                )
+        else:
+            reason_codes.append("MARKET_DATA_APPEND_ONLY_EFFECTIVE_SKIP_ALLOWED")
+
     if (
         fail_closed_on_routing_error
         and would_skip_inline
@@ -618,6 +650,10 @@ def decide_market_data_projection_routing(
         "condition_event_fusion_enabled": condition_event_fusion_enabled,
         "condition_event_backlog_ready": condition_event_backlog_ready,
         "condition_event_backlog": dict(condition_event_backlog),
+        "market_data_append_only_controller": controller_status.to_dict(),
+        "market_data_append_only_controller_rollback_event_id": (
+            controller_rollback_event_id
+        ),
         "condition_event_payload_valid": condition_event_payload_valid,
         "condition_event_payload_age_sec": condition_event_payload_age_sec,
         "condition_event_max_payload_age_sec": condition_event_max_payload_age_sec,
@@ -929,6 +965,10 @@ def get_latest_market_data_append_only_routing_status(
     condition_event_artifact_missing_after_worker_count = (
         _count_condition_event_artifact_missing_after_worker_records(connection)
     )
+    controller_status = build_market_data_append_only_controller_status(
+        connection,
+        settings=resolved_settings,
+    )
     failures: list[str] = []
     warnings = [
         "PR-11 condition_event limited cutover is feature-flagged",
@@ -961,6 +1001,8 @@ def get_latest_market_data_append_only_routing_status(
         failures.append("TR_RESPONSE_DEFERRED_SIDE_EFFECT_ERROR")
     if tr_response_duplicate_side_effect_count > 0:
         failures.append("TR_RESPONSE_DUPLICATE_SIDE_EFFECT_FOR_INLINE_EVENT")
+    if controller_status.auto_rollback_required:
+        failures.append("MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_REQUIRED")
     if (
         resolved_settings.gateway_market_data_append_only_price_tick_cutover_enabled
         and skip_budget_limit <= 0
@@ -986,6 +1028,17 @@ def get_latest_market_data_append_only_routing_status(
         "price_tick_pr": "PR-7",
         "tr_response_pr": "PR-9",
         "condition_event_pr": "PR-11",
+        "market_data_append_only_controller": controller_status.to_dict(),
+        "market_data_append_only_operating_mode": controller_status.operating_mode,
+        "market_data_append_only_global_kill_switch": (
+            controller_status.global_kill_switch
+        ),
+        "market_data_append_only_auto_rollback_required": (
+            controller_status.auto_rollback_required
+        ),
+        "market_data_append_only_effective_cutover_enabled": (
+            controller_status.effective_cutover_enabled
+        ),
         "dry_run_enabled": bool(
             resolved_settings.gateway_market_data_append_only_dry_run_enabled
         ),

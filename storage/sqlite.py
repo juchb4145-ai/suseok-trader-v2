@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 APP_NAME = "suseok-trader-v2"
 
 
@@ -41,6 +41,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_data_tables(connection)
     _create_market_data_projection_reconcile_tables(connection)
     _create_market_data_projection_routing_tables(connection)
+    _create_market_data_append_only_controller_tables(connection)
     _create_market_reference_tables(connection)
     _create_market_index_tables(connection)
     _create_market_scan_tables(connection)
@@ -1836,6 +1837,53 @@ def _create_market_data_projection_routing_tables(
         """
         CREATE INDEX IF NOT EXISTS idx_market_data_projection_routing_effective_skip
         ON market_data_projection_routing_decisions (effective_skip_inline, decided_at)
+        """
+    )
+
+
+def _create_market_data_append_only_controller_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_append_only_controller_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            operating_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            effective_cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
+            auto_rollback_required INTEGER NOT NULL DEFAULT 0,
+            allowed_event_types_json TEXT NOT NULL DEFAULT '[]',
+            gate_summary_json TEXT NOT NULL DEFAULT '{}',
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            snapshot_json TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_data_append_only_auto_rollback_events (
+            event_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_append_only_snapshots_created
+        ON market_data_append_only_controller_snapshots (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_data_append_only_rollback_created
+        ON market_data_append_only_auto_rollback_events (created_at)
         """
     )
 

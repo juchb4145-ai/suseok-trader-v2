@@ -294,6 +294,9 @@ def _configure_cutover_env(monkeypatch, tmp_path, db_path, **overrides: str) -> 
     values = {
         "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED": "true",
         "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED": "true",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE": "TR_RESPONSE_ONLY",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH": "false",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE": "10",
         "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED": "true",
         "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE": "10",
         "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED": "true",
@@ -310,6 +313,9 @@ def _cutover_settings(**overrides) -> Settings:
     values = {
         "gateway_market_data_append_only_dry_run_enabled": True,
         "gateway_market_data_append_only_cutover_enabled": True,
+        "gateway_market_data_append_only_operating_mode": "TR_RESPONSE_ONLY",
+        "gateway_market_data_append_only_global_kill_switch": False,
+        "gateway_market_data_append_only_global_max_skip_per_minute": 10,
         "gateway_market_data_append_only_tr_response_cutover_enabled": True,
         "gateway_market_data_append_only_tr_response_max_skip_per_minute": 10,
         "projection_outbox_apply_projection_enabled": True,

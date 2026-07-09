@@ -97,6 +97,13 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
         ]
         is False
     )
+    assert snapshot["market_data_append_only_controller"]["operating_mode"] == "OFF"
+    assert (
+        snapshot["pipeline_summary"]["market_data_append_only_controller"][
+            "effective_cutover_enabled"
+        ]
+        is False
+    )
 
 
 def test_dashboard_snapshot_includes_projection_outbox_status(tmp_path) -> None:
