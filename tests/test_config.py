@@ -73,6 +73,15 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_data_bar_intervals_sec == (60, 180, 300)
     assert settings.market_data_premarket_snapshot_enabled is False
     assert settings.market_data_projection_reconcile_limit == 500
+    assert settings.market_data_reconcile_live_default_persist is False
+    assert settings.market_data_reconcile_locked_fallback_to_read_only is True
+    assert settings.operator_sqlite_lock_retry_attempts == 3
+    assert settings.operator_sqlite_lock_retry_base_sleep_sec == 0.05
+    assert settings.operator_sqlite_lock_retry_max_sleep_sec == 0.5
+    assert settings.operator_sqlite_busy_timeout_ms == 500
+    assert settings.operator_run_once_locked_http_status == 409
+    assert settings.ops_script_locked_retry_attempts == 3
+    assert settings.ops_script_locked_retry_sleep_sec == 1.0
     assert settings.gateway_market_data_append_only_dry_run_enabled is False
     assert settings.gateway_market_data_append_only_cutover_enabled is False
     assert settings.gateway_market_data_append_only_price_tick_cutover_enabled is False
@@ -159,6 +168,8 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.projection_outbox_apply_projection_enabled is False
     assert settings.projection_outbox_market_data_apply_enabled is False
     assert settings.projection_outbox_apply_batch_size == 50
+    assert settings.projection_outbox_live_run_once_batch_size == 50
+    assert settings.projection_outbox_run_once_max_wall_ms == 5000
     assert settings.projection_outbox_apply_min_age_sec == 1.0
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
@@ -345,6 +356,8 @@ def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> 
             "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED": "true",
             "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED": "true",
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "7",
+            "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "9",
+            "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "1500",
             "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "0.25",
         }
     )
@@ -352,12 +365,16 @@ def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> 
     assert settings.projection_outbox_apply_projection_enabled is True
     assert settings.projection_outbox_market_data_apply_enabled is True
     assert settings.projection_outbox_apply_batch_size == 7
+    assert settings.projection_outbox_live_run_once_batch_size == 9
+    assert settings.projection_outbox_run_once_max_wall_ms == 1500
     assert settings.projection_outbox_apply_min_age_sec == 0.25
 
 
 def test_projection_outbox_apply_settings_are_validated() -> None:
     invalid_cases = {
         "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "0",
+        "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "0",
+        "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "0",
         "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "-0.1",
     }
     for key, value in invalid_cases.items():
@@ -530,6 +547,28 @@ def test_market_data_interval_settings_are_validated() -> None:
 
     settings = load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "25"})
     assert settings.market_data_projection_reconcile_limit == 25
+    operator_settings = load_settings(
+        {
+            "MARKET_DATA_RECONCILE_LIVE_DEFAULT_PERSIST": "true",
+            "MARKET_DATA_RECONCILE_LOCKED_FALLBACK_TO_READ_ONLY": "false",
+            "OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS": "5",
+            "OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC": "0.1",
+            "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC": "0.9",
+            "OPERATOR_SQLITE_BUSY_TIMEOUT_MS": "250",
+            "OPERATOR_RUN_ONCE_LOCKED_HTTP_STATUS": "200",
+            "OPS_SCRIPT_LOCKED_RETRY_ATTEMPTS": "4",
+            "OPS_SCRIPT_LOCKED_RETRY_SLEEP_SEC": "0.2",
+        }
+    )
+    assert operator_settings.market_data_reconcile_live_default_persist is True
+    assert operator_settings.market_data_reconcile_locked_fallback_to_read_only is False
+    assert operator_settings.operator_sqlite_lock_retry_attempts == 5
+    assert operator_settings.operator_sqlite_lock_retry_base_sleep_sec == 0.1
+    assert operator_settings.operator_sqlite_lock_retry_max_sleep_sec == 0.9
+    assert operator_settings.operator_sqlite_busy_timeout_ms == 250
+    assert operator_settings.operator_run_once_locked_http_status == 200
+    assert operator_settings.ops_script_locked_retry_attempts == 4
+    assert operator_settings.ops_script_locked_retry_sleep_sec == 0.2
 
     routing_settings = load_settings(
         {
@@ -603,6 +642,34 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "MARKET_DATA_PROJECTION_RECONCILE_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid market data reconcile limit")
+
+    invalid_operator_cases = {
+        "OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS": "0",
+        "OPERATOR_RUN_ONCE_LOCKED_HTTP_STATUS": "201",
+        "OPS_SCRIPT_LOCKED_RETRY_ATTEMPTS": "0",
+        "OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC": "-0.1",
+        "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC": "-0.1",
+        "OPERATOR_SQLITE_BUSY_TIMEOUT_MS": "0",
+        "OPS_SCRIPT_LOCKED_RETRY_SLEEP_SEC": "-0.1",
+    }
+    for key, value in invalid_operator_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid operator lock setting for {key}")
+    try:
+        load_settings(
+            {
+                "OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC": "1",
+                "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC": "0.5",
+            }
+        )
+    except ValueError as exc:
+        assert "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC" in str(exc)
+    else:
+        raise AssertionError("expected invalid operator lock retry sleep bounds")
 
     try:
         load_settings({"GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0"})

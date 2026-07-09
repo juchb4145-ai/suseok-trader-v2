@@ -414,6 +414,22 @@ def get_projection_outbox_status(
     market_data_apply_enabled = bool(
         getattr(settings, "projection_outbox_market_data_apply_enabled", False)
     )
+    processing_ttl_sec = int(getattr(settings, "projection_outbox_processing_ttl_sec", 60))
+    stale_cutoff = datetime_to_wire(
+        utc_now() - timedelta(seconds=max(processing_ttl_sec, 0))
+    )
+    stale_processing_count = int(
+        connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM projection_outbox
+            WHERE status = 'PROCESSING'
+                AND locked_at IS NOT NULL
+                AND julianday(locked_at) <= julianday(?)
+            """,
+            (stale_cutoff,),
+        ).fetchone()["count"]
+    )
     return {
         "enabled": True,
         "shadow_mode": bool(getattr(settings, "projection_outbox_shadow_mode", True)),
@@ -429,9 +445,7 @@ def get_projection_outbox_status(
             getattr(settings, "projection_outbox_apply_batch_size", 50)
         ),
         "retry_limit": int(getattr(settings, "projection_outbox_retry_limit", 3)),
-        "processing_ttl_sec": int(
-            getattr(settings, "projection_outbox_processing_ttl_sec", 60)
-        ),
+        "processing_ttl_sec": processing_ttl_sec,
         "shadow_min_age_sec": float(
             getattr(settings, "projection_outbox_shadow_min_age_sec", 0.5)
         ),
@@ -453,6 +467,11 @@ def get_projection_outbox_status(
         ),
         "latest_error": None if latest_error is None else _row_to_dict(latest_error),
         "by_projection_name": _outbox_counts_by_projection_name(connection),
+        "projection_outbox_processing_stale_count": stale_processing_count,
+        "recommended_run_once_limit": int(
+            getattr(settings, "projection_outbox_live_run_once_batch_size", 50)
+        ),
+        "operator_lock_health": "WARN" if stale_processing_count > 0 else "OK",
     }
 
 

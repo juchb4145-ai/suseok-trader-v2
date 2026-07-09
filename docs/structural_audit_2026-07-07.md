@@ -164,9 +164,24 @@ PR-10.5 진행 상태:
   - `tests/test_dashboard_snapshot_fast_path.py`
   - `tests/test_ops_dashboard_timeout_handling.py`
 
+PR-10.6 진행 상태:
+
+- 장중 ingest 중 operator run-once가 SQLite write lock과 경합할 때 HTTP 500으로 종료되지 않도록 `storage/sqlite_locking.py` retry helper와 `LOCKED_RETRYABLE` 응답을 추가했다.
+- `/api/operator/projection-outbox/run-once`는 live-safe 기본값으로 batch를 `PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE`까지 clamp하고, lock retry 횟수와 stale PROCESSING reset 수를 결과에 노출한다.
+- operator run-once connection은 `OPERATOR_SQLITE_BUSY_TIMEOUT_MS`를 사용해 SQLite lock을 길게 붙잡지 않고 retry/`LOCKED_RETRYABLE` 경로로 빠르게 넘긴다.
+- `/api/operator/market-data-projection-reconcile/run-once`는 `live_safe=true`에서 기본 persist를 끄고, persist 요청 중 lock이 발생하면 read-only reconcile fallback을 시도한다. fallback도 lock이면 `LOCKED_RETRYABLE`로 반환한다.
+- PR-7/8/9/10 ops scripts는 `409` 또는 body status `LOCKED_RETRYABLE`을 짧게 재시도하며, 재시도 소진 시 core 검증 실패가 아니라 WARN + `block_next_pr=true`로 분류한다.
+- 주문/LIVE_SIM/LIVE_REAL, market_data cutover policy, buy/safety gate는 변경하지 않았다.
+- 운영 절차는 `docs/runbook_sqlite_lock_contention_ko.md`에 정리했다.
+- 추가 테스트:
+  - `tests/test_operator_sqlite_lock_handling.py`
+  - `tests/test_projection_outbox_lock_retry.py`
+  - `tests/test_market_data_reconcile_lock_fallback.py`
+  - `tests/test_ops_sqlite_locked_retryable.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-10.5 dashboard fast snapshot을 실제 장중 ops script로 확인하고, dashboard timeout이 core 검증 FAIL로 섞이지 않는지 확인한다.
+1. PR-10.6 SQLite lock hardening을 실제 장중 ops script `--run-once`로 재검증하고, `LOCKED_RETRYABLE`이 WARN/block으로 분류되는지 확인한다.
 2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness 뒤에서 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.

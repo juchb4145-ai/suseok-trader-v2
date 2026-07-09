@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -64,14 +65,14 @@ def run_side_effect_report(
     if run_once:
         run_once_payloads["projection_outbox"] = fetch_json(
             f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true'})}",
+            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500))})}",
+            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
@@ -138,6 +139,7 @@ def run_side_effect_report(
 def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
+    run_once_blocker = False
     for key in (
         "routing_status",
         "routing_decisions",
@@ -148,6 +150,14 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         payload = report.get(key) or {}
         if not payload.get("ok"):
             failures.append(f"{key.upper()}_API_ERROR")
+    for name, payload in (report.get("run_once") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        if is_locked_retryable_payload(payload):
+            warnings.append(f"{str(name).upper()}_LOCKED_RETRYABLE")
+            run_once_blocker = True
+        elif not payload.get("ok"):
+            failures.append(f"{str(name).upper()}_RUN_ONCE_API_ERROR")
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
@@ -210,6 +220,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
+        "block_next_pr": bool(failures or run_once_blocker),
     }
 
 
@@ -225,32 +236,112 @@ def fetch_json(
         headers["X-Local-Token"] = token
         headers["X-Core-Token"] = token
     request = urllib.request.Request(url, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            body = response.read().decode("utf-8")
-            return {
-                "ok": True,
-                "status_code": int(response.status),
+    attempts = _ops_locked_retry_attempts()
+    sleep_sec = _ops_locked_retry_sleep_sec()
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+                body = response.read().decode("utf-8")
+                payload = {
+                    "ok": True,
+                    "status_code": int(response.status),
+                    "url": url,
+                    "data": json.loads(body) if body.strip() else {},
+                    "locked_retry_count": attempt - 1,
+                    "locked_retry_exhausted": False,
+                }
+                if is_locked_retryable_payload(payload):
+                    if attempt < attempts:
+                        if sleep_sec > 0:
+                            time.sleep(sleep_sec)
+                        continue
+                    payload["ok"] = False
+                    payload["retryable"] = True
+                    payload["locked_retryable"] = True
+                    payload["locked_retry_exhausted"] = True
+                return payload
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            payload = {
+                "ok": False,
+                "status_code": int(exc.code),
                 "url": url,
-                "data": json.loads(body) if body.strip() else {},
+                "error": body or str(exc),
+                "data": _json_or_empty(body),
+                "locked_retry_count": attempt - 1,
+                "locked_retry_exhausted": False,
             }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return {
-            "ok": False,
-            "status_code": int(exc.code),
-            "url": url,
-            "error": body or str(exc),
-            "data": _json_or_empty(body),
+            if is_locked_retryable_payload(payload):
+                if attempt < attempts:
+                    if sleep_sec > 0:
+                        time.sleep(sleep_sec)
+                    continue
+                payload["retryable"] = True
+                payload["locked_retryable"] = True
+                payload["locked_retry_exhausted"] = True
+            return payload
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            return {
+                "ok": False,
+                "status_code": None,
+                "url": url,
+                "error": str(exc),
+                "data": {},
+                "locked_retry_count": attempt - 1,
+                "locked_retry_exhausted": False,
+            }
+    return {
+        "ok": False,
+        "status_code": None,
+        "url": url,
+        "error": "unreachable locked retry state",
+        "data": {},
+        "locked_retry_count": attempts - 1,
+        "locked_retry_exhausted": True,
+    }
+
+
+def is_locked_retryable_payload(payload: dict[str, Any]) -> bool:
+    if int(payload.get("status_code") or 0) not in {200, 409}:
+        return False
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return False
+    candidates = [data]
+    detail = data.get("detail")
+    if isinstance(detail, dict):
+        candidates.append(detail)
+    for candidate in candidates:
+        status = str(candidate.get("status") or "").upper()
+        reason_codes = {
+            str(code).upper() for code in candidate.get("reason_codes", []) if code
         }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "url": url,
-            "error": str(exc),
-            "data": {},
-        }
+        lock_metadata = candidate.get("lock_metadata")
+        if isinstance(lock_metadata, dict):
+            reason_codes.update(
+                str(code).upper()
+                for code in lock_metadata.get("reason_codes", [])
+                if code
+            )
+        if status == "LOCKED_RETRYABLE":
+            return True
+        if bool(candidate.get("retryable")) and "SQLITE_DATABASE_LOCKED" in reason_codes:
+            return True
+    return False
+
+
+def _ops_locked_retry_attempts() -> int:
+    try:
+        return max(int(os.environ.get("OPS_SCRIPT_LOCKED_RETRY_ATTEMPTS", "3")), 1)
+    except ValueError:
+        return 3
+
+
+def _ops_locked_retry_sleep_sec() -> float:
+    try:
+        return max(float(os.environ.get("OPS_SCRIPT_LOCKED_RETRY_SLEEP_SEC", "1.0")), 0.0)
+    except ValueError:
+        return 1.0
 
 
 def write_report(report: dict[str, Any], *, out_dir: Path) -> dict[str, Path]:

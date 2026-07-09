@@ -15,6 +15,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from tools.ops_market_data_tr_response_side_effect_check import (
+    fetch_json as _fetch_json_with_locked_retry,
+    is_locked_retryable_payload,
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -64,14 +69,14 @@ def run_cutover_report(
     if run_once:
         run_once_payloads["projection_outbox"] = fetch_json(
             f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true'})}",
+            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500))})}",
+            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
@@ -138,6 +143,7 @@ def run_cutover_report(
 def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
+    run_once_blocker = False
     for key in (
         "routing_status",
         "routing_decisions",
@@ -148,6 +154,14 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         payload = report.get(key) or {}
         if not payload.get("ok"):
             failures.append(f"{key.upper()}_API_ERROR")
+    for name, payload in (report.get("run_once") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        if is_locked_retryable_payload(payload):
+            warnings.append(f"{str(name).upper()}_LOCKED_RETRYABLE")
+            run_once_blocker = True
+        elif not payload.get("ok"):
+            failures.append(f"{str(name).upper()}_RUN_ONCE_API_ERROR")
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
@@ -218,6 +232,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
+        "block_next_pr": bool(failures or run_once_blocker),
     }
 
 
@@ -228,37 +243,12 @@ def fetch_json(
     method: str,
     timeout_sec: float,
 ) -> dict[str, Any]:
-    headers = {"Accept": "application/json"}
-    if token:
-        headers["X-Local-Token"] = token
-        headers["X-Core-Token"] = token
-    request = urllib.request.Request(url, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            body = response.read().decode("utf-8")
-            return {
-                "ok": True,
-                "status_code": int(response.status),
-                "url": url,
-                "data": json.loads(body) if body.strip() else {},
-            }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return {
-            "ok": False,
-            "status_code": int(exc.code),
-            "url": url,
-            "error": body or str(exc),
-            "data": _json_or_empty(body),
-        }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "url": url,
-            "error": str(exc),
-            "data": {},
-        }
+    return _fetch_json_with_locked_retry(
+        url,
+        token=token,
+        method=method,
+        timeout_sec=timeout_sec,
+    )
 
 
 def write_report(report: dict[str, Any], *, out_dir: Path) -> dict[str, Path]:

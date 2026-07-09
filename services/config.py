@@ -176,6 +176,15 @@ class Settings:
     market_data_max_recent_ticks: int = 1000
     market_data_premarket_snapshot_enabled: bool = False
     market_data_projection_reconcile_limit: int = 500
+    market_data_reconcile_live_default_persist: bool = False
+    market_data_reconcile_locked_fallback_to_read_only: bool = True
+    operator_sqlite_lock_retry_attempts: int = 3
+    operator_sqlite_lock_retry_base_sleep_sec: float = 0.05
+    operator_sqlite_lock_retry_max_sleep_sec: float = 0.5
+    operator_sqlite_busy_timeout_ms: int = 500
+    operator_run_once_locked_http_status: int = 409
+    ops_script_locked_retry_attempts: int = 3
+    ops_script_locked_retry_sleep_sec: float = 1.0
     gateway_market_data_append_only_dry_run_enabled: bool = False
     gateway_market_data_append_only_cutover_enabled: bool = False
     gateway_market_data_append_only_price_tick_cutover_enabled: bool = False
@@ -289,6 +298,8 @@ class Settings:
     projection_outbox_apply_projection_enabled: bool = False
     projection_outbox_market_data_apply_enabled: bool = False
     projection_outbox_apply_batch_size: int = 50
+    projection_outbox_live_run_once_batch_size: int = 50
+    projection_outbox_run_once_max_wall_ms: int = 5000
     projection_outbox_apply_min_age_sec: float = 1.0
     projection_outbox_shadow_min_age_sec: float = 0.5
     candidate_fsm_enabled: bool = True
@@ -549,6 +560,31 @@ class Settings:
             )
         if self.market_data_projection_reconcile_limit < 1:
             raise ValueError("MARKET_DATA_PROJECTION_RECONCILE_LIMIT must be >= 1")
+        for field_name in (
+            "operator_sqlite_lock_retry_attempts",
+            "operator_sqlite_busy_timeout_ms",
+            "operator_run_once_locked_http_status",
+            "ops_script_locked_retry_attempts",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.operator_run_once_locked_http_status not in {200, 409}:
+            raise ValueError("OPERATOR_RUN_ONCE_LOCKED_HTTP_STATUS must be 200 or 409")
+        for field_name in (
+            "operator_sqlite_lock_retry_base_sleep_sec",
+            "operator_sqlite_lock_retry_max_sleep_sec",
+            "ops_script_locked_retry_sleep_sec",
+        ):
+            if getattr(self, field_name) < 0:
+                raise ValueError(f"{field_name.upper()} must be >= 0")
+        if (
+            self.operator_sqlite_lock_retry_max_sleep_sec
+            < self.operator_sqlite_lock_retry_base_sleep_sec
+        ):
+            raise ValueError(
+                "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC must be >= "
+                "OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC"
+            )
         if self.gateway_market_data_append_only_reconcile_max_age_sec < 1:
             raise ValueError(
                 "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
@@ -729,6 +765,8 @@ class Settings:
         for field_name in (
             "projection_outbox_batch_size",
             "projection_outbox_apply_batch_size",
+            "projection_outbox_live_run_once_batch_size",
+            "projection_outbox_run_once_max_wall_ms",
             "projection_outbox_retry_limit",
             "projection_outbox_processing_ttl_sec",
         ):
@@ -1729,6 +1767,47 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "MARKET_DATA_PROJECTION_RECONCILE_LIMIT",
             min_value=1,
         ),
+        market_data_reconcile_live_default_persist=_parse_bool(
+            env.get("MARKET_DATA_RECONCILE_LIVE_DEFAULT_PERSIST", "false")
+        ),
+        market_data_reconcile_locked_fallback_to_read_only=_parse_bool(
+            env.get("MARKET_DATA_RECONCILE_LOCKED_FALLBACK_TO_READ_ONLY", "true")
+        ),
+        operator_sqlite_lock_retry_attempts=_parse_int(
+            env.get("OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS", "3"),
+            "OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS",
+            min_value=1,
+        ),
+        operator_sqlite_lock_retry_base_sleep_sec=_parse_float(
+            env.get("OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC", "0.05"),
+            "OPERATOR_SQLITE_LOCK_RETRY_BASE_SLEEP_SEC",
+            min_value=0.0,
+        ),
+        operator_sqlite_lock_retry_max_sleep_sec=_parse_float(
+            env.get("OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC", "0.5"),
+            "OPERATOR_SQLITE_LOCK_RETRY_MAX_SLEEP_SEC",
+            min_value=0.0,
+        ),
+        operator_sqlite_busy_timeout_ms=_parse_int(
+            env.get("OPERATOR_SQLITE_BUSY_TIMEOUT_MS", "500"),
+            "OPERATOR_SQLITE_BUSY_TIMEOUT_MS",
+            min_value=1,
+        ),
+        operator_run_once_locked_http_status=_parse_int(
+            env.get("OPERATOR_RUN_ONCE_LOCKED_HTTP_STATUS", "409"),
+            "OPERATOR_RUN_ONCE_LOCKED_HTTP_STATUS",
+            min_value=1,
+        ),
+        ops_script_locked_retry_attempts=_parse_int(
+            env.get("OPS_SCRIPT_LOCKED_RETRY_ATTEMPTS", "3"),
+            "OPS_SCRIPT_LOCKED_RETRY_ATTEMPTS",
+            min_value=1,
+        ),
+        ops_script_locked_retry_sleep_sec=_parse_float(
+            env.get("OPS_SCRIPT_LOCKED_RETRY_SLEEP_SEC", "1.0"),
+            "OPS_SCRIPT_LOCKED_RETRY_SLEEP_SEC",
+            min_value=0.0,
+        ),
         gateway_market_data_append_only_dry_run_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED", "false")
         ),
@@ -2178,6 +2257,16 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_apply_batch_size=_parse_int(
             env.get("PROJECTION_OUTBOX_APPLY_BATCH_SIZE", "50"),
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_live_run_once_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE", "50"),
+            "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_run_once_max_wall_ms=_parse_int(
+            env.get("PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS", "5000"),
+            "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS",
             min_value=1,
         ),
         projection_outbox_apply_min_age_sec=_parse_float(

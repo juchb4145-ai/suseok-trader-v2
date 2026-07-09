@@ -13,7 +13,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tools.ops_market_data_tr_response_side_effect_check import fetch_json
+from tools.ops_market_data_tr_response_side_effect_check import (
+    fetch_json,
+    is_locked_retryable_payload,
+)
 
 
 def main() -> int:
@@ -64,14 +67,14 @@ def run_side_effect_report(
     if run_once:
         run_once_payloads["projection_outbox"] = fetch_json(
             f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true'})}",
+            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500))})}",
+            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
@@ -125,6 +128,7 @@ def run_side_effect_report(
 def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
+    run_once_blocker = False
     for key in (
         "routing_status",
         "projection_outbox",
@@ -133,6 +137,14 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         payload = report.get(key) or {}
         if not payload.get("ok"):
             failures.append(f"{key.upper()}_API_ERROR")
+    for name, payload in (report.get("run_once") or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        if is_locked_retryable_payload(payload):
+            warnings.append(f"{str(name).upper()}_LOCKED_RETRYABLE")
+            run_once_blocker = True
+        elif not payload.get("ok"):
+            failures.append(f"{str(name).upper()}_RUN_ONCE_API_ERROR")
     dashboard_payload = report.get("dashboard_snapshot") or {}
     dashboard_ok = bool(dashboard_payload.get("ok"))
     dashboard_blocker = False
@@ -229,7 +241,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
-        "block_next_pr": bool(failures or dashboard_blocker),
+        "block_next_pr": bool(failures or dashboard_blocker or run_once_blocker),
     }
 
 

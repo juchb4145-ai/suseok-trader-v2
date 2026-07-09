@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -21,7 +22,9 @@ from storage.projection_outbox import (
     mark_projection_outbox_applied,
     mark_projection_outbox_error,
     mark_projection_outbox_skipped,
+    reset_stale_projection_outbox_processing,
 )
+from storage.sqlite_locking import retry_sqlite_locked
 
 from services.config import Settings, load_settings
 from services.market_data_service import (
@@ -78,6 +81,17 @@ class ProjectionOutboxBatchResult:
     applied_by_worker_count: int = 0
     skipped_apply_disabled_count: int = 0
     projection_apply_error_count: int = 0
+    locked_retry_count: int = 0
+    locked_job_count: int = 0
+    lock_retry_exhausted: bool = False
+    retryable: bool = False
+    partial_result: bool = False
+    max_wall_ms_exceeded: bool = False
+    effective_limit: int | None = None
+    requested_limit: int | None = None
+    live_safe: bool = False
+    stale_processing_reset_count: int = 0
+    reason_codes: tuple[str, ...] = ()
     mutated_projection_names: tuple[str, ...] = ()
     no_trading_side_effects: bool = True
     projection_side_effects_allowed: bool = False
@@ -103,6 +117,17 @@ class ProjectionOutboxBatchResult:
             "applied_by_worker_count": self.applied_by_worker_count,
             "skipped_apply_disabled_count": self.skipped_apply_disabled_count,
             "projection_apply_error_count": self.projection_apply_error_count,
+            "locked_retry_count": self.locked_retry_count,
+            "locked_job_count": self.locked_job_count,
+            "lock_retry_exhausted": self.lock_retry_exhausted,
+            "retryable": self.retryable,
+            "partial_result": self.partial_result,
+            "max_wall_ms_exceeded": self.max_wall_ms_exceeded,
+            "effective_limit": self.effective_limit,
+            "requested_limit": self.requested_limit,
+            "live_safe": self.live_safe,
+            "stale_processing_reset_count": self.stale_processing_reset_count,
+            "reason_codes": list(self.reason_codes),
             "mutated_projection_names": list(self.mutated_projection_names),
             "no_trading_side_effects": self.no_trading_side_effects,
             "projection_side_effects_allowed": self.projection_side_effects_allowed,
@@ -118,8 +143,10 @@ def process_projection_outbox_batch(
     limit: int | None = None,
     owner_id: str | None = None,
     apply_projection: bool | None = None,
+    live_safe: bool = False,
 ) -> ProjectionOutboxBatchResult:
     resolved_settings = settings or load_settings()
+    started_at = time.monotonic()
     run_id = new_message_id("projection_outbox_shadow")
     resolved_owner_id = owner_id or run_id
     apply_requested = (
@@ -135,23 +162,52 @@ def process_projection_outbox_batch(
     apply_mode = (
         APPLY_MODE_MARKET_DATA_APPLY if apply_effective else APPLY_MODE_SHADOW_VERIFY_ONLY
     )
+    requested_limit = limit
     bounded_limit = limit or (
         resolved_settings.projection_outbox_apply_batch_size
         if apply_effective
         else resolved_settings.projection_outbox_batch_size
     )
+    if live_safe:
+        bounded_limit = min(
+            int(bounded_limit),
+            int(resolved_settings.projection_outbox_live_run_once_batch_size),
+        )
     min_age_sec = (
         resolved_settings.projection_outbox_apply_min_age_sec
         if apply_effective
         else resolved_settings.projection_outbox_shadow_min_age_sec
     )
     created_at = datetime_to_wire(utc_now())
-    claimed_jobs = claim_projection_outbox_jobs(
-        connection,
-        owner_id=resolved_owner_id,
-        limit=bounded_limit,
-        processing_ttl_sec=resolved_settings.projection_outbox_processing_ttl_sec,
-        min_age_sec=min_age_sec,
+    locked_retry_count = 0
+
+    def _on_locked_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    stale_processing_reset_count = retry_sqlite_locked(
+        lambda: reset_stale_projection_outbox_processing(
+            connection,
+            stale_sec=resolved_settings.projection_outbox_processing_ttl_sec,
+        ),
+        attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
+        base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
+        max_sleep_sec=resolved_settings.operator_sqlite_lock_retry_max_sleep_sec,
+        on_retry=_on_locked_retry,
+    )
+    claimed_jobs = retry_sqlite_locked(
+        lambda: claim_projection_outbox_jobs(
+            connection,
+            owner_id=resolved_owner_id,
+            limit=bounded_limit,
+            processing_ttl_sec=resolved_settings.projection_outbox_processing_ttl_sec,
+            min_age_sec=min_age_sec,
+        ),
+        attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
+        base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
+        max_sleep_sec=resolved_settings.operator_sqlite_lock_retry_max_sleep_sec,
+        on_retry=_on_locked_retry,
     )
     applied_count = 0
     skipped_count = 0
@@ -161,10 +217,15 @@ def process_projection_outbox_batch(
     applied_by_worker_count = 0
     skipped_apply_disabled_count = 0
     projection_apply_error_count = 0
+    max_wall_ms_exceeded = False
     mutated_projection_names: set[str] = set()
     errors: list[dict[str, Any]] = []
 
     for job in claimed_jobs:
+        elapsed_ms = (time.monotonic() - started_at) * 1000
+        if elapsed_ms >= float(resolved_settings.projection_outbox_run_once_max_wall_ms):
+            max_wall_ms_exceeded = True
+            break
         if apply_requested and not apply_effective:
             verification = _verification_skipped(
                 "APPLY_DISABLED_BY_SETTINGS",
@@ -205,11 +266,17 @@ def process_projection_outbox_batch(
         }
         outbox_id = str(job["outbox_id"])
         if verification.status == "APPLIED":
-            mark_projection_outbox_applied(
-                connection,
-                outbox_id,
-                owner_id=resolved_owner_id,
-                evidence=evidence,
+            retry_sqlite_locked(
+                lambda: mark_projection_outbox_applied(
+                    connection,
+                    outbox_id,
+                    owner_id=resolved_owner_id,
+                    evidence=evidence,
+                ),
+                attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=resolved_settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_locked_retry,
             )
             applied_count += 1
             if evidence.get("apply_result") == "APPLIED_BY_WORKER":
@@ -220,12 +287,18 @@ def process_projection_outbox_batch(
             if mutated_projection_name:
                 mutated_projection_names.add(str(mutated_projection_name))
         elif verification.status == "SKIPPED":
-            mark_projection_outbox_skipped(
-                connection,
-                outbox_id,
-                owner_id=resolved_owner_id,
-                reason=verification.reason,
-                evidence=evidence,
+            retry_sqlite_locked(
+                lambda: mark_projection_outbox_skipped(
+                    connection,
+                    outbox_id,
+                    owner_id=resolved_owner_id,
+                    reason=verification.reason,
+                    evidence=evidence,
+                ),
+                attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=resolved_settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_locked_retry,
             )
             skipped_count += 1
             if verification.reason in {
@@ -241,13 +314,19 @@ def process_projection_outbox_batch(
                 int(job.get("attempts") or 0) + 1
                 >= resolved_settings.projection_outbox_retry_limit
             )
-            mark_projection_outbox_error(
-                connection,
-                outbox_id,
-                owner_id=resolved_owner_id,
-                error_message=message,
-                retry_limit=resolved_settings.projection_outbox_retry_limit,
-                evidence=evidence,
+            retry_sqlite_locked(
+                lambda: mark_projection_outbox_error(
+                    connection,
+                    outbox_id,
+                    owner_id=resolved_owner_id,
+                    error_message=message,
+                    retry_limit=resolved_settings.projection_outbox_retry_limit,
+                    evidence=evidence,
+                ),
+                attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=resolved_settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=resolved_settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_locked_retry,
             )
             errors.append(
                 {
@@ -268,7 +347,14 @@ def process_projection_outbox_batch(
     status = "NOOP"
     if claimed_jobs:
         status = "COMPLETED_WITH_ERRORS" if errors else "COMPLETED"
+    if max_wall_ms_exceeded and not errors:
+        status = "PARTIAL_MAX_WALL_MS"
     outbox_status = get_projection_outbox_status(connection, settings=resolved_settings)
+    reason_codes = []
+    if locked_retry_count > 0:
+        reason_codes.append("SQLITE_LOCK_RETRIED")
+    if max_wall_ms_exceeded:
+        reason_codes.append("PROJECTION_OUTBOX_MAX_WALL_MS_EXCEEDED")
     return ProjectionOutboxBatchResult(
         run_id=run_id,
         status=status,
@@ -286,6 +372,16 @@ def process_projection_outbox_batch(
         applied_by_worker_count=applied_by_worker_count,
         skipped_apply_disabled_count=skipped_apply_disabled_count,
         projection_apply_error_count=projection_apply_error_count,
+        locked_retry_count=locked_retry_count,
+        locked_job_count=0,
+        retryable=False,
+        partial_result=max_wall_ms_exceeded,
+        max_wall_ms_exceeded=max_wall_ms_exceeded,
+        effective_limit=int(bounded_limit),
+        requested_limit=None if requested_limit is None else int(requested_limit),
+        live_safe=bool(live_safe),
+        stale_processing_reset_count=stale_processing_reset_count,
+        reason_codes=tuple(reason_codes),
         mutated_projection_names=tuple(sorted(mutated_projection_names)),
         projection_side_effects_allowed=apply_effective,
         errors=tuple(errors),

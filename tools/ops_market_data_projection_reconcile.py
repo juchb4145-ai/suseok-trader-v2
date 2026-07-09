@@ -15,6 +15,11 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from tools.ops_market_data_tr_response_side_effect_check import (
+    fetch_json as _fetch_json_with_locked_retry,
+    is_locked_retryable_payload,
+)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -68,7 +73,7 @@ def run_reconcile_report(
     base_url = core_url.rstrip("/")
     run_once_payload: dict[str, Any] | None = None
     if run_once:
-        query = {"limit": str(limit), "persist": "true"}
+        query = {"limit": str(limit), "persist": "true", "live_safe": "true"}
         if min_event_rowid is not None:
             query["min_event_rowid"] = str(min_event_rowid)
         if max_event_rowid is not None:
@@ -92,6 +97,11 @@ def run_reconcile_report(
         "core_url": base_url,
         "run_once": run_once_payload,
         "latest": latest_payload,
+        "run_once_locked_retryable": (
+            False
+            if not isinstance(run_once_payload, dict)
+            else is_locked_retryable_payload(run_once_payload)
+        ),
     }
     paths = write_report(report, out_dir=out_dir)
     report["report_paths"] = {key: str(path) for key, path in paths.items()}
@@ -105,37 +115,12 @@ def fetch_json(
     method: str,
     timeout_sec: float,
 ) -> dict[str, Any]:
-    headers = {"Accept": "application/json"}
-    if token:
-        headers["X-Local-Token"] = token
-        headers["X-Core-Token"] = token
-    request = urllib.request.Request(url, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
-            body = response.read().decode("utf-8")
-            return {
-                "ok": True,
-                "status_code": int(response.status),
-                "url": url,
-                "data": json.loads(body) if body.strip() else {},
-            }
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        return {
-            "ok": False,
-            "status_code": int(exc.code),
-            "url": url,
-            "error": body or str(exc),
-            "data": _json_or_empty(body),
-        }
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {
-            "ok": False,
-            "status_code": None,
-            "url": url,
-            "error": str(exc),
-            "data": {},
-        }
+    return _fetch_json_with_locked_retry(
+        url,
+        token=token,
+        method=method,
+        timeout_sec=timeout_sec,
+    )
 
 
 def write_report(report: dict[str, Any], *, out_dir: Path) -> dict[str, Path]:

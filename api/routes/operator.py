@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -40,6 +42,12 @@ from storage.event_retention import (
 )
 from storage.projection_outbox import get_projection_outbox_status
 from storage.sqlite import open_connection
+from storage.sqlite_locking import (
+    configure_sqlite_busy_timeout,
+    is_sqlite_locked_error,
+    retry_sqlite_locked,
+    sqlite_lock_retry_metadata,
+)
 
 from api.dependencies.auth import require_local_token
 
@@ -211,18 +219,54 @@ def operator_projection_outbox_status() -> dict[str, Any]:
 def operator_projection_outbox_run_once(
     limit: int | None = Query(default=None, ge=1, le=500),
     apply_projection: bool = Query(default=False),
+    live_safe: bool = Query(default=True),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
     try:
-        result = process_projection_outbox_batch(
-            connection,
-            settings=settings,
-            limit=limit,
-            apply_projection=apply_projection,
-        )
+        try:
+            result = retry_sqlite_locked(
+                lambda: process_projection_outbox_batch(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    apply_projection=apply_projection,
+                    live_safe=live_safe,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="projection_outbox_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=not bool(
+                        apply_projection
+                        and settings.projection_outbox_apply_projection_enabled
+                        and settings.projection_outbox_market_data_apply_enabled
+                    ),
+                    operator_action="retry with a smaller live_safe batch after ingest pressure drops",
+                )
+            raise
         payload = result.to_dict()
         payload["read_only_projection"] = not payload["projection_side_effects_allowed"]
+        payload["retryable"] = bool(payload.get("retryable"))
         return payload
     finally:
         connection.close()
@@ -246,22 +290,125 @@ def operator_market_data_projection_reconcile_run_once(
     limit: int = Query(default=500, ge=1, le=5000),
     min_event_rowid: int | None = Query(default=None, ge=1),
     max_event_rowid: int | None = Query(default=None, ge=1),
-    persist: bool = Query(default=True),
+    persist: bool | None = Query(default=None),
+    live_safe: bool = Query(default=True),
 ) -> dict[str, Any]:
     settings = load_settings()
+    effective_persist = (
+        bool(settings.market_data_reconcile_live_default_persist)
+        if persist is None and live_safe
+        else bool(True if persist is None else persist)
+    )
     connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
     try:
-        result = run_market_data_projection_reconcile(
-            connection,
-            settings=settings,
-            limit=limit,
-            min_event_rowid=min_event_rowid,
-            max_event_rowid=max_event_rowid,
-            persist=persist,
-        )
+        try:
+            result = retry_sqlite_locked(
+                lambda: run_market_data_projection_reconcile(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    min_event_rowid=min_event_rowid,
+                    max_event_rowid=max_event_rowid,
+                    persist=effective_persist,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+            locked_fallback_used = False
+        except sqlite3.OperationalError as exc:
+            if (
+                is_sqlite_locked_error(exc)
+                and live_safe
+                and effective_persist
+                and settings.market_data_reconcile_locked_fallback_to_read_only
+            ):
+                fallback_connection = open_connection(settings.trading_db_path)
+                _configure_operator_run_once_connection(
+                    fallback_connection,
+                    settings=settings,
+                )
+                try:
+                    result = retry_sqlite_locked(
+                        lambda: run_market_data_projection_reconcile(
+                            fallback_connection,
+                            settings=settings,
+                            limit=limit,
+                            min_event_rowid=min_event_rowid,
+                            max_event_rowid=max_event_rowid,
+                            persist=False,
+                        ),
+                        attempts=settings.operator_sqlite_lock_retry_attempts,
+                        base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                        max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                        on_retry=_on_retry,
+                    )
+                except sqlite3.OperationalError as fallback_exc:
+                    if is_sqlite_locked_error(fallback_exc):
+                        return _locked_retryable_operator_response(
+                            settings=settings,
+                            endpoint="market_data_projection_reconcile_run_once",
+                            exc=fallback_exc,
+                            attempts=settings.operator_sqlite_lock_retry_attempts,
+                            elapsed_ms=(time.monotonic() - started_at) * 1000,
+                            locked_retry_count=locked_retry_count,
+                            read_only_projection=True,
+                            operator_action=(
+                                "retry later; even read-only reconcile was locked "
+                                "during live ingest pressure"
+                            ),
+                        )
+                    raise
+                finally:
+                    fallback_connection.close()
+                payload = result.to_dict()
+                payload["status"] = "WARN_READ_ONLY_RESULT"
+                payload["persisted"] = False
+                payload["persist_requested"] = bool(effective_persist)
+                payload["locked_fallback_used"] = True
+                payload["retryable"] = True
+                payload["reason_codes"] = sorted(
+                    set(payload.get("reason_codes") or []) | {"SQLITE_DATABASE_LOCKED"}
+                )
+                payload["lock_metadata"] = sqlite_lock_retry_metadata(
+                    exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                )
+                payload["locked_retry_count"] = locked_retry_count
+                payload["read_only_projection"] = True
+                payload["read_only"] = True
+                payload["no_trading_side_effects"] = True
+                return payload
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_data_projection_reconcile_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action="retry later or call with persist=false during live ingest pressure",
+                )
+            raise
         payload = result.to_dict()
         payload["read_only_projection"] = True
         payload["read_only"] = True
+        payload["persist_requested"] = bool(effective_persist)
+        payload["locked_fallback_used"] = locked_fallback_used
+        payload["retryable"] = False
+        payload["locked_retry_count"] = locked_retry_count
         return payload
     finally:
         connection.close()
@@ -400,3 +547,47 @@ def operator_realtime_subscriptions_run_once(
         return plan.to_dict()
     finally:
         connection.close()
+
+
+def _locked_retryable_operator_response(
+    *,
+    settings: Any,
+    endpoint: str,
+    exc: BaseException,
+    attempts: int,
+    elapsed_ms: float,
+    locked_retry_count: int,
+    read_only_projection: bool,
+    operator_action: str,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "status": "LOCKED_RETRYABLE",
+        "retryable": True,
+        "reason_codes": ["SQLITE_DATABASE_LOCKED"],
+        "message": "SQLite write lock contention observed during live ingest.",
+        "endpoint": endpoint,
+        "locked_retry_count": int(locked_retry_count),
+        "lock_metadata": sqlite_lock_retry_metadata(
+            exc,
+            attempts=attempts,
+            elapsed_ms=elapsed_ms,
+        ),
+        "read_only_projection": bool(read_only_projection),
+        "no_trading_side_effects": True,
+        "operator_action": operator_action,
+    }
+    configured_status = int(getattr(settings, "operator_run_once_locked_http_status", 409))
+    if configured_status == 200:
+        return payload
+    raise HTTPException(status_code=configured_status, detail=payload) from exc
+
+
+def _configure_operator_run_once_connection(
+    connection: sqlite3.Connection,
+    *,
+    settings: Any,
+) -> None:
+    configure_sqlite_busy_timeout(
+        connection,
+        timeout_ms=int(getattr(settings, "operator_sqlite_busy_timeout_ms", 500)),
+    )
