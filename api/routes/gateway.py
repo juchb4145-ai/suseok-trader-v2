@@ -25,6 +25,10 @@ from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
     decide_market_data_projection_routing,
 )
+from services.runtime.gateway_market_reference_routing import (
+    MarketReferenceAppendOnlyRoutingDecision,
+    decide_market_reference_append_only_routing,
+)
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
     enqueue_incremental_for_price_tick_projection,
@@ -69,6 +73,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     projection_status: str | None = None
     projection_statuses: dict[str, str] = {}
     market_data_routing: dict[str, Any] | None = None
+    market_reference_routing: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
             result = append_gateway_event(connection, event)
@@ -171,6 +176,26 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                 )
                             )
                 if event_type in MARKET_SYMBOL_EVENT_TYPES:
+                    reference_routing = _decide_market_reference_append_only_routing(
+                        connection,
+                        event,
+                        settings=settings,
+                        outbox_status=outbox_status,
+                    )
+                    if reference_routing is None:
+                        projection_statuses[
+                            "market_reference_append_only_dry_run"
+                        ] = "ERROR"
+                    else:
+                        projection_statuses[
+                            "market_reference_append_only_dry_run"
+                        ] = _market_reference_append_only_dry_run_status(
+                            reference_routing
+                        )
+                        market_reference_routing = reference_routing.to_dict()
+                    projection_statuses["market_reference_effective_skip_inline"] = (
+                        "FALSE"
+                    )
                     reference_result = process_market_symbols_event(connection, event)
                     projection_statuses["market_reference"] = reference_result.status
                 if event_type in MARKET_INDEX_EVENT_TYPES:
@@ -225,6 +250,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["projection_statuses"] = projection_statuses
     if market_data_routing is not None:
         response["market_data_append_only_routing"] = market_data_routing
+    if market_reference_routing is not None:
+        response["market_reference_append_only_routing"] = market_reference_routing
     return response
 
 
@@ -258,6 +285,25 @@ def _decide_market_data_projection_routing(
         return None
 
 
+def _decide_market_reference_append_only_routing(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+    outbox_status: str | None,
+) -> MarketReferenceAppendOnlyRoutingDecision | None:
+    try:
+        return decide_market_reference_append_only_routing(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+        )
+    except Exception:
+        logger.exception("market_reference append-only dry-run routing decision failed")
+        return None
+
+
 def _market_data_append_only_dry_run_status(
     decision: MarketDataAppendOnlyRoutingDecision,
 ) -> str:
@@ -265,6 +311,18 @@ def _market_data_append_only_dry_run_status(
     if decision.would_skip_inline:
         return "WOULD_SKIP_INLINE"
     if "DRY_RUN_DISABLED" in reasons:
+        return "DISABLED"
+    return "BLOCKED"
+
+
+def _market_reference_append_only_dry_run_status(
+    decision: MarketReferenceAppendOnlyRoutingDecision,
+) -> str:
+    if decision.effective_skip_inline:
+        return "EFFECTIVE_SKIP_FORBIDDEN_IN_PR13"
+    if decision.would_skip_inline:
+        return "WOULD_SKIP_INLINE_DRY_RUN_ONLY"
+    if not decision.dry_run_enabled:
         return "DISABLED"
     return "BLOCKED"
 

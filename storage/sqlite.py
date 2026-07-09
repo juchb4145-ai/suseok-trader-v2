@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 APP_NAME = "suseok-trader-v2"
 
 
@@ -43,6 +43,8 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_data_projection_routing_tables(connection)
     _create_market_data_append_only_controller_tables(connection)
     _create_market_reference_tables(connection)
+    _create_market_reference_projection_reconcile_tables(connection)
+    _create_market_reference_projection_routing_tables(connection)
     _create_market_index_tables(connection)
     _create_market_scan_tables(connection)
     _create_market_regime_tables(connection)
@@ -1914,6 +1916,134 @@ def _create_market_reference_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_symbol_memberships_event_id
         ON market_symbol_memberships (event_id)
+        """
+    )
+
+
+def _create_market_reference_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_reference_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            checked_symbol_count INTEGER NOT NULL,
+            stored_membership_count INTEGER NOT NULL,
+            missing_membership_count INTEGER NOT NULL,
+            missing_membership_ratio REAL NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            latest_event_id TEXT,
+            latest_event_ts TEXT,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_reference_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            event_type TEXT,
+            code TEXT,
+            market TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_reconcile_runs_created
+        ON market_reference_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_reconcile_issues_run
+        ON market_reference_projection_reconcile_issues (run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_reconcile_issues_reason
+        ON market_reference_projection_reconcile_issues (reason_code)
+        """
+    )
+
+
+def _create_market_reference_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_reference_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_reference',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            membership_count INTEGER NOT NULL DEFAULT 0,
+            min_membership_count INTEGER NOT NULL DEFAULT 0,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_routing_event
+        ON market_reference_projection_routing_decisions (event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_routing_decided
+        ON market_reference_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_routing_would_skip
+        ON market_reference_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_reference_routing_effective_skip
+        ON market_reference_projection_routing_decisions (
+            effective_skip_inline,
+            decided_at
+        )
         """
     )
 

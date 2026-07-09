@@ -245,12 +245,28 @@ PR-12 진행 상태:
   - `tests/test_dashboard_market_data_append_only_controller.py`
   - `tests/test_ops_market_data_append_only_controller_check.py`
 
+PR-13 진행 상태:
+
+- `market_reference` projection worker apply 준비 경로를 추가했다. `projection_outbox` job 중 `projection_name='market_reference'`, `event_type='market_symbols'`만 처리하며, 기본 verify-only에서는 `market_symbol_memberships` inline artifact만 확인한다.
+- worker가 `process_market_symbols_event()`를 호출하는 조건은 `PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=true`와 `PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED=true`가 모두 켜진 run-once apply mode뿐이다. 기본값은 disabled다.
+- Gateway path의 `process_market_symbols_event()` inline 호출은 그대로 유지했다. PR-13은 market_reference cutover가 아니며, `market_reference effective_skip_inline`은 항상 `False`다.
+- accepted `market_symbols` event, membership coverage, payload shape(dict/list/other), outbox status, latest freshness를 대조하는 `market_reference_projection_reconcile`을 추가했다.
+- `market_reference` append-only dry-run routing decision을 추가했다. 조건이 모두 맞으면 `would_skip_inline=True` evidence만 남기고, cutover flag가 켜져도 `MARKET_REFERENCE_EFFECTIVE_SKIP_DISABLED_IN_PR13` reason과 함께 inline fallback을 유지한다.
+- operator API, dashboard fast path, `tools/ops_market_reference_projection_check.py`, `docs/runbook_market_reference_projection_ko.md`를 추가했다.
+- market_data append-only controller/price_tick/tr_response/condition_event, market_index/regime/scan/live_sim Gateway handling, 주문/LIVE_SIM/LIVE_REAL, safety/buy gate는 변경하지 않았다.
+- 추가 테스트:
+  - `tests/test_market_reference_projection_worker.py`
+  - `tests/test_market_reference_projection_reconcile.py`
+  - `tests/test_gateway_market_reference_append_only_routing.py`
+  - `tests/test_dashboard_market_reference_section.py`
+  - `tests/test_ops_market_reference_projection_check.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-12 controller 아래에서 condition_event limited cutover를 실제 장중 소량 budget으로 검증하고, worker applied, deferred fusion refresh, candidate ingest 0, outbox ERROR/DEAD_LETTER 0, reconcile PASS를 확인한다.
-2. PR-13에서 market_data append-only controller 장중 PASS 이후 market_reference/index/regime 등 non-market_data projection 분리와 append-only worker 적용 가능성을 검토한다.
+1. PR-13을 장중 dry-run으로 검증한다. market_reference reconcile PASS, append_only_ready, membership count, outbox ERROR/DEAD_LETTER 0, effective_skip_inline_count 0을 확인한다.
+2. PR-14에서만 market_reference limited cutover를 검토한다. 이때도 작은 skip budget, fresh reconcile PASS, worker apply enabled, rollback 절차를 선행 조건으로 둔다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
-4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
+4. market_index/regime/scan 등 나머지 projection을 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.
 6. runtime lock에 heartbeat/fencing token을 추가하고 startup clear 정책을 expired/self-owned lock만 대상으로 제한한다.
 7. order lifecycle state를 broker boundary 중심으로 세분화하고 DB pre_ack journal/unique key를 추가한다.

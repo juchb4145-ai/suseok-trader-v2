@@ -152,6 +152,29 @@ def list_market_symbol_memberships(
     return [_membership_row_to_dict(row) for row in rows]
 
 
+def extract_market_symbol_memberships(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return _extract_memberships(payload)
+
+
+def market_symbols_payload_has_symbols(payload: Mapping[str, Any]) -> bool:
+    try:
+        return bool(_extract_memberships(payload))
+    except Exception:
+        return False
+
+
+def market_symbols_payload_shape(payload: Mapping[str, Any]) -> str:
+    markets_payload = payload.get("markets")
+    if isinstance(markets_payload, Mapping):
+        return "dict"
+    if isinstance(markets_payload, Sequence) and not isinstance(
+        markets_payload,
+        (str, bytes),
+    ):
+        return "list"
+    return "other"
+
+
 def _extract_memberships(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     markets_payload = payload.get("markets")

@@ -83,7 +83,9 @@ def test_dashboard_pipeline_summary_fast_includes_outbox_reconcile_and_routing(
     assert "market_data_projection_reconcile" in summary
     assert "market_data_append_only_routing" in summary
     assert "market_data_append_only_controller" in summary
+    assert "market_reference" in summary
     assert summary["market_data_append_only_controller"]["operating_mode"] == "OFF"
+    assert summary["market_reference"]["effective_skip_inline_count"] == 0
     assert summary["order_safety"]["order_commands_allowed"] is False
 
 

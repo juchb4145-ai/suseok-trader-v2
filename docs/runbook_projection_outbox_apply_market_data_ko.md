@@ -7,7 +7,8 @@
 - 이 runbook은 append-only 전환 절차가 아니다. Gateway POST inline projection은 계속 유지된다.
 - background worker는 기본 disabled다.
 - 주문, LIVE_SIM, LIVE_REAL, 매수 gate, safety gate는 이 절차에서 변경하지 않는다.
-- `market_reference`, `market_index`, `market_regime`, `market_scan`, `condition_fusion` job은 apply mode에서도 projection을 갱신하지 않고 `APPLY_NOT_ENABLED_FOR_PROJECTION`으로 skip된다.
+- `market_index`, `market_regime`, `market_scan`, `condition_fusion` job은 apply mode에서도 projection을 갱신하지 않고 `APPLY_NOT_ENABLED_FOR_PROJECTION`으로 skip된다.
+- PR-13 이후 `market_reference`는 별도 `PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED=true`가 켜진 경우에만 `market_symbols` worker apply가 허용된다. market_data apply flag만으로는 market_reference를 갱신하지 않는다.
 
 ## 기본 설정
 

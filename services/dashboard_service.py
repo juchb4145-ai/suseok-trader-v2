@@ -119,12 +119,19 @@ from services.risk_gate import (
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
+from services.runtime.gateway_market_reference_routing import (
+    build_market_reference_status,
+    get_latest_market_reference_append_only_routing_status,
+)
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
 )
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
+)
+from services.runtime.market_reference_projection_reconcile import (
+    get_latest_market_reference_projection_reconcile,
 )
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
@@ -155,6 +162,7 @@ DASHBOARD_SECTIONS = [
     "gateway",
     "condition_fusion",
     "market_data",
+    "market_reference",
     "market_indexes",
     "market_regime",
     "realtime_subscription",
@@ -175,6 +183,8 @@ DASHBOARD_SECTIONS = [
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
+    "market_reference_projection_reconcile",
+    "market_reference_append_only_routing",
     "pipeline_summary",
 ]
 
@@ -182,11 +192,14 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "system",
     "gateway",
     "market_data",
+    "market_reference",
     "projection_outbox",
     "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
+    "market_reference_projection_reconcile",
+    "market_reference_append_only_routing",
     "pipeline_summary",
     "errors",
 )
@@ -197,6 +210,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "gateway",
     "condition_fusion",
     "market_data",
+    "market_reference",
     "market_indexes",
     "market_regime",
     "realtime_subscription",
@@ -207,6 +221,8 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
+    "market_reference_projection_reconcile",
+    "market_reference_append_only_routing",
     "pipeline_summary",
 }
 
@@ -317,6 +333,19 @@ def build_dashboard_snapshot(
             connection,
             settings=settings,
         ).to_dict()
+    )
+    market_reference_status = build_market_reference_status(
+        connection,
+        settings=settings,
+    )
+    market_reference_reconcile = get_latest_market_reference_projection_reconcile(
+        connection
+    )
+    market_reference_append_only_routing = (
+        get_latest_market_reference_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
     )
     projection_outbox_backlog = build_projection_outbox_backlog_status(
         connection,
@@ -503,6 +532,9 @@ def build_dashboard_snapshot(
         market_data_reconcile=market_data_reconcile,
         market_data_append_only_routing=market_data_append_only_routing,
         market_data_append_only_controller=market_data_append_only_controller,
+        market_reference_status=market_reference_status,
+        market_reference_reconcile=market_reference_reconcile,
+        market_reference_append_only_routing=market_reference_append_only_routing,
         settings=settings,
     )
 
@@ -532,6 +564,7 @@ def build_dashboard_snapshot(
                 "latest_observations": latest_cross_exchange,
             },
         },
+        "market_reference": market_reference_status,
         "market_indexes": {
             "status": market_index_status,
             "latest_ticks": latest_market_index_ticks,
@@ -545,6 +578,8 @@ def build_dashboard_snapshot(
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "market_data_append_only_controller": market_data_append_only_controller,
+        "market_reference_projection_reconcile": market_reference_reconcile,
+        "market_reference_append_only_routing": market_reference_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -860,6 +895,9 @@ def build_dashboard_pipeline_summary_fast(
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
     market_data_append_only_controller: dict[str, Any],
+    market_reference_status: dict[str, Any],
+    market_reference_reconcile: dict[str, Any],
+    market_reference_append_only_routing: dict[str, Any],
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
@@ -889,6 +927,9 @@ def build_dashboard_pipeline_summary_fast(
             ),
             "market_data_apply_enabled": bool(
                 projection_outbox_status.get("market_data_apply_enabled")
+            ),
+            "market_reference_apply_enabled": bool(
+                projection_outbox_status.get("market_reference_apply_enabled")
             ),
             "projection_side_effects_allowed": bool(
                 projection_outbox_status.get("projection_side_effects_allowed")
@@ -955,6 +996,11 @@ def build_dashboard_pipeline_summary_fast(
             _market_data_append_only_controller_summary(
                 market_data_append_only_controller
             )
+        ),
+        "market_reference": _market_reference_summary(
+            market_reference_status,
+            market_reference_reconcile,
+            market_reference_append_only_routing,
         ),
         "order_safety": {
             "order_command_count": order_command_count,
@@ -1080,6 +1126,31 @@ def _build_dashboard_fast_section(
             )
         return context["market_data_append_only_controller"]
 
+    def market_reference_status() -> dict[str, Any]:
+        if "market_reference_status" not in context:
+            context["market_reference_status"] = build_market_reference_status(
+                connection,
+                settings=settings,
+            )
+        return context["market_reference_status"]
+
+    def market_reference_reconcile() -> dict[str, Any]:
+        if "market_reference_reconcile" not in context:
+            context["market_reference_reconcile"] = (
+                get_latest_market_reference_projection_reconcile(connection)
+            )
+        return context["market_reference_reconcile"]
+
+    def market_reference_append_only_routing() -> dict[str, Any]:
+        if "market_reference_append_only_routing" not in context:
+            context["market_reference_append_only_routing"] = (
+                get_latest_market_reference_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_reference_append_only_routing"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1136,6 +1207,8 @@ def _build_dashboard_fast_section(
                 ),
             },
         }
+    if section == "market_reference":
+        return market_reference_status()
     if section == "market_indexes":
         latest_ticks = list_latest_market_index_ticks(
             connection,
@@ -1175,6 +1248,10 @@ def _build_dashboard_fast_section(
         return market_data_append_only_routing()
     if section == "market_data_append_only_controller":
         return market_data_append_only_controller()
+    if section == "market_reference_projection_reconcile":
+        return market_reference_reconcile()
+    if section == "market_reference_append_only_routing":
+        return market_reference_append_only_routing()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,
@@ -1186,6 +1263,11 @@ def _build_dashboard_fast_section(
             market_data_reconcile=market_data_reconcile(),
             market_data_append_only_routing=market_data_append_only_routing(),
             market_data_append_only_controller=market_data_append_only_controller(),
+            market_reference_status=market_reference_status(),
+            market_reference_reconcile=market_reference_reconcile(),
+            market_reference_append_only_routing=(
+                market_reference_append_only_routing()
+            ),
         )
 
     raise ValueError(f"unsupported dashboard fast section: {section}")
@@ -1651,6 +1733,9 @@ def _pipeline_summary(
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
     market_data_append_only_controller: dict[str, Any],
+    market_reference_status: dict[str, Any],
+    market_reference_reconcile: dict[str, Any],
+    market_reference_append_only_routing: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1713,6 +1798,9 @@ def _pipeline_summary(
             "market_data_apply_enabled": projection_outbox_status[
                 "market_data_apply_enabled"
             ],
+            "market_reference_apply_enabled": projection_outbox_status[
+                "market_reference_apply_enabled"
+            ],
             "projection_side_effects_allowed": projection_outbox_status[
                 "projection_side_effects_allowed"
             ],
@@ -1774,6 +1862,11 @@ def _pipeline_summary(
             _market_data_append_only_controller_summary(
                 market_data_append_only_controller
             )
+        ),
+        "market_reference": _market_reference_summary(
+            market_reference_status,
+            market_reference_reconcile,
+            market_reference_append_only_routing,
         ),
         "themes": {
             "theme_count": theme_status["theme_count"],
@@ -1993,6 +2086,48 @@ def _market_data_reconcile_summary(payload: Mapping[str, Any]) -> dict[str, Any]
         "latest_run_id": latest.get("run_id"),
         "latest_run_created_at": latest.get("created_at"),
         "warnings": warnings,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
+
+
+def _market_reference_summary(
+    status_payload: Mapping[str, Any],
+    reconcile_payload: Mapping[str, Any],
+    routing_payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    latest_run = (
+        reconcile_payload.get("latest_run")
+        if isinstance(reconcile_payload, Mapping)
+        else None
+    )
+    outbox = status_payload.get("outbox") if isinstance(status_payload, Mapping) else {}
+    if not isinstance(outbox, Mapping):
+        outbox = {}
+    return {
+        "pr": "PR-13",
+        "health": status_payload.get("latest_reconcile_status")
+        or (latest_run.get("status") if isinstance(latest_run, Mapping) else None),
+        "append_only_ready": bool(status_payload.get("append_only_ready")),
+        "membership_count": int(status_payload.get("membership_count") or 0),
+        "missing_membership_count": int(
+            status_payload.get("missing_membership_count") or 0
+        ),
+        "latest_market_symbols_event_id": status_payload.get(
+            "latest_market_symbols_event_id"
+        ),
+        "latest_market_symbols_event_ts": status_payload.get(
+            "latest_market_symbols_event_ts"
+        ),
+        "outbox_error_count": int(outbox.get("error_count") or 0),
+        "outbox_dead_letter_count": int(outbox.get("dead_letter_count") or 0),
+        "would_skip_inline_count": int(
+            routing_payload.get("would_skip_inline_count") or 0
+        ),
+        "effective_skip_inline_count": int(
+            routing_payload.get("effective_skip_inline_count") or 0
+        ),
+        "warnings": list(status_payload.get("warnings") or []),
         "read_only": True,
         "no_trading_side_effects": True,
     }

@@ -80,6 +80,7 @@ def test_dashboard_snapshot_empty_database_keeps_safety_and_keys(tmp_path) -> No
     assert snapshot["projection_outbox"]["worker_enabled"] is False
     assert snapshot["projection_outbox"]["apply_projection_enabled"] is False
     assert snapshot["projection_outbox"]["market_data_apply_enabled"] is False
+    assert snapshot["projection_outbox"]["market_reference_apply_enabled"] is False
     assert snapshot["projection_outbox"]["projection_side_effects_allowed"] is False
     assert "inline projection remains enabled" in snapshot["projection_outbox"]["warnings"]
     assert snapshot["projection_outbox"]["pending_count"] == 0
@@ -120,6 +121,7 @@ def test_dashboard_snapshot_includes_projection_outbox_status(tmp_path) -> None:
     assert snapshot["projection_outbox"]["worker_enabled"] is False
     assert snapshot["projection_outbox"]["apply_projection_enabled"] is False
     assert snapshot["projection_outbox"]["market_data_apply_enabled"] is False
+    assert snapshot["projection_outbox"]["market_reference_apply_enabled"] is False
     assert snapshot["projection_outbox"]["projection_side_effects_allowed"] is False
     assert snapshot["projection_outbox"]["pending_count"] == 1
     assert snapshot["projection_outbox"]["by_projection_name"]["market_data"][

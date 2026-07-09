@@ -149,6 +149,15 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
         "tr_response",
     )
     assert settings.gateway_market_data_append_only_min_outbox_status == "ENQUEUED"
+    assert settings.gateway_market_reference_append_only_dry_run_enabled is False
+    assert settings.gateway_market_reference_append_only_cutover_enabled is False
+    assert settings.gateway_market_reference_append_only_require_reconcile_pass is True
+    assert settings.gateway_market_reference_append_only_reconcile_max_age_sec == 1800
+    assert settings.gateway_market_reference_append_only_min_membership_count == 100
+    assert (
+        settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+        is True
+    )
     assert settings.event_store_retention_enabled is False
     assert settings.event_store_retention_days == 30
     assert settings.event_store_retention_batch_size == 5000
@@ -196,10 +205,13 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.projection_outbox_worker_enabled is False
     assert settings.projection_outbox_apply_projection_enabled is False
     assert settings.projection_outbox_market_data_apply_enabled is False
+    assert settings.projection_outbox_market_reference_apply_enabled is False
     assert settings.projection_outbox_apply_batch_size == 50
+    assert settings.projection_outbox_market_reference_apply_batch_size == 20
     assert settings.projection_outbox_live_run_once_batch_size == 50
     assert settings.projection_outbox_run_once_max_wall_ms == 5000
     assert settings.projection_outbox_apply_min_age_sec == 1.0
+    assert settings.projection_outbox_market_reference_apply_min_age_sec == 1.0
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -384,27 +396,35 @@ def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> 
         {
             "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED": "true",
             "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED": "true",
+            "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED": "true",
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "7",
+            "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE": "5",
             "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "9",
             "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "1500",
             "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "0.25",
+            "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC": "0.5",
         }
     )
 
     assert settings.projection_outbox_apply_projection_enabled is True
     assert settings.projection_outbox_market_data_apply_enabled is True
+    assert settings.projection_outbox_market_reference_apply_enabled is True
     assert settings.projection_outbox_apply_batch_size == 7
+    assert settings.projection_outbox_market_reference_apply_batch_size == 5
     assert settings.projection_outbox_live_run_once_batch_size == 9
     assert settings.projection_outbox_run_once_max_wall_ms == 1500
     assert settings.projection_outbox_apply_min_age_sec == 0.25
+    assert settings.projection_outbox_market_reference_apply_min_age_sec == 0.5
 
 
 def test_projection_outbox_apply_settings_are_validated() -> None:
     invalid_cases = {
         "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "0",
+        "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "0",
         "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "-0.1",
+        "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC": "-0.1",
     }
     for key, value in invalid_cases.items():
         try:
@@ -632,6 +652,14 @@ def test_market_data_interval_settings_are_validated() -> None:
             "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "60",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_EVENT_TYPES": "price_tick,tr_response",
             "GATEWAY_MARKET_DATA_APPEND_ONLY_MIN_OUTBOX_STATUS": "enqueued",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED": "true",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "90",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MIN_MEMBERSHIP_COUNT": "3",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13": (
+                "false"
+            ),
         }
     )
     assert routing_settings.gateway_market_data_append_only_dry_run_enabled is True
@@ -714,6 +742,21 @@ def test_market_data_interval_settings_are_validated() -> None:
         "tr_response",
     )
     assert routing_settings.gateway_market_data_append_only_min_outbox_status == "ENQUEUED"
+    assert routing_settings.gateway_market_reference_append_only_dry_run_enabled is True
+    assert routing_settings.gateway_market_reference_append_only_cutover_enabled is True
+    assert (
+        routing_settings.gateway_market_reference_append_only_require_reconcile_pass
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_reference_append_only_reconcile_max_age_sec
+        == 90
+    )
+    assert routing_settings.gateway_market_reference_append_only_min_membership_count == 3
+    assert (
+        routing_settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+        is False
+    )
 
     try:
         load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "0"})
@@ -721,6 +764,17 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "MARKET_DATA_PROJECTION_RECONCILE_LIMIT" in str(exc)
     else:
         raise AssertionError("expected invalid market data reconcile limit")
+    invalid_market_reference_cases = {
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MIN_MEMBERSHIP_COUNT": "-1",
+    }
+    for key, value in invalid_market_reference_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid market reference setting for {key}")
 
     invalid_operator_cases = {
         "OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS": "0",

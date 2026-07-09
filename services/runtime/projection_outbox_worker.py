@@ -33,6 +33,10 @@ from services.market_data_service import (
     normalize_market_data_exchange,
     process_gateway_event,
 )
+from services.market_reference_service import (
+    market_symbols_payload_has_symbols,
+    process_market_symbols_event,
+)
 from services.runtime.gateway_projection_routing import (
     record_market_data_post_apply_deferred_side_effects,
 )
@@ -44,6 +48,7 @@ from services.runtime.market_data_projection_side_effects import (
 
 APPLY_MODE_SHADOW_VERIFY_ONLY = "SHADOW_VERIFY_ONLY"
 APPLY_MODE_MARKET_DATA_APPLY = "MARKET_DATA_APPLY"
+APPLY_MODE_MARKET_REFERENCE_APPLY = "MARKET_REFERENCE_APPLY"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -77,6 +82,7 @@ class ProjectionOutboxBatchResult:
     apply_projection_requested: bool = False
     apply_projection_effective: bool = False
     market_data_apply_enabled: bool = False
+    market_reference_apply_enabled: bool = False
     applied_by_verify_count: int = 0
     applied_by_worker_count: int = 0
     skipped_apply_disabled_count: int = 0
@@ -113,6 +119,7 @@ class ProjectionOutboxBatchResult:
             "apply_projection_requested": self.apply_projection_requested,
             "apply_projection_effective": self.apply_projection_effective,
             "market_data_apply_enabled": self.market_data_apply_enabled,
+            "market_reference_apply_enabled": self.market_reference_apply_enabled,
             "applied_by_verify_count": self.applied_by_verify_count,
             "applied_by_worker_count": self.applied_by_worker_count,
             "skipped_apply_disabled_count": self.skipped_apply_disabled_count,
@@ -158,14 +165,18 @@ def process_projection_outbox_batch(
     market_data_apply_enabled = bool(
         resolved_settings.projection_outbox_market_data_apply_enabled
     )
-    apply_effective = apply_requested and global_apply_enabled and market_data_apply_enabled
-    apply_mode = (
-        APPLY_MODE_MARKET_DATA_APPLY if apply_effective else APPLY_MODE_SHADOW_VERIFY_ONLY
+    market_reference_apply_enabled = bool(
+        resolved_settings.projection_outbox_market_reference_apply_enabled
+    )
+    apply_effective = apply_requested and global_apply_enabled and (
+        market_data_apply_enabled or market_reference_apply_enabled
     )
     requested_limit = limit
     bounded_limit = limit or (
         resolved_settings.projection_outbox_apply_batch_size
-        if apply_effective
+        if apply_effective and market_data_apply_enabled
+        else resolved_settings.projection_outbox_market_reference_apply_batch_size
+        if apply_effective and market_reference_apply_enabled
         else resolved_settings.projection_outbox_batch_size
     )
     if live_safe:
@@ -175,7 +186,9 @@ def process_projection_outbox_batch(
         )
     min_age_sec = (
         resolved_settings.projection_outbox_apply_min_age_sec
-        if apply_effective
+        if apply_effective and market_data_apply_enabled
+        else resolved_settings.projection_outbox_market_reference_apply_min_age_sec
+        if apply_effective and market_reference_apply_enabled
         else resolved_settings.projection_outbox_shadow_min_age_sec
     )
     created_at = datetime_to_wire(utc_now())
@@ -228,12 +241,13 @@ def process_projection_outbox_batch(
             break
         if apply_requested and not apply_effective:
             verification = _verification_skipped(
-                "APPLY_DISABLED_BY_SETTINGS",
-                projection_name=job.get("projection_name"),
-                event_id=job.get("event_id"),
-                apply_projection_enabled=global_apply_enabled,
-                market_data_apply_enabled=market_data_apply_enabled,
-            )
+            "APPLY_DISABLED_BY_SETTINGS",
+            projection_name=job.get("projection_name"),
+            event_id=job.get("event_id"),
+            apply_projection_enabled=global_apply_enabled,
+            market_data_apply_enabled=market_data_apply_enabled,
+            market_reference_apply_enabled=market_reference_apply_enabled,
+        )
         elif apply_effective:
             verification = apply_projection_outbox_job(
                 connection,
@@ -248,6 +262,12 @@ def process_projection_outbox_batch(
                 job,
                 settings=resolved_settings,
             )
+        job_apply_mode = _job_apply_mode(
+            job,
+            apply_effective=apply_effective,
+            market_data_apply_enabled=market_data_apply_enabled,
+            market_reference_apply_enabled=market_reference_apply_enabled,
+        )
         evidence = {
             **dict(verification.evidence),
             "verification_reason": verification.reason,
@@ -256,11 +276,12 @@ def process_projection_outbox_batch(
             "projection_name": job.get("projection_name"),
             "event_id": job.get("event_id"),
             "event_type": job.get("event_type"),
-            "apply_mode": apply_mode,
+            "apply_mode": job_apply_mode,
             "apply_projection": apply_effective,
             "apply_projection_requested": apply_requested,
             "apply_projection_enabled": global_apply_enabled,
             "market_data_apply_enabled": market_data_apply_enabled,
+            "market_reference_apply_enabled": market_reference_apply_enabled,
             "no_trading_side_effects": True,
             "projection_side_effects_allowed": apply_effective,
         }
@@ -340,7 +361,7 @@ def process_projection_outbox_batch(
                     "reason": verification.reason,
                     "error_message": message,
                     "dead_letter": will_dead_letter,
-                    "apply_mode": apply_mode,
+                    "apply_mode": job_apply_mode,
                 }
             )
             if will_dead_letter:
@@ -372,6 +393,7 @@ def process_projection_outbox_batch(
         apply_projection_requested=apply_requested,
         apply_projection_effective=apply_effective,
         market_data_apply_enabled=market_data_apply_enabled,
+        market_reference_apply_enabled=market_reference_apply_enabled,
         applied_by_verify_count=applied_by_verify_count,
         applied_by_worker_count=applied_by_worker_count,
         skipped_apply_disabled_count=skipped_apply_disabled_count,
@@ -393,6 +415,23 @@ def process_projection_outbox_batch(
     )
 
 
+def _job_apply_mode(
+    job: Mapping[str, Any],
+    *,
+    apply_effective: bool,
+    market_data_apply_enabled: bool,
+    market_reference_apply_enabled: bool,
+) -> str:
+    if not apply_effective:
+        return APPLY_MODE_SHADOW_VERIFY_ONLY
+    projection_name = str(job.get("projection_name") or "").strip()
+    if projection_name == "market_data" and market_data_apply_enabled:
+        return APPLY_MODE_MARKET_DATA_APPLY
+    if projection_name == "market_reference" and market_reference_apply_enabled:
+        return APPLY_MODE_MARKET_REFERENCE_APPLY
+    return APPLY_MODE_SHADOW_VERIFY_ONLY
+
+
 def apply_projection_outbox_job(
     connection: sqlite3.Connection,
     job: Mapping[str, Any],
@@ -405,7 +444,27 @@ def apply_projection_outbox_job(
     projection_name = str(job.get("projection_name") or "").strip()
     event_id = str(job.get("event_id") or "").strip()
     event_type = str(job.get("event_type") or "").strip().lower()
-    if projection_name != "market_data":
+    if projection_name == "market_data" and not bool(
+        settings.projection_outbox_market_data_apply_enabled
+    ):
+        return _verification_skipped(
+            "APPLY_NOT_ENABLED_FOR_PROJECTION",
+            projection_name=projection_name,
+            event_id=event_id,
+            event_type=event_type,
+            worker_run_id=worker_run_id,
+        )
+    if projection_name == "market_reference" and not bool(
+        settings.projection_outbox_market_reference_apply_enabled
+    ):
+        return _verification_skipped(
+            "APPLY_NOT_ENABLED_FOR_PROJECTION",
+            projection_name=projection_name,
+            event_id=event_id,
+            event_type=event_type,
+            worker_run_id=worker_run_id,
+        )
+    if projection_name not in {"market_data", "market_reference"}:
         return _verification_skipped(
             "APPLY_NOT_ENABLED_FOR_PROJECTION",
             projection_name=projection_name,
@@ -425,6 +484,20 @@ def apply_projection_outbox_job(
             "SKIPPED_SOURCE_NOT_ACCEPTED",
             event_id=event_id,
             source_status=source_event["status"],
+        )
+    if projection_name == "market_reference":
+        if event_type != "market_symbols":
+            return _verification_skipped(
+                "MARKET_REFERENCE_APPLY_EVENT_TYPE_UNSUPPORTED",
+                event_id=event_id,
+                event_type=event_type,
+            )
+        return _apply_market_reference_projection(
+            connection,
+            job,
+            source_event,
+            settings=settings,
+            worker_run_id=worker_run_id,
         )
     if event_type not in MARKET_DATA_EVENT_TYPES:
         return _verification_skipped(
@@ -689,6 +762,110 @@ def _apply_market_data_projection(
     )
 
 
+def _apply_market_reference_projection(
+    connection: sqlite3.Connection,
+    job: Mapping[str, Any],
+    source_event: Mapping[str, Any],
+    *,
+    settings: Settings,
+    worker_run_id: str,
+) -> ProjectionOutboxVerificationResult:
+    del settings, worker_run_id
+    event_id = str(job.get("event_id") or "")
+    event_type = str(job.get("event_type") or "").lower()
+    verification_before = verify_projection_outbox_job(connection, job)
+    verification_before_payload = verification_before.to_dict()
+    if verification_before.status == "APPLIED":
+        return _verification_applied(
+            "INLINE_ARTIFACT_OBSERVED",
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLIED_BY_VERIFY",
+            verification_before_apply=verification_before_payload,
+            projection_result_status=None,
+        )
+    if verification_before.status == "SKIPPED":
+        return _verification_skipped(
+            verification_before.reason,
+            **dict(verification_before.evidence),
+            apply_result="SKIPPED_BY_VERIFY",
+            verification_before_apply=verification_before_payload,
+        )
+
+    try:
+        event = _gateway_event_from_row(source_event)
+        projection_result = process_market_symbols_event(connection, event)
+    except Exception as exc:
+        return _verification_error(
+            "MARKET_REFERENCE_APPLY_EXCEPTION",
+            str(exc),
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLY_ERROR",
+            verification_before_apply=verification_before_payload,
+        )
+
+    projection_result_payload = {
+        "event_id": projection_result.event_id,
+        "event_type": projection_result.event_type,
+        "status": projection_result.status,
+        "applied_count": projection_result.applied_count,
+        "ignored_count": projection_result.ignored_count,
+        "error_count": projection_result.error_count,
+        "error_message": projection_result.error_message,
+    }
+    if projection_result.status == "ERROR":
+        return _verification_error(
+            "MARKET_REFERENCE_APPLY_FAILED",
+            projection_result.error_message or projection_result.status,
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLY_ERROR",
+            verification_before_apply=verification_before_payload,
+            projection_result_status=projection_result.status,
+            projection_result=projection_result_payload,
+        )
+
+    verification_after = verify_projection_outbox_job(connection, job)
+    evidence = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "verification_before_apply": verification_before_payload,
+        "verification_after_apply": verification_after.to_dict(),
+        "projection_result_status": projection_result.status,
+        "projection_result": projection_result_payload,
+        "post_apply_side_effects": {},
+        "candidate_ingest_executed": False,
+        "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+    }
+    if verification_after.status == "APPLIED":
+        if projection_result.applied_count > 0:
+            evidence["apply_result"] = "APPLIED_BY_WORKER"
+            evidence["mutated_projection_name"] = "market_reference"
+        else:
+            evidence["apply_result"] = "APPLIED_BY_VERIFY"
+        return _verification_applied(
+            "MARKET_REFERENCE_APPLIED_BY_WORKER"
+            if projection_result.applied_count > 0
+            else "INLINE_ARTIFACT_OBSERVED",
+            **evidence,
+        )
+    if verification_after.status == "SKIPPED":
+        return _verification_skipped(
+            verification_after.reason,
+            **dict(verification_after.evidence),
+            **evidence,
+            apply_result="SKIPPED_AFTER_APPLY",
+        )
+    return _verification_error(
+        verification_after.reason,
+        verification_after.error_message or verification_after.reason,
+        **evidence,
+        apply_result="APPLY_ERROR",
+    )
+
+
 def verify_projection_outbox_job(
     connection: sqlite3.Connection,
     job: Mapping[str, Any],
@@ -848,10 +1025,11 @@ def _verify_market_reference(
 ) -> ProjectionOutboxVerificationResult:
     if _event_id_exists(connection, "market_symbol_memberships", event_id):
         return _verification_applied(
-            "MARKET_REFERENCE_SYMBOL_MEMBERSHIP_OBSERVED",
+            "INLINE_ARTIFACT_OBSERVED",
             event_id=event_id,
+            table="market_symbol_memberships",
         )
-    if not _market_symbols_payload_has_symbols(payload):
+    if not market_symbols_payload_has_symbols(payload):
         return _verification_skipped("MARKET_REFERENCE_NO_SYMBOLS", event_id=event_id)
     return _verification_error(
         "MARKET_REFERENCE_SYMBOL_MEMBERSHIP_MISSING",
@@ -1255,20 +1433,6 @@ def _latest_inline_error(
 def _rows_payload_has_rows(payload: Mapping[str, Any]) -> bool:
     rows = payload.get("rows")
     return isinstance(rows, list) and bool(rows)
-
-
-def _market_symbols_payload_has_symbols(payload: Mapping[str, Any]) -> bool:
-    markets = payload.get("markets")
-    if isinstance(markets, Mapping):
-        return any(isinstance(symbols, list) and bool(symbols) for symbols in markets.values())
-    if isinstance(markets, list):
-        for market in markets:
-            if not isinstance(market, Mapping):
-                continue
-            symbols = market.get("symbols")
-            if isinstance(symbols, list) and bool(symbols):
-                return True
-    return False
 
 
 def _count_rows(connection: sqlite3.Connection, table_name: str) -> int:
