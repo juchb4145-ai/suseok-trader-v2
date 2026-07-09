@@ -10,8 +10,7 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
 
     assert '$env:TRADING_MODE = "OBSERVE"' in script
     assert '$env:TRADING_ALLOW_LIVE_REAL = "false"' in script
-    assert '$env:LIVE_SIM_ORDER_ROUTING_ENABLED = "false"' in script
-    assert '$env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "false"' in script
+    _assert_observe_side_effect_flags_are_overridden(script)
     assert "queue_commands default remains false" in script
     assert "Dashboard URL:" in script
     assert "/api/gateway/events/recent?limit=20" in script
@@ -104,3 +103,44 @@ def test_start_kiwoom_gateway_visible_defaults_to_multi_profile_file() -> None:
     assert '"--market-index-realtime-enabled"' in script
     assert '"--market-index-codes"' in script
     assert '"--no-market-index-tr-bootstrap-enabled"' in script
+    _assert_observe_side_effect_flags_are_overridden(script)
+
+
+def _assert_observe_side_effect_flags_are_overridden(script: str) -> None:
+    false_flags = (
+        "DRY_RUN_ORDER_ROUTING_ENABLED",
+        "DRY_RUN_GATEWAY_COMMAND_ENABLED",
+        "DRY_RUN_EXIT_ENGINE_ENABLED",
+        "DRY_RUN_EXIT_INTENT_CREATION_ENABLED",
+        "DRY_RUN_EXIT_ORDER_CREATION_ENABLED",
+        "DRY_RUN_EXIT_SIMULATED_FILL_ENABLED",
+        "DRY_RUN_EXIT_ORDER_ROUTING_ENABLED",
+        "DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED",
+        "LIVE_SIM_ENABLED",
+        "LIVE_SIM_ORDER_ROUTING_ENABLED",
+        "LIVE_SIM_GATEWAY_COMMAND_ENABLED",
+        "LIVE_SIM_ALLOW_BUY",
+        "LIVE_SIM_ALLOW_SELL",
+        "LIVE_SIM_ALLOW_EXIT_SELL",
+        "LIVE_SIM_REPRICE_ENABLED",
+        "LIVE_SIM_PILOT_PIPELINE_ENABLED",
+        "LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND",
+        "LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED",
+        "LIVE_SIM_CANCEL_ENABLED",
+        "LIVE_SIM_CANCEL_UNFILLED_ENABLED",
+        "LIVE_SIM_EXIT_ENGINE_ENABLED",
+        "LIVE_SIM_EXIT_ORDER_CREATION_ENABLED",
+        "LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED",
+        "LIVE_SIM_EXIT_EOD_FLATTEN_ENABLED",
+        "LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED",
+        "LIVE_SIM_OPERATING_CYCLE_ENABLED",
+        "LIVE_SIM_OPERATING_LOOP_ENABLED",
+        "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS",
+    )
+    for flag in false_flags:
+        assert f'$env:{flag} = "false"' in script
+        assert f'"{flag}=$($env:{flag})"' in script
+
+    for flag in ("LIVE_SIM_KILL_SWITCH", "LIVE_SIM_CANCEL_KILL_SWITCH"):
+        assert f'$env:{flag} = "true"' in script
+        assert f'"{flag}=$($env:{flag})"' in script
