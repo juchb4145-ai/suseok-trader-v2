@@ -213,10 +213,27 @@ PR-10.8 진행 상태:
   - `tests/test_ops_projection_outbox_bulk_retire.py`
   - `tests/test_ops_projection_outbox_backlog_drain.py`
 
+PR-11 진행 상태:
+
+- `condition_event`에 한해서 market_data inline projection skip을 strict feature flag, fresh reconcile PASS, append_only_ready, projection_outbox worker apply enabled, condition_fusion enabled, backlog readiness, per-minute skip budget 뒤에서 허용했다.
+- 기본값은 `GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED=false`, `GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE=0`으로 유지해 production behavior는 변하지 않는다.
+- Gateway path에서 effective skipped `condition_event`는 `process_gateway_event()`와 Gateway-side `condition_fusion` refresh를 실행하지 않고, `projection_outbox` worker가 market_data apply 후 deferred `condition_fusion` refresh를 수행한다.
+- worker metadata와 routing decision evidence에 `candidate_ingest_executed=false`, `no_order_side_effects=true`, `no_trading_side_effects=true`, condition code/action, budget/backlog 상태를 기록한다.
+- candidate ingest는 worker에서 실행하지 않는다. `candidate_service.ingest_condition_sources()` 호출은 기존 pipeline 밖으로 이동하지 않았다.
+- reconcile은 effective skipped `condition_event`의 worker PENDING/PROCESSING within SLA를 WARN으로, terminal APPLIED/SKIPPED 이후 artifact missing이나 deferred fusion evidence missing/error를 FAIL로 분리한다.
+- operator status/dashboard/ops script에 PR-11 condition_event cutover status, pending worker, worker applied, deferred fusion refresh, candidate ingest forbidden, artifact missing, rollback hint를 노출했다.
+- price_tick PR-7, tr_response PR-9, market_reference/index/regime/scan/live_sim Gateway handling, 주문/LIVE_SIM/LIVE_REAL, safety/buy gate는 변경하지 않았다.
+- 운영 절차는 `docs/runbook_market_data_condition_event_cutover_ko.md`에 정리했다.
+- 추가 테스트:
+  - `tests/test_gateway_market_data_condition_event_cutover.py`
+  - `tests/test_projection_outbox_condition_event_cutover_worker.py`
+  - `tests/test_market_data_reconcile_condition_event_cutover.py`
+  - `tests/test_ops_market_data_condition_event_cutover_check.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-10.8 bulk retire를 실제 장중 dry-run/apply로 검증하고, `blocking_pending_count`, `effective_skip_pending_count`, `condition_event_blocking_pending_count`, `pr11_condition_event_cutover_ready`를 확인한다.
-2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness, backlog readiness 뒤에서 검토한다.
+1. PR-11 condition_event limited cutover를 실제 장중 소량 budget으로 검증하고, worker applied, deferred fusion refresh, candidate ingest 0, artifact missing 0, reconcile PASS를 확인한다.
+2. PR-12에서 market_reference/index/regime 등 비-market_data projection 분리와 append-only worker 적용 가능성을 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.

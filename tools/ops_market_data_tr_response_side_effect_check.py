@@ -63,16 +63,28 @@ def run_side_effect_report(
     base_url = core_url.rstrip("/")
     run_once_payloads: dict[str, Any] = {}
     if run_once:
+        projection_outbox_query = urllib.parse.urlencode(
+            {
+                "limit": str(limit),
+                "apply_projection": "true",
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["projection_outbox"] = fetch_json(
-            f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
+            f"{base_url}/api/operator/projection-outbox/run-once?{projection_outbox_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
+        reconcile_query = urllib.parse.urlencode(
+            {
+                "limit": str(max(limit, 500)),
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
+            f"{reconcile_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
@@ -170,7 +182,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     tr_effective = int(status.get("tr_response_effective_skip_count") or 0)
-    condition_effective = int(status.get("condition_event_effective_skip_count") or 0)
     invalid_effective = int(status.get("invalid_effective_skip_count") or 0)
     tr_would_skip = int(status.get("tr_response_would_skip_inline_count") or 0)
     tr_deferred_count = int(status.get("tr_response_deferred_side_effect_count") or 0)
@@ -184,8 +195,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
 
     if tr_effective > 0:
         failures.append("TR_RESPONSE_EFFECTIVE_SKIP_FORBIDDEN")
-    if condition_effective > 0:
-        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
     if invalid_effective > 0:
         failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
     if tr_error_count > 0:

@@ -23,7 +23,7 @@ def test_ops_tr_response_cutover_check_passes_normal_cutover() -> None:
     assert verdict["warnings"] == []
 
 
-def test_ops_tr_response_cutover_check_fails_condition_or_invalid_skip() -> None:
+def test_ops_tr_response_cutover_check_fails_invalid_skip_or_errors() -> None:
     verdict = tool.evaluate_report(
         _base_report(
             routing_overrides={
@@ -40,7 +40,6 @@ def test_ops_tr_response_cutover_check_fails_condition_or_invalid_skip() -> None
     )
 
     assert verdict["status"] == "FAIL"
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN" in verdict["failures"]
     assert "INVALID_EFFECTIVE_SKIP_EVENT_TYPE" in verdict["failures"]
     assert "TR_RESPONSE_DEFERRED_QUOTE_REFRESH_ERROR" in verdict["failures"]
     assert "PROJECTION_OUTBOX_ERROR_OR_DEAD_LETTER" in verdict["failures"]

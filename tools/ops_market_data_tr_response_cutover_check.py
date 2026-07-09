@@ -13,7 +13,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tools.ops_market_data_tr_response_side_effect_check import (
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     fetch_json,
     is_locked_retryable_payload,
 )
@@ -65,23 +65,38 @@ def run_cutover_report(
     base_url = core_url.rstrip("/")
     run_once_payloads: dict[str, Any] = {}
     if run_once:
+        projection_outbox_query = urllib.parse.urlencode(
+            {
+                "limit": str(limit),
+                "apply_projection": "true",
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["projection_outbox"] = fetch_json(
-            f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
+            f"{base_url}/api/operator/projection-outbox/run-once?{projection_outbox_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
+        reconcile_query = urllib.parse.urlencode(
+            {
+                "limit": str(max(limit, 500)),
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
+            f"{reconcile_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
 
     dashboard_params = {
-        "sections": "market_data,projection_outbox,projection_outbox_backlog,pipeline_summary,gateway,errors",
+        "sections": (
+            "market_data,projection_outbox,projection_outbox_backlog,"
+            "pipeline_summary,gateway,errors"
+        ),
         "detail": "summary",
         "limit": "20",
         "fast": "true",
@@ -175,7 +190,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     )
 
     tr_effective = int(status.get("tr_response_effective_skip_count") or 0)
-    condition_effective = int(status.get("condition_event_effective_skip_count") or 0)
     invalid_effective = int(status.get("invalid_effective_skip_count") or 0)
     worker_enabled = bool(status.get("worker_apply_enabled"))
     tr_errors = int(
@@ -188,8 +202,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     )
     backlog_status = str(backlog.get("readiness_status") or "").upper()
 
-    if condition_effective > 0:
-        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
     if invalid_effective > 0:
         failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
     if tr_effective > 0 and not worker_enabled:
@@ -280,7 +292,10 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         _summary_line(status, "condition_event_effective_skip_count"),
         _summary_line(status, "invalid_effective_skip_count"),
         f"- backlog_readiness_status: `{backlog.get('readiness_status')}`",
-        f"- pr11_condition_event_cutover_ready: `{backlog.get('pr11_condition_event_cutover_ready')}`",
+        (
+            f"- pr11_condition_event_cutover_ready: "
+            f"`{backlog.get('pr11_condition_event_cutover_ready')}`"
+        ),
         f"- backlog_operator_actions: `{backlog.get('operator_actions')}`",
         f"- failures: `{verdict.get('failures', [])}`",
         f"- warnings: `{verdict.get('warnings', [])}`",

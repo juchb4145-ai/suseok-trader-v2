@@ -267,7 +267,7 @@ def process_projection_outbox_batch(
         outbox_id = str(job["outbox_id"])
         if verification.status == "APPLIED":
             retry_sqlite_locked(
-                lambda: mark_projection_outbox_applied(
+                lambda outbox_id=outbox_id, evidence=evidence: mark_projection_outbox_applied(
                     connection,
                     outbox_id,
                     owner_id=resolved_owner_id,
@@ -288,11 +288,13 @@ def process_projection_outbox_batch(
                 mutated_projection_names.add(str(mutated_projection_name))
         elif verification.status == "SKIPPED":
             retry_sqlite_locked(
-                lambda: mark_projection_outbox_skipped(
+                lambda outbox_id=outbox_id,
+                reason=verification.reason,
+                evidence=evidence: mark_projection_outbox_skipped(
                     connection,
                     outbox_id,
                     owner_id=resolved_owner_id,
-                    reason=verification.reason,
+                    reason=reason,
                     evidence=evidence,
                 ),
                 attempts=resolved_settings.operator_sqlite_lock_retry_attempts,
@@ -315,7 +317,9 @@ def process_projection_outbox_batch(
                 >= resolved_settings.projection_outbox_retry_limit
             )
             retry_sqlite_locked(
-                lambda: mark_projection_outbox_error(
+                lambda outbox_id=outbox_id,
+                message=message,
+                evidence=evidence: mark_projection_outbox_error(
                     connection,
                     outbox_id,
                     owner_id=resolved_owner_id,
@@ -631,7 +635,9 @@ def _apply_market_data_projection(
         post_apply_side_effects.setdefault("candidate_ingest_executed", False)
         post_apply_side_effects.setdefault("no_order_side_effects", True)
         post_apply_side_effects.setdefault("no_trading_side_effects", True)
-        if _condition_event_side_effect_failed(post_apply_side_effects):
+        if _condition_event_side_effect_failed(post_apply_side_effects) and bool(
+            settings.gateway_market_data_append_only_condition_event_fail_closed_on_side_effect_error
+        ):
             return _verification_error(
                 "CONDITION_EVENT_DEFERRED_FUSION_REFRESH_SIDE_EFFECT_ERROR",
                 "condition_event deferred condition_fusion refresh failed",
@@ -1066,6 +1072,7 @@ def _refresh_deferred_condition_fusion_for_condition_event(
         "condition_fusion_processed_event_count": result.processed_count,
         "condition_fusion_fused_code_count": result.applied_count,
         "condition_code": result.code,
+        "condition_action": result.evidence.get("condition_action"),
         "condition_fusion_error_count": result.error_count,
         "condition_fusion_reason_codes": list(result.reason_codes),
         "source": result.source,
@@ -1113,6 +1120,7 @@ def _append_only_cutover_evidence(
         "gateway_inline_skipped": gateway_inline_skipped,
         "cutover_event_type": event_type if gateway_inline_skipped else None,
         "routing_decision_id": None if row is None else int(row["id"]),
+        "routing_decision_event_id": event_id if row is not None else None,
         "routing_decision_decided_at": None if row is None else row["decided_at"],
         "event_id": event_id,
         "worker_completed_at": datetime_to_wire(utc_now()),

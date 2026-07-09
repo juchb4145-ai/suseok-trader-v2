@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import (
     datetime_to_wire,
@@ -30,6 +31,7 @@ PR6_EFFECTIVE_SKIP_DISABLED_REASON = "EFFECTIVE_SKIP_DISABLED_IN_PR6"
 PR7_CUTOVER_SCOPE = "price_tick_only"
 PR9_CUTOVER_SCOPE = "price_tick_and_tr_response"
 PR10_CONDITION_EVENT_SCOPE = "condition_event_side_effect_prepare_only"
+PR11_CUTOVER_SCOPE = "price_tick_tr_response_condition_event"
 PR7_ALLOWED_CUTOVER_EVENT_TYPE = "price_tick"
 PR7_FORCED_INLINE_EVENT_TYPES = frozenset({"condition_event"})
 
@@ -62,6 +64,15 @@ class MarketDataAppendOnlyRoutingDecision:
     tr_response_skip_budget_limit: int | None = None
     tr_response_skip_budget_used: int | None = None
     tr_response_skip_budget_remaining: int | None = None
+    condition_event_skip_budget_limit: int | None = None
+    condition_event_skip_budget_used: int | None = None
+    condition_event_skip_budget_remaining: int | None = None
+    condition_event_worker_side_effect_ready: bool | None = None
+    condition_event_fusion_enabled: bool | None = None
+    condition_event_backlog_ready: bool | None = None
+    condition_event_code: str | None = None
+    condition_event_action: str | None = None
+    candidate_ingest_executed: bool = False
     synthetic_child_guard_status: str | None = None
     worker_side_effect_ready: bool | None = None
     deferred_side_effect_required: bool | None = None
@@ -100,6 +111,21 @@ class MarketDataAppendOnlyRoutingDecision:
             "tr_response_skip_budget_remaining": (
                 self.tr_response_skip_budget_remaining
             ),
+            "condition_event_skip_budget_limit": (
+                self.condition_event_skip_budget_limit
+            ),
+            "condition_event_skip_budget_used": self.condition_event_skip_budget_used,
+            "condition_event_skip_budget_remaining": (
+                self.condition_event_skip_budget_remaining
+            ),
+            "condition_event_worker_side_effect_ready": (
+                self.condition_event_worker_side_effect_ready
+            ),
+            "condition_event_fusion_enabled": self.condition_event_fusion_enabled,
+            "condition_event_backlog_ready": self.condition_event_backlog_ready,
+            "condition_event_code": self.condition_event_code,
+            "condition_event_action": self.condition_event_action,
+            "candidate_ingest_executed": self.candidate_ingest_executed,
             "synthetic_child_guard_status": self.synthetic_child_guard_status,
             "worker_side_effect_ready": self.worker_side_effect_ready,
             "deferred_side_effect_required": self.deferred_side_effect_required,
@@ -151,6 +177,18 @@ def decide_market_data_projection_routing(
     )
     condition_event_require_fusion_enabled = bool(
         settings.gateway_market_data_append_only_condition_event_require_fusion_enabled
+    )
+    condition_event_require_backlog_ready = bool(
+        settings.gateway_market_data_append_only_condition_event_require_backlog_ready
+    )
+    condition_event_skip_budget_limit = int(
+        settings.gateway_market_data_append_only_condition_event_max_skip_per_minute
+    )
+    condition_event_allow_candidate_ingest_in_worker = bool(
+        settings.gateway_market_data_append_only_condition_event_allow_candidate_ingest_in_worker
+    )
+    condition_event_max_payload_age_sec = int(
+        settings.gateway_market_data_append_only_condition_event_max_payload_age_sec
     )
     dry_run_enabled = bool(settings.gateway_market_data_append_only_dry_run_enabled)
     if event_type == "tr_response":
@@ -231,6 +269,41 @@ def decide_market_data_projection_routing(
     tr_response_skip_budget_remaining = (
         _tr_response_skip_budget_remaining(connection, settings=settings)
         if event_type == "tr_response"
+        else None
+    )
+    condition_event_skip_budget_used = (
+        _condition_event_skip_count_in_current_minute(connection)
+        if event_type == "condition_event"
+        else None
+    )
+    condition_event_skip_budget_remaining = (
+        _condition_event_skip_budget_remaining(connection, settings=settings)
+        if event_type == "condition_event"
+        else None
+    )
+    condition_event_payload = (
+        _condition_event_payload_identity(event.payload)
+        if event_type == "condition_event"
+        else None
+    )
+    condition_event_payload_valid = condition_event_payload is not None
+    condition_event_payload_age_sec = (
+        condition_event_payload.get("payload_age_sec")
+        if condition_event_payload is not None
+        else None
+    )
+    condition_event_backlog = (
+        _condition_event_backlog_status(
+            connection,
+            settings=settings,
+            latest_reconcile=latest_reconcile,
+        )
+        if event_type == "condition_event"
+        else {}
+    )
+    condition_event_backlog_ready = (
+        _condition_event_backlog_ready(condition_event_backlog)
+        if event_type == "condition_event"
         else None
     )
     synthetic_child_issue_count = (
@@ -358,16 +431,94 @@ def decide_market_data_projection_routing(
             else "TR_RESPONSE_WORKER_SIDE_EFFECT_NOT_READY"
         )
     elif event_type == "condition_event" and would_skip_inline:
-        reason_codes.append("CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10")
-        reason_codes.append("CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10")
+        if not settings.gateway_market_data_append_only_dry_run_enabled:
+            reason_codes.append("DRY_RUN_DISABLED")
+            effective_skip_reason = "DRY_RUN_DISABLED"
+        elif not cutover_enabled or not condition_event_cutover_enabled:
+            reason_codes.append("CONDITION_EVENT_CUTOVER_DISABLED")
+            effective_skip_reason = "CONDITION_EVENT_CUTOVER_DISABLED"
+        elif worker_apply_required and not worker_apply_enabled:
+            reason_codes.append("WORKER_APPLY_NOT_ENABLED")
+            effective_skip_reason = "WORKER_APPLY_NOT_ENABLED"
+        elif not worker_apply_enabled:
+            reason_codes.append("WORKER_APPLY_NOT_ENABLED")
+            effective_skip_reason = "WORKER_APPLY_NOT_ENABLED"
+        elif latest_reconcile_required and latest_run is None:
+            reason_codes.append("MARKET_DATA_RECONCILE_MISSING")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_MISSING"
+        elif latest_reconcile_required and latest_status != "PASS":
+            reason_codes.append("MARKET_DATA_RECONCILE_NOT_PASS")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_NOT_PASS"
+        elif latest_reconcile_required and not append_only_ready:
+            reason_codes.append("MARKET_DATA_RECONCILE_NOT_PASS")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_NOT_PASS"
+        elif (
+            latest_reconcile_required
+            and latest_age_sec is not None
+            and latest_age_sec
+            > settings.gateway_market_data_append_only_reconcile_max_age_sec
+        ):
+            reason_codes.append("MARKET_DATA_RECONCILE_STALE")
+            effective_skip_reason = "MARKET_DATA_RECONCILE_STALE"
+        elif not _outbox_is_ready(
+            outbox_status=normalized_outbox_status,
+            outbox_job_present=outbox_job_present,
+            min_outbox_status=settings.gateway_market_data_append_only_min_outbox_status,
+        ):
+            reason_codes.append("MARKET_DATA_OUTBOX_NOT_READY")
+            effective_skip_reason = "MARKET_DATA_OUTBOX_NOT_READY"
+        elif source_event_status != "ACCEPTED":
+            reason_codes.append("SOURCE_GATEWAY_EVENT_NOT_ACCEPTED")
+            effective_skip_reason = "SOURCE_GATEWAY_EVENT_NOT_ACCEPTED"
+        elif not condition_event_payload_valid:
+            reason_codes.append("CONDITION_EVENT_PAYLOAD_INVALID")
+            effective_skip_reason = "CONDITION_EVENT_PAYLOAD_INVALID"
+        elif (
+            condition_event_payload_age_sec is not None
+            and condition_event_payload_age_sec > condition_event_max_payload_age_sec
+        ):
+            reason_codes.append("CONDITION_EVENT_PAYLOAD_STALE")
+            effective_skip_reason = "CONDITION_EVENT_PAYLOAD_STALE"
+        elif (
+            condition_event_require_fusion_enabled
+            and not condition_event_fusion_enabled
+        ):
+            reason_codes.append("CONDITION_EVENT_FUSION_DISABLED")
+            effective_skip_reason = "CONDITION_EVENT_FUSION_DISABLED"
+        elif (
+            condition_event_require_backlog_ready
+            and not bool(condition_event_backlog_ready)
+        ):
+            reason_codes.append("CONDITION_EVENT_BACKLOG_NOT_READY")
+            effective_skip_reason = "CONDITION_EVENT_BACKLOG_NOT_READY"
+        elif condition_event_allow_candidate_ingest_in_worker:
+            reason_codes.append("CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER_FORBIDDEN")
+            effective_skip_reason = (
+                "CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER_FORBIDDEN"
+            )
+        elif (
+            condition_event_require_worker_side_effects
+            and not condition_event_worker_side_effect_ready
+        ):
+            reason_codes.append("CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY")
+            effective_skip_reason = "CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY"
+        elif (
+            condition_event_skip_budget_limit <= 0
+            or (condition_event_skip_budget_remaining or 0) <= 0
+        ):
+            reason_codes.append("CONDITION_EVENT_SKIP_BUDGET_EXHAUSTED")
+            effective_skip_reason = "CONDITION_EVENT_SKIP_BUDGET_EXHAUSTED"
+        else:
+            effective_skip_inline = True
+            reason_codes.append("CONDITION_EVENT_EFFECTIVE_SKIP_ALLOWED")
+            effective_skip_reason = "CONDITION_EVENT_EFFECTIVE_SKIP_ALLOWED"
         reason_codes.append(
             "CONDITION_EVENT_WORKER_SIDE_EFFECT_READY"
             if condition_event_worker_side_effect_ready
             else "CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY"
         )
         if not condition_event_fusion_enabled:
-            reason_codes.append("CONDITION_FUSION_INCREMENTAL_DISABLED")
-        effective_skip_reason = "CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10"
+            reason_codes.append("CONDITION_EVENT_FUSION_DISABLED")
     elif event_type == PR7_ALLOWED_CUTOVER_EVENT_TYPE:
         if not would_skip_inline:
             effective_skip_reason = "WOULD_SKIP_INLINE_FALSE"
@@ -433,40 +584,70 @@ def decide_market_data_projection_routing(
         and not effective_skip_inline
         and "EFFECTIVE_SKIP_ALLOWED_PRICE_TICK" not in reason_codes
         and "TR_RESPONSE_EFFECTIVE_SKIP_ALLOWED" not in reason_codes
+        and "CONDITION_EVENT_EFFECTIVE_SKIP_ALLOWED" not in reason_codes
     ):
         reason_codes.append("EFFECTIVE_SKIP_BLOCKED_FAIL_CLOSED")
 
     decision_cutover_scope = (
         PR7_CUTOVER_SCOPE
         if event_type == "price_tick"
-        else PR10_CONDITION_EVENT_SCOPE
+        else PR11_CUTOVER_SCOPE
         if event_type == "condition_event"
         else PR9_CUTOVER_SCOPE
     )
     evidence = {
-        "pr": "PR-10",
+        "pr": "PR-11",
         "price_tick_pr": "PR-7",
         "tr_response_pr": "PR-9",
-        "condition_event_pr": "PR-10",
+        "condition_event_pr": "PR-11",
         "pr8_side_effect_migration": True,
         "cutover_scope": decision_cutover_scope,
         "price_tick_only_cutover": False,
         "tr_response_limited_cutover": True,
-        "condition_event_side_effect_prepare_only": True,
+        "condition_event_limited_cutover": True,
+        "condition_event_side_effect_prepare_only": False,
         "condition_event_dry_run_enabled": condition_event_dry_run_enabled,
-        "condition_event_cutover_enabled": False,
+        "condition_event_cutover_enabled": condition_event_cutover_enabled,
         "condition_event_configured_cutover_enabled": condition_event_cutover_enabled,
+        "condition_event_worker_side_effect_required": (
+            condition_event_require_worker_side_effects
+        ),
         "condition_event_worker_side_effect_ready": (
             condition_event_worker_side_effect_ready
         ),
         "condition_event_fusion_enabled": condition_event_fusion_enabled,
-        "condition_event_effective_skip_disabled_in_pr10": True,
+        "condition_event_backlog_ready": condition_event_backlog_ready,
+        "condition_event_backlog": dict(condition_event_backlog),
+        "condition_event_payload_valid": condition_event_payload_valid,
+        "condition_event_payload_age_sec": condition_event_payload_age_sec,
+        "condition_event_max_payload_age_sec": condition_event_max_payload_age_sec,
+        "condition_event_code": (
+            None if condition_event_payload is None else condition_event_payload["code"]
+        ),
+        "condition_event_action": (
+            None if condition_event_payload is None else condition_event_payload["action"]
+        ),
+        "condition_event_skip_budget_limit_per_minute": (
+            condition_event_skip_budget_limit
+        ),
+        "condition_event_skip_budget_used_per_minute": (
+            condition_event_skip_budget_used
+        ),
+        "condition_event_skip_budget_remaining": (
+            condition_event_skip_budget_remaining
+        ),
+        "candidate_ingest_in_worker_allowed": (
+            condition_event_allow_candidate_ingest_in_worker
+        ),
+        "candidate_ingest_executed": False,
+        "condition_event_effective_skip_disabled_in_pr10": False,
         "condition_event_require_worker_side_effects": (
             condition_event_require_worker_side_effects
         ),
         "condition_event_require_fusion_enabled": (
             condition_event_require_fusion_enabled
         ),
+        "condition_event_require_backlog_ready": condition_event_require_backlog_ready,
         "tr_response_dry_run_enabled": tr_response_dry_run_enabled,
         "tr_response_cutover_enabled": tr_response_cutover_enabled,
         "tr_response_worker_side_effect_ready": tr_response_worker_side_effect_ready,
@@ -513,8 +694,8 @@ def decide_market_data_projection_routing(
         ),
         "no_trading_side_effects": True,
         "rollback_hint": (
-            "Disable GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED "
-            "or set GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE=0."
+            "Disable GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED "
+            "or set GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE=0."
         ),
     }
     decision = MarketDataAppendOnlyRoutingDecision(
@@ -544,15 +725,42 @@ def decide_market_data_projection_routing(
         else None,
         tr_response_skip_budget_used=tr_response_skip_budget_used,
         tr_response_skip_budget_remaining=tr_response_skip_budget_remaining,
+        condition_event_skip_budget_limit=condition_event_skip_budget_limit
+        if event_type == "condition_event"
+        else None,
+        condition_event_skip_budget_used=condition_event_skip_budget_used,
+        condition_event_skip_budget_remaining=condition_event_skip_budget_remaining,
+        condition_event_worker_side_effect_ready=condition_event_worker_side_effect_ready
+        if event_type == "condition_event"
+        else None,
+        condition_event_fusion_enabled=condition_event_fusion_enabled
+        if event_type == "condition_event"
+        else None,
+        condition_event_backlog_ready=condition_event_backlog_ready,
+        condition_event_code=None
+        if condition_event_payload is None
+        else str(condition_event_payload["code"]),
+        condition_event_action=None
+        if condition_event_payload is None
+        else str(condition_event_payload["action"]),
+        candidate_ingest_executed=False,
         synthetic_child_guard_status=synthetic_child_guard_status
         if event_type == "tr_response"
         else None,
-        worker_side_effect_ready=tr_response_worker_side_effect_ready
-        if event_type == "tr_response"
-        else None,
-        deferred_side_effect_required=tr_response_require_worker_side_effects
-        if event_type == "tr_response"
-        else None,
+        worker_side_effect_ready=(
+            tr_response_worker_side_effect_ready
+            if event_type == "tr_response"
+            else condition_event_worker_side_effect_ready
+            if event_type == "condition_event"
+            else None
+        ),
+        deferred_side_effect_required=(
+            tr_response_require_worker_side_effects
+            if event_type == "tr_response"
+            else condition_event_require_worker_side_effects
+            if event_type == "condition_event"
+            else None
+        ),
         blocked_reason_codes=tuple(reason_codes),
         evidence=evidence,
         decided_at=decided_at,
@@ -658,6 +866,22 @@ def get_latest_market_data_append_only_routing_status(
         if condition_event_require_worker_side_effects
         else True
     )
+    condition_event_skip_budget_limit = int(
+        resolved_settings.gateway_market_data_append_only_condition_event_max_skip_per_minute
+    )
+    condition_event_skip_budget_used = _condition_event_skip_count_in_current_minute(
+        connection
+    )
+    condition_event_skip_budget_remaining = _condition_event_skip_budget_remaining(
+        connection,
+        settings=resolved_settings,
+    )
+    condition_event_backlog = _condition_event_backlog_status(
+        connection,
+        settings=resolved_settings,
+        latest_reconcile=latest_reconcile,
+    )
+    condition_event_backlog_ready = _condition_event_backlog_ready(condition_event_backlog)
     skip_budget_limit = int(
         resolved_settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
     )
@@ -696,24 +920,35 @@ def get_latest_market_data_append_only_routing_status(
     tr_response_pending_worker_count = _count_tr_response_effective_skip_pending_worker(
         connection
     )
+    condition_event_worker_applied_count = _count_condition_event_worker_applied_records(
+        connection
+    )
+    condition_event_pending_worker_count = (
+        _count_condition_event_effective_skip_pending_worker(connection)
+    )
+    condition_event_artifact_missing_after_worker_count = (
+        _count_condition_event_artifact_missing_after_worker_records(connection)
+    )
     failures: list[str] = []
     warnings = [
-        "condition_event inline projection remains enabled",
+        "PR-11 condition_event limited cutover is feature-flagged",
         "PR-9 tr_response limited cutover requires strict flags and budget",
-        "PR-10 prepares condition_event worker side-effects; condition_event inline remains enabled",
         "candidate ingest remains outside projection_outbox worker",
-        "condition_event inline remains enabled",
         "LIVE_REAL/order behavior unchanged",
-        "rollback: disable gateway_market_data_append_only_tr_response_cutover_enabled",
+        "rollback: disable gateway_market_data_append_only_condition_event_cutover_enabled",
     ]
-    if condition_event_effective_skip_count > 0:
-        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
     if condition_event_candidate_ingest_executed_count > 0:
         failures.append("CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER_FORBIDDEN")
     if condition_event_deferred_side_effect_error_count > 0:
         failures.append("CONDITION_EVENT_DEFERRED_SIDE_EFFECT_ERROR")
+    if condition_event_artifact_missing_after_worker_count > 0:
+        failures.append("CONDITION_EVENT_ARTIFACT_MISSING_AFTER_WORKER")
     if condition_event_duplicate_side_effect_count > 0:
         failures.append("CONDITION_EVENT_DUPLICATE_SIDE_EFFECT_FOR_INLINE_EVENT")
+    if condition_event_effective_skip_count > 0 and not worker_apply_enabled:
+        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_WITH_WORKER_APPLY_DISABLED")
+    if condition_event_effective_skip_count > 0 and not append_only_ready:
+        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_WITH_APPEND_ONLY_NOT_READY")
     if invalid_effective_skip_count > 0:
         failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
     if tr_response_effective_skip_count > 0 and not worker_apply_enabled:
@@ -736,11 +971,21 @@ def get_latest_market_data_append_only_routing_status(
         and tr_response_skip_budget_limit <= 0
     ):
         warnings.append("tr_response cutover flag enabled but skip budget is 0")
+    if (
+        resolved_settings.gateway_market_data_append_only_condition_event_cutover_enabled
+        and condition_event_skip_budget_limit <= 0
+    ):
+        warnings.append("condition_event cutover flag enabled but skip budget is 0")
+    if (
+        resolved_settings.gateway_market_data_append_only_condition_event_cutover_enabled
+        and not condition_event_backlog_ready
+    ):
+        warnings.append("condition_event backlog readiness is not ready")
     return {
-        "pr": "PR-10",
+        "pr": "PR-11",
         "price_tick_pr": "PR-7",
         "tr_response_pr": "PR-9",
-        "condition_event_pr": "PR-10",
+        "condition_event_pr": "PR-11",
         "dry_run_enabled": bool(
             resolved_settings.gateway_market_data_append_only_dry_run_enabled
         ),
@@ -770,8 +1015,26 @@ def get_latest_market_data_append_only_routing_status(
             condition_event_require_worker_side_effects
         ),
         "condition_event_require_fusion_enabled": condition_event_require_fusion_enabled,
-        "cutover_scope": PR9_CUTOVER_SCOPE,
-        "condition_event_cutover_scope": PR10_CONDITION_EVENT_SCOPE,
+        "condition_event_require_backlog_ready": bool(
+            resolved_settings.gateway_market_data_append_only_condition_event_require_backlog_ready
+        ),
+        "condition_event_skip_budget_limit_per_minute": condition_event_skip_budget_limit,
+        "condition_event_skip_budget_used_current_minute": (
+            condition_event_skip_budget_used
+        ),
+        "condition_event_skip_budget_remaining_current_minute": (
+            condition_event_skip_budget_remaining
+        ),
+        "condition_event_backlog_ready": condition_event_backlog_ready,
+        "condition_event_backlog": dict(condition_event_backlog),
+        "condition_event_allow_candidate_ingest_in_worker": bool(
+            resolved_settings.gateway_market_data_append_only_condition_event_allow_candidate_ingest_in_worker
+        ),
+        "condition_event_max_payload_age_sec": int(
+            resolved_settings.gateway_market_data_append_only_condition_event_max_payload_age_sec
+        ),
+        "cutover_scope": PR11_CUTOVER_SCOPE,
+        "condition_event_cutover_scope": PR11_CUTOVER_SCOPE,
         "cutover_event_types": list(
             resolved_settings.gateway_market_data_append_only_cutover_event_types
         ),
@@ -822,6 +1085,11 @@ def get_latest_market_data_append_only_routing_status(
         "condition_event_candidate_ingest_executed_count": (
             condition_event_candidate_ingest_executed_count
         ),
+        "condition_event_pending_worker_count": condition_event_pending_worker_count,
+        "condition_event_worker_applied_count": condition_event_worker_applied_count,
+        "condition_event_artifact_missing_after_worker_count": (
+            condition_event_artifact_missing_after_worker_count
+        ),
         "condition_event_side_effect_duplicate_count": (
             condition_event_duplicate_side_effect_count
         ),
@@ -859,8 +1127,8 @@ def get_latest_market_data_append_only_routing_status(
             resolved_settings.gateway_market_data_append_only_fail_closed_on_routing_error
         ),
         "rollback_hint": (
-            "Set GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED=false, "
-            "set GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE=0, "
+            "Set GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED=false, "
+            "set GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE=0, "
             "or set GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED=false."
         ),
         "failures": failures,
@@ -919,6 +1187,15 @@ def _persist_market_data_projection_routing_decision(
             tr_response_skip_budget_limit,
             tr_response_skip_budget_used,
             tr_response_skip_budget_remaining,
+            condition_event_skip_budget_limit,
+            condition_event_skip_budget_used,
+            condition_event_skip_budget_remaining,
+            condition_event_worker_side_effect_ready,
+            condition_event_fusion_enabled,
+            condition_event_backlog_ready,
+            condition_event_code,
+            condition_event_action,
+            candidate_ingest_executed,
             synthetic_child_guard_status,
             worker_side_effect_ready,
             deferred_side_effect_required,
@@ -927,7 +1204,10 @@ def _persist_market_data_projection_routing_decision(
             evidence_json,
             decided_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(event_id, projection_name) DO UPDATE SET
             event_type = excluded.event_type,
             dry_run_enabled = excluded.dry_run_enabled,
@@ -952,6 +1232,16 @@ def _persist_market_data_projection_routing_decision(
             tr_response_skip_budget_limit = excluded.tr_response_skip_budget_limit,
             tr_response_skip_budget_used = excluded.tr_response_skip_budget_used,
             tr_response_skip_budget_remaining = excluded.tr_response_skip_budget_remaining,
+            condition_event_skip_budget_limit = excluded.condition_event_skip_budget_limit,
+            condition_event_skip_budget_used = excluded.condition_event_skip_budget_used,
+            condition_event_skip_budget_remaining = excluded.condition_event_skip_budget_remaining,
+            condition_event_worker_side_effect_ready =
+                excluded.condition_event_worker_side_effect_ready,
+            condition_event_fusion_enabled = excluded.condition_event_fusion_enabled,
+            condition_event_backlog_ready = excluded.condition_event_backlog_ready,
+            condition_event_code = excluded.condition_event_code,
+            condition_event_action = excluded.condition_event_action,
+            candidate_ingest_executed = excluded.candidate_ingest_executed,
             synthetic_child_guard_status = excluded.synthetic_child_guard_status,
             worker_side_effect_ready = excluded.worker_side_effect_ready,
             deferred_side_effect_required = excluded.deferred_side_effect_required,
@@ -986,6 +1276,21 @@ def _persist_market_data_projection_routing_decision(
             decision.tr_response_skip_budget_limit,
             decision.tr_response_skip_budget_used,
             decision.tr_response_skip_budget_remaining,
+            decision.condition_event_skip_budget_limit,
+            decision.condition_event_skip_budget_used,
+            decision.condition_event_skip_budget_remaining,
+            None
+            if decision.condition_event_worker_side_effect_ready is None
+            else int(decision.condition_event_worker_side_effect_ready),
+            None
+            if decision.condition_event_fusion_enabled is None
+            else int(decision.condition_event_fusion_enabled),
+            None
+            if decision.condition_event_backlog_ready is None
+            else int(decision.condition_event_backlog_ready),
+            decision.condition_event_code,
+            decision.condition_event_action,
+            int(decision.candidate_ingest_executed),
             decision.synthetic_child_guard_status,
             None
             if decision.worker_side_effect_ready is None
@@ -1167,6 +1472,94 @@ def _tr_response_skip_budget_remaining(
     return max(limit - used, 0)
 
 
+def _condition_event_skip_count_in_current_minute(connection: sqlite3.Connection) -> int:
+    minute_start = datetime_to_wire(utc_now().replace(second=0, microsecond=0))
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions
+        WHERE event_type = 'condition_event'
+            AND effective_skip_inline = 1
+            AND julianday(decided_at) >= julianday(?)
+        """,
+        (minute_start,),
+    ).fetchone()
+    return int(row["count"])
+
+
+def _condition_event_skip_budget_remaining(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> int:
+    limit = int(settings.gateway_market_data_append_only_condition_event_max_skip_per_minute)
+    if limit <= 0:
+        return 0
+    used = _condition_event_skip_count_in_current_minute(connection)
+    return max(limit - used, 0)
+
+
+def _condition_event_payload_identity(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    try:
+        condition = BrokerConditionEvent.from_dict(payload)
+    except Exception:
+        return None
+    return {
+        "code": condition.code,
+        "action": condition.action.value,
+        "condition_id": condition.condition_id,
+        "condition_name": condition.condition_name,
+        "payload_age_sec": max((utc_now() - condition.ts).total_seconds(), 0.0),
+    }
+
+
+def _condition_event_backlog_status(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+    latest_reconcile: Mapping[str, Any],
+) -> dict[str, Any]:
+    try:
+        from services.runtime.projection_outbox_backlog import (
+            build_projection_outbox_backlog_status,
+        )
+
+        routing_status = {
+            "condition_event_effective_skip_count": (
+                _count_effective_skip_by_event_type(connection, "condition_event")
+            ),
+            "invalid_effective_skip_count": _count_invalid_effective_skips(connection),
+        }
+        return build_projection_outbox_backlog_status(
+            connection,
+            settings=settings,
+            latest_reconcile=latest_reconcile,
+            routing_status=routing_status,
+            sample_limit=0,
+        ).to_dict()
+    except Exception as exc:
+        return {
+            "readiness_status": "FAIL",
+            "pr11_condition_event_cutover_ready": False,
+            "reason_codes": ["CONDITION_EVENT_BACKLOG_STATUS_ERROR"],
+            "error_message": str(exc),
+        }
+
+
+def _condition_event_backlog_ready(backlog: Mapping[str, Any]) -> bool:
+    if not bool(backlog.get("pr11_condition_event_cutover_ready")):
+        return False
+    if int(backlog.get("error_count") or backlog.get("total_error_count") or 0) > 0:
+        return False
+    if int(backlog.get("dead_letter_count") or backlog.get("total_dead_letter_count") or 0) > 0:
+        return False
+    if int(backlog.get("stale_processing_count") or 0) > 0:
+        return False
+    return True
+
+
 def _tr_response_rows(payload: Mapping[str, Any]) -> list[Any]:
     rows = payload.get("rows")
     if isinstance(rows, list):
@@ -1249,7 +1642,7 @@ def _count_invalid_effective_skips(connection: sqlite3.Connection) -> int:
         SELECT COUNT(*) AS count
         FROM market_data_projection_routing_decisions
         WHERE effective_skip_inline = 1
-            AND event_type NOT IN ('price_tick', 'tr_response')
+            AND event_type NOT IN ('price_tick', 'tr_response', 'condition_event')
         """
     ).fetchone()
     return int(row["count"])
@@ -1402,6 +1795,64 @@ def _count_condition_event_deferred_side_effect_records(
     return int(row["count"])
 
 
+def _count_condition_event_worker_applied_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM projection_outbox
+        WHERE projection_name = 'market_data'
+            AND event_type = 'condition_event'
+            AND status = 'APPLIED'
+            AND json_extract(
+                metadata_json,
+                '$.last_worker_evidence.apply_result'
+            ) = 'APPLIED_BY_WORKER'
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_effective_skip_pending_worker(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions AS d
+        JOIN projection_outbox AS po
+            ON po.projection_name = d.projection_name
+            AND po.event_id = d.event_id
+        WHERE d.event_type = 'condition_event'
+            AND d.effective_skip_inline = 1
+            AND po.status IN ('PENDING', 'PROCESSING')
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
+def _count_condition_event_artifact_missing_after_worker_records(
+    connection: sqlite3.Connection,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM market_data_projection_routing_decisions AS d
+        JOIN projection_outbox AS po
+            ON po.projection_name = d.projection_name
+            AND po.event_id = d.event_id
+        LEFT JOIN market_condition_signals AS signal
+            ON signal.event_id = d.event_id
+        WHERE d.event_type = 'condition_event'
+            AND d.effective_skip_inline = 1
+            AND po.status IN ('APPLIED', 'SKIPPED')
+            AND signal.event_id IS NULL
+        """
+    ).fetchone()
+    return int(row["count"])
+
+
 def _count_condition_event_deferred_side_effect_errors(
     connection: sqlite3.Connection,
 ) -> int:
@@ -1508,6 +1959,16 @@ def _routing_row_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
         payload["deferred_side_effect_required"] = bool(
             payload["deferred_side_effect_required"]
         )
+    for key in (
+        "condition_event_worker_side_effect_ready",
+        "condition_event_fusion_enabled",
+        "condition_event_backlog_ready",
+    ):
+        if payload.get(key) is not None:
+            payload[key] = bool(payload[key])
+    payload["candidate_ingest_executed"] = bool(
+        payload.get("candidate_ingest_executed", False)
+    )
     payload["post_apply_deferred_side_effects"] = _json_object(
         payload.pop("post_apply_deferred_side_effects_json", "{}")
     )

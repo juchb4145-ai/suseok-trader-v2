@@ -49,25 +49,14 @@ def test_reconcile_passes_worker_applied_condition_event_side_effect(
     assert result.condition_event_side_effect_duplicate_count == 0
 
 
-def test_reconcile_fails_if_condition_event_effective_skip_is_seen(
+def test_reconcile_warns_for_condition_event_effective_skip_pending_within_sla(
     tmp_path,
 ) -> None:
     connection = initialize_database(tmp_path / "condition-reconcile-effective.sqlite3")
-    settings = _condition_apply_settings()
+    settings = _condition_apply_settings(projection_outbox_processing_ttl_sec=300)
     event = _profile_condition_event("evt_condition_reconcile_effective_skip")
     append_gateway_event(connection, event)
     enqueue_projection_jobs_for_gateway_event(connection, event)
-    process_gateway_event(connection, event, settings=settings)
-    _mark_market_data_outbox(
-        connection,
-        event.event_id,
-        {
-            "last_worker_evidence": {
-                "apply_mode": "SHADOW_VERIFY_ONLY",
-                "apply_result": "APPLIED_BY_VERIFY",
-            }
-        },
-    )
     connection.execute(
         """
         INSERT INTO market_data_projection_routing_decisions (
@@ -89,12 +78,12 @@ def test_reconcile_fails_if_condition_event_effective_skip_is_seen(
             evidence_json
         )
         VALUES (?, 'condition_event', 'market_data', 1, 1, 0, 1, 'ENQUEUED',
-            1, 1, 1, 'condition_event_side_effect_prepare_only', 1, 0, ?, ?)
+            1, 1, 1, 'price_tick_tr_response_condition_event', 1, 0, ?, ?)
         """,
         (
             event.event_id,
-            json.dumps(["TEST_FORCE_CONDITION_EVENT_EFFECTIVE_SKIP"]),
-            canonical_json({"test": "condition_event_effective_skip_forbidden"}),
+            json.dumps(["CONDITION_EVENT_EFFECTIVE_SKIP_ALLOWED"]),
+            canonical_json({"test": "condition_event_effective_skip_pending"}),
         ),
     )
     connection.commit()
@@ -107,10 +96,14 @@ def test_reconcile_fails_if_condition_event_effective_skip_is_seen(
     )
     connection.close()
 
-    assert result.status == "FAIL"
+    assert result.status == "WARN"
+    assert result.append_only_ready is False
     assert result.condition_event_effective_skip_count == 1
-    assert result.invalid_effective_skip_count == 1
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN_IN_PR10" in result.reason_codes
+    assert result.condition_event_pending_within_sla_count == 1
+    assert result.invalid_effective_skip_count == 0
+    assert "MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_PENDING_WITHIN_SLA" in (
+        result.reason_codes
+    )
 
 
 def test_reconcile_fails_if_worker_candidate_ingest_is_reported(

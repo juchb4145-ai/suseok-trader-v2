@@ -39,7 +39,6 @@ def test_ops_tr_response_side_effect_check_fails_forbidden_skip_and_errors() -> 
 
     assert verdict["status"] == "FAIL"
     assert "TR_RESPONSE_EFFECTIVE_SKIP_FORBIDDEN" in verdict["failures"]
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN" in verdict["failures"]
     assert "INVALID_EFFECTIVE_SKIP_EVENT_TYPE" in verdict["failures"]
     assert "TR_RESPONSE_DEFERRED_SIDE_EFFECT_ERROR" in verdict["failures"]
     assert "TR_RESPONSE_DUPLICATE_QUOTE_REFRESH_SIDE_EFFECT" in verdict["failures"]

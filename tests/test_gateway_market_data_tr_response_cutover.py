@@ -157,11 +157,11 @@ def test_tr_response_cutover_blocks_when_worker_disabled_or_guard_fails(
     event = GatewayEvent.from_dict(
         _tr_response_payload("evt_tr_worker_disabled", codes=("005930",))
     )
-    from storage.event_store import append_gateway_event
-    from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
     from services.runtime.gateway_projection_routing import (
         decide_market_data_projection_routing,
     )
+    from storage.event_store import append_gateway_event
+    from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
 
     append_gateway_event(connection, event)
     outbox = enqueue_projection_jobs_for_gateway_event(connection, event)
@@ -234,7 +234,7 @@ def test_condition_event_remains_inline_with_tr_response_cutover_flags(
 
     assert response.json()["projection_statuses"]["market_data"] == "APPLIED"
     assert decision["effective_skip_inline"] == 0
-    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10" in decision[
+    assert "CONDITION_EVENT_CUTOVER_DISABLED" in decision[
         "blocked_reason_codes_json"
     ]
     assert signal_count == 1

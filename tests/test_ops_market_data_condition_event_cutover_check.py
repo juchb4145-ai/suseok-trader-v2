@@ -1,18 +1,20 @@
 from __future__ import annotations
 
-from tools import ops_market_data_condition_event_side_effect_check as tool
+from tools import ops_market_data_condition_event_cutover_check as tool
 
 
-def test_ops_condition_event_side_effect_check_passes_ready_state() -> None:
+def test_ops_condition_event_cutover_check_passes_normal_skip() -> None:
     report = _base_report(
         routing_overrides={
-            "condition_event_would_skip_inline_count": 2,
+            "condition_event_cutover_enabled": True,
+            "condition_event_effective_skip_count": 2,
+            "condition_event_worker_applied_count": 2,
             "condition_event_deferred_fusion_refresh_count": 2,
-            "condition_event_worker_side_effect_ready": True,
-            "condition_event_fusion_enabled": True,
+            "condition_event_skip_budget_remaining_current_minute": 1,
+            "append_only_ready": True,
+            "worker_apply_enabled": True,
         },
-        outbox_overrides={"pending_count": 0, "error_count": 0, "dead_letter_count": 0},
-        dashboard_routing_overrides={"condition_event_effective_skip_count": 0},
+        dashboard_routing_overrides={"condition_event_effective_skip_count": 2},
     )
 
     verdict = tool.evaluate_report(report)
@@ -22,36 +24,37 @@ def test_ops_condition_event_side_effect_check_passes_ready_state() -> None:
     assert verdict["warnings"] == []
 
 
-def test_ops_condition_event_side_effect_check_fails_bad_evidence() -> None:
+def test_ops_condition_event_cutover_check_fails_bad_worker_evidence() -> None:
     report = _base_report(
         routing_overrides={
+            "condition_event_cutover_enabled": True,
             "condition_event_effective_skip_count": 1,
-            "invalid_effective_skip_count": 1,
             "condition_event_candidate_ingest_executed_count": 1,
             "condition_event_deferred_fusion_refresh_error_count": 1,
-            "condition_event_side_effect_duplicate_count": 1,
+            "condition_event_artifact_missing_after_worker_count": 1,
+            "append_only_ready": True,
+            "worker_apply_enabled": True,
         },
-        outbox_overrides={"error_count": 1, "dead_letter_count": 0},
+        outbox_overrides={"error_count": 1},
         dashboard_routing_overrides={"condition_event_effective_skip_count": 1},
     )
 
     verdict = tool.evaluate_report(report)
 
     assert verdict["status"] == "FAIL"
-    assert "INVALID_EFFECTIVE_SKIP_EVENT_TYPE" in verdict["failures"]
     assert "CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER" in verdict["failures"]
     assert "CONDITION_EVENT_DEFERRED_FUSION_REFRESH_ERROR" in verdict["failures"]
-    assert "CONDITION_EVENT_SIDE_EFFECT_DUPLICATED" in verdict["failures"]
+    assert "CONDITION_EVENT_ARTIFACT_MISSING_AFTER_WORKER" in verdict["failures"]
     assert "PROJECTION_OUTBOX_ERROR_OR_DEAD_LETTER" in verdict["failures"]
 
 
-def test_ops_condition_event_side_effect_check_warns_without_observations() -> None:
+def test_ops_condition_event_cutover_check_warns_without_skip_observation() -> None:
     report = _base_report(
         routing_overrides={
-            "condition_event_would_skip_inline_count": 0,
+            "condition_event_cutover_enabled": True,
+            "condition_event_effective_skip_count": 0,
             "condition_event_deferred_fusion_refresh_count": 0,
-            "condition_event_worker_side_effect_ready": False,
-            "condition_event_fusion_enabled": False,
+            "condition_event_skip_budget_remaining_current_minute": 0,
         },
         dashboard_routing_overrides={"condition_event_effective_skip_count": 0},
     )
@@ -59,9 +62,8 @@ def test_ops_condition_event_side_effect_check_warns_without_observations() -> N
     verdict = tool.evaluate_report(report)
 
     assert verdict["status"] == "WARN"
-    assert "NO_CONDITION_EVENT_EVENTS_OBSERVED" in verdict["warnings"]
-    assert "CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY" in verdict["warnings"]
-    assert "CONDITION_FUSION_INCREMENTAL_DISABLED" in verdict["warnings"]
+    assert "NO_CONDITION_EVENT_EFFECTIVE_SKIP_OBSERVED" in verdict["warnings"]
+    assert "CONDITION_EVENT_SKIP_BUDGET_EXHAUSTED" in verdict["warnings"]
 
 
 def _base_report(
@@ -71,15 +73,17 @@ def _base_report(
     dashboard_routing_overrides: dict[str, object] | None = None,
 ) -> dict[str, object]:
     routing = {
-        "condition_event_worker_side_effect_ready": True,
-        "condition_event_fusion_enabled": True,
-        "condition_event_would_skip_inline_count": 1,
-        "condition_event_effective_skip_count": 0,
+        "condition_event_cutover_enabled": True,
+        "condition_event_skip_budget_remaining_current_minute": 10,
+        "condition_event_effective_skip_count": 1,
+        "condition_event_pending_worker_count": 0,
+        "condition_event_worker_applied_count": 1,
         "condition_event_deferred_fusion_refresh_count": 1,
         "condition_event_deferred_fusion_refresh_error_count": 0,
         "condition_event_candidate_ingest_executed_count": 0,
-        "condition_event_side_effect_duplicate_count": 0,
-        "invalid_effective_skip_count": 0,
+        "condition_event_artifact_missing_after_worker_count": 0,
+        "append_only_ready": True,
+        "worker_apply_enabled": True,
     }
     routing.update(routing_overrides or {})
     outbox = {"pending_count": 0, "error_count": 0, "dead_letter_count": 0}

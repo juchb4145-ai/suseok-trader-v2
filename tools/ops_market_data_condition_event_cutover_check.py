@@ -21,7 +21,7 @@ from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check condition_event worker-side condition_fusion evidence."
+        description="Check PR-11 condition_event market_data limited cutover."
     )
     parser.add_argument(
         "--core-url",
@@ -37,11 +37,11 @@ def main() -> int:
     parser.add_argument("--run-once", action="store_true")
     parser.add_argument(
         "--out-dir",
-        default=str(ROOT_DIR / "reports" / "market_data_condition_event_side_effect"),
+        default=str(ROOT_DIR / "reports" / "market_data_condition_event_cutover"),
     )
     args = parser.parse_args()
 
-    report = run_side_effect_report(
+    report = run_cutover_report(
         core_url=args.core_url,
         token=args.token,
         limit=args.limit,
@@ -53,7 +53,7 @@ def main() -> int:
     return 0 if report["verdict"]["status"] in {"PASS", "WARN"} else 2
 
 
-def run_side_effect_report(
+def run_cutover_report(
     *,
     core_url: str,
     token: str,
@@ -93,10 +93,7 @@ def run_side_effect_report(
         )
 
     dashboard_params = {
-        "sections": (
-            "market_data,projection_outbox,projection_outbox_backlog,"
-            "pipeline_summary,gateway,errors"
-        ),
+        "sections": "gateway,market_data,projection_outbox,pipeline_summary,errors",
         "detail": "summary",
         "limit": "20",
         "fast": "true",
@@ -150,11 +147,12 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
     run_once_blocker = False
-    backlog_blocker = False
     for key in (
         "routing_status",
         "projection_outbox",
+        "projection_outbox_backlog",
         "latest_reconcile",
+        "dashboard_snapshot",
     ):
         payload = report.get(key) or {}
         if not payload.get("ok"):
@@ -167,12 +165,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
             run_once_blocker = True
         elif not payload.get("ok"):
             failures.append(f"{str(name).upper()}_RUN_ONCE_API_ERROR")
-    dashboard_payload = report.get("dashboard_snapshot") or {}
-    dashboard_ok = bool(dashboard_payload.get("ok"))
-    dashboard_blocker = False
-    if not dashboard_ok:
-        warnings.append("DASHBOARD_SNAPSHOT_API_ERROR")
-        dashboard_blocker = True
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
@@ -187,7 +179,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     )
 
     condition_effective = int(status.get("condition_event_effective_skip_count") or 0)
-    invalid_effective = int(status.get("invalid_effective_skip_count") or 0)
+    worker_enabled = bool(status.get("worker_apply_enabled"))
     candidate_ingest_count = int(
         status.get("condition_event_candidate_ingest_executed_count") or 0
     )
@@ -196,85 +188,64 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         or status.get("condition_event_deferred_side_effect_error_count")
         or 0
     )
-    duplicate_count = int(status.get("condition_event_side_effect_duplicate_count") or 0)
-    deferred_count = int(
-        status.get("condition_event_deferred_fusion_refresh_count")
-        or status.get("condition_event_deferred_side_effect_count")
-        or 0
+    artifact_missing_count = int(
+        status.get("condition_event_artifact_missing_after_worker_count") or 0
     )
-    would_skip_count = int(status.get("condition_event_would_skip_inline_count") or 0)
     outbox_error_count = int(outbox.get("error_count") or 0) + int(
         outbox.get("dead_letter_count") or 0
     )
     backlog_status = str(backlog.get("readiness_status") or "").upper()
+    append_only_ready = bool(status.get("append_only_ready"))
 
-    if invalid_effective > 0:
-        failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
-    if candidate_ingest_count > 0:
-        failures.append("CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER")
-    if deferred_error_count > 0:
-        failures.append("CONDITION_EVENT_DEFERRED_FUSION_REFRESH_ERROR")
-    if duplicate_count > 0:
-        failures.append("CONDITION_EVENT_SIDE_EFFECT_DUPLICATED")
+    if condition_effective > 0 and not worker_enabled:
+        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_WITH_WORKER_APPLY_DISABLED")
     if outbox_error_count > 0:
         failures.append("PROJECTION_OUTBOX_ERROR_OR_DEAD_LETTER")
+    if artifact_missing_count > 0:
+        failures.append("CONDITION_EVENT_ARTIFACT_MISSING_AFTER_WORKER")
+    if deferred_error_count > 0:
+        failures.append("CONDITION_EVENT_DEFERRED_FUSION_REFRESH_ERROR")
+    if candidate_ingest_count > 0:
+        failures.append("CONDITION_EVENT_CANDIDATE_INGEST_IN_WORKER")
     if isinstance(latest_run, dict) and latest_run.get("status") == "FAIL":
         failures.append("LATEST_RECONCILE_FAIL")
-    if dashboard_ok and (
+    if condition_effective > 0 and not append_only_ready:
+        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_WITH_APPEND_ONLY_NOT_READY")
+    if backlog_status == "FAIL":
+        failures.append("PROJECTION_OUTBOX_BACKLOG_READINESS_FAIL")
+    if (
         int(dashboard_routing.get("condition_event_effective_skip_count") or 0)
         != condition_effective
     ):
         failures.append("DASHBOARD_CONDITION_EVENT_ROUTING_STATUS_MISMATCH")
-    if dashboard_ok:
-        dashboard_warnings = [
-            str(warning) for warning in dashboard.get("warnings", []) if warning
-        ]
-        skipped_timeout = any(
-            "SKIPPED_TIMEOUT_BUDGET" in warning for warning in dashboard_warnings
-        ) or any(
-            str(item.get("reason")) == "SKIPPED_TIMEOUT_BUDGET"
-            for item in dashboard.get("skipped_sections", [])
-            if isinstance(item, dict)
-        )
-        if skipped_timeout:
-            warnings.append("DASHBOARD_SECTION_SKIPPED_TIMEOUT_BUDGET")
-            dashboard_blocker = True
-        dashboard_latency_ms = float(dashboard.get("total_latency_ms") or 0)
-        if dashboard_latency_ms > 3000:
-            warnings.append("DASHBOARD_SNAPSHOT_LATENCY_WARN")
 
-    if not bool(status.get("condition_event_worker_side_effect_ready")):
-        warnings.append("CONDITION_EVENT_WORKER_SIDE_EFFECT_NOT_READY")
-    if not bool(status.get("condition_event_fusion_enabled")):
-        warnings.append("CONDITION_FUSION_INCREMENTAL_DISABLED")
-    if would_skip_count == 0 and deferred_count == 0:
-        warnings.append("NO_CONDITION_EVENT_EVENTS_OBSERVED")
-    if deferred_count == 0:
-        warnings.append("CONDITION_EVENT_DEFERRED_FUSION_REFRESH_NOT_OBSERVED")
-    if int(outbox.get("pending_count") or 0) > 0:
-        warnings.append("PROJECTION_OUTBOX_PENDING_WORKER_RUN_ONCE_RECOMMENDED")
-    if backlog_status == "FAIL":
-        warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_FAIL")
-        backlog_blocker = True
-    elif backlog_status == "WARN":
+    if bool(status.get("condition_event_cutover_enabled")) and int(
+        status.get("condition_event_skip_budget_remaining_current_minute") or 0
+    ) <= 0:
+        warnings.append("CONDITION_EVENT_SKIP_BUDGET_EXHAUSTED")
+    if condition_effective <= 0:
+        warnings.append("NO_CONDITION_EVENT_EFFECTIVE_SKIP_OBSERVED")
+    if int(status.get("condition_event_pending_worker_count") or 0) > 0:
+        warnings.append("CONDITION_EVENT_PENDING_WORKER_WITHIN_SLA")
+    if not isinstance(latest_run, dict):
+        warnings.append("LATEST_RECONCILE_MISSING")
+    elif latest_run.get("status") not in {"PASS", "WARN"}:
+        warnings.append("LATEST_RECONCILE_NOT_READY")
+    if backlog_status == "WARN":
         warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_WARN")
     elif backlog_status == "":
         warnings.append("PROJECTION_OUTBOX_BACKLOG_STATUS_MISSING")
     if not bool(backlog.get("pr11_condition_event_cutover_ready")):
         warnings.append("PR11_CONDITION_EVENT_CUTOVER_NOT_READY")
-    if not isinstance(latest_run, dict):
-        warnings.append("LATEST_RECONCILE_MISSING")
-    elif latest_run.get("status") not in {"PASS", "WARN"}:
-        warnings.append("LATEST_RECONCILE_NOT_READY")
+    if int(status.get("condition_event_deferred_fusion_refresh_count") or 0) <= 0:
+        warnings.append("CONDITION_EVENT_DEFERRED_FUSION_REFRESH_NOT_OBSERVED")
 
     verdict = "FAIL" if failures else "WARN" if warnings else "PASS"
     return {
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
-        "block_next_pr": bool(
-            failures or dashboard_blocker or run_once_blocker or backlog_blocker
-        ),
+        "block_next_pr": bool(failures or run_once_blocker),
         "backlog_readiness_status": backlog.get("readiness_status"),
         "pr11_condition_event_cutover_ready": bool(
             backlog.get("pr11_condition_event_cutover_ready")
@@ -301,32 +272,31 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
     backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     lines = [
-        "# Market Data Condition Event Side Effect Check",
+        "# Market Data Condition Event Cutover Check",
         "",
         f"- generated_at: `{report.get('generated_at')}`",
         f"- verdict: `{verdict.get('status')}`",
-        f"- block_next_pr: `{verdict.get('block_next_pr')}`",
-        _summary_line(status, "condition_event_worker_side_effect_ready"),
-        _summary_line(status, "condition_event_fusion_enabled"),
-        _summary_line(status, "condition_event_would_skip_inline_count"),
+        _summary_line(status, "condition_event_cutover_enabled"),
+        _summary_line(status, "condition_event_skip_budget_remaining_current_minute"),
         _summary_line(status, "condition_event_effective_skip_count"),
+        _summary_line(status, "condition_event_pending_worker_count"),
+        _summary_line(status, "condition_event_worker_applied_count"),
         _summary_line(status, "condition_event_deferred_fusion_refresh_count"),
         _summary_line(status, "condition_event_deferred_fusion_refresh_error_count"),
         _summary_line(status, "condition_event_candidate_ingest_executed_count"),
-        _summary_line(status, "condition_event_side_effect_duplicate_count"),
+        _summary_line(status, "condition_event_artifact_missing_after_worker_count"),
         f"- backlog_readiness_status: `{backlog.get('readiness_status')}`",
         (
             f"- pr11_condition_event_cutover_ready: "
             f"`{backlog.get('pr11_condition_event_cutover_ready')}`"
         ),
-        f"- backlog_operator_actions: `{backlog.get('operator_actions')}`",
         f"- failures: `{verdict.get('failures', [])}`",
         f"- warnings: `{verdict.get('warnings', [])}`",
         "",
         "## Safety",
         "",
-        "- PR-11 condition_event cutover is controlled by separate strict flags and budget.",
-        "- condition_event inline projection remains the default.",
+        "- PR-11 allows condition_event inline skip only behind strict flags and budget.",
+        "- skipped condition_event condition_fusion refresh is deferred to the worker.",
         "- candidate ingest remains outside projection_outbox worker.",
         "- LIVE_SIM/LIVE_REAL/order behavior is unchanged.",
     ]
@@ -338,12 +308,12 @@ def render_console_summary(report: dict[str, Any]) -> str:
     backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     return (
-        "market_data condition_event side-effect: "
+        "market_data condition_event cutover: "
         f"{verdict.get('status')} "
         f"condition_skip={status.get('condition_event_effective_skip_count')} "
+        f"worker_applied={status.get('condition_event_worker_applied_count')} "
         f"deferred={status.get('condition_event_deferred_fusion_refresh_count')} "
-        f"deferred_errors={status.get('condition_event_deferred_fusion_refresh_error_count')} "
-        f"candidate_ingest={status.get('condition_event_candidate_ingest_executed_count')} "
+        f"errors={status.get('condition_event_deferred_fusion_refresh_error_count')} "
         f"backlog={backlog.get('readiness_status')}"
     )
 

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 
-from services.config import Settings
 from services.condition_fusion import list_condition_fusion
+from services.config import Settings
 from services.dashboard_service import build_dashboard_snapshot
 from services.market_data_service import process_gateway_event
 from services.runtime.gateway_projection_routing import (
@@ -67,10 +67,7 @@ def test_worker_apply_condition_event_runs_deferred_condition_fusion_refresh(
     connection.close()
 
     assert decision.effective_skip_inline is False
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10" in (
-        decision.blocked_reason_codes
-    )
-    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10" in decision.blocked_reason_codes
+    assert "DRY_RUN_DISABLED" in decision.blocked_reason_codes
     assert result.applied_by_worker_count == 1
     assert row["status"] == "APPLIED"
     assert side_effects["condition_fusion_refresh_status"] == "APPLIED"
@@ -93,11 +90,13 @@ def test_worker_apply_condition_event_runs_deferred_condition_fusion_refresh(
     assert status["condition_event_worker_side_effect_ready"] is True
     summary = dashboard["pipeline_summary"]["market_data_append_only_routing"]
     assert summary["condition_event_side_effect_migration_status"] == (
-        "PREP_ONLY_INLINE_REQUIRED"
+        "WORKER_DEFERRED_READY"
     )
     assert summary["condition_event_deferred_fusion_refresh_count"] == 1
     assert summary["condition_event_candidate_ingest_status"] == "NOT_IN_WORKER"
-    assert "PR-10: condition_event cutover is not enabled" in summary["warnings"]
+    assert "PR-11 condition_event limited cutover is feature-flagged" in (
+        summary["warnings"]
+    )
 
 
 def test_worker_does_not_duplicate_condition_fusion_after_inline_apply(
@@ -173,7 +172,7 @@ def test_worker_condition_event_side_effect_skips_when_fusion_disabled(
     connection.close()
 
     assert decision.effective_skip_inline is False
-    assert "CONDITION_FUSION_INCREMENTAL_DISABLED" in decision.blocked_reason_codes
+    assert "CONDITION_EVENT_FUSION_DISABLED" in decision.blocked_reason_codes
     assert result.applied_by_worker_count == 1
     assert row["status"] == "APPLIED"
     assert side_effects["condition_fusion_refresh_status"] == "SKIPPED"
@@ -186,7 +185,7 @@ def test_worker_condition_event_side_effect_skips_when_fusion_disabled(
     assert status["condition_event_deferred_side_effect_error_count"] == 0
 
 
-def test_condition_event_effective_skip_is_forbidden_with_pr10_flags(
+def test_condition_event_effective_skip_requires_positive_skip_budget(
     tmp_path,
 ) -> None:
     connection = initialize_database(tmp_path / "condition-effective-skip-pr10.sqlite3")
@@ -195,6 +194,7 @@ def test_condition_event_effective_skip_is_forbidden_with_pr10_flags(
         gateway_market_data_append_only_cutover_enabled=True,
         gateway_market_data_append_only_condition_event_dry_run_enabled=True,
         gateway_market_data_append_only_condition_event_cutover_enabled=True,
+        gateway_market_data_append_only_condition_event_require_backlog_ready=False,
         gateway_market_data_append_only_cutover_event_types=(
             "price_tick",
             "condition_event",
@@ -223,10 +223,7 @@ def test_condition_event_effective_skip_is_forbidden_with_pr10_flags(
     assert decision.would_skip_inline is True
     assert decision.effective_skip_inline is False
     assert projection.status == "APPLIED"
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_DISABLED_IN_PR10" in (
-        decision.blocked_reason_codes
-    )
-    assert "CONDITION_EVENT_CUTOVER_DISABLED_IN_PR10" in decision.blocked_reason_codes
+    assert "CONDITION_EVENT_SKIP_BUDGET_EXHAUSTED" in decision.blocked_reason_codes
     assert status["condition_event_effective_skip_count"] == 0
     assert status["invalid_effective_skip_count"] == 0
 

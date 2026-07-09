@@ -15,8 +15,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tools.ops_market_data_tr_response_side_effect_check import (
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     fetch_json as _fetch_json_with_locked_retry,
+)
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     is_locked_retryable_payload,
 )
 
@@ -67,16 +69,28 @@ def run_cutover_report(
     base_url = core_url.rstrip("/")
     run_once_payloads: dict[str, Any] = {}
     if run_once:
+        projection_outbox_query = urllib.parse.urlencode(
+            {
+                "limit": str(limit),
+                "apply_projection": "true",
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["projection_outbox"] = fetch_json(
-            f"{base_url}/api/operator/projection-outbox/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(limit), 'apply_projection': 'true', 'live_safe': 'true'})}",
+            f"{base_url}/api/operator/projection-outbox/run-once?{projection_outbox_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
         )
+        reconcile_query = urllib.parse.urlencode(
+            {
+                "limit": str(max(limit, 500)),
+                "live_safe": "true",
+            }
+        )
         run_once_payloads["reconcile"] = fetch_json(
             f"{base_url}/api/operator/market-data-projection-reconcile/run-once?"
-            f"{urllib.parse.urlencode({'limit': str(max(limit, 500)), 'live_safe': 'true'})}",
+            f"{reconcile_query}",
             token=token,
             method="POST",
             timeout_sec=timeout_sec,
@@ -114,7 +128,10 @@ def run_cutover_report(
         timeout_sec=timeout_sec,
     )
     dashboard_params = {
-        "sections": "market_data,projection_outbox,projection_outbox_backlog,pipeline_summary,gateway,errors",
+        "sections": (
+            "market_data,projection_outbox,projection_outbox_backlog,"
+            "pipeline_summary,gateway,errors"
+        ),
         "detail": "summary",
         "limit": "20",
         "fast": "true",
@@ -183,7 +200,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     effective_price_tick = int(status.get("effective_price_tick_skip_count") or 0)
-    effective_total = int(status.get("effective_skip_inline_count") or 0)
     deferred_count = int(status.get("deferred_incremental_enqueue_count") or 0)
     pending_count = int(outbox.get("pending_count") or 0)
     outbox_error_count = int(outbox.get("error_count") or 0) + int(
@@ -191,10 +207,6 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     )
     backlog_status = str(backlog.get("readiness_status") or "").upper()
 
-    if int(status.get("condition_event_effective_skip_count") or 0) > 0:
-        failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
-    if int(status.get("tr_response_effective_skip_count") or 0) > 0:
-        failures.append("TR_RESPONSE_EFFECTIVE_SKIP_FORBIDDEN")
     if int(status.get("invalid_effective_skip_count") or 0) > 0:
         failures.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
     if effective_price_tick > 0 and not bool(status.get("worker_apply_enabled")):
@@ -206,7 +218,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         failures.append("EFFECTIVE_SKIP_OUTBOX_ERROR_OR_DEAD_LETTER")
     if isinstance(latest_run, dict) and latest_run.get("status") == "FAIL":
         failures.append("LATEST_RECONCILE_FAIL")
-    if effective_total > 0 and not bool(status.get("append_only_ready")):
+    if effective_price_tick > 0 and not bool(status.get("append_only_ready")):
         failures.append("EFFECTIVE_SKIP_WITH_APPEND_ONLY_NOT_READY")
     if (
         effective_price_tick > 0
@@ -305,9 +317,15 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         f"- skip_budget_remaining: `{status.get('skip_budget_remaining_current_minute')}`",
         f"- effective_price_tick_skip_count: `{status.get('effective_price_tick_skip_count')}`",
         f"- invalid_effective_skip_count: `{status.get('invalid_effective_skip_count')}`",
-        f"- deferred_incremental_enqueue_count: `{status.get('deferred_incremental_enqueue_count')}`",
+        (
+            f"- deferred_incremental_enqueue_count: "
+            f"`{status.get('deferred_incremental_enqueue_count')}`"
+        ),
         f"- backlog_readiness_status: `{backlog.get('readiness_status')}`",
-        f"- pr11_condition_event_cutover_ready: `{backlog.get('pr11_condition_event_cutover_ready')}`",
+        (
+            f"- pr11_condition_event_cutover_ready: "
+            f"`{backlog.get('pr11_condition_event_cutover_ready')}`"
+        ),
         f"- backlog_operator_actions: `{backlog.get('operator_actions')}`",
         f"- failures: `{verdict.get('failures', [])}`",
         f"- warnings: `{verdict.get('warnings', [])}`",

@@ -107,6 +107,20 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
         settings.gateway_market_data_append_only_condition_event_require_fusion_enabled
         is True
     )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_require_backlog_ready
+        is True
+    )
+    assert settings.gateway_market_data_append_only_condition_event_max_skip_per_minute == 0
+    assert (
+        settings.gateway_market_data_append_only_condition_event_fail_closed_on_side_effect_error
+        is True
+    )
+    assert (
+        settings.gateway_market_data_append_only_condition_event_allow_candidate_ingest_in_worker
+        is False
+    )
+    assert settings.gateway_market_data_append_only_condition_event_max_payload_age_sec == 60
     assert settings.gateway_market_data_append_only_cutover_event_types == ("price_tick",)
     assert settings.gateway_market_data_append_only_require_reconcile_pass is True
     assert settings.gateway_market_data_append_only_require_latest_reconcile_pass is True
@@ -677,6 +691,28 @@ def test_market_data_interval_settings_are_validated() -> None:
         assert "GATEWAY_MARKET_DATA_APPEND_ONLY_RECONCILE_MAX_AGE_SEC" in str(exc)
     else:
         raise AssertionError("expected invalid append-only routing max age")
+    try:
+        load_settings(
+            {"GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE": "-1"}
+        )
+    except ValueError as exc:
+        assert (
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE"
+            in str(exc)
+        )
+    else:
+        raise AssertionError("expected invalid condition_event skip budget")
+    try:
+        load_settings(
+            {"GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_PAYLOAD_AGE_SEC": "0"}
+        )
+    except ValueError as exc:
+        assert (
+            "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_PAYLOAD_AGE_SEC"
+            in str(exc)
+        )
+    else:
+        raise AssertionError("expected invalid condition_event max payload age")
 
 
 def test_realtime_subscription_settings_are_validated() -> None:

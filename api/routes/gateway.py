@@ -103,6 +103,11 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             incremental_status = (
                                 "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_TR_RESPONSE"
                             )
+                        elif event_type == "condition_event":
+                            projection_status = (
+                                "SKIPPED_INLINE_APPEND_ONLY_CONDITION_EVENT"
+                            )
+                            incremental_status = None
                         elif event_type == "price_tick":
                             projection_status = "SKIPPED_INLINE_APPEND_ONLY_PRICE_TICK"
                             incremental_status = "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
@@ -111,7 +116,14 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             incremental_status = "DEFERRED_TO_PROJECTION_OUTBOX_WORKER"
                         projection_statuses["market_data"] = projection_status
                         projection_statuses["market_data_effective_skip_inline"] = "TRUE"
-                        projection_statuses["incremental_evaluation"] = incremental_status
+                        if incremental_status is not None:
+                            projection_statuses["incremental_evaluation"] = (
+                                incremental_status
+                            )
+                        if event_type == "condition_event":
+                            projection_statuses["condition_fusion"] = (
+                                "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_CONDITION_EVENT"
+                            )
                     else:
                         projection_result = process_gateway_event(
                             connection,

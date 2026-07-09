@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 APP_NAME = "suseok-trader-v2"
 
 
@@ -1658,11 +1658,13 @@ def _create_market_data_projection_reconcile_tables(
             tr_response_deferred_quote_refresh_count INTEGER NOT NULL DEFAULT 0,
             tr_response_deferred_quote_refresh_error_count INTEGER NOT NULL DEFAULT 0,
             condition_event_effective_skip_count INTEGER NOT NULL DEFAULT 0,
+            condition_event_pending_within_sla_count INTEGER NOT NULL DEFAULT 0,
             condition_event_worker_applied_count INTEGER NOT NULL DEFAULT 0,
             condition_event_deferred_fusion_refresh_count INTEGER NOT NULL DEFAULT 0,
             condition_event_deferred_fusion_refresh_error_count INTEGER NOT NULL DEFAULT 0,
             condition_event_side_effect_duplicate_count INTEGER NOT NULL DEFAULT 0,
             condition_event_candidate_ingest_in_worker_count INTEGER NOT NULL DEFAULT 0,
+            condition_event_artifact_missing_after_worker_count INTEGER NOT NULL DEFAULT 0,
             invalid_effective_skip_count INTEGER NOT NULL DEFAULT 0,
             event_rowid_min INTEGER,
             event_rowid_max INTEGER,
@@ -1719,11 +1721,13 @@ def _create_market_data_projection_reconcile_tables(
             "tr_response_deferred_quote_refresh_count": "INTEGER NOT NULL DEFAULT 0",
             "tr_response_deferred_quote_refresh_error_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_effective_skip_count": "INTEGER NOT NULL DEFAULT 0",
+            "condition_event_pending_within_sla_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_worker_applied_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_deferred_fusion_refresh_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_deferred_fusion_refresh_error_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_side_effect_duplicate_count": "INTEGER NOT NULL DEFAULT 0",
             "condition_event_candidate_ingest_in_worker_count": "INTEGER NOT NULL DEFAULT 0",
+            "condition_event_artifact_missing_after_worker_count": "INTEGER NOT NULL DEFAULT 0",
             "invalid_effective_skip_count": "INTEGER NOT NULL DEFAULT 0",
         },
     )
@@ -1761,6 +1765,15 @@ def _create_market_data_projection_routing_tables(
             tr_response_skip_budget_limit INTEGER,
             tr_response_skip_budget_used INTEGER,
             tr_response_skip_budget_remaining INTEGER,
+            condition_event_skip_budget_limit INTEGER,
+            condition_event_skip_budget_used INTEGER,
+            condition_event_skip_budget_remaining INTEGER,
+            condition_event_worker_side_effect_ready INTEGER,
+            condition_event_fusion_enabled INTEGER,
+            condition_event_backlog_ready INTEGER,
+            condition_event_code TEXT,
+            condition_event_action TEXT,
+            candidate_ingest_executed INTEGER NOT NULL DEFAULT 0,
             synthetic_child_guard_status TEXT,
             worker_side_effect_ready INTEGER,
             deferred_side_effect_required INTEGER,
@@ -1786,6 +1799,15 @@ def _create_market_data_projection_routing_tables(
             "tr_response_skip_budget_limit": "INTEGER",
             "tr_response_skip_budget_used": "INTEGER",
             "tr_response_skip_budget_remaining": "INTEGER",
+            "condition_event_skip_budget_limit": "INTEGER",
+            "condition_event_skip_budget_used": "INTEGER",
+            "condition_event_skip_budget_remaining": "INTEGER",
+            "condition_event_worker_side_effect_ready": "INTEGER",
+            "condition_event_fusion_enabled": "INTEGER",
+            "condition_event_backlog_ready": "INTEGER",
+            "condition_event_code": "TEXT",
+            "condition_event_action": "TEXT",
+            "candidate_ingest_executed": "INTEGER NOT NULL DEFAULT 0",
             "synthetic_child_guard_status": "TEXT",
             "worker_side_effect_ready": "INTEGER",
             "deferred_side_effect_required": "INTEGER",

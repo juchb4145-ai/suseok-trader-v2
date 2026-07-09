@@ -337,7 +337,7 @@ def evaluate_projection_outbox_readiness(
         fail_reasons.append("OUTBOX_BLOCKING_PENDING_FAIL_THRESHOLD")
         actions.append("RUN_PROJECTION_OUTBOX_BACKLOG_DRAIN")
     if effective_skip_pending_count > 0:
-        fail_reasons.append("EFFECTIVE_SKIP_PENDING_BACKLOG")
+        warn_reasons.append("EFFECTIVE_SKIP_PENDING_WITHIN_SLA")
         actions.append("RUN_PROJECTION_OUTBOX_DRAIN_ONCE")
     if condition_event_blocking_pending_count > int(
         settings.projection_outbox_backlog_condition_event_ready_max_pending
@@ -355,9 +355,6 @@ def evaluate_projection_outbox_readiness(
     elif latest_reconcile_status != "PASS":
         fail_reasons.append("LATEST_RECONCILE_NOT_PASS")
         actions.append("RUN_MARKET_DATA_PROJECTION_RECONCILE")
-    if condition_event_effective_skip_count > 0:
-        fail_reasons.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
-        actions.append("KEEP_CONDITION_EVENT_INLINE_ENABLED")
     if invalid_effective_skip_count > 0:
         fail_reasons.append("INVALID_EFFECTIVE_SKIP_EVENT_TYPE")
         actions.append("CHECK_APPEND_ONLY_ROUTING_GUARD")
@@ -388,8 +385,10 @@ def evaluate_projection_outbox_readiness(
         <= int(
             settings.projection_outbox_backlog_condition_event_ready_recent_max_pending
         )
-        and effective_skip_pending_count == 0
-        and condition_event_effective_skip_count == 0
+        and effective_skip_pending_count
+        <= int(
+            settings.projection_outbox_backlog_condition_event_ready_recent_max_pending
+        )
         and latest_reconcile_status == "PASS"
         and total_error_count == 0
         and total_dead_letter_count == 0

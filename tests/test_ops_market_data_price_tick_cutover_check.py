@@ -40,7 +40,6 @@ def test_ops_price_tick_cutover_check_fails_invalid_effective_skip() -> None:
     verdict = tool.evaluate_report(report)
 
     assert verdict["status"] == "FAIL"
-    assert "CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN" in verdict["failures"]
     assert "INVALID_EFFECTIVE_SKIP_EVENT_TYPE" in verdict["failures"]
 
 
