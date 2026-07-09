@@ -85,6 +85,37 @@ def test_dashboard_pipeline_summary_fast_includes_outbox_reconcile_and_routing(
     assert summary["order_safety"]["order_commands_allowed"] is False
 
 
+def test_dashboard_fast_path_includes_projection_outbox_backlog(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "dashboard-fast-backlog.sqlite3")
+
+    snapshot = dashboard_service.build_dashboard_snapshot_sections(
+        connection,
+        Settings(),
+        sections={
+            "projection_outbox",
+            "projection_outbox_backlog",
+            "pipeline_summary",
+        },
+        limit=20,
+    )
+
+    connection.close()
+    assert "projection_outbox_backlog" in snapshot["included_sections"]
+    assert "projection_outbox_backlog" in snapshot
+    assert snapshot["projection_outbox_backlog"]["read_only"] is True
+    assert (
+        snapshot["pipeline_summary"]["projection_outbox"][
+            "backlog_readiness_status"
+        ]
+        == snapshot["projection_outbox_backlog"]["readiness_status"]
+    )
+    assert "pr11_condition_event_cutover_ready" in snapshot["pipeline_summary"][
+        "projection_outbox"
+    ]
+
+
 def test_dashboard_fast_path_skips_optional_sections_after_timeout_budget(
     tmp_path,
     monkeypatch,

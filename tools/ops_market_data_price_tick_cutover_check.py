@@ -101,6 +101,12 @@ def run_cutover_report(
         method="GET",
         timeout_sec=timeout_sec,
     )
+    backlog_payload = fetch_json(
+        f"{base_url}/api/operator/projection-outbox/backlog",
+        token=token,
+        method="GET",
+        timeout_sec=timeout_sec,
+    )
     reconcile_payload = fetch_json(
         f"{base_url}/api/operator/market-data-projection-reconcile/latest",
         token=token,
@@ -108,7 +114,7 @@ def run_cutover_report(
         timeout_sec=timeout_sec,
     )
     dashboard_params = {
-        "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
+        "sections": "market_data,projection_outbox,projection_outbox_backlog,pipeline_summary,gateway,errors",
         "detail": "summary",
         "limit": "20",
         "fast": "true",
@@ -131,6 +137,7 @@ def run_cutover_report(
         "routing_status": status_payload,
         "routing_decisions": decisions_payload,
         "projection_outbox": outbox_payload,
+        "projection_outbox_backlog": backlog_payload,
         "latest_reconcile": reconcile_payload,
         "dashboard_snapshot": dashboard_payload,
     }
@@ -144,6 +151,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
     run_once_blocker = False
+    backlog_blocker = False
     for key in (
         "routing_status",
         "routing_decisions",
@@ -165,6 +173,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
+    backlog = _data(report, "projection_outbox_backlog")
     reconcile = _data(report, "latest_reconcile")
     dashboard = _data(report, "dashboard_snapshot")
     latest_run = reconcile.get("latest_run") if isinstance(reconcile, dict) else None
@@ -180,6 +189,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     outbox_error_count = int(outbox.get("error_count") or 0) + int(
         outbox.get("dead_letter_count") or 0
     )
+    backlog_status = str(backlog.get("readiness_status") or "").upper()
 
     if int(status.get("condition_event_effective_skip_count") or 0) > 0:
         failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
@@ -220,6 +230,15 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         warnings.append("PRICE_TICK_SKIP_BUDGET_EXHAUSTED")
     if pending_count > 0:
         warnings.append("PROJECTION_OUTBOX_PENDING_WORKER_RUN_ONCE_RECOMMENDED")
+    if backlog_status == "FAIL":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_FAIL")
+        backlog_blocker = True
+    elif backlog_status == "WARN":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_WARN")
+    elif backlog_status == "":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_STATUS_MISSING")
+    if not bool(backlog.get("pr11_condition_event_cutover_ready")):
+        warnings.append("PR11_CONDITION_EVENT_CUTOVER_NOT_READY")
     if effective_price_tick > 0 and pending_count > 0 and deferred_count < effective_price_tick:
         warnings.append("DEFERRED_INCREMENTAL_ENQUEUE_WAITING_FOR_WORKER")
     if isinstance(latest_run, dict) and latest_run.get("status") not in {"PASS", "WARN"}:
@@ -232,7 +251,11 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
-        "block_next_pr": bool(failures or run_once_blocker),
+        "block_next_pr": bool(failures or run_once_blocker or backlog_blocker),
+        "backlog_readiness_status": backlog.get("readiness_status"),
+        "pr11_condition_event_cutover_ready": bool(
+            backlog.get("pr11_condition_event_cutover_ready")
+        ),
     }
 
 
@@ -267,6 +290,7 @@ def write_report(report: dict[str, Any], *, out_dir: Path) -> dict[str, Path]:
 
 def render_markdown_summary(report: dict[str, Any]) -> str:
     status = _data(report, "routing_status")
+    backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     lines = [
         "# Market Data Price Tick Cutover Check",
@@ -282,6 +306,9 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         f"- effective_price_tick_skip_count: `{status.get('effective_price_tick_skip_count')}`",
         f"- invalid_effective_skip_count: `{status.get('invalid_effective_skip_count')}`",
         f"- deferred_incremental_enqueue_count: `{status.get('deferred_incremental_enqueue_count')}`",
+        f"- backlog_readiness_status: `{backlog.get('readiness_status')}`",
+        f"- pr11_condition_event_cutover_ready: `{backlog.get('pr11_condition_event_cutover_ready')}`",
+        f"- backlog_operator_actions: `{backlog.get('operator_actions')}`",
         f"- failures: `{verdict.get('failures', [])}`",
         f"- warnings: `{verdict.get('warnings', [])}`",
         "",
@@ -296,13 +323,15 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
 
 def render_console_summary(report: dict[str, Any]) -> str:
     status = _data(report, "routing_status")
+    backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     return (
         "market_data price_tick cutover: "
         f"{verdict.get('status')} "
         f"price_tick_skip={status.get('effective_price_tick_skip_count')} "
         f"invalid_skip={status.get('invalid_effective_skip_count')} "
-        f"deferred_enqueue={status.get('deferred_incremental_enqueue_count')}"
+        f"deferred_enqueue={status.get('deferred_incremental_enqueue_count')} "
+        f"backlog={backlog.get('readiness_status')}"
     )
 
 

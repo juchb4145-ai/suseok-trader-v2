@@ -36,6 +36,10 @@ from services.runtime.market_open_observe_cycle import (
     run_market_open_observe_cycle_once,
 )
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
+from services.runtime.projection_outbox_backlog import (
+    build_projection_outbox_backlog_status,
+    projection_outbox_backlog_summary_fields,
+)
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
@@ -210,7 +214,29 @@ def operator_projection_outbox_status() -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        return get_projection_outbox_status(connection, settings=settings)
+        status = get_projection_outbox_status(connection, settings=settings)
+        backlog = build_projection_outbox_backlog_status(
+            connection,
+            settings=settings,
+            sample_limit=3,
+        ).to_dict()
+        status.update(projection_outbox_backlog_summary_fields(backlog))
+        status["backlog"] = backlog
+        return status
+    finally:
+        connection.close()
+
+
+@router.get("/projection-outbox/backlog")
+def operator_projection_outbox_backlog() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_projection_outbox_backlog_status(
+            connection,
+            settings=settings,
+            sample_limit=3,
+        ).to_dict()
     finally:
         connection.close()
 
@@ -268,6 +294,143 @@ def operator_projection_outbox_run_once(
         payload["read_only_projection"] = not payload["projection_side_effects_allowed"]
         payload["retryable"] = bool(payload.get("retryable"))
         return payload
+    finally:
+        connection.close()
+
+
+@router.post("/projection-outbox/drain-once", dependencies=[Depends(require_local_token)])
+def operator_projection_outbox_drain_once(
+    limit: int = Query(default=100, ge=1, le=500),
+    apply_projection: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+    max_batches: int = Query(default=1, ge=1, le=100),
+    stop_on_locked: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+    batches_run = 0
+    claimed_count = 0
+    applied_count = 0
+    skipped_count = 0
+    error_count = 0
+    dead_letter_count = 0
+    projection_side_effects_allowed = False
+    result_statuses: list[str] = []
+    locked_payload: dict[str, Any] | None = None
+    pending_before = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        pending_before = int(
+            build_projection_outbox_backlog_status(
+                connection,
+                settings=settings,
+                sample_limit=0,
+            ).total_pending_count
+        )
+        for _ in range(max_batches):
+            try:
+                result = retry_sqlite_locked(
+                    lambda: process_projection_outbox_batch(
+                        connection,
+                        settings=settings,
+                        limit=limit,
+                        apply_projection=apply_projection,
+                        live_safe=live_safe,
+                    ),
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                    max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                    on_retry=_on_retry,
+                )
+            except sqlite3.OperationalError as exc:
+                if not is_sqlite_locked_error(exc):
+                    raise
+                locked_payload = _locked_retryable_operator_payload(
+                    settings=settings,
+                    endpoint="projection_outbox_drain_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=not bool(
+                        apply_projection
+                        and settings.projection_outbox_apply_projection_enabled
+                        and settings.projection_outbox_market_data_apply_enabled
+                    ),
+                    operator_action=(
+                        "retry with a smaller live_safe drain batch after ingest pressure drops"
+                    ),
+                )
+                if stop_on_locked:
+                    break
+                continue
+            payload = result.to_dict()
+            batches_run += 1
+            claimed_count += int(payload.get("claimed_count") or 0)
+            applied_count += int(payload.get("applied_count") or 0)
+            skipped_count += int(payload.get("skipped_count") or 0)
+            error_count += int(payload.get("error_count") or 0)
+            dead_letter_count += int(payload.get("dead_letter_count") or 0)
+            locked_retry_count += int(payload.get("locked_retry_count") or 0)
+            projection_side_effects_allowed = (
+                projection_side_effects_allowed
+                or bool(payload.get("projection_side_effects_allowed"))
+            )
+            result_statuses.append(str(payload.get("status") or "UNKNOWN"))
+            if int(payload.get("claimed_count") or 0) == 0:
+                break
+        pending_after = int(
+            build_projection_outbox_backlog_status(
+                connection,
+                settings=settings,
+                sample_limit=0,
+            ).total_pending_count
+        )
+        if locked_payload is not None:
+            status = "LOCKED_RETRYABLE" if batches_run == 0 else "PARTIAL"
+        elif error_count > 0 or dead_letter_count > 0:
+            status = "COMPLETED_WITH_WARNINGS"
+        elif any(value.startswith("PARTIAL") for value in result_statuses):
+            status = "PARTIAL"
+        else:
+            status = "COMPLETED"
+        return {
+            "status": status,
+            "retryable": locked_payload is not None,
+            "batches_run": batches_run,
+            "claimed_count": claimed_count,
+            "applied_count": applied_count,
+            "skipped_count": skipped_count,
+            "error_count": error_count,
+            "dead_letter_count": dead_letter_count,
+            "pending_before": pending_before,
+            "pending_after": pending_after,
+            "pending_delta": pending_after - pending_before,
+            "locked_retry_count": locked_retry_count,
+            "lock_metadata": (
+                None if locked_payload is None else locked_payload.get("lock_metadata")
+            ),
+            "reason_codes": (
+                [] if locked_payload is None else locked_payload.get("reason_codes", [])
+            ),
+            "operator_action": (
+                None if locked_payload is None else locked_payload.get("operator_action")
+            ),
+            "read_only_projection": not projection_side_effects_allowed,
+            "no_trading_side_effects": True,
+            "projection_side_effects_allowed": projection_side_effects_allowed,
+            "projection_side_effects_requested": bool(apply_projection),
+            "live_safe": bool(live_safe),
+            "result_statuses": result_statuses,
+        }
     finally:
         connection.close()
 
@@ -560,7 +723,35 @@ def _locked_retryable_operator_response(
     read_only_projection: bool,
     operator_action: str,
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {
+    payload = _locked_retryable_operator_payload(
+        settings=settings,
+        endpoint=endpoint,
+        exc=exc,
+        attempts=attempts,
+        elapsed_ms=elapsed_ms,
+        locked_retry_count=locked_retry_count,
+        read_only_projection=read_only_projection,
+        operator_action=operator_action,
+    )
+    configured_status = int(getattr(settings, "operator_run_once_locked_http_status", 409))
+    if configured_status == 200:
+        return payload
+    raise HTTPException(status_code=configured_status, detail=payload) from exc
+
+
+def _locked_retryable_operator_payload(
+    *,
+    settings: Any,
+    endpoint: str,
+    exc: sqlite3.OperationalError,
+    attempts: int,
+    elapsed_ms: float,
+    locked_retry_count: int,
+    read_only_projection: bool,
+    operator_action: str,
+) -> dict[str, Any]:
+    del settings
+    return {
         "status": "LOCKED_RETRYABLE",
         "retryable": True,
         "reason_codes": ["SQLITE_DATABASE_LOCKED"],
@@ -576,10 +767,6 @@ def _locked_retryable_operator_response(
         "no_trading_side_effects": True,
         "operator_action": operator_action,
     }
-    configured_status = int(getattr(settings, "operator_run_once_locked_http_status", 409))
-    if configured_status == 200:
-        return payload
-    raise HTTPException(status_code=configured_status, detail=payload) from exc
 
 
 def _configure_operator_run_once_connection(

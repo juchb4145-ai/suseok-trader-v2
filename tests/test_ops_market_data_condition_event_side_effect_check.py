@@ -94,6 +94,14 @@ def _base_report(
     return {
         "routing_status": {"ok": True, "data": routing},
         "projection_outbox": {"ok": True, "data": outbox},
+        "projection_outbox_backlog": {
+            "ok": True,
+            "data": {
+                "readiness_status": "PASS",
+                "pr11_condition_event_cutover_ready": True,
+                "operator_actions": [],
+            },
+        },
         "latest_reconcile": {
             "ok": True,
             "data": {

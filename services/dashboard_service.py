@@ -126,6 +126,10 @@ from services.runtime.market_data_projection_reconcile import (
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
 )
+from services.runtime.projection_outbox_backlog import (
+    build_projection_outbox_backlog_status,
+    projection_outbox_backlog_summary_fields,
+)
 from services.strategy_engine import (
     get_strategy_status,
     list_latest_strategy_observations,
@@ -164,6 +168,7 @@ DASHBOARD_SECTIONS = [
     "recent_events",
     "errors",
     "projection_outbox",
+    "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "pipeline_summary",
@@ -174,6 +179,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "gateway",
     "market_data",
     "projection_outbox",
+    "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "pipeline_summary",
@@ -192,6 +198,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "recent_events",
     "errors",
     "projection_outbox",
+    "projection_outbox_backlog",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "pipeline_summary",
@@ -293,6 +300,21 @@ def build_dashboard_snapshot(
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
+    market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
+    market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
+        connection,
+        settings=settings,
+    )
+    projection_outbox_backlog = build_projection_outbox_backlog_status(
+        connection,
+        settings=settings,
+        latest_reconcile=market_data_reconcile,
+        routing_status=market_data_append_only_routing,
+        sample_limit=3,
+    ).to_dict()
+    projection_outbox_status.update(
+        projection_outbox_backlog_summary_fields(projection_outbox_backlog)
+    )
     latest_observe_cycle = get_latest_market_open_observe_cycle_run(connection)
     no_buy_sentinel = build_no_buy_sentinel_snapshot(
         connection,
@@ -301,11 +323,6 @@ def build_dashboard_snapshot(
         limit=min(bounded_limit, settings.no_buy_sentinel_top_near_miss_limit),
         write_snapshot=False,
     ).to_dict()
-    market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
-    market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
-        connection,
-        settings=settings,
-    )
 
     latest_ticks = list_latest_ticks(connection, limit=bounded_limit)
     latest_cross_exchange = list_recent_cross_exchange_observations(
@@ -469,6 +486,7 @@ def build_dashboard_snapshot(
         latest_observe_cycle=latest_observe_cycle,
         condition_fusion_status=condition_fusion_section["status"],
         projection_outbox_status=projection_outbox_status,
+        projection_outbox_backlog=projection_outbox_backlog,
         market_data_reconcile=market_data_reconcile,
         market_data_append_only_routing=market_data_append_only_routing,
         settings=settings,
@@ -509,6 +527,7 @@ def build_dashboard_snapshot(
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "projection_outbox": projection_outbox_status,
+        "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "themes": {
@@ -822,6 +841,7 @@ def build_dashboard_pipeline_summary_fast(
     gateway_status: dict[str, Any],
     market_data_status: dict[str, Any],
     projection_outbox_status: dict[str, Any],
+    projection_outbox_backlog: dict[str, Any],
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
 ) -> dict[str, Any]:
@@ -873,6 +893,24 @@ def build_dashboard_pipeline_summary_fast(
             "by_projection_name": projection_outbox_status.get("by_projection_name", {}),
             "last_apply_mode": projection_outbox_status.get("last_apply_mode"),
             "warnings": list(projection_outbox_status.get("warnings") or []),
+            "backlog_readiness_status": projection_outbox_backlog.get(
+                "readiness_status"
+            ),
+            "pr11_condition_event_cutover_ready": bool(
+                projection_outbox_backlog.get("pr11_condition_event_cutover_ready")
+            ),
+            "recent_pending_count": int(
+                projection_outbox_backlog.get("recent_pending_count") or 0
+            ),
+            "condition_event_pending_count": int(
+                projection_outbox_backlog.get("condition_event_pending_count") or 0
+            ),
+            "stale_processing_count": int(
+                projection_outbox_backlog.get("stale_processing_count") or 0
+            ),
+            "operator_actions": list(
+                projection_outbox_backlog.get("operator_actions") or []
+            ),
             "read_only": True,
         },
         "market_data_projection_reconcile": _market_data_reconcile_summary(
@@ -995,6 +1033,24 @@ def _build_dashboard_fast_section(
             )
         return context["market_data_append_only_routing"]
 
+    def projection_outbox_backlog() -> dict[str, Any]:
+        if "projection_outbox_backlog" not in context:
+            context["projection_outbox_backlog"] = (
+                build_projection_outbox_backlog_status(
+                    connection,
+                    settings=settings,
+                    latest_reconcile=market_data_reconcile(),
+                    routing_status=market_data_append_only_routing(),
+                    sample_limit=3,
+                ).to_dict()
+            )
+            projection_outbox_status().update(
+                projection_outbox_backlog_summary_fields(
+                    context["projection_outbox_backlog"]
+                )
+            )
+        return context["projection_outbox_backlog"]
+
     if section == "safety":
         return build_safety_section(settings)
     if section == "system":
@@ -1062,7 +1118,10 @@ def _build_dashboard_fast_section(
             limit=min(bounded_limit, 20),
         )
     if section == "projection_outbox":
+        projection_outbox_backlog()
         return projection_outbox_status()
+    if section == "projection_outbox_backlog":
+        return projection_outbox_backlog()
     if section == "market_data_projection_reconcile":
         return market_data_reconcile()
     if section == "market_data_append_only_routing":
@@ -1074,6 +1133,7 @@ def _build_dashboard_fast_section(
             gateway_status=gateway_status(),
             market_data_status=market_data_status(),
             projection_outbox_status=projection_outbox_status(),
+            projection_outbox_backlog=projection_outbox_backlog(),
             market_data_reconcile=market_data_reconcile(),
             market_data_append_only_routing=market_data_append_only_routing(),
         )
@@ -1537,6 +1597,7 @@ def _pipeline_summary(
     latest_observe_cycle: dict[str, Any] | None,
     condition_fusion_status: dict[str, Any],
     projection_outbox_status: dict[str, Any],
+    projection_outbox_backlog: dict[str, Any],
     market_data_reconcile: dict[str, Any],
     market_data_append_only_routing: dict[str, Any],
     settings: Settings,
@@ -1616,6 +1677,24 @@ def _pipeline_summary(
             "by_projection_name": projection_outbox_status["by_projection_name"],
             "last_apply_mode": projection_outbox_status["last_apply_mode"],
             "warnings": projection_outbox_status["warnings"],
+            "backlog_readiness_status": projection_outbox_backlog.get(
+                "readiness_status"
+            ),
+            "pr11_condition_event_cutover_ready": bool(
+                projection_outbox_backlog.get("pr11_condition_event_cutover_ready")
+            ),
+            "recent_pending_count": int(
+                projection_outbox_backlog.get("recent_pending_count") or 0
+            ),
+            "condition_event_pending_count": int(
+                projection_outbox_backlog.get("condition_event_pending_count") or 0
+            ),
+            "stale_processing_count": int(
+                projection_outbox_backlog.get("stale_processing_count") or 0
+            ),
+            "operator_actions": list(
+                projection_outbox_backlog.get("operator_actions") or []
+            ),
             "read_only": True,
         },
         "market_data_projection_reconcile": _market_data_reconcile_summary(

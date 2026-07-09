@@ -179,10 +179,25 @@ PR-10.6 진행 상태:
   - `tests/test_market_data_reconcile_lock_fallback.py`
   - `tests/test_ops_sqlite_locked_retryable.py`
 
+PR-10.7 진행 상태:
+
+- `projection_outbox` backlog를 projection_name/event_type/status/age 기준으로 진단하는 read-only service를 추가했다.
+- `/api/operator/projection-outbox/backlog`는 backlog readiness, recent pending, stale PROCESSING, condition_event pending, latest reconcile/routing guard 상태를 한 번에 반환한다.
+- `/api/operator/projection-outbox/drain-once`는 token 보호 하에 live_safe batch를 반복 실행할 수 있지만, 기존 worker apply 설정을 완화하지 않는다.
+- operator status/dashboard fast path/pipeline_summary에 `backlog_readiness_status`, `pr11_condition_event_cutover_ready`, recent/condition_event pending, stale count, operator action을 노출한다.
+- PR-7/9/10 ops script는 core PASS와 backlog WARN을 분리해 표시하며, PR-11 condition_event cutover 가능 여부를 별도 필드로 표시한다.
+- 새 drain 운영 스크립트 `tools/ops_projection_outbox_backlog_drain.py`와 `docs/runbook_projection_outbox_backlog_ko.md`를 추가했다.
+- 주문/LIVE_SIM/LIVE_REAL, safety gate, buy gate, price_tick/tr_response/condition_event cutover policy는 변경하지 않았다.
+- 추가 테스트:
+  - `tests/test_projection_outbox_backlog_status.py`
+  - `tests/test_projection_outbox_drain_once_api.py`
+  - `tests/test_ops_projection_outbox_backlog_drain.py`
+  - `tests/test_dashboard_snapshot_fast_path.py`
+
 ## 다음 PR 권장 순서
 
-1. PR-10.6 SQLite lock hardening을 실제 장중 ops script `--run-once`로 재검증하고, `LOCKED_RETRYABLE`이 WARN/block으로 분류되는지 확인한다.
-2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness 뒤에서 검토한다.
+1. PR-10.7 backlog readiness를 실제 장중 `tools.ops_projection_outbox_backlog_drain`으로 검증하고, `pr11_condition_event_cutover_ready=true` 조건을 확인한다.
+2. PR-11에서 `condition_event` limited cutover를 feature flag, budget, fresh reconcile, worker side-effect readiness, backlog readiness 뒤에서 검토한다.
 3. Replay 검증을 도입한다. 기록된 `raw_events`/`gateway_events`를 격리 DB에 재주입해 inline/worker 경로를 오프라인에서 dual-run reconcile로 대조한다. 상세는 아래 "Replay 검증 계획" 참조.
 4. Gateway ingest를 append-only + projection outbox/worker로 넓히고, projection별 watermark/error/retry 정책을 확정한다.
 5. Cutover 완료 판정 후 append-only scaffolding flag를 정리한다. 상세는 아래 "Flag 정리 계획" 참조.

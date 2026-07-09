@@ -302,6 +302,14 @@ class Settings:
     projection_outbox_run_once_max_wall_ms: int = 5000
     projection_outbox_apply_min_age_sec: float = 1.0
     projection_outbox_shadow_min_age_sec: float = 0.5
+    projection_outbox_backlog_warn_pending_count: int = 1000
+    projection_outbox_backlog_fail_pending_count: int = 10000
+    projection_outbox_backlog_recent_window_sec: int = 300
+    projection_outbox_backlog_recent_fail_count: int = 100
+    projection_outbox_backlog_stale_processing_sec: int = 120
+    projection_outbox_backlog_condition_event_ready_max_pending: int = 100
+    projection_outbox_backlog_condition_event_ready_recent_max_pending: int = 10
+    projection_outbox_backlog_required_for_condition_event_cutover: bool = True
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -769,6 +777,13 @@ class Settings:
             "projection_outbox_run_once_max_wall_ms",
             "projection_outbox_retry_limit",
             "projection_outbox_processing_ttl_sec",
+            "projection_outbox_backlog_warn_pending_count",
+            "projection_outbox_backlog_fail_pending_count",
+            "projection_outbox_backlog_recent_window_sec",
+            "projection_outbox_backlog_recent_fail_count",
+            "projection_outbox_backlog_stale_processing_sec",
+            "projection_outbox_backlog_condition_event_ready_max_pending",
+            "projection_outbox_backlog_condition_event_ready_recent_max_pending",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -2278,6 +2293,53 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC", "0.5"),
             "PROJECTION_OUTBOX_SHADOW_MIN_AGE_SEC",
             min_value=0.0,
+        ),
+        projection_outbox_backlog_warn_pending_count=_parse_int(
+            env.get("PROJECTION_OUTBOX_BACKLOG_WARN_PENDING_COUNT", "1000"),
+            "PROJECTION_OUTBOX_BACKLOG_WARN_PENDING_COUNT",
+            min_value=1,
+        ),
+        projection_outbox_backlog_fail_pending_count=_parse_int(
+            env.get("PROJECTION_OUTBOX_BACKLOG_FAIL_PENDING_COUNT", "10000"),
+            "PROJECTION_OUTBOX_BACKLOG_FAIL_PENDING_COUNT",
+            min_value=1,
+        ),
+        projection_outbox_backlog_recent_window_sec=_parse_int(
+            env.get("PROJECTION_OUTBOX_BACKLOG_RECENT_WINDOW_SEC", "300"),
+            "PROJECTION_OUTBOX_BACKLOG_RECENT_WINDOW_SEC",
+            min_value=1,
+        ),
+        projection_outbox_backlog_recent_fail_count=_parse_int(
+            env.get("PROJECTION_OUTBOX_BACKLOG_RECENT_FAIL_COUNT", "100"),
+            "PROJECTION_OUTBOX_BACKLOG_RECENT_FAIL_COUNT",
+            min_value=1,
+        ),
+        projection_outbox_backlog_stale_processing_sec=_parse_int(
+            env.get("PROJECTION_OUTBOX_BACKLOG_STALE_PROCESSING_SEC", "120"),
+            "PROJECTION_OUTBOX_BACKLOG_STALE_PROCESSING_SEC",
+            min_value=1,
+        ),
+        projection_outbox_backlog_condition_event_ready_max_pending=_parse_int(
+            env.get(
+                "PROJECTION_OUTBOX_BACKLOG_CONDITION_EVENT_READY_MAX_PENDING",
+                "100",
+            ),
+            "PROJECTION_OUTBOX_BACKLOG_CONDITION_EVENT_READY_MAX_PENDING",
+            min_value=1,
+        ),
+        projection_outbox_backlog_condition_event_ready_recent_max_pending=_parse_int(
+            env.get(
+                "PROJECTION_OUTBOX_BACKLOG_CONDITION_EVENT_READY_RECENT_MAX_PENDING",
+                "10",
+            ),
+            "PROJECTION_OUTBOX_BACKLOG_CONDITION_EVENT_READY_RECENT_MAX_PENDING",
+            min_value=1,
+        ),
+        projection_outbox_backlog_required_for_condition_event_cutover=_parse_bool(
+            env.get(
+                "PROJECTION_OUTBOX_BACKLOG_REQUIRED_FOR_CONDITION_EVENT_CUTOVER",
+                "true",
+            )
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),

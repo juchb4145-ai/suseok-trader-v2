@@ -81,7 +81,7 @@ def run_side_effect_report(
         )
 
     dashboard_params = {
-        "sections": "market_data,projection_outbox,pipeline_summary,gateway,errors",
+        "sections": "market_data,projection_outbox,projection_outbox_backlog,pipeline_summary,gateway,errors",
         "detail": "summary",
         "limit": "20",
         "fast": "true",
@@ -102,6 +102,12 @@ def run_side_effect_report(
         ),
         "projection_outbox": fetch_json(
             f"{base_url}/api/operator/projection-outbox/status",
+            token=token,
+            method="GET",
+            timeout_sec=timeout_sec,
+        ),
+        "projection_outbox_backlog": fetch_json(
+            f"{base_url}/api/operator/projection-outbox/backlog",
             token=token,
             method="GET",
             timeout_sec=timeout_sec,
@@ -129,6 +135,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     warnings: list[str] = []
     run_once_blocker = False
+    backlog_blocker = False
     for key in (
         "routing_status",
         "projection_outbox",
@@ -154,6 +161,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
 
     status = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
+    backlog = _data(report, "projection_outbox_backlog")
     reconcile = _data(report, "latest_reconcile")
     dashboard = _data(report, "dashboard_snapshot")
     latest_run = reconcile.get("latest_run") if isinstance(reconcile, dict) else None
@@ -183,6 +191,7 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
     outbox_error_count = int(outbox.get("error_count") or 0) + int(
         outbox.get("dead_letter_count") or 0
     )
+    backlog_status = str(backlog.get("readiness_status") or "").upper()
 
     if condition_effective > 0:
         failures.append("CONDITION_EVENT_EFFECTIVE_SKIP_FORBIDDEN")
@@ -231,6 +240,15 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         warnings.append("CONDITION_EVENT_DEFERRED_FUSION_REFRESH_NOT_OBSERVED")
     if int(outbox.get("pending_count") or 0) > 0:
         warnings.append("PROJECTION_OUTBOX_PENDING_WORKER_RUN_ONCE_RECOMMENDED")
+    if backlog_status == "FAIL":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_FAIL")
+        backlog_blocker = True
+    elif backlog_status == "WARN":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_READINESS_WARN")
+    elif backlog_status == "":
+        warnings.append("PROJECTION_OUTBOX_BACKLOG_STATUS_MISSING")
+    if not bool(backlog.get("pr11_condition_event_cutover_ready")):
+        warnings.append("PR11_CONDITION_EVENT_CUTOVER_NOT_READY")
     if not isinstance(latest_run, dict):
         warnings.append("LATEST_RECONCILE_MISSING")
     elif latest_run.get("status") not in {"PASS", "WARN"}:
@@ -241,7 +259,13 @@ def evaluate_report(report: dict[str, Any]) -> dict[str, Any]:
         "status": verdict,
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
-        "block_next_pr": bool(failures or dashboard_blocker or run_once_blocker),
+        "block_next_pr": bool(
+            failures or dashboard_blocker or run_once_blocker or backlog_blocker
+        ),
+        "backlog_readiness_status": backlog.get("readiness_status"),
+        "pr11_condition_event_cutover_ready": bool(
+            backlog.get("pr11_condition_event_cutover_ready")
+        ),
     }
 
 
@@ -261,6 +285,7 @@ def write_report(report: dict[str, Any], *, out_dir: Path) -> dict[str, Path]:
 
 def render_markdown_summary(report: dict[str, Any]) -> str:
     status = _data(report, "routing_status")
+    backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     lines = [
         "# Market Data Condition Event Side Effect Check",
@@ -276,6 +301,9 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         _summary_line(status, "condition_event_deferred_fusion_refresh_error_count"),
         _summary_line(status, "condition_event_candidate_ingest_executed_count"),
         _summary_line(status, "condition_event_side_effect_duplicate_count"),
+        f"- backlog_readiness_status: `{backlog.get('readiness_status')}`",
+        f"- pr11_condition_event_cutover_ready: `{backlog.get('pr11_condition_event_cutover_ready')}`",
+        f"- backlog_operator_actions: `{backlog.get('operator_actions')}`",
         f"- failures: `{verdict.get('failures', [])}`",
         f"- warnings: `{verdict.get('warnings', [])}`",
         "",
@@ -291,6 +319,7 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
 
 def render_console_summary(report: dict[str, Any]) -> str:
     status = _data(report, "routing_status")
+    backlog = _data(report, "projection_outbox_backlog")
     verdict = report.get("verdict", {})
     return (
         "market_data condition_event side-effect: "
@@ -298,7 +327,8 @@ def render_console_summary(report: dict[str, Any]) -> str:
         f"condition_skip={status.get('condition_event_effective_skip_count')} "
         f"deferred={status.get('condition_event_deferred_fusion_refresh_count')} "
         f"deferred_errors={status.get('condition_event_deferred_fusion_refresh_error_count')} "
-        f"candidate_ingest={status.get('condition_event_candidate_ingest_executed_count')}"
+        f"candidate_ingest={status.get('condition_event_candidate_ingest_executed_count')} "
+        f"backlog={backlog.get('readiness_status')}"
     )
 
 
