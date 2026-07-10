@@ -110,6 +110,7 @@ from services.market_index_service import (
     get_market_index_status,
     list_latest_market_index_ticks,
 )
+from services.market_index_tr_bootstrap import get_market_index_tr_bootstrap_status
 from services.market_regime_service import get_market_regime_status
 from services.market_scan_service import get_market_scan_status
 from services.oms.dry_run_service import (
@@ -211,6 +212,7 @@ DASHBOARD_SECTIONS = [
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_index_tr_bootstrap",
     "market_context",
     "market_regime",
     "market_scan",
@@ -292,6 +294,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_index_tr_bootstrap",
     "market_context",
     "market_regime",
     "market_scan",
@@ -387,6 +390,10 @@ def build_dashboard_snapshot(
 
     market_data_status = get_market_data_status(connection, settings=settings)
     market_index_status = get_market_index_status(connection, settings=settings)
+    market_index_tr_bootstrap = get_market_index_tr_bootstrap_status(
+        connection,
+        settings=settings,
+    )
     market_context_status = get_market_context_status(connection, settings=settings)
     market_regime_status = get_market_regime_status(connection, settings=settings)
     realtime_subscription = build_realtime_subscription_plan(
@@ -702,6 +709,7 @@ def build_dashboard_snapshot(
         order_broker_boundaries=order_broker_boundaries,
         pipeline_coherency=pipeline_coherency,
         theme_coherency=theme_coherency,
+        market_index_tr_bootstrap=market_index_tr_bootstrap,
         settings=settings,
     )
 
@@ -734,12 +742,14 @@ def build_dashboard_snapshot(
         "market_reference": market_reference_status,
         "market_indexes": {
             "status": market_index_status,
+            "tr_bootstrap": market_index_tr_bootstrap,
             "latest_ticks": latest_market_index_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_market_index_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status),
             "projection_reconcile": market_index_reconcile,
             "append_only_routing": market_index_append_only_routing,
         },
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
         "market_context": market_context_status,
         "market_regime": market_regime_status,
         "market_scan": market_scan_status,
@@ -1085,6 +1095,7 @@ def build_dashboard_pipeline_summary_fast(
     market_reference_append_only_routing: dict[str, Any],
     pipeline_coherency: dict[str, Any],
     theme_coherency: dict[str, Any] | None,
+    market_index_tr_bootstrap: dict[str, Any] | None,
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
@@ -1108,6 +1119,7 @@ def build_dashboard_pipeline_summary_fast(
         "order_broker_boundaries": order_broker_boundaries,
         "coherency": pipeline_coherency,
         "theme_coherency": theme_coherency,
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1443,6 +1455,16 @@ def _build_dashboard_fast_section(
             )
         return context["theme_coherency"]
 
+    def market_index_tr_bootstrap() -> dict[str, Any]:
+        if "market_index_tr_bootstrap" not in context:
+            context["market_index_tr_bootstrap"] = (
+                get_market_index_tr_bootstrap_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_index_tr_bootstrap"]
+
     if section == "safety":
         return build_safety_section(settings)
     if section == "system":
@@ -1504,12 +1526,15 @@ def _build_dashboard_fast_section(
         )
         return {
             "status": get_market_index_status(connection, settings=settings),
+            "tr_bootstrap": market_index_tr_bootstrap(),
             "latest_ticks": latest_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status()),
             "projection_reconcile": market_index_reconcile(),
             "append_only_routing": market_index_append_only_routing(),
         }
+    if section == "market_index_tr_bootstrap":
+        return market_index_tr_bootstrap()
     if section == "market_regime":
         return get_market_regime_status(connection, settings=settings)
     if section == "market_scan":
@@ -1583,6 +1608,9 @@ def _build_dashboard_fast_section(
             ),
             pipeline_coherency=pipeline_coherency(),
             theme_coherency=context.get("theme_coherency"),
+            market_index_tr_bootstrap=context.get(
+                "market_index_tr_bootstrap"
+            ),
         )
 
     raise ValueError(f"unsupported dashboard fast section: {section}")
@@ -1795,7 +1823,8 @@ def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dic
         "tr_bootstrap_enabled": tr_bootstrap_enabled,
         "realtime_source_status": "ENABLED" if realtime_enabled else "DISABLED",
         "tr_bootstrap_source_status": (
-            "CONFIGURED_NOT_IMPLEMENTED" if tr_bootstrap_enabled else "DISABLED"
+            gateway_status.get("market_index_tr_bootstrap_adapter_status")
+            or ("IMPLEMENTED_REQUEST_TR_READY" if tr_bootstrap_enabled else "DISABLED")
         ),
         "source_contract_explicit": True,
         "parser_confidence_separate_from_data_usability": True,
@@ -1850,6 +1879,7 @@ _GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
     "market_index_enabled",
     "market_index_realtime_enabled",
     "market_index_tr_bootstrap_enabled",
+    "market_index_tr_bootstrap_adapter_status",
     "market_index_codes",
     "market_index_screen_no",
     "market_index_poll_sec",
@@ -1966,6 +1996,9 @@ def _gateway_status_section(
         "market_index_tr_bootstrap_enabled": heartbeat_payload.get(
             "market_index_tr_bootstrap_enabled"
         ),
+        "market_index_tr_bootstrap_adapter_status": heartbeat_payload.get(
+            "market_index_tr_bootstrap_adapter_status"
+        ),
         "market_index_codes": heartbeat_payload.get("market_index_codes") or [],
         "market_index_screen_no": heartbeat_payload.get("market_index_screen_no") or "",
         "market_index_poll_sec": heartbeat_payload.get("market_index_poll_sec"),
@@ -2076,6 +2109,7 @@ def _pipeline_summary(
     order_broker_boundaries: dict[str, Any],
     pipeline_coherency: dict[str, Any],
     theme_coherency: dict[str, Any],
+    market_index_tr_bootstrap: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -2099,6 +2133,7 @@ def _pipeline_summary(
         "order_broker_boundaries": order_broker_boundaries,
         "coherency": pipeline_coherency,
         "theme_coherency": theme_coherency,
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],

@@ -14,7 +14,11 @@ from services.market_context_service import (
     should_rebuild_market_context_snapshots,
 )
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
-from services.market_index_service import MARKET_INDEX_EVENT_TYPES, process_market_index_event
+from services.market_index_service import (
+    is_market_index_projection_event,
+    process_market_index_event,
+)
+from services.market_index_tr_bootstrap import is_market_index_tr_bootstrap_event
 from services.market_reference_service import (
     MARKET_SYMBOL_EVENT_TYPES,
     process_market_symbols_event,
@@ -236,24 +240,47 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                     else:
                         reference_result = process_market_symbols_event(connection, event)
                         projection_statuses["market_reference"] = reference_result.status
-                if event_type in MARKET_INDEX_EVENT_TYPES:
-                    index_routing = _decide_market_index_append_only_routing(
-                        connection,
+                if is_market_index_projection_event(event, settings=settings):
+                    index_bootstrap = is_market_index_tr_bootstrap_event(
                         event,
                         settings=settings,
-                        outbox_status=outbox_status,
                     )
-                    if index_routing is None:
-                        projection_statuses["market_index_append_only_dry_run"] = "ERROR"
-                        projection_statuses["market_index_effective_skip_inline"] = "FALSE"
-                    else:
-                        market_index_routing = index_routing.to_dict()
+                    if index_bootstrap:
+                        index_routing = None
                         projection_statuses["market_index_append_only_dry_run"] = (
-                            _market_index_append_only_dry_run_status(index_routing)
+                            "TR_BOOTSTRAP_INLINE_ONLY"
                         )
                         projection_statuses["market_index_effective_skip_inline"] = (
-                            "TRUE" if index_routing.effective_skip_inline else "FALSE"
+                            "FALSE"
                         )
+                    else:
+                        index_routing = _decide_market_index_append_only_routing(
+                            connection,
+                            event,
+                            settings=settings,
+                            outbox_status=outbox_status,
+                        )
+                        if index_routing is None:
+                            projection_statuses[
+                                "market_index_append_only_dry_run"
+                            ] = "ERROR"
+                            projection_statuses[
+                                "market_index_effective_skip_inline"
+                            ] = "FALSE"
+                        else:
+                            market_index_routing = index_routing.to_dict()
+                            projection_statuses[
+                                "market_index_append_only_dry_run"
+                            ] = _market_index_append_only_dry_run_status(
+                                index_routing
+                            )
+                            projection_statuses[
+                                "market_index_effective_skip_inline"
+                            ] = (
+                                "TRUE"
+                                if index_routing.effective_skip_inline
+                                else "FALSE"
+                            )
                     if index_routing is not None and index_routing.effective_skip_inline:
                         projection_statuses["market_index"] = (
                             "SKIPPED_INLINE_APPEND_ONLY_MARKET_INDEX"
@@ -272,35 +299,46 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             index_result.status == "APPLIED"
                             and settings.market_regime_enabled
                         ):
-                            regime_routing = _decide_market_regime_append_only_routing(
-                                connection,
-                                event,
-                                settings=settings,
-                                outbox_status=outbox_status,
-                            )
-                            if regime_routing is None:
+                            if index_bootstrap:
+                                regime_routing = None
                                 projection_statuses[
                                     "market_regime_append_only_dry_run"
-                                ] = "ERROR"
+                                ] = "TR_BOOTSTRAP_INLINE_ONLY"
                                 projection_statuses[
                                     "market_regime_effective_skip_inline"
                                 ] = "FALSE"
                             else:
-                                market_regime_routing = regime_routing.to_dict()
-                                projection_statuses[
-                                    "market_regime_append_only_dry_run"
-                                ] = (
-                                    "WOULD_SKIP_INLINE"
-                                    if regime_routing.would_skip_inline
-                                    else "WOULD_KEEP_INLINE"
+                                regime_routing = (
+                                    _decide_market_regime_append_only_routing(
+                                        connection,
+                                        event,
+                                        settings=settings,
+                                        outbox_status=outbox_status,
+                                    )
                                 )
-                                projection_statuses[
-                                    "market_regime_effective_skip_inline"
-                                ] = (
-                                    "TRUE"
-                                    if regime_routing.effective_skip_inline
-                                    else "FALSE"
-                                )
+                                if regime_routing is None:
+                                    projection_statuses[
+                                        "market_regime_append_only_dry_run"
+                                    ] = "ERROR"
+                                    projection_statuses[
+                                        "market_regime_effective_skip_inline"
+                                    ] = "FALSE"
+                                else:
+                                    market_regime_routing = regime_routing.to_dict()
+                                    projection_statuses[
+                                        "market_regime_append_only_dry_run"
+                                    ] = (
+                                        "WOULD_SKIP_INLINE"
+                                        if regime_routing.would_skip_inline
+                                        else "WOULD_KEEP_INLINE"
+                                    )
+                                    projection_statuses[
+                                        "market_regime_effective_skip_inline"
+                                    ] = (
+                                        "TRUE"
+                                        if regime_routing.effective_skip_inline
+                                        else "FALSE"
+                                    )
                             if (
                                 regime_routing is not None
                                 and regime_routing.effective_skip_inline
@@ -732,6 +770,9 @@ def get_gateway_status() -> dict[str, Any]:
         ),
         "market_index_tr_bootstrap_enabled": _json_value(
             status_values.get("market_index_tr_bootstrap_enabled")
+        ),
+        "market_index_tr_bootstrap_adapter_status": status_values.get(
+            "market_index_tr_bootstrap_adapter_status"
         ),
         "market_index_codes": _json_value(status_values.get("market_index_codes")),
         "market_index_screen_no": status_values.get("market_index_screen_no"),

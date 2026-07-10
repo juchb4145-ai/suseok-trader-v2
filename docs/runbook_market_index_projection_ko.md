@@ -88,7 +88,11 @@ false, legacy PR-15 guard false, 양수 budget이 모두 필요하다.
 - `TR_BOOTSTRAP`: metadata source가 명시적 TR bootstrap source다.
 - `UNKNOWN`: source를 판정할 수 없다.
 
-현재 Gateway의 TR bootstrap은 설정만 존재하고 adapter는 구현되지 않았다. 따라서 `TR_BOOTSTRAP` event는 reconcile FAIL이며 realtime 결과로 대체 판정하지 않는다.
+TR bootstrap adapter는 generic `request_tr`와 v1 source lineage contract로 구현되어 있다.
+유효한 parent `tr_response`는 `TR_BOOTSTRAP` source로 집계하며 source/contract/index/TR
+lineage가 없거나 다르면 FAIL한다. 기본 parser status는
+`PILOT_UNVERIFIED_KOA_STUDIO`이므로 실제 KOA Studio 확인 전에는 append-only readiness가
+false다. 상세 절차는 `docs/runbook_market_index_tr_bootstrap_ko.md`를 따른다.
 
 ## API
 
@@ -97,6 +101,8 @@ GET  /api/operator/market-index-projection-reconcile/latest
 POST /api/operator/market-index-projection-reconcile/run-once
 GET  /api/operator/market-index-append-only-routing/status
 GET  /api/operator/market-index-append-only-routing/decisions
+GET  /api/operator/market-index/tr-bootstrap/status
+POST /api/operator/market-index/tr-bootstrap/run-once
 POST /api/operator/projection-outbox/run-once
 GET  /api/operator/projection-outbox/status
 ```
@@ -197,7 +203,7 @@ FAIL:
 - sample missing, projection error, stale outbox
 - outbox ERROR/DEAD_LETTER/SKIPPED
 - data unusable
-- 현재 미구현 TR bootstrap source 유입
+- TR bootstrap v1 source/contract/index/parent lineage 위반 또는 row parse 실패
 - PR-15 준비 점검에서 effective skip 1건 이상
 - PR-16 기대 모드에서 effective skip 또는 linked index/regime closure 누락
 - 주문 command 증가 또는 OBSERVE 안전 조건 위반

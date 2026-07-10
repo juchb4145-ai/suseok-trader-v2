@@ -211,6 +211,21 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_scan_append_only_max_future_skew_sec == 5
     assert settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20 is True
     assert settings.market_context_snapshot_stale_sec == 30
+    assert settings.market_index_tr_bootstrap_enabled is False
+    assert settings.market_index_tr_bootstrap_tr_code == "OPT20001"
+    assert settings.market_index_tr_bootstrap_screen_no == "5701"
+    assert settings.market_index_tr_bootstrap_parser_status == (
+        "PILOT_UNVERIFIED_KOA_STUDIO"
+    )
+    assert settings.market_index_tr_bootstrap_index_codes == ("KOSPI", "KOSDAQ")
+    assert settings.market_index_tr_bootstrap_market_types == {
+        "KOSPI": "0",
+        "KOSDAQ": "1",
+    }
+    assert settings.market_index_tr_bootstrap_industry_codes == {
+        "KOSPI": "001",
+        "KOSDAQ": "101",
+    }
     assert settings.event_store_retention_enabled is False
     assert settings.projection_event_result_backfill_enabled is False
     assert settings.event_store_retention_days == 30

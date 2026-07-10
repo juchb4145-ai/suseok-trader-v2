@@ -18,6 +18,9 @@ from domain.market.quality import freshness_status, tick_age_seconds
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
+from services.market_index_tr_bootstrap import (
+    inspect_market_index_tr_bootstrap_event,
+)
 
 MARKET_INDEX_EVENT_TYPES: frozenset[str] = frozenset({"market_index_tick"})
 MARKET_INDEX_SOURCE_REALTIME = "REALTIME"
@@ -50,7 +53,11 @@ def process_market_index_event(
 ) -> MarketIndexProcessResult:
     resolved_settings = settings or load_settings()
     event_type = event.event_type.strip().lower()
-    if event_type not in MARKET_INDEX_EVENT_TYPES:
+    bootstrap = inspect_market_index_tr_bootstrap_event(
+        event,
+        settings=resolved_settings,
+    )
+    if event_type not in MARKET_INDEX_EVENT_TYPES and not bootstrap.recognized:
         return MarketIndexProcessResult(
             event_id=event.event_id,
             event_type=event_type,
@@ -64,16 +71,40 @@ def process_market_index_event(
             status="DUPLICATE",
             ignored_count=1,
         )
-    if _is_older_than_latest_index_tick(connection, event):
-        return MarketIndexProcessResult(
-            event_id=event.event_id,
-            event_type=event_type,
-            status="IGNORED",
-            ignored_count=1,
-        )
-
     try:
-        tick = BrokerMarketIndexTick.from_dict(event.payload)
+        if bootstrap.recognized:
+            if not bootstrap.valid or bootstrap.tick is None:
+                error_message = ",".join(bootstrap.reason_codes) or (
+                    "MARKET_INDEX_TR_BOOTSTRAP_INVALID"
+                )
+                _record_projection_error(
+                    connection,
+                    event,
+                    error_message=error_message,
+                    reason_code="MARKET_INDEX_TR_BOOTSTRAP_INVALID",
+                )
+                connection.commit()
+                return MarketIndexProcessResult(
+                    event_id=event.event_id,
+                    event_type=event_type,
+                    status="ERROR",
+                    error_count=1,
+                    error_message=error_message,
+                )
+            tick = bootstrap.tick
+        else:
+            tick = BrokerMarketIndexTick.from_dict(event.payload)
+        if _is_older_than_latest_index_tick(
+            connection,
+            event,
+            index_code=tick.index_code,
+        ):
+            return MarketIndexProcessResult(
+                event_id=event.event_id,
+                event_type=event_type,
+                status="IGNORED",
+                ignored_count=1,
+            )
         implausible_reason = _index_implausible_reason(tick)
         if implausible_reason is not None:
             _record_projection_error(
@@ -305,7 +336,17 @@ def get_market_index_status(
             "realtime": MARKET_INDEX_SOURCE_REALTIME,
             "tr_bootstrap": MARKET_INDEX_SOURCE_TR_BOOTSTRAP,
             "unknown": MARKET_INDEX_SOURCE_UNKNOWN,
-            "tr_bootstrap_adapter_status": "NOT_IMPLEMENTED",
+            "tr_bootstrap_adapter_status": "IMPLEMENTED",
+            "tr_bootstrap_enabled": (
+                resolved_settings.market_index_tr_bootstrap_enabled
+            ),
+            "tr_bootstrap_parser_status": (
+                resolved_settings.market_index_tr_bootstrap_parser_status
+            ),
+            "tr_bootstrap_koa_studio_confirmation_required": (
+                resolved_settings.market_index_tr_bootstrap_parser_status
+                != "VERIFIED"
+            ),
             "nxt_is_not_valid_market_index_evidence": True,
         },
         "stale_sec": resolved_settings.market_index_stale_sec,
@@ -348,6 +389,19 @@ def classify_market_index_data_source(payload: object) -> str:
     }:
         return MARKET_INDEX_SOURCE_REALTIME
     return MARKET_INDEX_SOURCE_UNKNOWN
+
+
+def is_market_index_projection_event(
+    event: GatewayEvent,
+    *,
+    settings: Settings | None = None,
+) -> bool:
+    if event.event_type.strip().lower() in MARKET_INDEX_EVENT_TYPES:
+        return True
+    return inspect_market_index_tr_bootstrap_event(
+        event,
+        settings=settings,
+    ).recognized
 
 
 def market_index_payload_usability(payload: object) -> dict[str, Any]:
@@ -583,11 +637,9 @@ def _event_store_times(
 def _is_older_than_latest_index_tick(
     connection: sqlite3.Connection,
     event: GatewayEvent,
+    *,
+    index_code: str,
 ) -> bool:
-    try:
-        index_code = normalize_index_code(event.payload.get("index_code"))
-    except ValueError:
-        return False
     row = connection.execute(
         """
         SELECT event_ts

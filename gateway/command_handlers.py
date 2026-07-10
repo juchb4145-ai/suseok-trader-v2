@@ -225,6 +225,7 @@ class GatewayCommandHandler:
             request_name=request_name,
             rows=[normalize_payload(row) for row in rows],
             source=self.source,
+            metadata=_mapping_value(payload, "metadata"),
         )
         ack_event = make_command_ack_event(command, source=self.source, message="tr response sent")
         return [response_event, ack_event]

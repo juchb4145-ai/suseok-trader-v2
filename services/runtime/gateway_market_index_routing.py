@@ -411,7 +411,11 @@ def decide_market_index_append_only_routing(
         "regime_continuity_ready": regime_continuity_ready,
         "controller_status": controller_status,
         "parser_confidence_separate_from_data_usability": True,
-        "tr_bootstrap_adapter_status": "NOT_IMPLEMENTED",
+        "tr_bootstrap_adapter_status": "IMPLEMENTED",
+        "tr_bootstrap_enabled": settings.market_index_tr_bootstrap_enabled,
+        "tr_bootstrap_parser_status": (
+            settings.market_index_tr_bootstrap_parser_status
+        ),
         "nxt_is_not_valid_market_index_evidence": True,
         "no_order_side_effects": True,
         "no_trading_side_effects": True,
@@ -643,7 +647,11 @@ def get_latest_market_index_append_only_routing_status(
             controller_status == "PASS" and skip_budget_remaining > 0
         ),
         "parser_confidence_separate_from_data_usability": True,
-        "tr_bootstrap_adapter_status": "NOT_IMPLEMENTED",
+        "tr_bootstrap_adapter_status": "IMPLEMENTED",
+        "tr_bootstrap_enabled": resolved_settings.market_index_tr_bootstrap_enabled,
+        "tr_bootstrap_parser_status": (
+            resolved_settings.market_index_tr_bootstrap_parser_status
+        ),
         "failures": sorted(set(failures)),
         "warnings": warnings,
         "read_only": True,

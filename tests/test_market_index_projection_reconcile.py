@@ -84,7 +84,7 @@ def test_market_index_reconcile_separates_usable_data_from_parser_confidence(
     assert "MARKET_INDEX_PARSER_UNVERIFIED" in result.reason_codes
 
 
-def test_market_index_reconcile_rejects_tr_bootstrap_until_adapter_exists(tmp_path) -> None:
+def test_market_index_reconcile_rejects_tr_bootstrap_without_v1_lineage(tmp_path) -> None:
     connection = initialize_database(tmp_path / "market-index-reconcile-bootstrap.sqlite3")
     settings = _settings()
     for index, code in enumerate(("KOSPI", "KOSDAQ")):
@@ -108,7 +108,7 @@ def test_market_index_reconcile_rejects_tr_bootstrap_until_adapter_exists(tmp_pa
     assert result.status == "FAIL"
     assert result.tr_bootstrap_source_count == 2
     assert result.append_only_ready is False
-    assert "MARKET_INDEX_TR_BOOTSTRAP_SOURCE_NOT_IMPLEMENTED" in result.reason_codes
+    assert "MARKET_INDEX_TR_BOOTSTRAP_LINEAGE_INVALID" in result.reason_codes
 
 
 def _append_inline_and_shadow(

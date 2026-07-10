@@ -26,7 +26,9 @@ def test_market_index_ops_report_warns_for_unverified_parser() -> None:
     assert verdict["warnings"] == ["MARKET_INDEX_PARSER_UNVERIFIED"]
 
 
-def test_market_index_ops_report_fails_on_forbidden_cutover_or_bootstrap(tmp_path) -> None:
+def test_market_index_ops_report_fails_on_forbidden_cutover_or_command_mutation(
+    tmp_path,
+) -> None:
     report = _report()
     report["routing_status"]["data"]["effective_skip_inline_count"] = 1
     report["reconcile_run"]["data"]["tr_bootstrap_source_count"] = 1
@@ -38,7 +40,9 @@ def test_market_index_ops_report_fails_on_forbidden_cutover_or_bootstrap(tmp_pat
 
     assert verdict["status"] == "FAIL"
     assert "MARKET_INDEX_EFFECTIVE_SKIP_FORBIDDEN_IN_PR15" in verdict["failures"]
-    assert "MARKET_INDEX_TR_BOOTSTRAP_SOURCE_NOT_IMPLEMENTED" in verdict["failures"]
+    assert "MARKET_INDEX_TR_BOOTSTRAP_ADAPTER_NOT_IMPLEMENTED" not in verdict[
+        "failures"
+    ]
     assert "COMMAND_COUNT_CHANGED_DURING_CHECK" in verdict["failures"]
     assert paths["raw_json"].exists()
     assert paths["summary_md"].exists()
@@ -210,7 +214,7 @@ def _report() -> dict:
             "ok": True,
             "data": {
                 "effective_skip_inline_count": 0,
-                "tr_bootstrap_adapter_status": "NOT_IMPLEMENTED",
+                "tr_bootstrap_adapter_status": "IMPLEMENTED",
             },
         },
         "projection_outbox": {

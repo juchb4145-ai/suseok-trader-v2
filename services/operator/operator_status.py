@@ -25,6 +25,7 @@ from services.live_sim.live_sim_service import (
 )
 from services.market_data_service import get_market_data_status
 from services.market_index_service import get_market_index_status
+from services.market_index_tr_bootstrap import get_market_index_tr_bootstrap_status
 from services.market_regime_service import get_market_regime_status
 from services.market_scan_service import get_market_scan_status
 from services.operator.no_buy_sentinel import (
@@ -171,6 +172,10 @@ def build_operator_status(
         "market_data": get_market_data_status(connection, settings=resolved_settings),
         "market_index": {
             "status": get_market_index_status(connection, settings=resolved_settings),
+            "tr_bootstrap": get_market_index_tr_bootstrap_status(
+                connection,
+                settings=resolved_settings,
+            ),
             "projection_reconcile": get_latest_market_index_projection_reconcile(
                 connection
             ),
@@ -181,6 +186,10 @@ def build_operator_status(
                 )
             ),
         },
+        "market_index_tr_bootstrap": get_market_index_tr_bootstrap_status(
+            connection,
+            settings=resolved_settings,
+        ),
         "market_regime": {
             "status": get_market_regime_status(
                 connection,

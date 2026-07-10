@@ -175,7 +175,7 @@ def test_market_index_operator_and_dashboard_surfaces_are_safe(
     assert latest.json()["latest_run"]["run_id"] == reconcile.json()["run_id"]
     assert routing.status_code == 200
     assert routing.json()["effective_skip_inline_count"] == 0
-    assert routing.json()["tr_bootstrap_adapter_status"] == "NOT_IMPLEMENTED"
+    assert routing.json()["tr_bootstrap_adapter_status"] == "IMPLEMENTED"
     assert decisions.status_code == 200
     assert decisions.json()["decisions"] == []
     assert dashboard.status_code == 200
@@ -185,7 +185,7 @@ def test_market_index_operator_and_dashboard_surfaces_are_safe(
     assert "market_index_append_only_routing" in snapshot
     assert snapshot["market_indexes"]["status"]["source_contract"][
         "tr_bootstrap_adapter_status"
-    ] == "NOT_IMPLEMENTED"
+    ] == "IMPLEMENTED"
     assert after_commands == before_commands
 
 

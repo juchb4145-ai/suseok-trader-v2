@@ -11,6 +11,10 @@ from services.market_context_service import (
     get_market_context_status,
     rebuild_market_context_snapshots,
 )
+from services.market_index_tr_bootstrap import (
+    get_market_index_tr_bootstrap_status,
+    run_market_index_tr_bootstrap_once,
+)
 from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
@@ -318,6 +322,40 @@ def operator_theme_coherency_status(
             settings=settings,
             limit=limit,
         )
+    finally:
+        connection.close()
+
+
+@router.get("/market-index/tr-bootstrap/status")
+def operator_market_index_tr_bootstrap_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_market_index_tr_bootstrap_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-index/tr-bootstrap/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_index_tr_bootstrap_run_once(
+    queue_commands: bool = Query(default=False),
+    trade_date: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return run_market_index_tr_bootstrap_once(
+            connection,
+            settings=settings,
+            queue_commands=queue_commands,
+            trade_date=trade_date,
+        ).to_dict()
     finally:
         connection.close()
 

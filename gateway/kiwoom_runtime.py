@@ -748,6 +748,9 @@ class KiwoomGatewayRuntime:
             "market_index_tr_bootstrap_enabled": bool(
                 self.config.market_index_tr_bootstrap_enabled
             ),
+            "market_index_tr_bootstrap_adapter_status": (
+                self._market_index_tr_bootstrap_adapter_status()
+            ),
             "market_index_codes": [
                 normalize_market_index_code(code) for code in self.config.market_index_codes
             ],
@@ -2069,7 +2072,7 @@ class KiwoomGatewayRuntime:
             self.config.market_index_tr_bootstrap_enabled
             and not self.config.market_index_realtime_enabled
         ):
-            return "TR_BOOTSTRAP_NOT_IMPLEMENTED"
+            return "TR_BOOTSTRAP_REQUEST_TR_READY"
         if not self.config.market_index_realtime_enabled:
             return "REALTIME_DISABLED"
         if self._market_index_parse_error_count and not self._parsed_market_index_tick_count:
@@ -2081,6 +2084,11 @@ class KiwoomGatewayRuntime:
         if self._market_index_registered_codes:
             return "REGISTERED_WAITING_CALLBACK"
         return "ENABLED_NOT_REGISTERED"
+
+    def _market_index_tr_bootstrap_adapter_status(self) -> str:
+        if not self.config.market_index_tr_bootstrap_enabled:
+            return "DISABLED"
+        return "IMPLEMENTED_REQUEST_TR_READY"
 
     def _realtime_exchange(self) -> str:
         return normalize_realtime_exchange(self.config.realtime_exchange)

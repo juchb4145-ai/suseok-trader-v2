@@ -142,6 +142,7 @@ def make_tr_response_event(
     rows: list[dict[str, Any]],
     source: str = "mock_gateway",
     message: str = "mock tr response",
+    metadata: Mapping[str, Any] | None = None,
 ) -> GatewayEvent:
     response = BrokerTrResponse(
         request_id=request_id,
@@ -150,6 +151,7 @@ def make_tr_response_event(
         success=True,
         rows=rows,
         message=message,
+        metadata=normalize_payload(metadata or {}),
     )
     return GatewayEvent(event_type="tr_response", source=source, payload=response.to_dict())
 

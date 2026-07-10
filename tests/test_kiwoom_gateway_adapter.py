@@ -2320,6 +2320,7 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
             "request_id": "tr1",
             "tr_code": "OPT10001",
             "request_name": "stock_basic",
+            "metadata": {"projection_source": "test_kiwoom_tr_metadata"},
             "params": {"종목코드": "005930"},
             "fields": ["종목코드", "종목명", "현재가"],
         },
@@ -2333,6 +2334,7 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
         "command_ack",
     ]
     response = BrokerTrResponse.from_dict(events[1].payload)
+    assert response.metadata["projection_source"] == "test_kiwoom_tr_metadata"
     assert response.rows[0]["종목코드"] == "005930"
 
 
@@ -2379,6 +2381,7 @@ def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() 
             "request_id": "tr_async",
             "tr_code": "OPT10001",
             "request_name": "stock_basic",
+            "metadata": {"projection_source": "test_kiwoom_tr_metadata"},
             "params": {"종목코드": "005930"},
             "fields": ["종목코드", "종목명", "현재가"],
         },
@@ -2392,6 +2395,9 @@ def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() 
 
     assert event_types_before_callback == ["command_started"]
     assert event_types_after_callback == ["command_started", "tr_response", "command_ack"]
+    assert BrokerTrResponse.from_dict(response.payload).metadata[
+        "projection_source"
+    ] == "test_kiwoom_tr_metadata"
     assert BrokerTrResponse.from_dict(response.payload).rows[0]["종목코드"] == "005930"
 
 

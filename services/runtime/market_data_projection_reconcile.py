@@ -1278,6 +1278,7 @@ def _check_non_market_mutation_evidence(
         SELECT outbox_id, projection_name, event_id, event_type, event_rowid, metadata_json
         FROM projection_outbox
         WHERE event_rowid BETWEEN ? AND ?
+            AND projection_name = 'market_data'
             AND json_extract(metadata_json, '$.last_worker_evidence.mutated_projection_name')
                 IS NOT NULL
             AND json_extract(metadata_json, '$.last_worker_evidence.mutated_projection_name')

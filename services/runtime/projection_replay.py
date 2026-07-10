@@ -24,8 +24,16 @@ from storage.sqlite import initialize_database, open_connection
 
 from services.config import Settings, TradingMode, TradingProfile, load_settings
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, MARKET_PROJECTION_TABLES
+from services.market_index_service import (
+    MARKET_INDEX_PROJECTION_TABLES,
+    is_market_index_projection_event,
+    process_market_index_event,
+)
 from services.runtime.market_data_projection_reconcile import (
     run_market_data_projection_reconcile,
+)
+from services.runtime.market_index_projection_reconcile import (
+    run_market_index_projection_reconcile,
 )
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 
@@ -76,6 +84,7 @@ _REPLAY_WRITABLE_TABLES = frozenset(
         "projection_watermarks",
         "sqlite_sequence",
         *MARKET_PROJECTION_TABLES,
+        *MARKET_INDEX_PROJECTION_TABLES,
     }
 )
 _SIDE_EFFECT_EXACT_TABLES = frozenset(
@@ -193,8 +202,11 @@ class ProjectionReplayPathResult:
     worker_error_count: int
     worker_dead_letter_count: int
     market_data_outbox_counts: Mapping[str, int]
+    projection_outbox_counts: Mapping[str, Mapping[str, int]]
     reconcile_status: str
     reconcile_runs: Sequence[Mapping[str, Any]]
+    market_index_reconcile_status: str
+    market_index_reconcile_run: Mapping[str, Any] | None
     snapshot: ProjectionSnapshot
     side_effect_table_counts_before: Mapping[str, int]
     side_effect_table_counts_after: Mapping[str, int]
@@ -223,8 +235,17 @@ class ProjectionReplayPathResult:
             "worker_error_count": self.worker_error_count,
             "worker_dead_letter_count": self.worker_dead_letter_count,
             "market_data_outbox_counts": dict(self.market_data_outbox_counts),
+            "projection_outbox_counts": {
+                key: dict(value) for key, value in self.projection_outbox_counts.items()
+            },
             "reconcile_status": self.reconcile_status,
             "reconcile_runs": [dict(item) for item in self.reconcile_runs],
+            "market_index_reconcile_status": self.market_index_reconcile_status,
+            "market_index_reconcile_run": (
+                None
+                if self.market_index_reconcile_run is None
+                else dict(self.market_index_reconcile_run)
+            ),
             "snapshot": self.snapshot.to_dict(),
             "side_effect_table_counts_before": dict(self.side_effect_table_counts_before),
             "side_effect_table_counts_after": dict(self.side_effect_table_counts_after),
@@ -515,10 +536,18 @@ def run_projection_replay_parity(
         prefix = path_result.mode.upper()
         if path_result.reconcile_status != "PASS":
             failures.append(f"{prefix}_RECONCILE_NOT_PASS")
+        if path_result.market_index_reconcile_status not in {"NOT_RUN", "PASS"}:
+            failures.append(f"{prefix}_MARKET_INDEX_RECONCILE_NOT_PASS")
         if path_result.worker_error_count or path_result.worker_dead_letter_count:
             failures.append(f"{prefix}_OUTBOX_ERROR_OR_DEAD_LETTER")
-        if int(path_result.market_data_outbox_counts.get("PENDING") or 0):
-            failures.append(f"{prefix}_MARKET_DATA_OUTBOX_PENDING")
+        for projection_name, counts in path_result.projection_outbox_counts.items():
+            projection_code = projection_name.upper()
+            if int(counts.get("PENDING") or 0):
+                failures.append(f"{prefix}_{projection_code}_OUTBOX_PENDING")
+            if int(counts.get("ERROR") or 0) or int(counts.get("DEAD_LETTER") or 0):
+                failures.append(
+                    f"{prefix}_{projection_code}_OUTBOX_ERROR_OR_DEAD_LETTER"
+                )
         if not path_result.no_trading_side_effects:
             failures.append(f"{prefix}_TRADING_SIDE_EFFECT_DETECTED")
     if not any(key == "NXT" for key in bundle.venue_counts):
@@ -675,26 +704,49 @@ def _run_projection_path(
                 inline_applied += result[0]
                 inline_ignored += result[1]
                 inline_errors += result[2]
-
-        while _market_data_pending_count(connection) > 0:
-            batch = process_projection_outbox_batch(
-                connection,
+            if mode == "inline" and is_market_index_projection_event(
+                event,
                 settings=replay_settings,
-                limit=batch_size,
-                owner_id=f"{mode}-projection-replay",
-                apply_projection=mode == "worker",
-                projection_name="market_data",
-            )
-            worker_batch_count += 1
-            worker_claimed += batch.claimed_count
-            worker_applied += batch.applied_count
-            worker_errors += batch.error_count
-            worker_dead_letters += batch.dead_letter_count
-            if batch.claimed_count == 0:
-                break
-        outbox_counts = _market_data_outbox_counts(connection)
+            ):
+                result = process_market_index_event(
+                    connection,
+                    event,
+                    settings=replay_settings,
+                )
+                inline_applied += result.applied_count
+                inline_ignored += result.ignored_count
+                inline_errors += result.error_count
+
+        for projection_name in ("market_data", "market_index", "market_regime"):
+            while _projection_pending_count(connection, projection_name) > 0:
+                batch = process_projection_outbox_batch(
+                    connection,
+                    settings=replay_settings,
+                    limit=batch_size,
+                    owner_id=f"{mode}-projection-replay-{projection_name}",
+                    apply_projection=mode == "worker",
+                    projection_name=projection_name,
+                )
+                worker_batch_count += 1
+                worker_claimed += batch.claimed_count
+                worker_applied += batch.applied_count
+                worker_errors += batch.error_count
+                worker_dead_letters += batch.dead_letter_count
+                if batch.claimed_count == 0:
+                    break
+        projection_outbox_counts = _projection_outbox_counts(connection)
+        outbox_counts = projection_outbox_counts["market_data"]
         reconcile_runs = _run_reconcile_chunks(connection, settings=replay_settings)
         reconcile_status = _aggregate_reconcile_status(reconcile_runs)
+        market_index_reconcile_run = _run_market_index_reconcile(
+            connection,
+            settings=replay_settings,
+        )
+        market_index_reconcile_status = (
+            "NOT_RUN"
+            if market_index_reconcile_run is None
+            else str(market_index_reconcile_run.get("status") or "FAIL")
+        )
         snapshot = _projection_snapshot(connection)
         after = _side_effect_table_counts(connection)
     finally:
@@ -718,8 +770,11 @@ def _run_projection_path(
         worker_error_count=worker_errors,
         worker_dead_letter_count=worker_dead_letters,
         market_data_outbox_counts=outbox_counts,
+        projection_outbox_counts=projection_outbox_counts,
         reconcile_status=reconcile_status,
         reconcile_runs=tuple(reconcile_runs),
+        market_index_reconcile_status=market_index_reconcile_status,
+        market_index_reconcile_run=market_index_reconcile_run,
         snapshot=snapshot,
         side_effect_table_counts_before=combined_before,
         side_effect_table_counts_after=combined_after,
@@ -746,9 +801,15 @@ def _projection_replay_settings(
         projection_outbox_apply_projection_enabled=worker_apply,
         projection_outbox_market_data_apply_enabled=worker_apply,
         projection_outbox_market_reference_apply_enabled=False,
+        projection_outbox_market_index_apply_enabled=worker_apply,
+        projection_outbox_market_regime_apply_enabled=False,
         projection_outbox_shadow_min_age_sec=0,
         projection_outbox_apply_min_age_sec=0,
+        projection_outbox_market_index_apply_min_age_sec=0,
+        projection_outbox_market_regime_apply_min_age_sec=0,
         projection_outbox_run_once_max_wall_ms=600_000,
+        market_index_tr_bootstrap_enabled=True,
+        market_regime_enabled=False,
         incremental_evaluation_enabled=False,
         incremental_evaluation_worker_enabled=False,
         condition_fusion_event_incremental_enabled=False,
@@ -832,9 +893,40 @@ def _aggregate_reconcile_status(runs: Sequence[Mapping[str, Any]]) -> str:
     return "PASS" if statuses == {"PASS"} else "FAIL"
 
 
+def _run_market_index_reconcile(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gateway_events
+        WHERE status = 'ACCEPTED'
+          AND (
+                event_type = 'market_index_tick'
+                OR (
+                    event_type = 'tr_response'
+                    AND lower(COALESCE(json_extract(payload_json, '$.request_id'), ''))
+                        LIKE 'market_index_tr_bootstrap:%'
+                )
+          )
+        """
+    ).fetchone()
+    event_count = int(row["count"] if row is not None else 0)
+    if event_count == 0:
+        return None
+    return run_market_index_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=event_count,
+        persist=False,
+    ).to_dict()
+
+
 def _projection_snapshot(connection: sqlite3.Connection) -> ProjectionSnapshot:
     tables: dict[str, dict[str, Any]] = {}
-    for table_name in MARKET_PROJECTION_TABLES:
+    for table_name in (*MARKET_PROJECTION_TABLES, *MARKET_INDEX_PROJECTION_TABLES):
         tables[table_name] = _table_snapshot(connection, table_name)
     tables["projection_watermarks"] = _table_snapshot(
         connection,
@@ -932,30 +1024,39 @@ def _gateway_event_from_row(row: Mapping[str, Any]) -> GatewayEvent:
     )
 
 
-def _market_data_pending_count(connection: sqlite3.Connection) -> int:
+def _projection_pending_count(
+    connection: sqlite3.Connection,
+    projection_name: str,
+) -> int:
     row = connection.execute(
         """
         SELECT COUNT(*) AS count
         FROM projection_outbox
-        WHERE projection_name = 'market_data' AND status = 'PENDING'
-        """
+        WHERE projection_name = ? AND status = 'PENDING'
+        """,
+        (projection_name,),
     ).fetchone()
     return int(row["count"] if row else 0)
 
 
-def _market_data_outbox_counts(connection: sqlite3.Connection) -> dict[str, int]:
+def _projection_outbox_counts(
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, int]]:
     statuses = ("PENDING", "PROCESSING", "APPLIED", "SKIPPED", "ERROR", "DEAD_LETTER")
-    counts = {status: 0 for status in statuses}
+    counts = {
+        projection_name: {status: 0 for status in statuses}
+        for projection_name in ("market_data", "market_index", "market_regime")
+    }
     rows = connection.execute(
         """
-        SELECT status, COUNT(*) AS count
+        SELECT projection_name, status, COUNT(*) AS count
         FROM projection_outbox
-        WHERE projection_name = 'market_data'
-        GROUP BY status
+        WHERE projection_name IN ('market_data', 'market_index', 'market_regime')
+        GROUP BY projection_name, status
         """
     ).fetchall()
     for row in rows:
-        counts[str(row["status"])] = int(row["count"])
+        counts[str(row["projection_name"])][str(row["status"])] = int(row["count"])
     return counts
 
 

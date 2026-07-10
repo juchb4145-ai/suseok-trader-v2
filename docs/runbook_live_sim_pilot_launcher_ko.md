@@ -42,7 +42,7 @@ pwsh -File .\tools\stop_live_sim_pilot.ps1 -Force
 | Gateway 기동 | 32-bit Python, PyQt5, Kiwoom OpenAPI+ 환경에서 프로세스 시작 | `Current Python is 64-bit`, `PyQt5 is required`, ActiveX 등록 오류 확인 |
 | Gateway login | `kiwoom_logged_in=true`, `server_mode=SIMULATION` | Kiwoom 로그인창, server_gubun, token/Core URL 확인 |
 | 실시간 tick | latest price tick `event_ts`가 60초 이내 | 조건식/실시간 등록, `latest_realtime_callback_at`, event posting 확인 |
-| 지수 실시간 | latest market index tick `event_ts`가 120초 이내 | `KIWOOM_MARKET_INDEX_REALTIME_ENABLED=true`, 필요 시 `KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED=true`로 재기동 |
+| 지수 실시간 | latest market index tick `event_ts`가 120초 이내 | `KIWOOM_MARKET_INDEX_REALTIME_ENABLED=true`; TR bootstrap은 별도 runbook의 OBSERVE plan/queue 절차와 KOA parser 확인 후 사용 |
 | 조건식 로드 | `condition_load_state=LOADED` | 조건식 파일/이름, `OnReceiveConditionVer`, gateway event 로그 확인 |
 | LIVE_SIM status | safety gate 요약 출력 | kill switch, heartbeat, gateway_orderable, simulation mode 확인 |
 | Preflight | `PASS` 또는 원인 있는 `WARN`; `BLOCK`이면 주문 차단 | 출력된 `blocking_reasons`를 먼저 해소 |

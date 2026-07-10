@@ -289,6 +289,17 @@ class Settings:
     market_regime_enabled: bool = True
     market_context_snapshot_stale_sec: int = 30
     market_index_stale_sec: int = 30
+    market_index_tr_bootstrap_enabled: bool = False
+    market_index_tr_bootstrap_tr_code: str = "OPT20001"
+    market_index_tr_bootstrap_screen_no: str = "5701"
+    market_index_tr_bootstrap_parser_status: str = "PILOT_UNVERIFIED_KOA_STUDIO"
+    market_index_tr_bootstrap_index_codes: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+    market_index_tr_bootstrap_market_types: Mapping[str, str] = field(
+        default_factory=lambda: {"KOSPI": "0", "KOSDAQ": "1"}
+    )
+    market_index_tr_bootstrap_industry_codes: Mapping[str, str] = field(
+        default_factory=lambda: {"KOSPI": "001", "KOSDAQ": "101"}
+    )
     market_scan_enabled: bool = False
     market_scan_interval_sec: int = 120
     market_scan_top_n: int = 200
@@ -867,6 +878,46 @@ class Settings:
             )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_tr_code",
+            _normalize_non_empty(self.market_index_tr_bootstrap_tr_code).upper(),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_screen_no",
+            _require_non_empty_config(self.market_index_tr_bootstrap_screen_no),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_parser_status",
+            _normalize_non_empty(self.market_index_tr_bootstrap_parser_status),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_index_codes",
+            _normalize_market_scan_markets(
+                self.market_index_tr_bootstrap_index_codes
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_market_types",
+            _normalize_required_mapping(
+                self.market_index_tr_bootstrap_market_types,
+                "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+                required_keys=self.market_index_tr_bootstrap_index_codes,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_industry_codes",
+            _normalize_required_mapping(
+                self.market_index_tr_bootstrap_industry_codes,
+                "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
+                required_keys=self.market_index_tr_bootstrap_index_codes,
+            ),
+        )
         if self.market_context_snapshot_stale_sec < 1:
             raise ValueError("MARKET_CONTEXT_SNAPSHOT_STALE_SEC must be >= 1")
         if self.market_scan_interval_sec < 1:
@@ -2708,6 +2759,39 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("MARKET_INDEX_STALE_SEC", "30"),
             "MARKET_INDEX_STALE_SEC",
             min_value=1,
+        ),
+        market_index_tr_bootstrap_enabled=_parse_bool(
+            env.get("KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED", "false")
+        ),
+        market_index_tr_bootstrap_tr_code=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_TR_CODE",
+            "OPT20001",
+        ),
+        market_index_tr_bootstrap_screen_no=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_SCREEN_NO",
+            "5701",
+        ),
+        market_index_tr_bootstrap_parser_status=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_PARSER_STATUS",
+            "PILOT_UNVERIFIED_KOA_STUDIO",
+        ),
+        market_index_tr_bootstrap_index_codes=_parse_csv_list(
+            env.get("KIWOOM_MARKET_INDEX_CODES", "KOSPI,KOSDAQ"),
+            "KIWOOM_MARKET_INDEX_CODES",
+        ),
+        market_index_tr_bootstrap_market_types=_parse_key_value_mapping(
+            env.get(
+                "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+                "KOSPI=0,KOSDAQ=1",
+            ),
+            "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+        ),
+        market_index_tr_bootstrap_industry_codes=_parse_key_value_mapping(
+            env.get(
+                "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
+                "KOSPI=001,KOSDAQ=101",
+            ),
+            "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
         ),
         market_scan_enabled=_parse_bool(env.get("MARKET_SCAN_ENABLED", "false")),
         market_scan_interval_sec=_parse_int(

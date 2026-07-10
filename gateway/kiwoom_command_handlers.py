@@ -343,6 +343,7 @@ class KiwoomGatewayCommandHandler:
             rows=[normalize_payload(row) for row in result.rows],
             message="kiwoom tr response",
             continuation_key=result.continuation_key,
+            metadata=normalize_payload(_mapping_value(payload, "metadata")),
         )
         return [
             GatewayEvent(

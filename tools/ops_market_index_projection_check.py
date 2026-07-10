@@ -221,8 +221,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         warnings.append("MARKET_INDEX_EVENT_MISSING")
     if data_unusable_count:
         failures.append("MARKET_INDEX_DATA_NOT_USABLE")
-    if tr_bootstrap_count:
-        failures.append("MARKET_INDEX_TR_BOOTSTRAP_SOURCE_NOT_IMPLEMENTED")
+    if tr_bootstrap_count and parser_unverified_count:
+        warnings.append("MARKET_INDEX_TR_BOOTSTRAP_KOA_STUDIO_PENDING")
     if parser_unverified_count:
         (failures if report.get("expect_effective_skip") else warnings).append(
             "MARKET_INDEX_PARSER_UNVERIFIED"
@@ -326,8 +326,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 failures.append(f"MARKET_INDEX_{key.upper()}")
         if not bool(routing.get("regime_continuity_ready")):
             failures.append("MARKET_INDEX_REGIME_CONTINUITY_NOT_READY")
-    if str(routing.get("tr_bootstrap_adapter_status") or "") != "NOT_IMPLEMENTED":
-        failures.append("MARKET_INDEX_TR_BOOTSTRAP_STATUS_NOT_EXPLICIT")
+    if str(routing.get("tr_bootstrap_adapter_status") or "") != "IMPLEMENTED":
+        failures.append("MARKET_INDEX_TR_BOOTSTRAP_ADAPTER_NOT_IMPLEMENTED")
     if report.get("run_worker"):
         if str(worker.get("status") or "") not in {"COMPLETED", "NOOP"}:
             failures.append("MARKET_INDEX_WORKER_NOT_COMPLETED")
@@ -446,7 +446,11 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             "",
             "PR-16 permits only guarded, budgeted market_index effective skips.",
             "Worker evidence must close both market_index and event-linked market_regime.",
-            "TR bootstrap is not implemented; NXT is not KRX market-index evidence.",
+            (
+                "TR bootstrap is implemented behind a disabled-by-default v1 lineage "
+                "contract; KOA Studio confirmation is still required."
+            ),
+            "NXT is not KRX market-index evidence.",
         ]
     )
 

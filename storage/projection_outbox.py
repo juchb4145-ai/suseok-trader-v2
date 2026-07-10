@@ -794,6 +794,9 @@ def _projection_jobs_for_event(event: GatewayEvent) -> list[ProjectionJobSpec]:
     specs = projection_jobs_for_gateway_event(event.event_type)
     if _is_scan_related_tr_response(event):
         specs = _append_projection_job(specs, "market_scan")
+    if _is_market_index_bootstrap_tr_response(event):
+        specs = _append_projection_job(specs, "market_index")
+        specs = _append_projection_job(specs, "market_regime")
     return specs
 
 
@@ -816,6 +819,23 @@ def _is_scan_related_tr_response(event: GatewayEvent) -> bool:
         return True
     metadata = payload.get("metadata")
     return isinstance(metadata, Mapping) and str(metadata.get("source") or "") == "market_scan"
+
+
+def _is_market_index_bootstrap_tr_response(event: GatewayEvent) -> bool:
+    if _normalize_event_type(event.event_type) != "tr_response":
+        return False
+    payload = event.payload
+    request_id = str(payload.get("request_id") or "").strip().lower()
+    metadata = payload.get("metadata")
+    if not request_id.startswith("market_index_tr_bootstrap:"):
+        return False
+    if not isinstance(metadata, Mapping):
+        return False
+    source = str(
+        metadata.get("projection_source") or metadata.get("source") or ""
+    ).strip().upper()
+    contract = str(metadata.get("tr_bootstrap_contract_version") or "").strip().lower()
+    return source == "KIWOOM_TR_BOOTSTRAP_MARKET_INDEX" and contract == "v1"
 
 
 def _lookup_gateway_event_rowid(

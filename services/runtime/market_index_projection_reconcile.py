@@ -19,6 +19,12 @@ from services.market_index_service import (
     market_index_parser_verified,
     market_index_payload_usability,
 )
+from services.market_index_tr_bootstrap import (
+    MARKET_INDEX_TR_BOOTSTRAP_CONTRACT_VERSION,
+    MARKET_INDEX_TR_BOOTSTRAP_SOURCE,
+    bootstrap_event_from_row,
+    inspect_market_index_tr_bootstrap_event,
+)
 
 PROJECTION_NAME_MARKET_INDEX = "market_index"
 MARKET_INDEX_EVENT_TYPE = "market_index_tick"
@@ -153,13 +159,23 @@ def run_market_index_projection_reconcile(
             run_id=run_id,
             severity="WARN",
             reason_code="MARKET_INDEX_EVENT_MISSING",
-            message="no accepted market_index_tick gateway event was found",
+            message="no accepted market-index realtime or TR bootstrap event was found",
         )
 
     for row in events:
         counters["checked_event_count"] += 1
         event_id = str(row["event_id"])
-        payload = _json_object(row["payload_json"])
+        stored_payload = _json_object(row["payload_json"])
+        payload = stored_payload
+        bootstrap_inspection = None
+        if str(row["event_type"]).lower() == "tr_response":
+            bootstrap_event = bootstrap_event_from_row(dict(row))
+            bootstrap_inspection = inspect_market_index_tr_bootstrap_event(
+                bootstrap_event,
+                settings=resolved_settings,
+            )
+            if bootstrap_inspection.valid and bootstrap_inspection.tick is not None:
+                payload = bootstrap_inspection.tick.to_dict()
         parser_status = market_index_parser_status(payload)
         parser_verified = market_index_parser_verified(payload)
         data_source = classify_market_index_data_source(payload)
@@ -188,20 +204,24 @@ def run_market_index_projection_reconcile(
             counters["realtime_source_count"] += 1
         elif data_source == MARKET_INDEX_SOURCE_TR_BOOTSTRAP:
             counters["tr_bootstrap_source_count"] += 1
-            _add_issue(
-                issues,
-                run_id=run_id,
-                severity="FAIL",
-                reason_code="MARKET_INDEX_TR_BOOTSTRAP_SOURCE_NOT_IMPLEMENTED",
-                event_id=event_id,
-                index_code=index_code,
-                parser_status=parser_status,
-                data_source=data_source,
-                message=(
-                    "TR bootstrap source is declared but the Gateway adapter "
-                    "is not implemented"
-                ),
+            lineage_reasons = _tr_bootstrap_lineage_reasons(
+                event_type=str(row["event_type"]),
+                payload=payload,
+                inspection=bootstrap_inspection,
             )
+            for reason_code in lineage_reasons:
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="FAIL",
+                    reason_code=reason_code,
+                    event_id=event_id,
+                    index_code=index_code,
+                    parser_status=parser_status,
+                    data_source=data_source,
+                    message="TR bootstrap event does not satisfy the v1 source lineage contract",
+                    evidence={"stored_payload": stored_payload},
+                )
         else:
             counters["unknown_source_count"] += 1
             _add_issue(
@@ -532,15 +552,53 @@ def get_latest_market_index_projection_reconcile(
 def _select_events(connection: sqlite3.Connection, *, limit: int) -> list[sqlite3.Row]:
     rows = connection.execute(
         """
-        SELECT rowid, event_id, event_type, event_ts, received_at, payload_json
+        SELECT rowid, event_id, event_type, event_ts, received_at, source,
+               command_id, idempotency_key, payload_json
         FROM gateway_events
-        WHERE status = 'ACCEPTED' AND event_type = 'market_index_tick'
+        WHERE status = 'ACCEPTED'
+          AND (
+              event_type = 'market_index_tick'
+              OR (
+                  event_type = 'tr_response'
+                  AND lower(COALESCE(json_extract(payload_json, '$.request_id'), ''))
+                      LIKE 'market_index_tr_bootstrap:%'
+              )
+          )
         ORDER BY rowid DESC
         LIMIT ?
         """,
         (limit,),
     ).fetchall()
     return sorted(rows, key=lambda row: int(row["rowid"]))
+
+
+def _tr_bootstrap_lineage_reasons(
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+    inspection: Any,
+) -> list[str]:
+    if str(event_type).lower() == "tr_response":
+        if inspection is None or not bool(inspection.valid):
+            return ["MARKET_INDEX_TR_BOOTSTRAP_LINEAGE_INVALID"]
+        return []
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return ["MARKET_INDEX_TR_BOOTSTRAP_LINEAGE_INVALID"]
+    source = str(
+        metadata.get("projection_source") or metadata.get("source") or ""
+    ).strip().upper()
+    contract = str(metadata.get("tr_bootstrap_contract_version") or "").strip().lower()
+    parent_event_id = str(metadata.get("parent_event_id") or "").strip()
+    request_id = str(metadata.get("request_id") or "").strip().lower()
+    if (
+        source != MARKET_INDEX_TR_BOOTSTRAP_SOURCE
+        or contract != MARKET_INDEX_TR_BOOTSTRAP_CONTRACT_VERSION
+        or not parent_event_id
+        or not request_id.startswith("market_index_tr_bootstrap:")
+    ):
+        return ["MARKET_INDEX_TR_BOOTSTRAP_LINEAGE_INVALID"]
+    return []
 
 
 def _outbox_job(connection: sqlite3.Connection, event_id: str) -> Mapping[str, Any] | None:

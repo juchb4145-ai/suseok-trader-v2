@@ -39,7 +39,10 @@ from services.market_data_service import (
     normalize_market_data_exchange,
     process_gateway_event,
 )
-from services.market_index_service import process_market_index_event
+from services.market_index_service import (
+    is_market_index_projection_event,
+    process_market_index_event,
+)
 from services.market_reference_service import (
     market_symbols_payload_has_symbols,
     process_market_symbols_event,
@@ -683,7 +686,10 @@ def apply_projection_outbox_job(
             worker_run_id=worker_run_id,
         )
     if projection_name == "market_index":
-        if event_type != "market_index_tick":
+        if not _market_index_source_event_supported(
+            source_event,
+            settings=settings,
+        ):
             return _verification_skipped(
                 "MARKET_INDEX_APPLY_EVENT_TYPE_UNSUPPORTED",
                 event_id=event_id,
@@ -697,7 +703,10 @@ def apply_projection_outbox_job(
             worker_run_id=worker_run_id,
         )
     if projection_name == "market_regime":
-        if event_type != "market_index_tick":
+        if not _market_index_source_event_supported(
+            source_event,
+            settings=settings,
+        ):
             return _verification_skipped(
                 "MARKET_REGIME_APPLY_EVENT_TYPE_UNSUPPORTED",
                 event_id=event_id,
@@ -1398,9 +1407,11 @@ def _apply_market_regime_continuity_verification(
     if verification.status == "SKIPPED":
         return _verification_skipped(
             verification.reason,
-            **dict(verification.evidence),
-            **evidence,
-            apply_result="SKIPPED_BY_VERIFY",
+            **{
+                **dict(verification.evidence),
+                **evidence,
+                "apply_result": "SKIPPED_BY_VERIFY",
+            },
         )
     return _verification_error(
         verification.reason,
@@ -1446,12 +1457,35 @@ def _market_regime_source_event_superseded(
     payload = _json_object(source_event["payload_json"])
     index_code = str(payload.get("index_code") or "").strip().upper()
     if not index_code:
+        sample = connection.execute(
+            "SELECT index_code FROM market_index_tick_samples WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        index_code = "" if sample is None else str(sample["index_code"] or "").upper()
+    if not index_code:
         return False
     latest = connection.execute(
         "SELECT event_id FROM market_index_ticks_latest WHERE index_code = ?",
         (index_code,),
     ).fetchone()
     return bool(latest is not None and str(latest["event_id"]) != event_id)
+
+
+def _market_index_source_event_supported(
+    source_event: Mapping[str, Any] | sqlite3.Row,
+    *,
+    settings: Settings,
+) -> bool:
+    event_type = str(source_event["event_type"] or "").strip().lower()
+    if event_type == "market_index_tick":
+        return True
+    if event_type != "tr_response":
+        return False
+    try:
+        event = _gateway_event_from_row(source_event)
+    except Exception:
+        return False
+    return is_market_index_projection_event(event, settings=settings)
 
 
 def _apply_market_index_projection(
