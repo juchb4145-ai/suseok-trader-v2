@@ -122,7 +122,10 @@ class GatewayCommandHandler:
             return [make_command_failed_event(command, error_message, source=self.source)]
 
         broker_order_no = f"MOCKSIM-{command.command_id[-12:]}"
-        events = [make_command_started_event(command, source=self.source)]
+        events = [
+            make_command_started_event(command, source=self.source),
+            _make_mock_order_pre_ack_event(command, source=self.source),
+        ]
         events.append(
             make_command_ack_event(
                 command,
@@ -181,7 +184,10 @@ class GatewayCommandHandler:
         if error_message is not None:
             return [make_command_failed_event(command, error_message, source=self.source)]
 
-        events = [make_command_started_event(command, source=self.source)]
+        events = [
+            make_command_started_event(command, source=self.source),
+            _make_mock_order_pre_ack_event(command, source=self.source),
+        ]
         events.append(
             make_command_ack_event(
                 command,
@@ -266,6 +272,36 @@ class GatewayCommandHandler:
 
 def _is_forbidden_order_command(command_type: str) -> bool:
     return command_type in FORBIDDEN_COMMAND_TYPES or "order" in command_type
+
+
+def _make_mock_order_pre_ack_event(
+    command: GatewayCommand,
+    *,
+    source: str,
+) -> GatewayEvent:
+    payload = command.payload
+    return GatewayEvent(
+        event_type="order_pre_ack",
+        source=source,
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        payload={
+            "command_id": command.command_id,
+            "command_type": command.command_type,
+            "idempotency_key": command.idempotency_key,
+            "status": "PRE_ACK",
+            "broker_env": payload.get("broker_env", "MOCK"),
+            "account_id": payload.get("account_id"),
+            "code": payload.get("code"),
+            "side": payload.get("side"),
+            "quantity": payload.get("quantity"),
+            "price": payload.get("price", payload.get("limit_price")),
+            "order_type": payload.get("order_type"),
+            "original_order_no": payload.get("original_order_no"),
+            "metadata": normalize_payload(_mapping_value(payload, "metadata")),
+            "mock": True,
+        },
+    )
 
 
 def _extract_codes(payload: Mapping[str, Any], *, default_code: str) -> set[str]:

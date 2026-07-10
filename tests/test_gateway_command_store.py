@@ -253,7 +253,7 @@ def test_order_commands_are_claimed_before_market_data_backlog(tmp_path) -> None
     assert [command.command_id for command in commands] == ["cmd_send_new"]
     statuses = {row["command_id"]: row["status"] for row in rows}
     attempts = {row["command_id"]: row["attempts"] for row in rows}
-    assert statuses["cmd_send_new"] == GatewayCommandStatus.DISPATCHED.value
+    assert statuses["cmd_send_new"] == GatewayCommandStatus.CLAIMED.value
     assert attempts["cmd_send_new"] == 1
     assert statuses["cmd_request_old"] == GatewayCommandStatus.QUEUED.value
     assert statuses["cmd_realtime_old"] == GatewayCommandStatus.QUEUED.value
@@ -417,7 +417,7 @@ def test_execution_event_reconciles_unconfirmed_order(tmp_path) -> None:
     ).fetchone()
     connection.close()
 
-    assert row["status"] == GatewayCommandStatus.ACKED.value
+    assert row["status"] == GatewayCommandStatus.CHEJAN_CONFIRMED.value
     assert row["completed_at"] is not None
 
 

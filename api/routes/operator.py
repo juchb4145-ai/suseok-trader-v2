@@ -21,14 +21,14 @@ from services.runtime.evaluation_run_guard import (
     EvaluationRunLockError,
     get_runtime_execution_lock_status,
 )
-from services.runtime.gateway_projection_routing import (
-    get_latest_market_data_append_only_routing_status,
-    list_market_data_append_only_routing_decisions,
-)
 from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
     list_market_reference_append_only_routing_decisions,
+)
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+    list_market_data_append_only_routing_decisions,
 )
 from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
@@ -43,14 +43,14 @@ from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
     run_market_data_projection_reconcile,
 )
-from services.runtime.market_reference_projection_reconcile import (
-    get_latest_market_reference_projection_reconcile,
-    run_market_reference_projection_reconcile,
-)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
     run_market_open_observe_cycle_once,
+)
+from services.runtime.market_reference_projection_reconcile import (
+    get_latest_market_reference_projection_reconcile,
+    run_market_reference_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -63,6 +63,10 @@ from services.runtime.projection_outbox_worker import process_projection_outbox_
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
+)
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+    list_order_broker_boundaries,
 )
 from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
@@ -266,6 +270,40 @@ def operator_live_sim_order_plan_uniqueness_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_live_sim_order_plan_uniqueness_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/gateway/order-broker-boundaries/status")
+def operator_order_broker_boundaries_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_order_broker_boundary_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/gateway/order-broker-boundaries")
+def operator_order_broker_boundaries(
+    state: str | None = Query(default=None, min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_order_broker_boundaries(
+            connection,
+            state=state,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
     finally:
         connection.close()
 

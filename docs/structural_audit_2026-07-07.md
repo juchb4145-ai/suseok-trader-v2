@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (P1-6 LIVE_SIM order-plan uniqueness 완료)
+최종 업데이트: 2026-07-10 (P0-4 durable order broker boundary 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -12,7 +12,7 @@
 - LIVE_SIM intent/order 주요 키는 DB 제약이 있다. `live_sim_intents.live_sim_intent_id` PK, `idempotency_key` UNIQUE, nullable `order_plan_id` partial UNIQUE, `live_sim_orders.live_sim_order_id` PK, `live_sim_orders.idempotency_key` UNIQUE, `order_plan_drafts.order_plan_id` PK, `order_plan_drafts.idempotency_key` UNIQUE. 근거: `storage/sqlite.py`, `storage/live_sim_order_plan_uniqueness.py`.
 - Market index parser의 `parser_status`는 latest row와 dashboard status에 노출된다. `PILOT_UNVERIFIED` 같은 상태를 감지할 수 있다. 근거: `services/market_index_service.py`, `gateway/kiwoom_client.py`.
 - Dashboard top theme 표시는 단순 latest sample만 쓰지 않고 state-filtered query를 별도로 사용한다. 기존 테스트가 DATA_WAIT 최신 표본 뒤에 숨은 LEADING/SPREADING 테마를 검증한다. 근거: `services/dashboard_service.py`, `tests/test_dashboard_service.py`.
-- Stale `DISPATCHED` order command는 timeout 후 `UNCONFIRMED`로 전환되고 운영자 종결 도구가 `command_started`/`command_ack`/CHEJAN/체결 evidence를 확인한다. 근거: `storage/gateway_command_store.py`, `tools/resolve_live_sim_order.py`.
+- Order command는 `CLAIMED -> GATEWAY_STARTED -> PRE_ACK_RECORDED -> BROKER_ACCEPTED -> CHEJAN_CONFIRMED` 경계를 사용한다. timeout은 `UNCONFIRMED`로 격리되고, durable pre-ack이 Core DB에 commit되지 않으면 Kiwoom broker method를 호출하지 않는다. 근거: `storage/gateway_command_store.py`, `storage/gateway_order_broker_boundary.py`, `gateway/kiwoom_command_handlers.py`.
 - P0-2는 수정 완료됐다. Candidate quote refresh `tr_response`의 synthetic `price_tick`은 `parent_event_id:synthetic_price_tick:row_index:code:exchange` 기반 deterministic child `event_id`를 사용하며, payload metadata에 parent event/command/TR/request/row 정보를 남긴다. 근거: `services/market_data_service.py`, `tests/test_structural_audit_guards.py`.
 
 ## P0-1 진행 요약
@@ -31,7 +31,7 @@
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
 - PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness를 완료했다. 다음 우선순위는 P0-4 broker boundary다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary를 완료했다. 다음 우선순위는 격리 replay 기반이다.
 
 ## P0
 
@@ -40,7 +40,7 @@
 | P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12의 guarded mode에서, `market_reference`는 PR-14 guarded mode에서만 inline projection을 건너뛸 수 있다. market_index/regime/scan과 `handle_live_sim_gateway_event()`는 request path에 남아 있다. | 제한된 market_data/reference event는 worker로 이관할 수 있지만, 나머지 inline projection 비용과 DB write lock 경합은 여전히 Gateway POST latency와 같은 critical path에 있다. | projection별 worker/watermark/error/retry 정책과 lifecycle consumer를 확정한다. 최종적으로 POST는 raw append + outbox enqueue만 수행한다. | MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. SQL: `SELECT projection_name,event_type,status,COUNT(*) FROM projection_outbox GROUP BY 1,2,3;` |
 | P0-2 Candidate quote refresh TR response synthetic price_tick `event_id` collision | 수정 완료. `_process_tr_response()`는 row별 synthetic child `GatewayEvent.event_id`를 deterministic하게 생성하고, parent metadata를 보존한다. 근거: `services/market_data_service.py::_synthetic_price_tick_event_id()`, `_with_synthetic_price_tick_metadata()`. | 다중 code row TR response가 `market_tick_samples.event_id` PK 충돌 없이 projection된다. | 유지보수 방향: child id 포맷과 metadata contract를 replay/reconcile 문서에 계속 고정한다. | 테스트: `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`. SQL: `SELECT event_id, metadata_json FROM market_tick_samples WHERE event_id LIKE '%synthetic_price_tick%';` |
 | P0-3 runtime execution lock lease/fencing | 수정 완료. lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 저장하고 별도 monotonic fence sequence를 유지한다. daemon heartbeat가 lease를 갱신하며 TTL이 지나도 owner process/thread가 살아 있으면 takeover를 차단한다. evaluation transaction과 cycle commit 경계는 현재 owner/token을 검증한다. startup cleanup은 expired/dead-owner 또는 self-owned row만 삭제한다. | 장시간 run의 TTL overlap, 다른 Core startup의 active-lock 삭제, stale owner latest-row write를 fail-closed로 차단한다. | 운영 상태는 operator API/dashboard fast/ops report로 확인한다. active owner를 수동 전체 삭제하지 않는다. | 테스트: `tests/test_evaluation_run_guard.py`, `tests/test_live_sim_operating_loop.py`, `tests/test_ops_runtime_execution_lock_check.py`. Runbook: `docs/runbook_runtime_execution_lock_ko.md`. |
-| P0-4 order command가 `DISPATCHED`로 claim된 뒤 Gateway가 SendOrder 전 죽으면 broker boundary 상태가 불명확 | `storage/gateway_command_store.py::_dispatch_ready_commands()`가 poll 시 `QUEUED -> DISPATCHED`를 커밋한다. `gateway/kiwoom_command_handlers.py::_handle_send_order()`에서 그 뒤 `command_started`, `order_pre_ack`, SendOrder, `command_ack` 순으로 이벤트가 생성된다. | Core에는 `DISPATCHED`만 남고 `order_pre_ack`가 없으면 broker 도달 전/후를 DB 상태만으로 구분하기 어렵다. timeout 후 `UNCONFIRMED`로 가더라도 operator가 broker absent 여부를 수동 확인해야 한다. | command 상태 모델에 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 분리한다. `order_pre_ack`를 file journal뿐 아니라 DB pre_ack table/unique key로 durable하게 저장한다. | 추가 테스트: `test_order_command_lifecycle_detects_dispatched_without_pre_ack`. SQL: `SELECT c.command_id FROM gateway_commands c WHERE c.status='DISPATCHED' AND c.command_type IN ('send_order','cancel_order') AND NOT EXISTS (SELECT 1 FROM gateway_events e WHERE e.command_id=c.command_id AND e.event_type='order_pre_ack');` |
+| P0-4 order command broker boundary와 durable DB pre-ack | 수정 완료. schema 47의 `gateway_order_broker_boundaries`가 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 저장한다. Gateway는 local journal 이후 Core에 `order_pre_ack`를 동기 POST하고 `accepted=true`, `durable_pre_ack_recorded=true`를 모두 확인한 경우에만 Kiwoom 주문/cancel method를 호출한다. | Core 응답 실패/유실은 `DURABLE_DB_PRE_ACK_FAILED`로 fail-closed한다. timeout은 `UNCONFIRMED`로 격리하고 신규 BUY routing을 차단하되 lifecycle cancel은 허용한다. 늦은 ack/Chejan은 상태를 복구하며 out-of-order lower state는 역행시키지 않는다. | operator API, Dashboard fast section, ops report로 missing/gap/duplicate/mismatch와 historical unconfirmed를 확인한다. 기존 미확정 row를 evidence 없이 종결하지 않는다. | 테스트: `tests/test_gateway_order_broker_boundary.py`, `tests/test_ops_order_broker_boundary_check.py`, `tests/test_structural_audit_guards.py::test_order_command_lifecycle_detects_claimed_without_pre_ack`. Runbook: `docs/runbook_order_broker_boundary_ko.md`. Reports: `reports/order_broker_boundary_migration/20260710T012452Z/summary.md`, `reports/order_broker_boundary/20260710T013001Z/summary.md`. |
 
 ## P1
 
@@ -312,23 +312,36 @@ P1-6 LIVE_SIM order-plan uniqueness 진행 상태:
 - 운영 DB를 read-only SQLite backup으로 복제한 격리 DB에서 7건 backfill, partial UNIQUE 생성, schema 46 재실행을 검증했다. 1차/2차 상태 모두 `PASS`, duplicate/mismatch/missing backfill `0/0/0`이었다.
 - full pytest suite 863개와 LIVE_SIM/dashboard/SQLite 영향 범위 회귀를 통과했다. duplicate, mismatch, nullable partial UNIQUE, direct lookup, API/dashboard/ops fail-closed 계약을 포함한다.
 - 2026-07-10 09:46 KST OBSERVE-safe Core API에서 `profile/mode=OBSERVE/OBSERVE`, LIVE_SIM/LIVE_REAL false, kill switch true, uniqueness/dashboard `PASS`, intent/backfill `7/7`, duplicate/mismatch/missing `0/0/0`을 확인했다. 과거 order command 5건은 유지됐고 점검 전후 total/order command delta는 `0/0`이었다. 공식 report: `reports/live_sim_order_plan_uniqueness/20260710T004658Z/summary.md`.
-- 검증 후 Core PID를 종료했다. 최종 상태는 health unreachable, 8000 listener `0`, Python runtime process `0`이다. 다음 PR 진입 조건은 `PASS`이며 P0-4 broker boundary로 진행한다.
+- 검증 후 Core PID를 종료했다. 최종 상태는 health unreachable, 8000 listener `0`, Python runtime process `0`이었다. P1-6 진입 조건 `PASS`를 충족해 후속 P0-4 broker boundary로 진행했다.
+
+P0-4 durable order broker boundary 진행 상태:
+
+- schema version 47에 `gateway_order_broker_boundaries`와 nullable idempotency partial UNIQUE, state/update, broker order number index를 추가했다. 500만 건 이상의 market-only event를 불필요하게 색인하지 않도록 `gateway_events(command_id,event_type,received_at) WHERE command_id IS NOT NULL` partial index를 사용한다.
+- Core poll은 order command를 `QUEUED -> CLAIMED`로 전환한다. `command_started`, `order_pre_ack`, `command_ack`, `kiwoom_order_chejan`/`execution_event`는 각각 `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`로 기록하며 lower/out-of-order event가 상태를 되돌리지 않는다.
+- Kiwoom `send_order`/`cancel_order` handler는 local pre-ack journal을 기록한 뒤 Core `/api/gateway/events`에 동기 POST한다. Core가 `accepted=true`와 `durable_pre_ack_recorded=true`를 모두 반환하지 않으면 `DURABLE_DB_PRE_ACK_FAILED`로 종료하고 broker method를 호출하지 않는다. 이 경계는 비동기 Core worker queue를 우회한다.
+- pre-ack 이후 Kiwoom broker method가 예외를 던지거나 broker ack 전 timeout이 발생하면 `order_broker_unconfirmed`/timeout evidence와 함께 `UNCONFIRMED`로 보존한다. `UNCONFIRMED` 또는 durable gap이 있으면 신규 `send_order` claim과 NEW_BUY safety gate를 차단하지만 reconcile/lifecycle cancel은 막지 않는다. 늦은 ack/Chejan만 `BROKER_ACCEPTED`/`CHEJAN_CONFIRMED`로 복구할 수 있다.
+- mock Gateway도 `command_started -> order_pre_ack -> command_ack` 계약을 사용해 replay와 실제 adapter의 상태 의미를 맞췄다. `order_pre_ack`는 LIVE_SIM lifecycle unknown-event error를 만들지 않는 broker-boundary event로 분리했다.
+- `GET /api/operator/gateway/order-broker-boundaries/status`, read-only list API, operator aggregate status, Dashboard full/fast `order_broker_boundaries`/pipeline summary, Gateway heartbeat의 durable pre-ack metrics, `tools/ops_order_broker_boundary_check.py`를 추가했다. runbook은 `docs/runbook_order_broker_boundary_ko.md`다.
+- 구버전 migration, 재실행, duplicate/idempotency, out-of-order, broker-call exception/timeout과 late Chejan recovery, pre-ack callback failure에서 broker call 0, send/cancel 공통 경계, API/dashboard/ops 계약을 테스트했다. 구조 감사 guard는 과거 `DISPATCHED` 대신 `CLAIMED/GATEWAY_STARTED` pre-ack 누락을 탐지한다. 최종 full pytest suite `882`개와 scoped ruff를 통과했다.
+- 26.7GB 운영 DB를 read-only SQLite online backup으로 복제한 격리 DB에서 schema `46 -> 47`을 적용했다. 1차 `37.039s`, 재실행 `0.059s`, `quick_check=ok`, partial index query plan 사용을 확인했다. 5개 order command 중 미발송 `EXPIRED=2`, 기존 evidence 없는 `UNCONFIRMED=3`은 그대로 보존됐고 missing/gap/duplicate/mismatch는 `0/0/0/0`이었다. 근거: `reports/order_broker_boundary_migration/20260710T012452Z/summary.md`.
+- 최초 Core 실행은 process env보다 `.env`를 나중에 적용하는 config precedence 때문에 ops가 `CORE_NOT_OBSERVE/LIVE_SIM_ALLOWED`로 즉시 FAIL 판정했다. Gateway는 없었고 total/order command delta는 `0/0`이었다. 해당 Core를 종료한 뒤 별도 temp safe env를 `TRADING_ENV_FILE`로 지정해 재검증했다.
+- 2026-07-10 10:30 KST 최종 Core API는 `mode=OBSERVE`, LIVE_SIM/LIVE_REAL false였다. boundary/dashboard는 기존 `UNCONFIRMED=3` 때문에 예상 `WARN`, 신규 BUY routing block `true`, missing/gap/duplicate/mismatch `0/0/0/0`, 점검 전후 total/order command delta `0/0`이었다. 이 WARN은 과거 broker evidence를 조작하지 않은 결과이며 다음 replay PR을 차단하지 않는다. 공식 report: `reports/order_broker_boundary/20260710T013001Z/summary.md`.
+- 검증 후 Core supervisor/child PID를 종료하고 8000 listener `0`을 확인했다. temp safe env와 26.7GB 격리 backup도 경로 검증 후 삭제했다. 다음 PR 진입 판정은 `WARN_ALLOWED_HISTORICAL_UNCONFIRMED`이며 replay 기반으로 진행한다.
 
 ## 다음 PR 권장 순서
 
-1. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
-2. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
-3. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-4. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-5. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-6. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-7. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-8. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-9. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-10. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-11. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
+2. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+3. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+4. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+5. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+6. LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+7. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+8. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+9. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+10. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
-## Replay 검증 계획 (순서 3)
+## Replay 검증 계획 (다음 순서 1)
 
 - 목적: cutover PR 검증이 "장중 run-once + reconcile" 1일 1회 사이클에 묶이지 않도록, 기록된 이벤트를 오프라인에서 재주입해 하루에 여러 PR을 검증할 수 있게 한다.
 - 방식: `raw_events`/`gateway_events`에서 하루치 이벤트를 export하고, 격리된 replay DB에 두 경로를 재실행한다 — (a) Gateway POST inline projection 경로, (b) `projection_outbox` worker apply 경로. 결과는 기존 `market_data` dual-run reconcile(PR-5)로 대조한다.
@@ -336,7 +349,7 @@ P1-6 LIVE_SIM order-plan uniqueness 진행 상태:
 - 안전 제약: replay는 검증 전용이며 production DB에 쓰지 않는다. 주문/LIVE_SIM/LIVE_REAL side effect는 replay에서 항상 차단한다. 안전 원칙(주문 정책 완화 없음)은 replay 환경에도 동일 적용한다.
 - 연계: P1-2 projection watermark/retention 정책과 event export 포맷을 공유한다. retention gating이 확정되기 전에는 replay 대상 이벤트가 삭제되지 않도록 export를 먼저 수행한다.
 
-## Flag 정리 계획 (순서 5)
+## Flag 정리 계획 (최종 순서 10)
 
 - 전제 조건 (exit criteria): `price_tick`/`tr_response`/`condition_event` cutover가 모두 기본 경로로 동작하고, 연속 10거래일 reconcile PASS, invalid effective skip 0건, deferred side-effect 누락 0건.
 - 1단계: `GATEWAY_MARKET_DATA_APPEND_ONLY_*` 계열 scaffolding flag(dry-run, per-type cutover, budget, require-*, reconcile max age 등 약 20개)와 `PROJECTION_OUTBOX_SHADOW_MODE`/`PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED`/`PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED` apply 게이트를 제거하고, append-only를 기본 동작으로 만든다. inline projection 경로는 긴급 rollback용 단일 flag 하나 뒤에만 유지한다.

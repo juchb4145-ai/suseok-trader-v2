@@ -20,6 +20,9 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 from storage.gateway_command_store import FORBIDDEN_ORDER_COMMAND_TYPES
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+)
 from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
 )
@@ -119,14 +122,14 @@ from services.risk_gate import (
     list_risk_check_observations,
     list_risk_errors,
 )
-from services.runtime.gateway_projection_routing import (
-    get_latest_market_data_append_only_routing_status,
-)
+from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
 )
-from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+)
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -134,11 +137,11 @@ from services.runtime.market_data_append_only_controller import (
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
-from services.runtime.market_reference_projection_reconcile import (
-    get_latest_market_reference_projection_reconcile,
-)
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
+)
+from services.runtime.market_reference_projection_reconcile import (
+    get_latest_market_reference_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -165,6 +168,7 @@ DASHBOARD_SECTIONS = [
     "system",
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -198,6 +202,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "system",
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
     "gateway",
     "market_data",
     "market_reference",
@@ -217,6 +222,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "system",
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -248,6 +254,12 @@ GATEWAY_HEARTBEAT_STALE_SEC = 120.0
 COMMAND_STATUSES = (
     "QUEUED",
     "DISPATCHED",
+    "CLAIMED",
+    "GATEWAY_STARTED",
+    "PRE_ACK_RECORDED",
+    "BROKER_ACCEPTED",
+    "CHEJAN_CONFIRMED",
+    "UNCONFIRMED",
     "ACKED",
     "REJECTED",
     "FAILED",
@@ -336,6 +348,7 @@ def build_dashboard_snapshot(
     live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
         connection
     )
+    order_broker_boundaries = get_order_broker_boundary_status(connection)
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -551,6 +564,7 @@ def build_dashboard_snapshot(
         market_reference_append_only_routing=market_reference_append_only_routing,
         runtime_execution_locks=runtime_execution_locks,
         live_sim_order_plan_uniqueness=live_sim_order_plan_uniqueness,
+        order_broker_boundaries=order_broker_boundaries,
         settings=settings,
     )
 
@@ -591,6 +605,7 @@ def build_dashboard_snapshot(
         "realtime_subscription": realtime_subscription,
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
@@ -923,6 +938,7 @@ def build_dashboard_pipeline_summary_fast(
     live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
         connection
     )
+    order_broker_boundaries = get_order_broker_boundary_status(connection)
     return {
         "fast_path": True,
         "read_only": True,
@@ -935,6 +951,7 @@ def build_dashboard_pipeline_summary_fast(
         },
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1221,6 +1238,8 @@ def _build_dashboard_fast_section(
         return get_runtime_execution_lock_status(connection)
     if section == "live_sim_order_plan_uniqueness":
         return get_live_sim_order_plan_uniqueness_status(connection)
+    if section == "order_broker_boundaries":
+        return get_order_broker_boundary_status(connection)
     if section == "market_data":
         return {
             "status": market_data_status(),
@@ -1766,6 +1785,7 @@ def _pipeline_summary(
     market_reference_append_only_routing: dict[str, Any],
     runtime_execution_locks: dict[str, Any],
     live_sim_order_plan_uniqueness: dict[str, Any],
+    order_broker_boundaries: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1786,6 +1806,7 @@ def _pipeline_summary(
         "latest_observe_cycle": latest_observe_cycle,
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],

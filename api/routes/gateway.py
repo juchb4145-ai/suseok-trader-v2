@@ -21,13 +21,13 @@ from services.market_regime_service import (
     should_rebuild_market_regime_snapshot,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
-from services.runtime.gateway_projection_routing import (
-    MarketDataAppendOnlyRoutingDecision,
-    decide_market_data_projection_routing,
-)
 from services.runtime.gateway_market_reference_routing import (
     MarketReferenceAppendOnlyRoutingDecision,
     decide_market_reference_append_only_routing,
+)
+from services.runtime.gateway_projection_routing import (
+    MarketDataAppendOnlyRoutingDecision,
+    decide_market_data_projection_routing,
 )
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
@@ -48,6 +48,7 @@ from storage.gateway_command_store import (
     get_command_type_counts,
     poll_commands,
 )
+from storage.gateway_order_broker_boundary import get_order_broker_boundary
 from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
 from storage.sqlite import open_connection
 
@@ -74,6 +75,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     projection_statuses: dict[str, str] = {}
     market_data_routing: dict[str, Any] | None = None
     market_reference_routing: dict[str, Any] | None = None
+    broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
             result = append_gateway_event(connection, event)
@@ -239,6 +241,11 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         projection_statuses["market_scan"] = scan_result.status
             if result.status == "ACCEPTED" and not result.duplicate:
                 handle_live_sim_gateway_event(connection, event, settings=settings)
+            if event.command_id:
+                broker_boundary = get_order_broker_boundary(
+                    connection,
+                    event.command_id,
+                )
     finally:
         connection.close()
 
@@ -259,6 +266,14 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         "duplicate": result.duplicate,
         "status": result.status,
     }
+    if event.event_type.strip().lower() == "order_pre_ack":
+        response["broker_boundary_state"] = (
+            broker_boundary.get("state") if broker_boundary is not None else None
+        )
+        response["durable_pre_ack_recorded"] = bool(
+            broker_boundary
+            and broker_boundary.get("durable_pre_ack_recorded") is True
+        )
     if projection_status is not None:
         response["projection_status"] = projection_status
     if projection_statuses:
@@ -455,6 +470,13 @@ def get_gateway_status() -> dict[str, Any]:
         "core_io_worker_coalesce_after_size": _json_value(
             status_values.get("core_io_worker_coalesce_after_size")
         ),
+        "durable_pre_ack_posted_count": _json_value(
+            status_values.get("durable_pre_ack_posted_count")
+        ),
+        "last_durable_pre_ack_at": status_values.get("last_durable_pre_ack_at"),
+        "last_durable_pre_ack_error": status_values.get(
+            "last_durable_pre_ack_error"
+        ),
         "local_event_count": _json_value(status_values.get("local_event_count")),
         "condition_load_state": status_values.get("condition_load_state"),
         "condition_load_requested_at": status_values.get("condition_load_requested_at"),
@@ -556,6 +578,22 @@ def get_gateway_status() -> dict[str, Any]:
         ),
         "queued_command_count": command_counts[GatewayCommandStatus.QUEUED.value],
         "dispatched_command_count": command_counts[GatewayCommandStatus.DISPATCHED.value],
+        "claimed_command_count": command_counts[GatewayCommandStatus.CLAIMED.value],
+        "gateway_started_command_count": command_counts[
+            GatewayCommandStatus.GATEWAY_STARTED.value
+        ],
+        "pre_ack_recorded_command_count": command_counts[
+            GatewayCommandStatus.PRE_ACK_RECORDED.value
+        ],
+        "broker_accepted_command_count": command_counts[
+            GatewayCommandStatus.BROKER_ACCEPTED.value
+        ],
+        "chejan_confirmed_command_count": command_counts[
+            GatewayCommandStatus.CHEJAN_CONFIRMED.value
+        ],
+        "unconfirmed_command_count": command_counts[
+            GatewayCommandStatus.UNCONFIRMED.value
+        ],
         "acked_command_count": command_counts[GatewayCommandStatus.ACKED.value],
         "failed_command_count": command_counts[GatewayCommandStatus.FAILED.value],
         "recent_event_count": recent_event_count,

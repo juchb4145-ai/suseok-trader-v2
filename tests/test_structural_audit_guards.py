@@ -361,7 +361,7 @@ def test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query(
     ]
 
 
-def test_order_command_lifecycle_detects_dispatched_without_pre_ack(tmp_path) -> None:
+def test_order_command_lifecycle_detects_claimed_without_pre_ack(tmp_path) -> None:
     connection = initialize_database(tmp_path / "dispatched-no-preack.sqlite3")
     command = _live_sim_order_command("cmd-dispatched-no-preack")
 
@@ -375,7 +375,7 @@ def test_order_command_lifecycle_detects_dispatched_without_pre_ack(tmp_path) ->
     assert stuck == [
         {
             "command_id": command.command_id,
-            "status": GatewayCommandStatus.DISPATCHED.value,
+            "status": GatewayCommandStatus.CLAIMED.value,
             "event_count": 0,
         }
     ]
@@ -818,7 +818,7 @@ def _dispatched_order_commands_without_pre_ack(connection) -> list[dict[str, Any
                 WHERE e.command_id = c.command_id
             ) AS event_count
         FROM gateway_commands AS c
-        WHERE c.status = ?
+        WHERE c.status IN (?, ?, ?)
             AND c.command_type IN ('send_order', 'cancel_order')
             AND NOT EXISTS (
                 SELECT 1
@@ -828,7 +828,11 @@ def _dispatched_order_commands_without_pre_ack(connection) -> list[dict[str, Any
             )
         ORDER BY c.command_id
         """,
-        (GatewayCommandStatus.DISPATCHED.value,),
+        (
+            GatewayCommandStatus.DISPATCHED.value,
+            GatewayCommandStatus.CLAIMED.value,
+            GatewayCommandStatus.GATEWAY_STARTED.value,
+        ),
     ).fetchall()
     return [
         {

@@ -267,11 +267,15 @@ class KiwoomGatewayRuntime:
             source=self.config.source,
             on_order_ack=self.pending_orders.record_ack,
             on_async_events=self.emit_events_immediately,
+            on_durable_order_pre_ack=self._persist_order_pre_ack,
             order_journal=self.order_journal,
         )
         self._event_queue: deque[GatewayEvent] = deque()
         self._heartbeat_sequence = 0
         self._posted_count = 0
+        self._durable_pre_ack_posted_count = 0
+        self._last_durable_pre_ack_at = ""
+        self._last_durable_pre_ack_error = ""
         self._polled_count = 0
         self._handled_command_count = 0
         self._claimed_not_started_commands: dict[str, GatewayCommand] = {}
@@ -388,6 +392,34 @@ class KiwoomGatewayRuntime:
             return
         for event in self.order_journal.recovery_events(source=self.config.source):
             self.emit_event(event)
+
+    def _persist_order_pre_ack(self, event: GatewayEvent) -> Mapping[str, Any]:
+        if not self.config.core_io_enabled or not self.config.event_posting_enabled:
+            self._last_durable_pre_ack_error = (
+                "Core event posting is disabled for durable order pre-ack"
+            )
+            return {}
+        try:
+            response = self.core_client.post_event(event)
+        except Exception as exc:
+            self._last_durable_pre_ack_error = str(exc)
+            raise
+        self._posted_count += 1
+        if not isinstance(response, Mapping):
+            self._last_durable_pre_ack_error = "Core returned an invalid pre-ack response"
+            return {}
+        if (
+            response.get("accepted") is True
+            and response.get("durable_pre_ack_recorded") is True
+        ):
+            self._durable_pre_ack_posted_count += 1
+            self._last_durable_pre_ack_at = datetime_to_wire(utc_now())
+            self._last_durable_pre_ack_error = ""
+        else:
+            self._last_durable_pre_ack_error = (
+                "Core did not confirm durable order pre-ack"
+            )
+        return response
 
     def emit_heartbeat(self) -> None:
         self._heartbeat_sequence += 1
@@ -529,7 +561,13 @@ class KiwoomGatewayRuntime:
             if str(event.command_id or "") != command.command_id:
                 continue
             event_type = event.event_type.strip().lower()
-            if event_type in {"command_started", "command_ack", "command_failed", "rate_limited"}:
+            if event_type in {
+                "command_started",
+                "command_ack",
+                "command_failed",
+                "rate_limited",
+                "order_broker_unconfirmed",
+            }:
                 self._claimed_not_started_commands.pop(command.command_id, None)
                 return
 
@@ -748,6 +786,9 @@ class KiwoomGatewayRuntime:
             ),
             "queued_event_count": len(self._event_queue) + worker_event_queue_size,
             "posted_event_count": self._posted_count,
+            "durable_pre_ack_posted_count": self._durable_pre_ack_posted_count,
+            "last_durable_pre_ack_at": self._last_durable_pre_ack_at,
+            "last_durable_pre_ack_error": self._last_durable_pre_ack_error,
             "poll_count": self._polled_count,
             "handled_command_count": self._handled_command_count,
             "observe_only": self.config.observe_only,

@@ -37,6 +37,7 @@ SUPPORTED_GATEWAY_EVENT_TYPES: frozenset[str] = frozenset(
         "tr_response",
         "execution_event",
         "order_pre_ack",
+        "order_broker_unconfirmed",
         "command_started",
         "command_ack",
         "command_failed",
@@ -210,6 +211,8 @@ def _append_gateway_event_once(
                 "rate_limited",
                 "execution_event",
                 "order_pre_ack",
+                "order_broker_unconfirmed",
+                "kiwoom_order_chejan",
             }
             and event.command_id
         ):
@@ -218,6 +221,8 @@ def _append_gateway_event_once(
                 command_id=event.command_id,
                 event_type=event_type,
                 payload=dict(event.payload),
+                event_id=event.event_id,
+                occurred_at=received_at,
                 commit=False,
             )
         connection.commit()
@@ -353,6 +358,9 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "core_io_worker_last_error": "core_io_worker_last_error",
         "core_io_worker_coalesced_event_count": "core_io_worker_coalesced_event_count",
         "core_io_worker_coalesce_after_size": "core_io_worker_coalesce_after_size",
+        "durable_pre_ack_posted_count": "durable_pre_ack_posted_count",
+        "last_durable_pre_ack_at": "last_durable_pre_ack_at",
+        "last_durable_pre_ack_error": "last_durable_pre_ack_error",
         "local_event_count": "local_event_count",
         "condition_load_state": "condition_load_state",
         "condition_load_requested_at": "condition_load_requested_at",

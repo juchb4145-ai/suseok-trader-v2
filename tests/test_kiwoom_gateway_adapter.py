@@ -2424,7 +2424,10 @@ def test_kiwoom_handler_register_realtime_and_send_condition_call_client() -> No
 
 def test_kiwoom_handler_live_sim_send_order_requires_safety_metadata() -> None:
     client = MockKiwoomClient()
-    handler = KiwoomGatewayCommandHandler(client)
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+    )
 
     rejected = handler.handle(
         GatewayCommand(
@@ -2469,7 +2472,10 @@ def test_kiwoom_handler_expired_live_sim_send_order_emits_command_failed() -> No
 
 def test_kiwoom_handler_live_sim_send_order_forwards_nxt_exchange() -> None:
     client = MockKiwoomClient()
-    handler = KiwoomGatewayCommandHandler(client)
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+    )
 
     accepted = handler.handle(
         _live_sim_order_command(command_id="cmd_live_sim_nxt", order_exchange="NXT")
@@ -2512,8 +2518,10 @@ def test_kiwoom_handler_rate_limit_delays_without_failure_event() -> None:
 def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> None:
     journal_path = tmp_path / "orders.jsonl"
     client = MockKiwoomClient()
+    durable_events: list[GatewayEvent] = []
     handler = KiwoomGatewayCommandHandler(
         client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(durable_events),
         order_journal=OrderPreAckJournal(journal_path),
     )
 
@@ -2522,14 +2530,11 @@ def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> Non
     journal_rows = [
         json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert [event.event_type for event in events] == [
-        "command_started",
-        "order_pre_ack",
-        "command_ack",
-    ]
+    assert [event.event_type for event in events] == ["command_started", "command_ack"]
+    assert [event.event_type for event in durable_events] == ["order_pre_ack"]
     assert [row["status"] for row in journal_rows] == ["PRE_ACK", "BROKER_ACCEPTED"]
     assert journal_rows[0]["command_id"] == "cmd_journaled"
-    assert events[1].command_id == "cmd_journaled"
+    assert durable_events[0].command_id == "cmd_journaled"
     recovery_events = OrderPreAckJournal(journal_path).recovery_events(source="kiwoom_gateway")
     assert [event.event_type for event in recovery_events] == ["order_pre_ack"]
     assert recovery_events[0].payload["status"] == "RECOVERED_BROKER_ACCEPTED"
@@ -2550,6 +2555,7 @@ def test_kiwoom_handler_emits_order_start_before_send_order_call(tmp_path) -> No
     handler = KiwoomGatewayCommandHandler(
         client,
         on_async_events=lambda events: async_events.extend(events),
+        on_durable_order_pre_ack=_durable_pre_ack_callback(async_events),
         order_journal=OrderPreAckJournal(tmp_path / "orders.jsonl"),
     )
 
@@ -2563,6 +2569,132 @@ def test_kiwoom_handler_emits_order_start_before_send_order_call(tmp_path) -> No
     ]
     assert [event.event_type for event in returned_events] == ["command_ack"]
     assert async_events[0].command_id == "cmd_started_before_send"
+
+
+def test_kiwoom_handler_blocks_broker_call_without_durable_core_pre_ack() -> None:
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(client)
+
+    events = handler.handle(
+        _live_sim_order_command(command_id="cmd_missing_durable_pre_ack")
+    )
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "command_failed",
+    ]
+    assert events[-1].payload["error_message"].startswith(
+        "DURABLE_DB_PRE_ACK_FAILED"
+    )
+    assert client.orders == []
+
+
+def test_kiwoom_handler_marks_broker_call_exception_unconfirmed(tmp_path) -> None:
+    class RaisingClient(MockKiwoomClient):
+        def send_order(self, request: KiwoomOrderRequest) -> KiwoomOrderResult:
+            del request
+            raise RuntimeError("COM transport outcome unknown")
+
+    journal_path = tmp_path / "orders-unconfirmed.jsonl"
+    client = RaisingClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+        order_journal=OrderPreAckJournal(journal_path),
+    )
+
+    events = handler.handle(
+        _live_sim_order_command(command_id="cmd_broker_call_unconfirmed")
+    )
+    journal_rows = [
+        json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "order_broker_unconfirmed",
+    ]
+    assert events[-1].payload["broker_call_attempted"] is True
+    assert events[-1].payload["broker_acceptance_unknown"] is True
+    assert [row["status"] for row in journal_rows] == ["PRE_ACK", "UNCONFIRMED"]
+    assert OrderPreAckJournal(journal_path).recovery_events(
+        source="kiwoom_gateway"
+    ) == []
+    assert client.orders == []
+
+
+def test_runtime_posts_durable_pre_ack_synchronously_before_broker_call() -> None:
+    posted_events: list[GatewayEvent] = []
+
+    class Core:
+        def post_event(self, event: GatewayEvent) -> dict[str, object]:
+            assert client.orders == []
+            posted_events.append(event)
+            return {
+                "accepted": True,
+                "broker_boundary_state": "PRE_ACK_RECORDED",
+                "durable_pre_ack_recorded": True,
+            }
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=Core())
+
+    returned_events = runtime.command_handler.handle(
+        _live_sim_order_command(command_id="cmd_runtime_durable_pre_ack")
+    )
+    heartbeat = runtime.heartbeat_payload()
+
+    assert [event.event_type for event in posted_events] == ["order_pre_ack"]
+    assert [event.event_type for event in returned_events] == ["command_ack"]
+    assert len(client.orders) == 1
+    assert heartbeat["durable_pre_ack_posted_count"] == 1
+    assert heartbeat["last_durable_pre_ack_at"]
+    assert heartbeat["last_durable_pre_ack_error"] == ""
+
+
+def test_runtime_blocks_order_when_core_event_posting_is_disabled() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> dict[str, object]:
+            del event
+            raise AssertionError("disabled event posting must not call Core")
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=Core(),
+        config=KiwoomGatewayRuntimeConfig(event_posting_enabled=False),
+    )
+
+    returned_events = runtime.command_handler.handle(
+        _live_sim_order_command(command_id="cmd_event_posting_disabled")
+    )
+
+    assert [event.event_type for event in returned_events] == ["command_failed"]
+    assert returned_events[0].payload["error_message"].startswith(
+        "DURABLE_DB_PRE_ACK_FAILED"
+    )
+    assert "disabled" in runtime.heartbeat_payload()["last_durable_pre_ack_error"]
+    assert client.orders == []
+
+
+def test_kiwoom_handler_cancel_uses_same_durable_pre_ack_boundary() -> None:
+    durable_events: list[GatewayEvent] = []
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(durable_events),
+    )
+
+    events = handler.handle(_live_sim_cancel_command("cmd_cancel_durable"))
+
+    assert [event.event_type for event in durable_events] == ["order_pre_ack"]
+    assert durable_events[0].payload["original_order_no"] == "SIM-ORIGINAL-1"
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "command_ack",
+    ]
+    assert len(client.orders) == 1
+    assert client.orders[0].side == "BUY_CANCEL"
 
 
 def test_pending_order_registry_uses_command_id_before_ambiguous_signature() -> None:
@@ -2768,6 +2900,21 @@ def _drain_worker_once(runtime: KiwoomGatewayRuntime) -> bool:
     return False
 
 
+def _durable_pre_ack_callback(
+    captured: list[GatewayEvent] | None = None,
+) -> Callable[[GatewayEvent], dict[str, object]]:
+    def callback(event: GatewayEvent) -> dict[str, object]:
+        if captured is not None:
+            captured.append(event)
+        return {
+            "accepted": True,
+            "broker_boundary_state": "PRE_ACK_RECORDED",
+            "durable_pre_ack_recorded": True,
+        }
+
+    return callback
+
+
 def _live_sim_order_command(
     command_id: str = "cmd_live_sim",
     *,
@@ -2804,6 +2951,40 @@ def _live_sim_order_command(
                 "live_sim_intent_id": "live_sim_intent_1",
                 "idempotency_key": idempotency_key,
                 "order_exchange": order_exchange,
+            },
+        },
+    )
+
+
+def _live_sim_cancel_command(command_id: str) -> GatewayCommand:
+    idempotency_key = f"idem-{command_id}"
+    return GatewayCommand(
+        command_id=command_id,
+        command_type="cancel_order",
+        source="live_sim",
+        idempotency_key=idempotency_key,
+        payload={
+            "account_id": "1234567890",
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "server_mode": "SIMULATION",
+            "code": "005930",
+            "side": "BUY_CANCEL",
+            "quantity": 1,
+            "original_order_no": "SIM-ORIGINAL-1",
+            "mode": "LIVE_SIM",
+            "live_mode": "LIVE_SIM",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+            "idempotency_key": idempotency_key,
+            "metadata": {
+                "source": "live_sim",
+                "live_sim_only": True,
+                "live_real_allowed": False,
+                "idempotency_key": idempotency_key,
+                "cancel_intent_id": "cancel-intent-1",
+                "original_live_sim_order_id": "live-sim-order-1",
             },
         },
     )

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from gateway.event_factory import make_price_tick_event, make_tr_response_event
 from storage.gateway_command_store import GatewayCommandStatus, enqueue_command
 from storage.sqlite import open_connection
+from tests.test_gateway_command_store import make_live_sim_order_command
 
 TS = datetime(2026, 6, 26, 9, 1, 2, tzinfo=UTC).isoformat()
 
@@ -82,6 +83,72 @@ def test_gateway_commands_api_dispatches_queued_commands(tmp_path, monkeypatch) 
     assert response.json()["commands"][0]["command_type"] == "request_tr"
     assert status_response.status_code == 200
     assert status_response.json()["counts"][GatewayCommandStatus.DISPATCHED.value] == 1
+
+
+def test_gateway_pre_ack_api_confirms_durable_boundary_without_order_side_effect(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "api-order-boundary.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    command = make_live_sim_order_command("cmd-api-pre-ack")
+    event = {
+        "event_id": "evt-api-pre-ack",
+        "event_type": "order_pre_ack",
+        "source": "test-gateway",
+        "ts": TS,
+        "command_id": command.command_id,
+        "idempotency_key": command.idempotency_key,
+        "payload": {
+            "status": "PRE_ACK",
+            "command_id": command.command_id,
+            "command_type": command.command_type,
+            "idempotency_key": command.idempotency_key,
+            "account_id": "1234567890",
+            "code": "005930",
+            "side": "BUY",
+        },
+    }
+
+    with TestClient(app) as client:
+        connection = open_connection(db_path)
+        try:
+            assert enqueue_command(connection, command).accepted is True
+        finally:
+            connection.close()
+        polled = client.get(
+            "/api/gateway/commands",
+            headers={"X-Local-Token": "test-token"},
+        )
+        accepted = client.post(
+            "/api/gateway/events",
+            json=event,
+            headers={"X-Local-Token": "test-token"},
+        )
+        duplicate = client.post(
+            "/api/gateway/events",
+            json=event,
+            headers={"X-Local-Token": "test-token"},
+        )
+        status_response = client.get(
+            "/api/operator/gateway/order-broker-boundaries/status"
+        )
+        list_response = client.get(
+            "/api/operator/gateway/order-broker-boundaries?limit=10"
+        )
+
+    assert polled.status_code == 200
+    assert accepted.status_code == 200
+    assert accepted.json()["accepted"] is True
+    assert accepted.json()["broker_boundary_state"] == "PRE_ACK_RECORDED"
+    assert accepted.json()["durable_pre_ack_recorded"] is True
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["durable_pre_ack_recorded"] is True
+    assert status_response.json()["status"] == "PASS"
+    assert status_response.json()["durable_pre_ack_count"] == 1
+    assert list_response.json()["count"] == 1
+    assert list_response.json()["items"][0]["state"] == "PRE_ACK_RECORDED"
+    assert list_response.json()["no_order_side_effects"] is True
 
 
 def test_gateway_event_api_requires_token_when_configured(tmp_path, monkeypatch) -> None:

@@ -10,6 +10,7 @@ from domain.broker.utils import market_time_str, market_today, parse_timestamp, 
 from domain.live_sim.reasons import LiveSimReasonCode
 from domain.live_sim.status import LiveSimOrderStatus
 from storage.gateway_command_store import get_command_status_counts
+from storage.gateway_order_broker_boundary import get_order_broker_boundary_status
 
 from services.config import Settings, TradingMode, load_settings
 from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
@@ -65,6 +66,7 @@ class LiveSimSafetyGateResult:
     entry_window_enforced: bool = False
     entry_window_open: bool = True
     entry_window: Mapping[str, Any] = field(default_factory=dict)
+    order_broker_boundary: Mapping[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -108,6 +110,7 @@ class LiveSimSafetyGateResult:
             "entry_window_enforced": self.entry_window_enforced,
             "entry_window_open": self.entry_window_open,
             "entry_window": dict(self.entry_window),
+            "order_broker_boundary": dict(self.order_broker_boundary),
         }
 
 
@@ -167,6 +170,7 @@ def check_live_sim_safety_gate(
         and _is_simulation_like(resolved_settings.live_sim_server_mode)
     )
     command_counts = get_command_status_counts(connection)
+    order_broker_boundary = get_order_broker_boundary_status(connection)
     queue_healthy = _bool_status(gateway_values, "command_queue_healthy", default=True)
     entry_window = live_sim_entry_window_state(resolved_settings)
     order_exchange = resolved_settings.live_sim_order_exchange
@@ -180,6 +184,13 @@ def check_live_sim_safety_gate(
         reason_codes.append(LiveSimReasonCode.LIVE_REAL_NOT_ALLOWED.value)
     if not order_routing_enabled:
         reason_codes.append(LiveSimReasonCode.ORDER_ROUTING_DISABLED.value)
+    if (
+        resolved_purpose == "NEW_BUY"
+        and order_broker_boundary.get("block_new_order_routing") is True
+    ):
+        reason_codes.append(
+            LiveSimReasonCode.ORDER_BROKER_BOUNDARY_BLOCKED.value
+        )
     if not gateway_command_enabled:
         reason_codes.append(LiveSimReasonCode.GATEWAY_COMMAND_DISABLED.value)
     if kill_switch_active:
@@ -287,6 +298,7 @@ def check_live_sim_safety_gate(
         entry_window_enforced=bool(enforce_entry_window),
         entry_window_open=bool(entry_window["open"]),
         entry_window=entry_window,
+        order_broker_boundary=order_broker_boundary,
     )
 
 

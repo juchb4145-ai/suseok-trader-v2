@@ -589,6 +589,8 @@ def handle_live_sim_gateway_event(
     event_type = event.event_type.strip().lower()
     if event_type in LIVE_SIM_RUNTIME_STATUS_EVENT_TYPES:
         return {"handled": False, "reason": "runtime_status_event_not_live_sim"}
+    if event_type in {"order_pre_ack", "order_broker_unconfirmed"}:
+        return {"handled": False, "reason": "broker_boundary_event"}
     if event_type in {"command_started", "command_ack", "command_failed"}:
         return _handle_live_sim_command_event(connection, event)
     if event_type == "execution_event":

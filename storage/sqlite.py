@@ -3,11 +3,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from storage.gateway_order_broker_boundary import (
+    ensure_gateway_order_broker_boundary_schema,
+)
 from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 APP_NAME = "suseok-trader-v2"
 
 
@@ -1318,6 +1321,7 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         ON gateway_events (received_at)
         """
     )
+    ensure_gateway_order_broker_boundary_schema(connection)
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gateway_events_type_status

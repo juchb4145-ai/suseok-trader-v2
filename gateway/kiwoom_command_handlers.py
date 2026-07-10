@@ -25,10 +25,11 @@ from gateway.kiwoom_client import (
     normalize_order_exchange,
 )
 from gateway.kiwoom_tr import KiwoomTrRunner
-from gateway.order_pre_ack_journal import OrderPreAckJournal
+from gateway.order_pre_ack_journal import OrderPreAckJournal, make_order_pre_ack_event
 
 OrderAckCallback = Callable[[GatewayCommand, KiwoomOrderRequest, KiwoomOrderResult], None]
 AsyncEventsCallback = Callable[[list[GatewayEvent]], None]
+DurableOrderPreAckCallback = Callable[[GatewayEvent], Mapping[str, Any]]
 
 ALLOWED_KIWOOM_COMMAND_TYPES = {
     "heartbeat_request",
@@ -152,6 +153,7 @@ class KiwoomGatewayCommandHandler:
         tr_runner: KiwoomTrRunner | None = None,
         on_order_ack: OrderAckCallback | None = None,
         on_async_events: AsyncEventsCallback | None = None,
+        on_durable_order_pre_ack: DurableOrderPreAckCallback | None = None,
         order_journal: OrderPreAckJournal | None = None,
         rate_limit_governor: KiwoomRateLimitGovernor | None = None,
         clock: Callable[[], float] = time.monotonic,
@@ -161,6 +163,7 @@ class KiwoomGatewayCommandHandler:
         self.tr_runner = tr_runner or KiwoomTrRunner(client)
         self.on_order_ack = on_order_ack
         self.on_async_events = on_async_events
+        self.on_durable_order_pre_ack = on_durable_order_pre_ack
         self.order_journal = order_journal
         self.clock = clock
         self.subscriptions: set[str] = set()
@@ -458,16 +461,22 @@ class KiwoomGatewayCommandHandler:
             make_command_started_event(command, source=self.source),
             events,
         )
-        if self.order_journal is not None:
-            self._emit_before_blocking_call(
-                self.order_journal.record_pre_ack(
+        durable_pre_ack_error = self._record_durable_pre_ack(
+            command,
+            request,
+            broker_env=actual_broker_env,
+        )
+        if durable_pre_ack_error is not None:
+            if self.order_journal is not None:
+                self.order_journal.mark_failed(command, durable_pre_ack_error)
+            events.append(
+                make_command_failed_event(
                     command,
-                    request,
-                    broker_env=actual_broker_env,
+                    durable_pre_ack_error,
                     source=self.source,
-                ),
-                events,
+                )
             )
+            return events
         try:
             result = self.client.send_order(request)
             self._record_rate_limit("send_order")
@@ -475,8 +484,8 @@ class KiwoomGatewayCommandHandler:
                 self.order_journal.mark_broker_result(command, result)
         except Exception as exc:
             if self.order_journal is not None:
-                self.order_journal.mark_failed(command, str(exc))
-            events.append(make_command_failed_event(command, str(exc), source=self.source))
+                self.order_journal.mark_unconfirmed(command, str(exc))
+            events.append(self._order_broker_unconfirmed_event(command, exc))
             return events
 
         if result.ok and self.on_order_ack is not None:
@@ -558,16 +567,22 @@ class KiwoomGatewayCommandHandler:
             make_command_started_event(command, source=self.source),
             events,
         )
-        if self.order_journal is not None:
-            self._emit_before_blocking_call(
-                self.order_journal.record_pre_ack(
+        durable_pre_ack_error = self._record_durable_pre_ack(
+            command,
+            request,
+            broker_env=actual_broker_env,
+        )
+        if durable_pre_ack_error is not None:
+            if self.order_journal is not None:
+                self.order_journal.mark_failed(command, durable_pre_ack_error)
+            events.append(
+                make_command_failed_event(
                     command,
-                    request,
-                    broker_env=actual_broker_env,
+                    durable_pre_ack_error,
                     source=self.source,
-                ),
-                events,
+                )
             )
+            return events
         try:
             result = self.client.send_order(request)
             self._record_rate_limit("cancel_order")
@@ -575,8 +590,8 @@ class KiwoomGatewayCommandHandler:
                 self.order_journal.mark_broker_result(command, result)
         except Exception as exc:
             if self.order_journal is not None:
-                self.order_journal.mark_failed(command, str(exc))
-            events.append(make_command_failed_event(command, str(exc), source=self.source))
+                self.order_journal.mark_unconfirmed(command, str(exc))
+            events.append(self._order_broker_unconfirmed_event(command, exc))
             return events
 
         details = {
@@ -625,6 +640,65 @@ class KiwoomGatewayCommandHandler:
 
     def _record_rate_limit(self, command_type: str) -> None:
         self.rate_limit_governor.record(command_type)
+
+    def _record_durable_pre_ack(
+        self,
+        command: GatewayCommand,
+        request: KiwoomOrderRequest,
+        *,
+        broker_env: str,
+    ) -> str | None:
+        event = (
+            self.order_journal.record_pre_ack(
+                command,
+                request,
+                broker_env=broker_env,
+                source=self.source,
+            )
+            if self.order_journal is not None
+            else make_order_pre_ack_event(
+                command,
+                request,
+                broker_env=broker_env,
+                source=self.source,
+            )
+        )
+        if self.on_durable_order_pre_ack is None:
+            return "DURABLE_DB_PRE_ACK_FAILED: callback is not configured"
+        try:
+            response = self.on_durable_order_pre_ack(event)
+        except Exception as exc:
+            return f"DURABLE_DB_PRE_ACK_FAILED: {exc}"
+        if not isinstance(response, Mapping):
+            return "DURABLE_DB_PRE_ACK_FAILED: Core returned an invalid response"
+        if response.get("accepted") is not True:
+            return "DURABLE_DB_PRE_ACK_FAILED: Core did not accept pre-ack event"
+        if response.get("durable_pre_ack_recorded") is not True:
+            return "DURABLE_DB_PRE_ACK_FAILED: Core did not confirm durable pre-ack"
+        return None
+
+    def _order_broker_unconfirmed_event(
+        self,
+        command: GatewayCommand,
+        exc: Exception,
+    ) -> GatewayEvent:
+        return GatewayEvent(
+            event_type="order_broker_unconfirmed",
+            source=self.source,
+            command_id=command.command_id,
+            idempotency_key=command.idempotency_key,
+            payload={
+                "command_id": command.command_id,
+                "command_type": command.command_type,
+                "idempotency_key": command.idempotency_key,
+                "status": "UNCONFIRMED",
+                "broker_call_attempted": True,
+                "broker_acceptance_unknown": True,
+                "error_message": str(exc),
+                "live_sim_only": True,
+                "live_real_allowed": False,
+            },
+        )
 
     def _emit_before_blocking_call(
         self,
