@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +20,9 @@ from storage.gateway_command_store import canonical_json
 from services.config import Settings, load_settings
 
 MARKET_INDEX_EVENT_TYPES: frozenset[str] = frozenset({"market_index_tick"})
+MARKET_INDEX_SOURCE_REALTIME = "REALTIME"
+MARKET_INDEX_SOURCE_TR_BOOTSTRAP = "TR_BOOTSTRAP"
+MARKET_INDEX_SOURCE_UNKNOWN = "UNKNOWN"
 MARKET_INDEX_PROJECTION_TABLES: tuple[str, ...] = (
     "market_index_ticks_latest",
     "market_index_tick_samples",
@@ -181,10 +185,16 @@ def get_market_index_readiness(
     reason_codes: list[str] = []
     tick_age_sec: float | None = None
     quality_status = MarketDataQualityStatus.MISSING
+    parser_status = "UNKNOWN"
+    parser_verified = False
+    data_source = MARKET_INDEX_SOURCE_UNKNOWN
 
     if latest is None:
         reason_codes.append("INDEX_TICK_MISSING")
     else:
+        parser_status = str(latest.get("parser_status") or "UNKNOWN").upper()
+        parser_verified = parser_status == "VERIFIED"
+        data_source = str(latest.get("data_source") or MARKET_INDEX_SOURCE_UNKNOWN)
         tick_age_sec = tick_age_seconds(latest["event_ts"])
         quality_status = freshness_status(
             latest["event_ts"],
@@ -206,11 +216,31 @@ def get_market_index_readiness(
                 reason_codes.append("INDEX_BAR_MISSING")
             reason_codes.append(f"INDEX_BAR_MISSING_{interval_sec}")
 
+    data_usable = bool(
+        latest is not None
+        and quality_status in {
+            MarketDataQualityStatus.FRESH,
+            MarketDataQualityStatus.DEGRADED,
+        }
+        and all(
+            bar_presence.get(interval_sec, False)
+            for interval_sec in resolved_settings.market_data_bar_intervals_sec
+        )
+    )
+    if not data_usable:
+        reason_codes.append("INDEX_DATA_NOT_USABLE")
+    if not parser_verified:
+        reason_codes.append("INDEX_PARSER_NOT_VERIFIED")
+
     return {
         "index_code": normalized_code,
         "quality_status": quality_status.value,
         "has_latest_tick": latest is not None,
         "tick_age_sec": tick_age_sec,
+        "data_usable": data_usable,
+        "parser_status": parser_status,
+        "parser_verified": parser_verified,
+        "data_source": data_source,
         "has_1m_bar": bar_presence.get(60, False),
         "has_3m_bar": bar_presence.get(180, False),
         "has_5m_bar": bar_presence.get(300, False),
@@ -235,6 +265,16 @@ def get_market_index_status(
     freshness_counts = {status.value: 0 for status in MarketDataQualityStatus}
     for item in readiness.values():
         freshness_counts[item["quality_status"]] += 1
+    parser_verified_count = sum(
+        1 for item in readiness.values() if bool(item.get("parser_verified"))
+    )
+    data_usable_count = sum(
+        1 for item in readiness.values() if bool(item.get("data_usable"))
+    )
+    source_counts: dict[str, int] = {}
+    for item in readiness.values():
+        source = str(item.get("data_source") or MARKET_INDEX_SOURCE_UNKNOWN)
+        source_counts[source] = source_counts.get(source, 0) + 1
     return {
         "enabled": True,
         "allowed_index_codes": sorted(DEFAULT_ALLOWED_INDEX_CODES),
@@ -248,6 +288,26 @@ def get_market_index_status(
         "core_status": _market_index_core_status(readiness),
         "sanity_warnings": _market_index_sanity_warnings(connection),
         "unverified": _has_unverified_index_parser(connection),
+        "parser_confidence": {
+            "verified_count": parser_verified_count,
+            "unverified_or_unknown_count": len(readiness) - parser_verified_count,
+            "required_index_count": len(readiness),
+            "separate_from_data_usability": True,
+        },
+        "data_usability": {
+            "usable_count": data_usable_count,
+            "unusable_count": len(readiness) - data_usable_count,
+            "required_index_count": len(readiness),
+            "separate_from_parser_confidence": True,
+        },
+        "source_counts": source_counts,
+        "source_contract": {
+            "realtime": MARKET_INDEX_SOURCE_REALTIME,
+            "tr_bootstrap": MARKET_INDEX_SOURCE_TR_BOOTSTRAP,
+            "unknown": MARKET_INDEX_SOURCE_UNKNOWN,
+            "tr_bootstrap_adapter_status": "NOT_IMPLEMENTED",
+            "nxt_is_not_valid_market_index_evidence": True,
+        },
         "stale_sec": resolved_settings.market_index_stale_sec,
         "bar_intervals_sec": list(resolved_settings.market_data_bar_intervals_sec),
     }
@@ -259,6 +319,66 @@ def normalize_index_code(value: object) -> str:
         allowed = ", ".join(sorted(DEFAULT_ALLOWED_INDEX_CODES))
         raise ValueError(f"index_code must be one of: {allowed}")
     return normalized
+
+
+def market_index_parser_status(payload: object) -> str:
+    metadata = _payload_metadata(payload)
+    return str(metadata.get("parser_status") or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+
+def market_index_parser_verified(payload: object) -> bool:
+    return market_index_parser_status(payload) == "VERIFIED"
+
+
+def classify_market_index_data_source(payload: object) -> str:
+    metadata = _payload_metadata(payload)
+    raw_source = str(
+        metadata.get("projection_source")
+        or metadata.get("source")
+        or metadata.get("callback_source")
+        or ""
+    ).strip().upper()
+    if "TR_BOOTSTRAP" in raw_source or (
+        "BOOTSTRAP" in raw_source and "TR" in raw_source
+    ):
+        return MARKET_INDEX_SOURCE_TR_BOOTSTRAP
+    if "REALTIME" in raw_source or raw_source in {
+        "KIWOOM_REAL",
+        "KIWOOM_REALTIME_MARKET_INDEX",
+    }:
+        return MARKET_INDEX_SOURCE_REALTIME
+    return MARKET_INDEX_SOURCE_UNKNOWN
+
+
+def market_index_payload_usability(payload: object) -> dict[str, Any]:
+    reason_codes: list[str] = []
+    if not isinstance(payload, Mapping):
+        return {
+            "data_usable": False,
+            "index_code": None,
+            "reason_codes": ["INDEX_PAYLOAD_INVALID"],
+            "error": "market index payload must be an object",
+        }
+    try:
+        tick = BrokerMarketIndexTick.from_dict(payload)
+    except Exception as exc:
+        return {
+            "data_usable": False,
+            "index_code": None,
+            "reason_codes": ["INDEX_PAYLOAD_INVALID"],
+            "error": str(exc),
+        }
+    implausible_reason = _index_implausible_reason(tick)
+    if implausible_reason is not None:
+        reason_codes.append(implausible_reason)
+    return {
+        "data_usable": not reason_codes,
+        "index_code": tick.index_code,
+        "price": tick.price,
+        "change_rate": tick.change_rate,
+        "reason_codes": reason_codes,
+        "error": None,
+    }
 
 
 def _upsert_latest_tick(
@@ -634,7 +754,7 @@ def _has_unverified_index_parser(connection: sqlite3.Connection) -> bool:
             metadata = json.loads(row["metadata_json"] or "{}")
         except json.JSONDecodeError:
             return True
-        parser_status = str(metadata.get("parser_status") or "VERIFIED").upper()
+        parser_status = str(metadata.get("parser_status") or "UNKNOWN").upper()
         if parser_status != "VERIFIED":
             return True
     return False
@@ -644,9 +764,21 @@ def _latest_tick_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data = _row_to_dict(row)
     data["metadata"] = json.loads(data.pop("metadata_json"))
     data["tick_age_sec"] = tick_age_seconds(data["event_ts"])
-    data["parser_status"] = str(data["metadata"].get("parser_status") or "VERIFIED").upper()
+    data["parser_status"] = str(
+        data["metadata"].get("parser_status") or "UNKNOWN"
+    ).upper()
     data["unverified"] = data["parser_status"] != "VERIFIED"
+    data["data_source"] = classify_market_index_data_source(
+        {"metadata": data["metadata"]}
+    )
     return data
+
+
+def _payload_metadata(payload: object) -> dict[str, Any]:
+    if not isinstance(payload, Mapping):
+        return {}
+    metadata = payload.get("metadata")
+    return dict(metadata) if isinstance(metadata, Mapping) else {}
 
 
 def _bar_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:

@@ -33,6 +33,7 @@ from services.market_data_service import (
     normalize_market_data_exchange,
     process_gateway_event,
 )
+from services.market_index_service import process_market_index_event
 from services.market_reference_service import (
     market_symbols_payload_has_symbols,
     process_market_symbols_event,
@@ -49,6 +50,7 @@ from services.runtime.market_data_projection_side_effects import (
 APPLY_MODE_SHADOW_VERIFY_ONLY = "SHADOW_VERIFY_ONLY"
 APPLY_MODE_MARKET_DATA_APPLY = "MARKET_DATA_APPLY"
 APPLY_MODE_MARKET_REFERENCE_APPLY = "MARKET_REFERENCE_APPLY"
+APPLY_MODE_MARKET_INDEX_APPLY = "MARKET_INDEX_APPLY"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -83,6 +85,7 @@ class ProjectionOutboxBatchResult:
     apply_projection_effective: bool = False
     market_data_apply_enabled: bool = False
     market_reference_apply_enabled: bool = False
+    market_index_apply_enabled: bool = False
     applied_by_verify_count: int = 0
     applied_by_worker_count: int = 0
     skipped_apply_disabled_count: int = 0
@@ -121,6 +124,7 @@ class ProjectionOutboxBatchResult:
             "apply_projection_effective": self.apply_projection_effective,
             "market_data_apply_enabled": self.market_data_apply_enabled,
             "market_reference_apply_enabled": self.market_reference_apply_enabled,
+            "market_index_apply_enabled": self.market_index_apply_enabled,
             "applied_by_verify_count": self.applied_by_verify_count,
             "applied_by_worker_count": self.applied_by_worker_count,
             "skipped_apply_disabled_count": self.skipped_apply_disabled_count,
@@ -176,8 +180,13 @@ def process_projection_outbox_batch(
     market_reference_apply_enabled = bool(
         resolved_settings.projection_outbox_market_reference_apply_enabled
     )
+    market_index_apply_enabled = bool(
+        resolved_settings.projection_outbox_market_index_apply_enabled
+    )
     apply_effective = apply_requested and global_apply_enabled and (
-        market_data_apply_enabled or market_reference_apply_enabled
+        market_data_apply_enabled
+        or market_reference_apply_enabled
+        or market_index_apply_enabled
     )
     requested_limit = limit
     bounded_limit = limit or (
@@ -185,6 +194,8 @@ def process_projection_outbox_batch(
         if apply_effective and market_data_apply_enabled
         else resolved_settings.projection_outbox_market_reference_apply_batch_size
         if apply_effective and market_reference_apply_enabled
+        else resolved_settings.projection_outbox_market_index_apply_batch_size
+        if apply_effective and market_index_apply_enabled
         else resolved_settings.projection_outbox_batch_size
     )
     if live_safe:
@@ -197,6 +208,8 @@ def process_projection_outbox_batch(
         if apply_effective and market_data_apply_enabled
         else resolved_settings.projection_outbox_market_reference_apply_min_age_sec
         if apply_effective and market_reference_apply_enabled
+        else resolved_settings.projection_outbox_market_index_apply_min_age_sec
+        if apply_effective and market_index_apply_enabled
         else resolved_settings.projection_outbox_shadow_min_age_sec
     )
     created_at = datetime_to_wire(utc_now())
@@ -256,6 +269,7 @@ def process_projection_outbox_batch(
             apply_projection_enabled=global_apply_enabled,
             market_data_apply_enabled=market_data_apply_enabled,
             market_reference_apply_enabled=market_reference_apply_enabled,
+            market_index_apply_enabled=market_index_apply_enabled,
         )
         elif apply_effective:
             verification = apply_projection_outbox_job(
@@ -276,6 +290,7 @@ def process_projection_outbox_batch(
             apply_effective=apply_effective,
             market_data_apply_enabled=market_data_apply_enabled,
             market_reference_apply_enabled=market_reference_apply_enabled,
+            market_index_apply_enabled=market_index_apply_enabled,
         )
         evidence = {
             **dict(verification.evidence),
@@ -291,6 +306,7 @@ def process_projection_outbox_batch(
             "apply_projection_enabled": global_apply_enabled,
             "market_data_apply_enabled": market_data_apply_enabled,
             "market_reference_apply_enabled": market_reference_apply_enabled,
+            "market_index_apply_enabled": market_index_apply_enabled,
             "no_trading_side_effects": True,
             "projection_side_effects_allowed": apply_effective,
         }
@@ -403,6 +419,7 @@ def process_projection_outbox_batch(
         apply_projection_effective=apply_effective,
         market_data_apply_enabled=market_data_apply_enabled,
         market_reference_apply_enabled=market_reference_apply_enabled,
+        market_index_apply_enabled=market_index_apply_enabled,
         applied_by_verify_count=applied_by_verify_count,
         applied_by_worker_count=applied_by_worker_count,
         skipped_apply_disabled_count=skipped_apply_disabled_count,
@@ -431,6 +448,7 @@ def _job_apply_mode(
     apply_effective: bool,
     market_data_apply_enabled: bool,
     market_reference_apply_enabled: bool,
+    market_index_apply_enabled: bool,
 ) -> str:
     if not apply_effective:
         return APPLY_MODE_SHADOW_VERIFY_ONLY
@@ -439,6 +457,8 @@ def _job_apply_mode(
         return APPLY_MODE_MARKET_DATA_APPLY
     if projection_name == "market_reference" and market_reference_apply_enabled:
         return APPLY_MODE_MARKET_REFERENCE_APPLY
+    if projection_name == "market_index" and market_index_apply_enabled:
+        return APPLY_MODE_MARKET_INDEX_APPLY
     return APPLY_MODE_SHADOW_VERIFY_ONLY
 
 
@@ -474,7 +494,17 @@ def apply_projection_outbox_job(
             event_type=event_type,
             worker_run_id=worker_run_id,
         )
-    if projection_name not in {"market_data", "market_reference"}:
+    if projection_name == "market_index" and not bool(
+        settings.projection_outbox_market_index_apply_enabled
+    ):
+        return _verification_skipped(
+            "APPLY_NOT_ENABLED_FOR_PROJECTION",
+            projection_name=projection_name,
+            event_id=event_id,
+            event_type=event_type,
+            worker_run_id=worker_run_id,
+        )
+    if projection_name not in {"market_data", "market_reference", "market_index"}:
         return _verification_skipped(
             "APPLY_NOT_ENABLED_FOR_PROJECTION",
             projection_name=projection_name,
@@ -503,6 +533,20 @@ def apply_projection_outbox_job(
                 event_type=event_type,
             )
         return _apply_market_reference_projection(
+            connection,
+            job,
+            source_event,
+            settings=settings,
+            worker_run_id=worker_run_id,
+        )
+    if projection_name == "market_index":
+        if event_type != "market_index_tick":
+            return _verification_skipped(
+                "MARKET_INDEX_APPLY_EVENT_TYPE_UNSUPPORTED",
+                event_id=event_id,
+                event_type=event_type,
+            )
+        return _apply_market_index_projection(
             connection,
             job,
             source_event,
@@ -876,6 +920,128 @@ def _apply_market_reference_projection(
     )
 
 
+def _apply_market_index_projection(
+    connection: sqlite3.Connection,
+    job: Mapping[str, Any],
+    source_event: Mapping[str, Any],
+    *,
+    settings: Settings,
+    worker_run_id: str,
+) -> ProjectionOutboxVerificationResult:
+    del worker_run_id
+    event_id = str(job.get("event_id") or "")
+    event_type = str(job.get("event_type") or "").lower()
+    verification_before = verify_projection_outbox_job(
+        connection,
+        job,
+        settings=settings,
+    )
+    verification_before_payload = verification_before.to_dict()
+    if verification_before.status == "APPLIED":
+        return _verification_applied(
+            "MARKET_INDEX_ALREADY_APPLIED_BY_INLINE",
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLIED_BY_VERIFY",
+            verification_before_apply=verification_before_payload,
+            projection_result_status=None,
+            market_regime_refresh_deferred=False,
+            no_order_side_effects=True,
+            no_trading_side_effects=True,
+        )
+    if verification_before.status == "SKIPPED":
+        return _verification_skipped(
+            verification_before.reason,
+            **dict(verification_before.evidence),
+            apply_result="SKIPPED_BY_VERIFY",
+            verification_before_apply=verification_before_payload,
+        )
+
+    try:
+        event = _gateway_event_from_row(source_event)
+        projection_result = process_market_index_event(
+            connection,
+            event,
+            settings=settings,
+        )
+    except Exception as exc:
+        return _verification_error(
+            "MARKET_INDEX_APPLY_EXCEPTION",
+            str(exc),
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLY_ERROR",
+            verification_before_apply=verification_before_payload,
+        )
+
+    projection_result_payload = {
+        "event_id": projection_result.event_id,
+        "event_type": projection_result.event_type,
+        "status": projection_result.status,
+        "applied_count": projection_result.applied_count,
+        "ignored_count": projection_result.ignored_count,
+        "error_count": projection_result.error_count,
+        "error_message": projection_result.error_message,
+    }
+    if projection_result.status == "ERROR":
+        return _verification_error(
+            "MARKET_INDEX_APPLY_FAILED",
+            projection_result.error_message or projection_result.status,
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="APPLY_ERROR",
+            verification_before_apply=verification_before_payload,
+            projection_result_status=projection_result.status,
+            projection_result=projection_result_payload,
+        )
+    if projection_result.status == "IGNORED":
+        return _verification_skipped(
+            "MARKET_INDEX_OLDER_THAN_LATEST",
+            event_id=event_id,
+            event_type=event_type,
+            apply_result="SKIPPED_AFTER_APPLY",
+            verification_before_apply=verification_before_payload,
+            projection_result_status=projection_result.status,
+            projection_result=projection_result_payload,
+        )
+
+    verification_after = verify_projection_outbox_job(
+        connection,
+        job,
+        settings=settings,
+    )
+    evidence = {
+        "event_id": event_id,
+        "event_type": event_type,
+        "verification_before_apply": verification_before_payload,
+        "verification_after_apply": verification_after.to_dict(),
+        "projection_result_status": projection_result.status,
+        "projection_result": projection_result_payload,
+        "market_regime_refresh_deferred": False,
+        "market_regime_inline_path_unchanged_in_pr15": True,
+        "no_order_side_effects": True,
+        "no_trading_side_effects": True,
+    }
+    if verification_after.status == "APPLIED":
+        if projection_result.applied_count > 0:
+            evidence["apply_result"] = "APPLIED_BY_WORKER"
+            evidence["mutated_projection_name"] = "market_index"
+        else:
+            evidence["apply_result"] = "APPLIED_BY_VERIFY"
+        return _verification_applied(
+            "MARKET_INDEX_APPLIED_BY_WORKER"
+            if projection_result.applied_count > 0
+            else "MARKET_INDEX_ALREADY_APPLIED_BY_INLINE",
+            **evidence,
+        )
+    return _verification_error(
+        verification_after.reason,
+        verification_after.error_message or verification_after.reason,
+        **evidence,
+        apply_result="APPLY_ERROR",
+    )
+
+
 def verify_projection_outbox_job(
     connection: sqlite3.Connection,
     job: Mapping[str, Any],
@@ -1053,8 +1219,9 @@ def _verify_market_index(
 ) -> ProjectionOutboxVerificationResult:
     inline_error = _market_index_inline_error(connection, event_id)
     if inline_error is not None:
-        return _verification_applied(
-            "APPLIED_WITH_INLINE_ERROR",
+        return _verification_error(
+            "MARKET_INDEX_INLINE_PROJECTION_ERROR",
+            str(inline_error.get("error_message") or "market index projection failed"),
             event_id=event_id,
             inline_projection_status="ERROR",
             inline_error=inline_error,

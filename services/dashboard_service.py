@@ -126,6 +126,9 @@ from services.risk_gate import (
     list_risk_errors,
 )
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
+from services.runtime.gateway_market_index_routing import (
+    get_latest_market_index_append_only_routing_status,
+)
 from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
@@ -139,6 +142,9 @@ from services.runtime.market_data_append_only_controller import (
 )
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
+)
+from services.runtime.market_index_projection_reconcile import (
+    get_latest_market_index_projection_reconcile,
 )
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
@@ -202,6 +208,8 @@ DASHBOARD_SECTIONS = [
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
     "pipeline_summary",
 ]
 
@@ -223,6 +231,8 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
     "pipeline_summary",
     "errors",
 )
@@ -252,6 +262,8 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
     "pipeline_summary",
 }
 
@@ -389,6 +401,13 @@ def build_dashboard_snapshot(
     )
     market_reference_append_only_routing = (
         get_latest_market_reference_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_index_reconcile = get_latest_market_index_projection_reconcile(connection)
+    market_index_append_only_routing = (
+        get_latest_market_index_append_only_routing_status(
             connection,
             settings=settings,
         )
@@ -624,6 +643,8 @@ def build_dashboard_snapshot(
             "latest_ticks": latest_market_index_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_market_index_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status),
+            "projection_reconcile": market_index_reconcile,
+            "append_only_routing": market_index_append_only_routing,
         },
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
@@ -640,6 +661,8 @@ def build_dashboard_snapshot(
         "market_data_append_only_controller": market_data_append_only_controller,
         "market_reference_projection_reconcile": market_reference_reconcile,
         "market_reference_append_only_routing": market_reference_append_only_routing,
+        "market_index_projection_reconcile": market_index_reconcile,
+        "market_index_append_only_routing": market_index_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -1219,6 +1242,23 @@ def _build_dashboard_fast_section(
             )
         return context["market_reference_append_only_routing"]
 
+    def market_index_reconcile() -> dict[str, Any]:
+        if "market_index_reconcile" not in context:
+            context["market_index_reconcile"] = (
+                get_latest_market_index_projection_reconcile(connection)
+            )
+        return context["market_index_reconcile"]
+
+    def market_index_append_only_routing() -> dict[str, Any]:
+        if "market_index_append_only_routing" not in context:
+            context["market_index_append_only_routing"] = (
+                get_latest_market_index_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_index_append_only_routing"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1307,6 +1347,8 @@ def _build_dashboard_fast_section(
             "latest_ticks": latest_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status()),
+            "projection_reconcile": market_index_reconcile(),
+            "append_only_routing": market_index_append_only_routing(),
         }
     if section == "market_regime":
         return get_market_regime_status(connection, settings=settings)
@@ -1341,6 +1383,10 @@ def _build_dashboard_fast_section(
         return market_reference_reconcile()
     if section == "market_reference_append_only_routing":
         return market_reference_append_only_routing()
+    if section == "market_index_projection_reconcile":
+        return market_index_reconcile()
+    if section == "market_index_append_only_routing":
+        return market_index_append_only_routing()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,
@@ -1559,12 +1605,21 @@ def _market_index_latest_by_code(latest_ticks: list[dict[str, Any]]) -> dict[str
 
 
 def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dict[str, Any]:
+    realtime_enabled = bool(gateway_status.get("market_index_realtime_enabled"))
+    tr_bootstrap_enabled = bool(
+        gateway_status.get("market_index_tr_bootstrap_enabled")
+    )
     return {
         "enabled": bool(gateway_status.get("market_index_enabled")),
-        "realtime_enabled": bool(gateway_status.get("market_index_realtime_enabled")),
-        "tr_bootstrap_enabled": bool(
-            gateway_status.get("market_index_tr_bootstrap_enabled")
+        "realtime_enabled": realtime_enabled,
+        "tr_bootstrap_enabled": tr_bootstrap_enabled,
+        "realtime_source_status": "ENABLED" if realtime_enabled else "DISABLED",
+        "tr_bootstrap_source_status": (
+            "CONFIGURED_NOT_IMPLEMENTED" if tr_bootstrap_enabled else "DISABLED"
         ),
+        "source_contract_explicit": True,
+        "parser_confidence_separate_from_data_usability": True,
+        "nxt_is_not_valid_market_index_evidence": True,
         "configured_codes": gateway_status.get("market_index_codes") or [],
         "registered_codes": gateway_status.get("market_index_registered_codes") or [],
         "screen_no": gateway_status.get("market_index_screen_no") or "",

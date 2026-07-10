@@ -21,6 +21,10 @@ from services.market_regime_service import (
     should_rebuild_market_regime_snapshot,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
+from services.runtime.gateway_market_index_routing import (
+    MarketIndexAppendOnlyRoutingDecision,
+    decide_market_index_append_only_routing,
+)
 from services.runtime.gateway_market_reference_routing import (
     MarketReferenceAppendOnlyRoutingDecision,
     decide_market_reference_append_only_routing,
@@ -75,6 +79,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     projection_statuses: dict[str, str] = {}
     market_data_routing: dict[str, Any] | None = None
     market_reference_routing: dict[str, Any] | None = None
+    market_index_routing: dict[str, Any] | None = None
     broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
@@ -216,21 +221,51 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         reference_result = process_market_symbols_event(connection, event)
                         projection_statuses["market_reference"] = reference_result.status
                 if event_type in MARKET_INDEX_EVENT_TYPES:
-                    index_result = process_market_index_event(
+                    index_routing = _decide_market_index_append_only_routing(
                         connection,
                         event,
                         settings=settings,
+                        outbox_status=outbox_status,
                     )
-                    projection_statuses["market_index"] = index_result.status
-                    if index_result.status == "APPLIED" and settings.market_regime_enabled:
-                        if should_rebuild_market_regime_snapshot(connection):
-                            regime = rebuild_market_regime_snapshot(
-                                connection,
-                                settings=settings,
-                            )
-                            projection_statuses["market_regime"] = regime["regime_status"]
-                        else:
-                            projection_statuses["market_regime"] = "SKIPPED_RECENT"
+                    if index_routing is None:
+                        projection_statuses["market_index_append_only_dry_run"] = "ERROR"
+                        projection_statuses["market_index_effective_skip_inline"] = "FALSE"
+                    else:
+                        market_index_routing = index_routing.to_dict()
+                        projection_statuses["market_index_append_only_dry_run"] = (
+                            _market_index_append_only_dry_run_status(index_routing)
+                        )
+                        projection_statuses["market_index_effective_skip_inline"] = (
+                            "TRUE" if index_routing.effective_skip_inline else "FALSE"
+                        )
+                    if index_routing is not None and index_routing.effective_skip_inline:
+                        projection_statuses["market_index"] = (
+                            "SKIPPED_INLINE_APPEND_ONLY_MARKET_INDEX"
+                        )
+                        projection_statuses["market_regime"] = (
+                            "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_MARKET_INDEX"
+                        )
+                    else:
+                        index_result = process_market_index_event(
+                            connection,
+                            event,
+                            settings=settings,
+                        )
+                        projection_statuses["market_index"] = index_result.status
+                        if (
+                            index_result.status == "APPLIED"
+                            and settings.market_regime_enabled
+                        ):
+                            if should_rebuild_market_regime_snapshot(connection):
+                                regime = rebuild_market_regime_snapshot(
+                                    connection,
+                                    settings=settings,
+                                )
+                                projection_statuses["market_regime"] = regime[
+                                    "regime_status"
+                                ]
+                            else:
+                                projection_statuses["market_regime"] = "SKIPPED_RECENT"
                 if event_type in SCAN_EVENT_TYPES:
                     scan_result = process_market_scan_event(
                         connection,
@@ -282,6 +317,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["market_data_append_only_routing"] = market_data_routing
     if market_reference_routing is not None:
         response["market_reference_append_only_routing"] = market_reference_routing
+    if market_index_routing is not None:
+        response["market_index_append_only_routing"] = market_index_routing
     return response
 
 
@@ -334,6 +371,25 @@ def _decide_market_reference_append_only_routing(
         return None
 
 
+def _decide_market_index_append_only_routing(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+    outbox_status: str | None,
+) -> MarketIndexAppendOnlyRoutingDecision | None:
+    try:
+        return decide_market_index_append_only_routing(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+        )
+    except Exception:
+        logger.exception("market_index append-only routing decision failed")
+        return None
+
+
 def _market_data_append_only_dry_run_status(
     decision: MarketDataAppendOnlyRoutingDecision,
 ) -> str:
@@ -350,6 +406,18 @@ def _market_reference_append_only_dry_run_status(
 ) -> str:
     if decision.effective_skip_inline:
         return "EFFECTIVE_SKIP_INLINE_PR14_LIMITED"
+    if decision.would_skip_inline:
+        return "WOULD_SKIP_INLINE_WITH_INLINE_FALLBACK"
+    if not decision.dry_run_enabled:
+        return "DISABLED"
+    return "BLOCKED"
+
+
+def _market_index_append_only_dry_run_status(
+    decision: MarketIndexAppendOnlyRoutingDecision,
+) -> str:
+    if decision.effective_skip_inline:
+        return "EFFECTIVE_SKIP_INLINE"
     if decision.would_skip_inline:
         return "WOULD_SKIP_INLINE_WITH_INLINE_FALLBACK"
     if not decision.dry_run_enabled:
