@@ -275,6 +275,13 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.projection_outbox_market_index_apply_min_age_sec == 1.0
     assert settings.projection_outbox_market_regime_apply_min_age_sec == 1.0
     assert settings.projection_outbox_market_scan_apply_min_age_sec == 1.0
+    assert settings.live_sim_lifecycle_consumer_enabled is False
+    assert settings.live_sim_lifecycle_worker_enabled is False
+    assert settings.live_sim_lifecycle_worker_interval_sec == 1.0
+    assert settings.live_sim_lifecycle_batch_size == 20
+    assert settings.live_sim_lifecycle_retry_limit == 3
+    assert settings.live_sim_lifecycle_processing_ttl_sec == 60
+    assert settings.live_sim_lifecycle_retry_delay_sec == 1.0
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300

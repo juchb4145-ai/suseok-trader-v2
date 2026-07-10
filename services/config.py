@@ -393,6 +393,13 @@ class Settings:
     projection_outbox_backlog_condition_event_ready_max_pending: int = 100
     projection_outbox_backlog_condition_event_ready_recent_max_pending: int = 10
     projection_outbox_backlog_required_for_condition_event_cutover: bool = True
+    live_sim_lifecycle_consumer_enabled: bool = False
+    live_sim_lifecycle_worker_enabled: bool = False
+    live_sim_lifecycle_worker_interval_sec: float = 1.0
+    live_sim_lifecycle_batch_size: int = 20
+    live_sim_lifecycle_retry_limit: int = 3
+    live_sim_lifecycle_processing_ttl_sec: int = 60
+    live_sim_lifecycle_retry_delay_sec: float = 1.0
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -1019,6 +1026,17 @@ class Settings:
             raise ValueError(
                 "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_MIN_AGE_SEC must be >= 0"
             )
+        if self.live_sim_lifecycle_worker_interval_sec <= 0:
+            raise ValueError("LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC must be > 0")
+        for field_name in (
+            "live_sim_lifecycle_batch_size",
+            "live_sim_lifecycle_retry_limit",
+            "live_sim_lifecycle_processing_ttl_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.live_sim_lifecycle_retry_delay_sec < 0:
+            raise ValueError("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC must be >= 0")
         if not self.projection_outbox_shadow_mode:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
         _validate_timezone(self.candidate_trade_date_timezone)
@@ -3051,6 +3069,37 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
                 "PROJECTION_OUTBOX_BACKLOG_REQUIRED_FOR_CONDITION_EVENT_CUTOVER",
                 "true",
             )
+        ),
+        live_sim_lifecycle_consumer_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_worker_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_worker_interval_sec=_parse_float(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC", "1.0"),
+            "LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC",
+            min_value=0.1,
+        ),
+        live_sim_lifecycle_batch_size=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_BATCH_SIZE", "20"),
+            "LIVE_SIM_LIFECYCLE_BATCH_SIZE",
+            min_value=1,
+        ),
+        live_sim_lifecycle_retry_limit=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_RETRY_LIMIT", "3"),
+            "LIVE_SIM_LIFECYCLE_RETRY_LIMIT",
+            min_value=1,
+        ),
+        live_sim_lifecycle_processing_ttl_sec=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_PROCESSING_TTL_SEC", "60"),
+            "LIVE_SIM_LIFECYCLE_PROCESSING_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_lifecycle_retry_delay_sec=_parse_float(
+            env.get("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC", "1.0"),
+            "LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC",
+            min_value=0.0,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),

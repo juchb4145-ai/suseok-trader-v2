@@ -9,7 +9,6 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
-from services.live_sim.live_sim_service import handle_live_sim_gateway_event
 from services.market_context_service import (
     rebuild_market_context_snapshots,
     should_rebuild_market_context_snapshots,
@@ -40,6 +39,10 @@ from services.runtime.gateway_market_scan_routing import (
 from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
     decide_market_data_projection_routing,
+)
+from services.runtime.live_sim_lifecycle_consumer import (
+    is_live_sim_lifecycle_event,
+    process_live_sim_lifecycle_inline,
 )
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
@@ -90,6 +93,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     market_index_routing: dict[str, Any] | None = None
     market_regime_routing: dict[str, Any] | None = None
     market_scan_routing: dict[str, Any] | None = None
+    live_sim_lifecycle: dict[str, Any] | None = None
     broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
@@ -356,8 +360,12 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         )
                         if scan_result.status != "IGNORED":
                             projection_statuses["market_scan"] = scan_result.status
-            if result.status == "ACCEPTED" and not result.duplicate:
-                handle_live_sim_gateway_event(connection, event, settings=settings)
+            if result.status == "ACCEPTED" and is_live_sim_lifecycle_event(event.event_type):
+                live_sim_lifecycle = process_live_sim_lifecycle_inline(
+                    connection,
+                    event,
+                    settings=settings,
+                )
             if event.command_id:
                 broker_boundary = get_order_broker_boundary(
                     connection,
@@ -405,6 +413,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["market_regime_append_only_routing"] = market_regime_routing
     if market_scan_routing is not None:
         response["market_scan_append_only_routing"] = market_scan_routing
+    if live_sim_lifecycle is not None:
+        response["live_sim_lifecycle"] = live_sim_lifecycle
     return response
 
 

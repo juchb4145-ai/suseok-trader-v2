@@ -50,6 +50,12 @@ from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
     process_incremental_evaluation_batch,
 )
+from services.runtime.live_sim_lifecycle_consumer import (
+    get_live_sim_lifecycle_consumer_status,
+    list_live_sim_lifecycle_inbox,
+    process_live_sim_lifecycle_batch,
+    reset_live_sim_lifecycle_dead_letter,
+)
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
     list_market_data_append_only_auto_rollback_events,
@@ -346,6 +352,75 @@ def operator_order_broker_boundaries(
             "no_order_side_effects": True,
             "no_trading_side_effects": True,
         }
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/status")
+def operator_live_sim_lifecycle_consumer_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_live_sim_lifecycle_consumer_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/inbox")
+def operator_live_sim_lifecycle_consumer_inbox(
+    status: str | None = Query(default=None, min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_live_sim_lifecycle_inbox(
+            connection,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_commands_created": True,
+            "live_real_allowed": False,
+        }
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/live-sim/lifecycle-consumer/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_live_sim_lifecycle_consumer_run_once(
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    try:
+        return process_live_sim_lifecycle_batch(
+            connection,
+            settings=settings,
+            limit=limit,
+        ).to_dict()
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/live-sim/lifecycle-consumer/reset-dead-letter",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_live_sim_lifecycle_consumer_reset_dead_letter(
+    event_id: str = Query(min_length=1, max_length=200),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return reset_live_sim_lifecycle_dead_letter(connection, event_id)
     finally:
         connection.close()
 

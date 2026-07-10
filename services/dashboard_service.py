@@ -144,6 +144,9 @@ from services.runtime.gateway_market_scan_routing import (
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
+from services.runtime.live_sim_lifecycle_consumer import (
+    get_live_sim_lifecycle_consumer_status,
+)
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -193,6 +196,7 @@ DASHBOARD_SECTIONS = [
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "live_sim_lifecycle_consumer",
     "projection_replay",
     "projection_watermarks",
     "projection_retention",
@@ -238,6 +242,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "live_sim_lifecycle_consumer",
     "projection_replay",
     "projection_watermarks",
     "projection_retention",
@@ -267,6 +272,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "live_sim_lifecycle_consumer",
     "projection_replay",
     "projection_watermarks",
     "projection_retention",
@@ -405,6 +411,10 @@ def build_dashboard_snapshot(
         connection
     )
     order_broker_boundaries = get_order_broker_boundary_status(connection)
+    live_sim_lifecycle_consumer = get_live_sim_lifecycle_consumer_status(
+        connection,
+        settings=settings,
+    )
     projection_replay = get_projection_replay_status()
     projection_watermarks = get_projection_watermark_status(connection)
     projection_retention = get_event_retention_status(
@@ -701,6 +711,7 @@ def build_dashboard_snapshot(
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
+        "live_sim_lifecycle_consumer": live_sim_lifecycle_consumer,
         "projection_replay": projection_replay,
         "projection_watermarks": projection_watermarks,
         "projection_retention": projection_retention,
@@ -1403,6 +1414,8 @@ def _build_dashboard_fast_section(
         return get_live_sim_order_plan_uniqueness_status(connection)
     if section == "order_broker_boundaries":
         return get_order_broker_boundary_status(connection)
+    if section == "live_sim_lifecycle_consumer":
+        return get_live_sim_lifecycle_consumer_status(connection, settings=settings)
     if section == "projection_replay":
         return get_projection_replay_status()
     if section == "projection_watermarks":

@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 55
+SCHEMA_VERSION = 56
 APP_NAME = "suseok-trader-v2"
 
 
@@ -69,6 +69,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_dry_run_oms_tables(connection)
     _create_dry_run_exit_tables(connection)
     _create_live_sim_tables(connection)
+    _create_live_sim_lifecycle_consumer_tables(connection)
     _create_operator_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
@@ -4731,5 +4732,50 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_live_sim_errors_created
         ON live_sim_errors (created_at)
+        """
+    )
+
+
+def _create_live_sim_lifecycle_consumer_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_inbox (
+            event_id TEXT PRIMARY KEY,
+            event_rowid INTEGER NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING'
+                CHECK (status IN ('PENDING', 'PROCESSING', 'APPLIED', 'DEAD_LETTER')),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+            available_at TEXT NOT NULL,
+            locked_by TEXT,
+            locked_at TEXT,
+            consumer_source TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            processed_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_inbox_status_sequence
+        ON live_sim_lifecycle_inbox (status, event_rowid, available_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_inbox_locked
+        ON live_sim_lifecycle_inbox (status, locked_at)
+        WHERE status = 'PROCESSING'
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO app_metadata (key, value)
+        VALUES ('live_sim_lifecycle_inbox_started_at', datetime('now'))
+        ON CONFLICT(key) DO NOTHING
         """
     )
