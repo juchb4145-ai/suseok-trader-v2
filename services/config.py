@@ -360,6 +360,10 @@ class Settings:
     incremental_evaluation_worker_interval_sec: float = 1.0
     incremental_evaluation_batch_size: int = 20
     incremental_evaluation_retry_limit: int = 3
+    incremental_evaluation_backlog_warn_count: int = 100
+    incremental_evaluation_backlog_fail_count: int = 1000
+    incremental_evaluation_stale_warn_sec: int = 30
+    incremental_evaluation_stale_fail_sec: int = 300
     projection_outbox_worker_enabled: bool = False
     projection_outbox_worker_interval_sec: float = 1.0
     projection_outbox_batch_size: int = 100
@@ -987,9 +991,29 @@ class Settings:
         for field_name in (
             "incremental_evaluation_batch_size",
             "incremental_evaluation_retry_limit",
+            "incremental_evaluation_backlog_warn_count",
+            "incremental_evaluation_backlog_fail_count",
+            "incremental_evaluation_stale_warn_sec",
+            "incremental_evaluation_stale_fail_sec",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
+        if (
+            self.incremental_evaluation_backlog_fail_count
+            < self.incremental_evaluation_backlog_warn_count
+        ):
+            raise ValueError(
+                "INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT must be >= "
+                "INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT"
+            )
+        if (
+            self.incremental_evaluation_stale_fail_sec
+            < self.incremental_evaluation_stale_warn_sec
+        ):
+            raise ValueError(
+                "INCREMENTAL_EVALUATION_STALE_FAIL_SEC must be >= "
+                "INCREMENTAL_EVALUATION_STALE_WARN_SEC"
+            )
         if self.projection_outbox_worker_interval_sec <= 0:
             raise ValueError("PROJECTION_OUTBOX_WORKER_INTERVAL_SEC must be > 0")
         for field_name in (
@@ -2925,6 +2949,26 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         incremental_evaluation_retry_limit=_parse_int(
             env.get("INCREMENTAL_EVALUATION_RETRY_LIMIT", "3"),
             "INCREMENTAL_EVALUATION_RETRY_LIMIT",
+            min_value=1,
+        ),
+        incremental_evaluation_backlog_warn_count=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT", "100"),
+            "INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT",
+            min_value=1,
+        ),
+        incremental_evaluation_backlog_fail_count=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT", "1000"),
+            "INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT",
+            min_value=1,
+        ),
+        incremental_evaluation_stale_warn_sec=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_STALE_WARN_SEC", "30"),
+            "INCREMENTAL_EVALUATION_STALE_WARN_SEC",
+            min_value=1,
+        ),
+        incremental_evaluation_stale_fail_sec=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_STALE_FAIL_SEC", "300"),
+            "INCREMENTAL_EVALUATION_STALE_FAIL_SEC",
             min_value=1,
         ),
         projection_outbox_worker_enabled=_parse_bool(

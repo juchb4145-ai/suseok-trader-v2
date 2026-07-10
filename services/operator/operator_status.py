@@ -45,6 +45,7 @@ from services.runtime.gateway_market_regime_routing import (
 from services.runtime.gateway_market_scan_routing import (
     get_latest_market_scan_append_only_routing_status,
 )
+from services.runtime.incremental_evaluation import get_incremental_evaluation_status
 from services.runtime.live_sim_pilot_pipeline import list_live_sim_pilot_runs
 from services.runtime.market_index_projection_reconcile import (
     get_latest_market_index_projection_reconcile,
@@ -122,6 +123,10 @@ def build_operator_status(
         ),
         "order_broker_boundaries": get_order_broker_boundary_status(connection),
         "live_sim_lifecycle_consumer": build_live_sim_lifecycle_cutover_status(
+            connection,
+            settings=resolved_settings,
+        ),
+        "incremental_evaluation": get_incremental_evaluation_status(
             connection,
             settings=resolved_settings,
         ),

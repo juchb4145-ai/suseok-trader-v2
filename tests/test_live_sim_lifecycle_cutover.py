@@ -46,7 +46,7 @@ def _record_worker_heartbeat(connection, settings: Settings) -> None:
     assert result.status == "IDLE"
 
 
-def test_schema_57_cutover_tables_migrate_and_rerun(tmp_path) -> None:
+def test_lifecycle_cutover_tables_migrate_and_rerun(tmp_path) -> None:
     db_path = tmp_path / "lifecycle-cutover-migration.sqlite3"
     connection = initialize_database(db_path)
     connection.execute("UPDATE app_metadata SET value = '56' WHERE key = 'schema_version'")
@@ -75,7 +75,7 @@ def test_schema_57_cutover_tables_migrate_and_rerun(tmp_path) -> None:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "57"
+    assert schema_version == str(SCHEMA_VERSION) == "58"
     assert "live_sim_lifecycle_consumer_runs" in tables
     assert "live_sim_lifecycle_routing_decisions" in tables
     assert "idx_live_sim_lifecycle_routing_effective" in indexes

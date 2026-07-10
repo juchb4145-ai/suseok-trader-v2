@@ -30,7 +30,7 @@ def _worker_settings(**overrides) -> Settings:
     )
 
 
-def test_schema_57_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
+def test_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
     db_path = tmp_path / "lifecycle-migration.sqlite3"
     connection = initialize_database(db_path)
     connection.execute("UPDATE app_metadata SET value = '55' WHERE key = 'schema_version'")
@@ -59,7 +59,7 @@ def test_schema_57_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
         migrated.close()
         second.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "57"
+    assert schema_version == str(SCHEMA_VERSION) == "58"
     assert {"event_id", "event_rowid", "status", "attempts", "locked_by"} <= columns
     assert "idx_live_sim_lifecycle_inbox_status_sequence" in indexes
 

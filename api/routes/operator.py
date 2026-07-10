@@ -53,7 +53,10 @@ from services.runtime.gateway_projection_routing import (
 )
 from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
+    list_incremental_evaluation_dead_letters,
     process_incremental_evaluation_batch,
+    reset_incremental_evaluation_dead_letter,
+    sweep_incremental_evaluation_retry_exhausted,
 )
 from services.runtime.live_sim_lifecycle_consumer import (
     list_live_sim_lifecycle_inbox,
@@ -279,6 +282,30 @@ def operator_incremental_evaluation_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_incremental_evaluation_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.get("/incremental-evaluation/dead-letters")
+def operator_incremental_evaluation_dead_letters(
+    status: str | None = Query(default="DEAD_LETTER", min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_incremental_evaluation_dead_letters(
+            connection,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
     finally:
         connection.close()
 
@@ -1555,6 +1582,56 @@ def operator_incremental_evaluation_run_once(
                 detail=exc.to_dict(),
             ) from exc
         return result.to_dict()
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/incremental-evaluation/dead-letters/reset",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_incremental_evaluation_dead_letter_reset(
+    dead_letter_id: str = Query(min_length=1, max_length=200),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return reset_incremental_evaluation_dead_letter(
+            connection,
+            dead_letter_id,
+            reset_by="operator_api",
+        )
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/incremental-evaluation/dead-letters/sweep",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_incremental_evaluation_dead_letter_sweep(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            moved_count = sweep_incremental_evaluation_retry_exhausted(
+                connection,
+                settings=settings,
+                limit=limit,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
+        return {
+            "status": "MOVED" if moved_count else "NOOP",
+            "moved_count": moved_count,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
     finally:
         connection.close()
 

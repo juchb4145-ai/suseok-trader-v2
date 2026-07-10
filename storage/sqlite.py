@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 57
+SCHEMA_VERSION = 58
 APP_NAME = "suseok-trader-v2"
 
 
@@ -870,6 +870,42 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_queue_trade_code
         ON incremental_evaluation_queue (trade_date, code)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incremental_evaluation_dead_letters (
+            dead_letter_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            source_event_id TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            original_enqueued_at TEXT NOT NULL,
+            last_queue_updated_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL CHECK (attempts > 0),
+            last_error TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'DEAD_LETTER'
+                CHECK (status IN ('DEAD_LETTER', 'RESET')),
+            dead_lettered_at TEXT NOT NULL,
+            reset_at TEXT,
+            reset_by TEXT,
+            reset_evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_incremental_evaluation_dead_letter_active
+        ON incremental_evaluation_dead_letters (candidate_instance_id)
+        WHERE status = 'DEAD_LETTER'
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_dead_letter_status_time
+        ON incremental_evaluation_dead_letters (status, dead_lettered_at DESC)
         """
     )
     connection.execute(

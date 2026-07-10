@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (PR-23 LIVE_SIM lifecycle guarded cutover 구현 및 격리 검증 완료)
+최종 업데이트: 2026-07-10 (PR-24 incremental queue 운영 경로 구현 및 격리 검증 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -40,8 +40,9 @@
 - PR-21: schema 55에 market-scan cutover/controller/budget/rollback evidence를 추가했다. fresh prior reconcile, parser/data/event freshness, market_data dependency, outbox SLA와 이전 effective-skip worker closure가 모두 PASS일 때만 global `1/min` budget으로 inline scan을 제한적으로 건너뛴다.
 - PR-22: schema 56에 LIVE_SIM lifecycle durable inbox와 event-id idempotent consumer를 추가했다. handler write, inbox APPLIED와 success watermark를 한 transaction으로 묶고 ordered retry/dead-letter/reset을 제공한다. 기본 consumer/worker는 disabled이며 Gateway inline compatibility는 유지한다.
 - PR-23: schema 57에 lifecycle worker heartbeat와 routing evidence를 추가했다. healthy worker, inbox 무결성, backlog gate, cutover ON, kill switch OFF일 때만 inline lifecycle apply를 건너뛰며 worker 오류 또는 health 실패는 sequence-safe inline fallback으로 복귀한다.
+- PR-24: schema 58에 incremental evaluation dead-letter ledger와 retry-reset을 추가했다. backlog/age/stale/retry-exhausted 상태를 표준화하고 exhausted active row를 lock/fencing 경계에서 원자 이동한다.
 - Replay 기반: accepted event export/import, source rowid/received_at 및 order hash 보존, 새 격리 DB 강제, inline-shadow와 worker-apply projection hash/reconcile 비교, strict SQLite write authorizer, KRX/NXT 분리 evidence를 구현했다. operator/API Dashboard는 report read-only status만 제공하고 replay 실행 endpoint는 없다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay, P1-2/P2-4 projection watermark/retention RCA, PR-15/16 market_index, PR-17 common context, PR-18/19 market_regime, PR-20/21 market_scan, PR-22/23 lifecycle durable consumer와 guarded cutover를 완료했다. 다음 구현 범위는 P2-1 incremental queue 운영 경로이며 market-regime/scan 운영 gate는 `PENDING_KRX_SESSION`/`PENDING_KOA_STUDIO_CONFIRMATION`이다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay, P1-2/P2-4 projection watermark/retention RCA, PR-15/16 market_index, PR-17 common context, PR-18/19 market_regime, PR-20/21 market_scan, PR-22/23 lifecycle durable consumer, PR-24 P2-1 incremental queue 운영 경로를 완료했다. 다음 구현 범위는 P1-1/P1-5 pipeline coherency이며 market-regime/scan 운영 gate는 `PENDING_KRX_SESSION`/`PENDING_KOA_STUDIO_CONFIRMATION`이다.
 
 ## P0
 
@@ -67,7 +68,7 @@
 
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
 |---|---|---|---|---|---|
-| P2-1 incremental queue status는 backlog/stale age alert가 없다 | `services/runtime/incremental_evaluation.py::get_incremental_evaluation_status()`는 `queued_count`, `retry_exhausted_count`, `oldest_enqueued_at`, `max_attempts`를 반환하지만 stale threshold 평가와 reason code는 없다. | queue가 오래 쌓여도 dashboard/operator가 즉시 `STALE_QUEUE`로 해석하기 어렵다. | status에 `oldest_age_sec`, `stale_queue_count`, `backlog_status`, `reason_codes`를 추가한다. retry exhausted row는 별도 dead-letter/retry reset 운영 경로를 둔다. | 추가 테스트: `test_incremental_queue_backlog_and_stale_rows_are_detectable`. SQL: `SELECT COUNT(*),MIN(enqueued_at),MAX(attempts) FROM incremental_evaluation_queue;` |
+| P2-1 incremental queue backlog/stale/dead-letter 운영 경로 | 수정 완료. schema 58은 `incremental_evaluation_dead_letters`와 candidate별 unresolved dead-letter partial UNIQUE를 추가했다. status는 oldest enqueue/update age, stale warn/fail, backlog warn/fail, active retry-exhausted와 unresolved dead-letter를 반환한다. | retry limit 도달 row는 active queue에서 원자 이동하므로 polling에서 조용히 사라진 채 queue를 막지 않는다. 새 event는 failure evidence와 explicit reset을 우회하지 않고 unresolved dead-letter에서 차단된다. | single dead-letter reset은 active candidate/no newer queue를 확인하고 attempts 0 row만 복원한다. worker disable 시 ledger를 보존하고 원인 수정 후 작은 run-once로 복구한다. | 테스트: `tests/test_incremental_evaluation_operations.py`. API: `/api/operator/incremental-evaluation/*`. Ops: `tools/ops_incremental_evaluation_queue_check.py`. Runbook: `docs/runbook_incremental_evaluation_queue_ko.md`. |
 | P2-2 top theme DB/leadership source가 둘 다 표시되지만 coherency warning은 제한적 | `services/dashboard_service.py`는 DB top tradable과 leadership fallback을 함께 다루며 `DASHBOARD_SAMPLE_LIMIT_HIDES_TRADABLE_THEME`는 있다. 그러나 DB snapshot과 leadership snapshot의 생성 run/watermark는 표시하지 않는다. | 운영자가 DB top theme와 leadership top theme가 같은 관측 universe인지 구분하기 어렵다. | theme/leadership section에 `source`, `snapshot_id`, `calculated_at`, `data_age_sec`, `watchset_selection_source`를 동일 포맷으로 표시한다. | 기존 테스트: `tests/test_dashboard_service.py::test_dashboard_top_theme_query_does_not_hide_tradable_themes_behind_latest_sample`. |
 | P2-3 Market index TR bootstrap 설정은 status에 보이지만 Core projection과 bootstrap replay 경계가 약함 (부분 수정) | PR-15는 event source를 `REALTIME/TR_BOOTSTRAP/UNKNOWN`으로 분류하고 Dashboard에 realtime source와 `CONFIGURED_NOT_IMPLEMENTED` bootstrap 상태를 별도로 표시한다. 현재 Gateway `_market_index_adapter_health()`도 TR-only 설정을 `TR_BOOTSTRAP_NOT_IMPLEMENTED`로 판정한다. | realtime 결과를 bootstrap evidence로 오인하지 않으며, 구현되지 않은 TR bootstrap event는 reconcile FAIL이다. 다만 실제 TR child event/projection은 아직 없다. | bootstrap TR 응답을 deterministic `market_index_tick` child event 또는 별도 snapshot으로 구현하고 replay/source lineage를 추가한다. | 테스트: `tests/test_market_index_projection_reconcile.py::test_market_index_reconcile_rejects_tr_bootstrap_until_adapter_exists`. |
 | P2-4 event별 projection-retention RCA | 수정 완료. `projection_retention_event_rca` SQL view와 read-only RCA service가 Gateway/raw event, required outbox, result, success/error watermark, replay availability, KRX/NXT venue, eligibility reason을 event_id 단위로 결합한다. | 운영자는 `PROJECTION_OUTBOX_MISSING/NOT_APPLIED`, `PROJECTION_RESULT_MISSING/ERROR`, `PROJECTION_SUCCESS_WATERMARK_BEHIND`, raw/command 보호 사유를 API/Dashboard에서 바로 확인한다. | Dashboard full/fast `projection_watermarks`, `projection_retention`, errors RCA card와 ops report를 추가했다. fast status는 bounded blocker probe, exact count는 명시적 ops 요청으로 분리한다. | API: `/api/operator/projection-retention/rca`. Ops: `tools/ops_projection_retention_check.py`. Report: `reports/projection_retention/20260710T031456Z/summary.md`. |
@@ -340,10 +341,9 @@ P0-4 durable order broker boundary 진행 상태:
 
 ## 다음 PR 권장 순서
 
-1. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-2. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-3. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-4. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+2. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+3. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 완료
 
@@ -463,6 +463,15 @@ P0-4 durable order broker boundary 진행 상태:
 - Core lifespan은 consumer/worker가 명시적으로 enabled일 때만 background task를 시작하고 첫 loop에서 즉시 heartbeat를 남긴다. operator routing status/list, aggregate status, Dashboard full/fast와 ops report는 worker age, effective defer count, fallback/block reason을 노출한다.
 - schema-57 격리 Core를 port 8027에서 OBSERVE-safe로 기동했다. worker health PASS 뒤 event 1건은 `DEFERRED_TO_DURABLE_WORKER`, effective defer true, inline fallback false였고 run-once limit 1에서 APPLIED됐다. duplicate는 DUPLICATE였으며 inbox APPLIED/DEAD_LETTER `1/0`, effective routing `1`, success result `1`, command row `0`, command/order-command delta `0/0`, `quick_check=ok`였다. 최종 ops verdict는 PASS이고 report는 `reports/live_sim_lifecycle_consumer_cutover/20260710T082720Z/summary.md`다. Core와 fixture DB/WAL/SHM/log는 검증 후 정리했다.
 - migration/re-run, default kill-switch fallback, dry-run, effective defer/worker closure, missing worker health fallback, prior dead-letter ordered block, background API, lock contention, ops 판정과 영향 범위 테스트 `117`개 및 full pytest suite `1010`개를 통과했다. 다음 논리 PR은 P2-1 incremental queue 운영 경로다.
+
+## PR-24 P2-1 incremental queue 운영 경로 완료
+
+- schema 58은 `incremental_evaluation_dead_letters`와 candidate별 unresolved dead-letter partial UNIQUE를 추가한다. retry limit에 도달한 row는 failure/source/priority/enqueue 시각을 ledger에 보존하고 active queue에서 같은 transaction으로 제거된다.
+- worker batch 시작은 schema-58 이전 retry-exhausted row를 evaluation runtime lock/fencing 경계에서 sweep한다. 정상 처리 중 마지막 retry가 실패해도 같은 lock 안에서 dead-letter로 이동한다. 같은 candidate의 새 event는 exhausted row를 먼저 보존한 뒤 unresolved dead-letter에서 차단되며 명시적 reset만 attempts 0 queue를 복원한다.
+- status는 oldest enqueue/update age, stale warn/fail count, backlog warn/fail, active retry-exhausted, unresolved dead-letter와 reason code를 노출한다. unresolved dead-letter 또는 active exhausted row는 FAIL이며 configurable threshold의 backlog/stale는 WARN/FAIL로 나뉜다.
+- reset은 단일 dead-letter만 허용한다. candidate가 closed이거나 newer active queue가 있으면 fail-closed로 차단하고, 성공 시 ledger를 RESET으로 보존하며 attempts 0 queue row를 복원한다. operator status/list/sweep/reset API, Dashboard full/fast section, ops 도구와 `docs/runbook_incremental_evaluation_queue_ko.md`를 추가했다.
+- schema-58 격리 Core를 port 8028에서 OBSERVE-safe로 기동했다. legacy active retry-exhausted `1`을 API sweep으로 dead-letter 이동한 뒤 단일 reset으로 queue attempts `0`을 복원했다. 최종 queue/dead-letter/stale `1/0/0`, RESET ledger `1`, command row `0`, command/order-command delta `0/0`, `quick_check=ok`, ops verdict PASS였다. Report: `reports/incremental_evaluation_queue/20260710T084813Z/summary.md`. Core와 fixture DB/WAL/SHM/log는 검증 후 정리했다.
+- migration/re-run, backlog/age/stale severity, atomic retry failure move, legacy sweep, unresolved dead-letter new-event block, reset/idempotency/conflict, operator/Dashboard/ops 계약과 영향 범위 회귀를 추가했고 full pytest suite `1019`개를 통과했다. 다음 논리 PR은 P1-1/P1-5 pipeline source lineage와 freshness coherency다.
 
 ## Flag 정리 계획 (최종 순서 8)
 

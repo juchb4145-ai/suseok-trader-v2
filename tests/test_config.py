@@ -256,6 +256,10 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.incremental_evaluation_worker_interval_sec == 1.0
     assert settings.incremental_evaluation_batch_size == 20
     assert settings.incremental_evaluation_retry_limit == 3
+    assert settings.incremental_evaluation_backlog_warn_count == 100
+    assert settings.incremental_evaluation_backlog_fail_count == 1000
+    assert settings.incremental_evaluation_stale_warn_sec == 30
+    assert settings.incremental_evaluation_stale_fail_sec == 300
     assert settings.projection_outbox_worker_enabled is False
     assert settings.projection_outbox_apply_projection_enabled is False
     assert settings.projection_outbox_market_data_apply_enabled is False

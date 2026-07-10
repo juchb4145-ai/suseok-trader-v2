@@ -147,6 +147,7 @@ from services.runtime.gateway_market_scan_routing import (
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
+from services.runtime.incremental_evaluation import get_incremental_evaluation_status
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -223,6 +224,7 @@ DASHBOARD_SECTIONS = [
     "errors",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -251,6 +253,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "market_reference",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -289,6 +292,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "errors",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -422,6 +426,10 @@ def build_dashboard_snapshot(
         settings=settings,
     )
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
+    incremental_evaluation = get_incremental_evaluation_status(
+        connection,
+        settings=settings,
+    )
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
         connection,
@@ -717,6 +725,7 @@ def build_dashboard_snapshot(
         "projection_retention": projection_retention,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
+        "incremental_evaluation": incremental_evaluation,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "market_data_append_only_controller": market_data_append_only_controller,
@@ -1478,6 +1487,8 @@ def _build_dashboard_fast_section(
         return projection_outbox_status()
     if section == "projection_outbox_backlog":
         return projection_outbox_backlog()
+    if section == "incremental_evaluation":
+        return get_incremental_evaluation_status(connection, settings=settings)
     if section == "market_data_projection_reconcile":
         return market_data_reconcile()
     if section == "market_data_append_only_routing":

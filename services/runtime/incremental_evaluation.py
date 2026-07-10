@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from domain.broker.events import GatewayEvent
@@ -46,6 +48,9 @@ class IncrementalEvaluationEnqueueResult:
     code: str | None = None
     enqueued_count: int = 0
     candidate_ids: Sequence[str] = field(default_factory=tuple)
+    retry_exhausted_dead_lettered_count: int = 0
+    dead_letter_blocked_count: int = 0
+    dead_letter_blocked_candidate_ids: Sequence[str] = field(default_factory=tuple)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +59,13 @@ class IncrementalEvaluationEnqueueResult:
             "code": self.code,
             "enqueued_count": self.enqueued_count,
             "candidate_ids": list(self.candidate_ids),
+            "retry_exhausted_dead_lettered_count": (
+                self.retry_exhausted_dead_lettered_count
+            ),
+            "dead_letter_blocked_count": self.dead_letter_blocked_count,
+            "dead_letter_blocked_candidate_ids": list(
+                self.dead_letter_blocked_candidate_ids
+            ),
         }
 
 
@@ -69,6 +81,8 @@ class IncrementalEvaluationBatchResult:
     strategy_observation_count: int = 0
     risk_observation_count: int = 0
     error_count: int = 0
+    dead_letter_count: int = 0
+    legacy_retry_exhausted_dead_lettered_count: int = 0
     errors: Sequence[dict[str, Any]] = field(default_factory=tuple)
     created_at: str = field(default_factory=lambda: datetime_to_wire(utc_now()))
     observe_only: bool = True
@@ -86,6 +100,10 @@ class IncrementalEvaluationBatchResult:
             "strategy_observation_count": self.strategy_observation_count,
             "risk_observation_count": self.risk_observation_count,
             "error_count": self.error_count,
+            "dead_letter_count": self.dead_letter_count,
+            "legacy_retry_exhausted_dead_lettered_count": (
+                self.legacy_retry_exhausted_dead_lettered_count
+            ),
             "errors": list(self.errors),
             "created_at": self.created_at,
             "observe_only": self.observe_only,
@@ -184,9 +202,21 @@ def enqueue_incremental_evaluation_for_code(
         )
 
     now = datetime_to_wire(utc_now())
-    candidate_ids = tuple(str(row["candidate_instance_id"]) for row in rows)
     normalized_reason = str(reason or DIRTY_REASON_CANDIDATE_QUOTE_REFRESH).strip().upper()
+    retry_exhausted_dead_lettered_count = 0
+    enqueued_candidate_ids: list[str] = []
+    blocked_candidate_ids: list[str] = []
     for row in rows:
+        candidate_id = str(row["candidate_instance_id"])
+        retry_exhausted_dead_lettered_count += _dead_letter_retry_exhausted_candidate(
+            connection,
+            candidate_id,
+            retry_limit=resolved_settings.incremental_evaluation_retry_limit,
+            fallback_error="RETRY_EXHAUSTED_SUPERSEDED_BY_NEW_EVENT",
+        )
+        if _candidate_has_unresolved_dead_letter(connection, candidate_id):
+            blocked_candidate_ids.append(candidate_id)
+            continue
         connection.execute(
             """
             INSERT INTO incremental_evaluation_queue (
@@ -226,13 +256,22 @@ def enqueue_incremental_evaluation_for_code(
                 now,
             ),
         )
+        enqueued_candidate_ids.append(candidate_id)
     connection.commit()
+    status = "ENQUEUED"
+    if blocked_candidate_ids and not enqueued_candidate_ids:
+        status = "BLOCKED_DEAD_LETTER"
+    elif blocked_candidate_ids:
+        status = "PARTIAL_ENQUEUED_DEAD_LETTER_BLOCKED"
     return IncrementalEvaluationEnqueueResult(
-        status="ENQUEUED",
+        status=status,
         event_id=normalized_event_id,
         code=normalized_code,
-        enqueued_count=len(candidate_ids),
-        candidate_ids=candidate_ids,
+        enqueued_count=len(enqueued_candidate_ids),
+        candidate_ids=tuple(enqueued_candidate_ids),
+        retry_exhausted_dead_lettered_count=retry_exhausted_dead_lettered_count,
+        dead_letter_blocked_count=len(blocked_candidate_ids),
+        dead_letter_blocked_candidate_ids=tuple(blocked_candidate_ids),
     )
 
 
@@ -303,6 +342,25 @@ def process_incremental_evaluation_batch(
             queued_after=queued_before,
         )
 
+    legacy_dead_lettered_count = 0
+    if _retry_exhausted_queue_count(
+        connection,
+        retry_limit=resolved_settings.incremental_evaluation_retry_limit,
+    ):
+        with runtime_execution_lock(
+            connection,
+            EVALUATION_PIPELINE_LOCK,
+            details={"run_type": "incremental_retry_exhausted_sweep"},
+        ):
+            assert_runtime_execution_fence(connection)
+            legacy_dead_lettered_count = sweep_incremental_evaluation_retry_exhausted(
+                connection,
+                settings=resolved_settings,
+                commit=False,
+            )
+            assert_runtime_execution_fence(connection)
+            connection.commit()
+
     bounded_limit = _bounded_limit(limit or resolved_settings.incremental_evaluation_batch_size)
     chunk_limit = min(bounded_limit, DEFAULT_INCREMENTAL_EVALUATION_LOCK_CHUNK_SIZE)
     remaining_limit = bounded_limit
@@ -313,6 +371,7 @@ def process_incremental_evaluation_batch(
     risk_count = 0
     errors: list[dict[str, Any]] = []
     polled_count = 0
+    dead_letter_count = legacy_dead_lettered_count
 
     while remaining_limit > 0:
         current_limit = min(remaining_limit, chunk_limit)
@@ -343,6 +402,7 @@ def process_incremental_evaluation_batch(
             chunk_skipped_closed_count = 0
             chunk_strategy_count = 0
             chunk_risk_count = 0
+            chunk_dead_letter_count = 0
 
             for row in rows:
                 candidate_id = str(row["candidate_instance_id"])
@@ -396,7 +456,14 @@ def process_incremental_evaluation_batch(
                         "error_message": str(exc),
                     }
                     errors.append(error)
-                    _mark_queue_error(connection, candidate_id, str(exc))
+                    queue_error_status = _mark_queue_error(
+                        connection,
+                        candidate_id,
+                        str(exc),
+                        retry_limit=resolved_settings.incremental_evaluation_retry_limit,
+                    )
+                    if queue_error_status == "DEAD_LETTER":
+                        chunk_dead_letter_count += 1
                     assert_runtime_execution_fence(connection)
                     connection.commit()
 
@@ -404,6 +471,7 @@ def process_incremental_evaluation_batch(
             skipped_closed_count += chunk_skipped_closed_count
             strategy_count += chunk_strategy_count
             risk_count += chunk_risk_count
+            dead_letter_count += chunk_dead_letter_count
 
         if fetched_count < current_limit:
             break
@@ -414,13 +482,27 @@ def process_incremental_evaluation_batch(
         queued_after = _queue_count(connection)
         return IncrementalEvaluationBatchResult(
             run_id=run_id,
-            status="IDLE",
+            status=(
+                "COMPLETED_WITH_DEAD_LETTERS"
+                if legacy_dead_lettered_count
+                else "IDLE"
+            ),
             queued_before=queued_before,
             queued_after=queued_after,
+            dead_letter_count=dead_letter_count,
+            legacy_retry_exhausted_dead_lettered_count=(
+                legacy_dead_lettered_count
+            ),
         )
 
     queued_after = _queue_count(connection)
-    status = "COMPLETED_WITH_ERRORS" if errors else "COMPLETED"
+    status = (
+        "COMPLETED_WITH_ERRORS"
+        if errors
+        else "COMPLETED_WITH_DEAD_LETTERS"
+        if legacy_dead_lettered_count
+        else "COMPLETED"
+    )
     return IncrementalEvaluationBatchResult(
         run_id=run_id,
         status=status,
@@ -432,6 +514,8 @@ def process_incremental_evaluation_batch(
         strategy_observation_count=strategy_count,
         risk_observation_count=risk_count,
         error_count=len(errors),
+        dead_letter_count=dead_letter_count,
+        legacy_retry_exhausted_dead_lettered_count=legacy_dead_lettered_count,
         errors=tuple(errors),
     )
 
@@ -442,33 +526,311 @@ def get_incremental_evaluation_status(
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
+    now = utc_now()
+    stale_warn_cutoff = datetime_to_wire(
+        now - timedelta(seconds=resolved_settings.incremental_evaluation_stale_warn_sec)
+    )
+    stale_fail_cutoff = datetime_to_wire(
+        now - timedelta(seconds=resolved_settings.incremental_evaluation_stale_fail_sec)
+    )
     row = connection.execute(
         """
         SELECT
             COUNT(*) AS queued_count,
             SUM(CASE WHEN attempts >= ? THEN 1 ELSE 0 END) AS retry_exhausted_count,
             MIN(enqueued_at) AS oldest_enqueued_at,
+            MIN(updated_at) AS oldest_updated_at,
             MAX(updated_at) AS latest_updated_at,
-            MAX(attempts) AS max_attempts
+            MAX(attempts) AS max_attempts,
+            SUM(CASE WHEN julianday(updated_at) <= julianday(?) THEN 1 ELSE 0 END)
+                AS stale_warn_count,
+            SUM(CASE WHEN julianday(updated_at) <= julianday(?) THEN 1 ELSE 0 END)
+                AS stale_fail_count
         FROM incremental_evaluation_queue
         """,
-        (resolved_settings.incremental_evaluation_retry_limit,),
+        (
+            resolved_settings.incremental_evaluation_retry_limit,
+            stale_warn_cutoff,
+            stale_fail_cutoff,
+        ),
     ).fetchone()
+    dead_letter = connection.execute(
+        """
+        SELECT
+            COUNT(*) AS dead_letter_count,
+            MIN(dead_lettered_at) AS oldest_dead_lettered_at,
+            MAX(dead_lettered_at) AS latest_dead_lettered_at
+        FROM incremental_evaluation_dead_letters
+        WHERE status = 'DEAD_LETTER'
+        """
+    ).fetchone()
+    queued_count = int(row["queued_count"] or 0)
+    retry_exhausted_count = int(row["retry_exhausted_count"] or 0)
+    stale_warn_count = int(row["stale_warn_count"] or 0)
+    stale_fail_count = int(row["stale_fail_count"] or 0)
+    dead_letter_count = int(dead_letter["dead_letter_count"] or 0)
+    reason_codes: list[str] = []
+    status = "PASS"
+    if queued_count >= resolved_settings.incremental_evaluation_backlog_fail_count:
+        status = "FAIL"
+        reason_codes.append("INCREMENTAL_QUEUE_BACKLOG_FAIL")
+    elif queued_count >= resolved_settings.incremental_evaluation_backlog_warn_count:
+        status = "WARN"
+        reason_codes.append("INCREMENTAL_QUEUE_BACKLOG_WARN")
+    if stale_fail_count:
+        status = "FAIL"
+        reason_codes.append("INCREMENTAL_QUEUE_STALE_FAIL")
+    elif stale_warn_count:
+        if status == "PASS":
+            status = "WARN"
+        reason_codes.append("INCREMENTAL_QUEUE_STALE_WARN")
+    if retry_exhausted_count:
+        status = "FAIL"
+        reason_codes.append("INCREMENTAL_QUEUE_RETRY_EXHAUSTED_ACTIVE")
+    if dead_letter_count:
+        status = "FAIL"
+        reason_codes.append("INCREMENTAL_QUEUE_DEAD_LETTER_PRESENT")
     return {
+        "status": status,
+        "backlog_status": status,
+        "reason_codes": reason_codes,
         "enabled": resolved_settings.incremental_evaluation_enabled,
         "worker_enabled": resolved_settings.incremental_evaluation_worker_enabled,
         "worker_interval_sec": resolved_settings.incremental_evaluation_worker_interval_sec,
         "batch_size": resolved_settings.incremental_evaluation_batch_size,
         "retry_limit": resolved_settings.incremental_evaluation_retry_limit,
-        "queued_count": int(row["queued_count"] or 0),
-        "retry_exhausted_count": int(row["retry_exhausted_count"] or 0),
+        "queued_count": queued_count,
+        "retry_exhausted_count": retry_exhausted_count,
+        "dead_letter_count": dead_letter_count,
+        "stale_queue_count": stale_warn_count,
+        "stale_fail_count": stale_fail_count,
         "oldest_enqueued_at": row["oldest_enqueued_at"],
+        "oldest_updated_at": row["oldest_updated_at"],
+        "oldest_age_sec": _age_sec(row["oldest_enqueued_at"], now=now),
+        "oldest_updated_age_sec": _age_sec(row["oldest_updated_at"], now=now),
         "latest_updated_at": row["latest_updated_at"],
         "max_attempts": int(row["max_attempts"] or 0),
+        "oldest_dead_lettered_at": dead_letter["oldest_dead_lettered_at"],
+        "latest_dead_lettered_at": dead_letter["latest_dead_lettered_at"],
+        "thresholds": {
+            "backlog_warn_count": (
+                resolved_settings.incremental_evaluation_backlog_warn_count
+            ),
+            "backlog_fail_count": (
+                resolved_settings.incremental_evaluation_backlog_fail_count
+            ),
+            "stale_warn_sec": resolved_settings.incremental_evaluation_stale_warn_sec,
+            "stale_fail_sec": resolved_settings.incremental_evaluation_stale_fail_sec,
+        },
         "read_only": True,
         "observe_only": True,
         "no_order_side_effects": True,
     }
+
+
+def list_incremental_evaluation_dead_letters(
+    connection: sqlite3.Connection,
+    *,
+    status: str | None = "DEAD_LETTER",
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if status is not None:
+        normalized_status = str(status).strip().upper()
+        if normalized_status not in {"DEAD_LETTER", "RESET"}:
+            raise ValueError("status must be DEAD_LETTER or RESET")
+        clauses.append("status = ?")
+        params.append(normalized_status)
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.append(_bounded_limit(limit))
+    rows = connection.execute(
+        f"""
+        SELECT *
+        FROM incremental_evaluation_dead_letters
+        {where_sql}
+        ORDER BY dead_lettered_at DESC, dead_letter_id DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    ).fetchall()
+    results: list[dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["reset_evidence"] = _json_object(
+            item.pop("reset_evidence_json", "{}")
+        )
+        results.append(item)
+    return results
+
+
+def reset_incremental_evaluation_dead_letter(
+    connection: sqlite3.Connection,
+    dead_letter_id: str,
+    *,
+    reset_by: str = "operator",
+) -> dict[str, Any]:
+    normalized_id = str(dead_letter_id).strip()
+    normalized_reset_by = str(reset_by).strip()
+    if not normalized_id:
+        raise ValueError("dead_letter_id must not be empty")
+    if not normalized_reset_by:
+        raise ValueError("reset_by must not be empty")
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        row = connection.execute(
+            """
+            SELECT *
+            FROM incremental_evaluation_dead_letters
+            WHERE dead_letter_id = ?
+            """,
+            (normalized_id,),
+        ).fetchone()
+        if row is None:
+            connection.commit()
+            return {
+                "status": "NOT_FOUND",
+                "dead_letter_id": normalized_id,
+                "reset_count": 0,
+            }
+        if str(row["status"]) != "DEAD_LETTER":
+            connection.commit()
+            return {
+                "status": "ALREADY_RESET",
+                "dead_letter_id": normalized_id,
+                "reset_count": 0,
+            }
+        candidate_id = str(row["candidate_instance_id"])
+        if not _is_candidate_active(connection, candidate_id):
+            connection.commit()
+            return {
+                "status": "BLOCKED_CANDIDATE_NOT_ACTIVE",
+                "dead_letter_id": normalized_id,
+                "candidate_instance_id": candidate_id,
+                "reset_count": 0,
+            }
+        existing = connection.execute(
+            """
+            SELECT source_event_id, updated_at
+            FROM incremental_evaluation_queue
+            WHERE candidate_instance_id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()
+        if existing is not None:
+            connection.commit()
+            return {
+                "status": "BLOCKED_ACTIVE_QUEUE_EXISTS",
+                "dead_letter_id": normalized_id,
+                "candidate_instance_id": candidate_id,
+                "active_source_event_id": existing["source_event_id"],
+                "reset_count": 0,
+            }
+        now = datetime_to_wire(utc_now())
+        connection.execute(
+            """
+            INSERT INTO incremental_evaluation_queue (
+                candidate_instance_id,
+                trade_date,
+                code,
+                reason,
+                source_event_id,
+                priority,
+                enqueued_at,
+                updated_at,
+                attempts,
+                last_error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
+            """,
+            (
+                candidate_id,
+                row["trade_date"],
+                row["code"],
+                row["reason"],
+                row["source_event_id"],
+                row["priority"],
+                now,
+                now,
+            ),
+        )
+        evidence = {
+            "previous_attempts": int(row["attempts"]),
+            "previous_last_error": row["last_error"],
+            "restored_source_event_id": row["source_event_id"],
+        }
+        connection.execute(
+            """
+            UPDATE incremental_evaluation_dead_letters
+            SET status = 'RESET',
+                reset_at = ?,
+                reset_by = ?,
+                reset_evidence_json = ?
+            WHERE dead_letter_id = ? AND status = 'DEAD_LETTER'
+            """,
+            (now, normalized_reset_by, _json_dumps(evidence), normalized_id),
+        )
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return {
+        "status": "RESET",
+        "dead_letter_id": normalized_id,
+        "candidate_instance_id": candidate_id,
+        "reset_count": 1,
+        "reset_by": normalized_reset_by,
+        "no_order_side_effects": True,
+    }
+
+
+def sweep_incremental_evaluation_retry_exhausted(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings | None = None,
+    limit: int = 500,
+    commit: bool = True,
+) -> int:
+    resolved_settings = settings or load_settings()
+    if commit:
+        with runtime_execution_lock(
+            connection,
+            EVALUATION_PIPELINE_LOCK,
+            details={"run_type": "incremental_retry_exhausted_operator_sweep"},
+        ):
+            assert_runtime_execution_fence(connection)
+            moved_count = sweep_incremental_evaluation_retry_exhausted(
+                connection,
+                settings=resolved_settings,
+                limit=limit,
+                commit=False,
+            )
+            assert_runtime_execution_fence(connection)
+            connection.commit()
+            return moved_count
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM incremental_evaluation_queue
+        WHERE attempts >= ?
+        ORDER BY updated_at, candidate_instance_id
+        LIMIT ?
+        """,
+        (
+            resolved_settings.incremental_evaluation_retry_limit,
+            _bounded_limit(limit),
+        ),
+    ).fetchall()
+    moved_count = 0
+    for row in rows:
+        _move_queue_row_to_dead_letter(
+            connection,
+            row,
+            attempts=int(row["attempts"]),
+            error_message=str(row["last_error"] or "LEGACY_RETRY_EXHAUSTED"),
+        )
+        moved_count += 1
+    return moved_count
 
 
 def _active_candidate_rows_for_code(
@@ -618,17 +980,176 @@ def _mark_queue_error(
     connection: sqlite3.Connection,
     candidate_instance_id: str,
     error_message: str,
-) -> None:
+    *,
+    retry_limit: int,
+) -> str:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM incremental_evaluation_queue
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_instance_id,),
+    ).fetchone()
+    if row is None:
+        return "MISSING"
+    next_attempts = int(row["attempts"]) + 1
+    normalized_error = _truncate_error(error_message)
+    if next_attempts >= max(int(retry_limit), 1):
+        _move_queue_row_to_dead_letter(
+            connection,
+            row,
+            attempts=next_attempts,
+            error_message=normalized_error,
+        )
+        return "DEAD_LETTER"
     connection.execute(
         """
         UPDATE incremental_evaluation_queue
-        SET attempts = attempts + 1,
+        SET attempts = ?,
             last_error = ?,
             updated_at = ?
         WHERE candidate_instance_id = ?
         """,
-        (_truncate_error(error_message), datetime_to_wire(utc_now()), candidate_instance_id),
+        (
+            next_attempts,
+            normalized_error,
+            datetime_to_wire(utc_now()),
+            candidate_instance_id,
+        ),
     )
+    return "RETRY_PENDING"
+
+
+def _dead_letter_retry_exhausted_candidate(
+    connection: sqlite3.Connection,
+    candidate_instance_id: str,
+    *,
+    retry_limit: int,
+    fallback_error: str,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM incremental_evaluation_queue
+        WHERE candidate_instance_id = ? AND attempts >= ?
+        """,
+        (candidate_instance_id, max(int(retry_limit), 1)),
+    ).fetchone()
+    if row is None:
+        return 0
+    _move_queue_row_to_dead_letter(
+        connection,
+        row,
+        attempts=int(row["attempts"]),
+        error_message=str(row["last_error"] or fallback_error),
+    )
+    return 1
+
+
+def _candidate_has_unresolved_dead_letter(
+    connection: sqlite3.Connection,
+    candidate_instance_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM incremental_evaluation_dead_letters
+        WHERE candidate_instance_id = ? AND status = 'DEAD_LETTER'
+        LIMIT 1
+        """,
+        (candidate_instance_id,),
+    ).fetchone()
+    return row is not None
+
+
+def _move_queue_row_to_dead_letter(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+    *,
+    attempts: int,
+    error_message: str,
+) -> None:
+    candidate_id = str(row["candidate_instance_id"])
+    now = datetime_to_wire(utc_now())
+    existing = connection.execute(
+        """
+        SELECT dead_letter_id
+        FROM incremental_evaluation_dead_letters
+        WHERE candidate_instance_id = ? AND status = 'DEAD_LETTER'
+        """,
+        (candidate_id,),
+    ).fetchone()
+    if existing is None:
+        connection.execute(
+            """
+            INSERT INTO incremental_evaluation_dead_letters (
+                dead_letter_id,
+                candidate_instance_id,
+                trade_date,
+                code,
+                reason,
+                source_event_id,
+                priority,
+                original_enqueued_at,
+                last_queue_updated_at,
+                attempts,
+                last_error,
+                status,
+                dead_lettered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DEAD_LETTER', ?)
+            """,
+            (
+                new_message_id("incremental_dead_letter"),
+                candidate_id,
+                row["trade_date"],
+                row["code"],
+                row["reason"],
+                row["source_event_id"],
+                int(row["priority"]),
+                row["enqueued_at"],
+                row["updated_at"],
+                max(int(attempts), 1),
+                _truncate_error(error_message),
+                now,
+            ),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE incremental_evaluation_dead_letters
+            SET attempts = ?,
+                last_error = ?,
+                last_queue_updated_at = ?,
+                dead_lettered_at = ?
+            WHERE dead_letter_id = ?
+            """,
+            (
+                max(int(attempts), 1),
+                _truncate_error(error_message),
+                row["updated_at"],
+                now,
+                existing["dead_letter_id"],
+            ),
+        )
+    _delete_queue_row(connection, candidate_id)
+
+
+def _retry_exhausted_queue_count(
+    connection: sqlite3.Connection,
+    *,
+    retry_limit: int,
+) -> int:
+    row = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM incremental_evaluation_queue
+        WHERE attempts >= ?
+        """,
+        (max(int(retry_limit), 1),),
+    ).fetchone()
+    return int(row["count"] or 0)
 
 
 def _bounded_limit(value: int) -> int:
@@ -638,3 +1159,25 @@ def _bounded_limit(value: int) -> int:
 def _truncate_error(value: str) -> str:
     normalized = value.strip()
     return normalized[:500] if len(normalized) > 500 else normalized
+
+
+def _age_sec(value: Any, *, now) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = parse_timestamp(value, "queue_timestamp")
+    except (TypeError, ValueError):
+        return None
+    return round(max((now - parsed).total_seconds(), 0.0), 3)
+
+
+def _json_object(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
