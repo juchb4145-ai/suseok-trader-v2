@@ -34,6 +34,9 @@ from services.operator.no_buy_sentinel import (
 )
 from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import build_realtime_subscription_plan
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.gateway_live_sim_lifecycle_routing import (
     build_live_sim_lifecycle_cutover_status,
@@ -125,6 +128,10 @@ def build_operator_status(
             get_live_sim_order_plan_uniqueness_status(connection)
         ),
         "order_broker_boundaries": get_order_broker_boundary_status(connection),
+        "append_only_readiness": build_append_only_readiness_status(
+            connection,
+            settings=resolved_settings,
+        ),
         "live_sim_lifecycle_consumer": build_live_sim_lifecycle_cutover_status(
             connection,
             settings=resolved_settings,

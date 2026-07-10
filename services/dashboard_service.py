@@ -129,6 +129,9 @@ from services.risk_gate import (
     list_risk_check_observations,
     list_risk_errors,
 )
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.gateway_live_sim_lifecycle_routing import (
     build_live_sim_lifecycle_cutover_status,
@@ -203,6 +206,7 @@ DASHBOARD_SECTIONS = [
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "append_only_readiness",
     "live_sim_lifecycle_consumer",
     "projection_replay",
     "projection_watermarks",
@@ -285,6 +289,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "append_only_readiness",
     "live_sim_lifecycle_consumer",
     "projection_replay",
     "projection_watermarks",
@@ -432,6 +437,10 @@ def build_dashboard_snapshot(
         connection
     )
     order_broker_boundaries = get_order_broker_boundary_status(connection)
+    append_only_readiness = build_append_only_readiness_status(
+        connection,
+        settings=settings,
+    )
     live_sim_lifecycle_consumer = build_live_sim_lifecycle_cutover_status(
         connection,
         settings=settings,
@@ -757,6 +766,7 @@ def build_dashboard_snapshot(
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
+        "append_only_readiness": append_only_readiness,
         "live_sim_lifecycle_consumer": live_sim_lifecycle_consumer,
         "projection_replay": projection_replay,
         "projection_watermarks": projection_watermarks,
@@ -1495,6 +1505,11 @@ def _build_dashboard_fast_section(
         return get_live_sim_order_plan_uniqueness_status(connection)
     if section == "order_broker_boundaries":
         return get_order_broker_boundary_status(connection)
+    if section == "append_only_readiness":
+        return build_append_only_readiness_status(
+            connection,
+            settings=settings,
+        )
     if section == "live_sim_lifecycle_consumer":
         return build_live_sim_lifecycle_cutover_status(connection, settings=settings)
     if section == "projection_replay":

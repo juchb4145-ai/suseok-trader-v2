@@ -26,6 +26,9 @@ from services.realtime_subscription import (
     build_realtime_subscription_plan,
     run_realtime_subscription_once,
 )
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
 from services.runtime.evaluation_run_guard import (
     EvaluationRunLockError,
     get_runtime_execution_lock_status,
@@ -153,6 +156,19 @@ def operator_status(
             settings=settings,
             trade_date=trade_date,
             include_no_buy_rebuild=True,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/append-only-readiness/status")
+def operator_append_only_readiness_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_append_only_readiness_status(
+            connection,
+            settings=settings,
         )
     finally:
         connection.close()
