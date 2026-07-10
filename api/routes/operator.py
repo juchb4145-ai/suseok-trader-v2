@@ -103,6 +103,7 @@ from services.runtime.projection_outbox_bulk_retire import (
 )
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from services.runtime.projection_replay import get_projection_replay_status
+from services.theme_coherency import build_theme_coherency_status
 from storage.event_retention import (
     EventRetentionSafetyError,
     get_event_retention_status,
@@ -299,6 +300,22 @@ def operator_pipeline_coherency_status(
             connection,
             trade_date=trade_date,
             max_age_sec=settings.entry_timing_stale_max_seconds,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/theme-coherency/status")
+def operator_theme_coherency_status(
+    limit: int = Query(default=10, ge=1, le=100),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_theme_coherency_status(
+            connection,
+            settings=settings,
             limit=limit,
         )
     finally:

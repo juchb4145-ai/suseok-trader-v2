@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -14,6 +15,7 @@ from domain.broker.utils import (
     parse_int,
     parse_timestamp,
     require_non_empty_str,
+    utc_now,
     validate_stock_code,
 )
 from domain.theme.state import ThemeMemberRole as LegacyThemeMemberRole
@@ -316,6 +318,9 @@ class ThemeLeadershipSnapshot:
     full_fresh_member_count: int = 0
     full_fresh_coverage_ratio: float = 0.0
     score_components: Mapping[str, float] = field(default_factory=dict)
+    source: str = "REALTIME_UNIVERSE_REBUILD"
+    snapshot_id: str | None = None
+    calculated_at: datetime | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "theme_id", require_non_empty_str(self.theme_id, "theme_id"))
@@ -367,6 +372,36 @@ class ThemeLeadershipSnapshot:
                 self, "leader_name", require_non_empty_str(self.leader_name, "leader_name")
             )
         object.__setattr__(self, "created_at", parse_timestamp(self.created_at, "created_at"))
+        object.__setattr__(
+            self,
+            "source",
+            require_non_empty_str(self.source, "source").upper(),
+        )
+        calculated_at = self.calculated_at or self.created_at
+        object.__setattr__(
+            self,
+            "calculated_at",
+            parse_timestamp(calculated_at, "calculated_at"),
+        )
+        if self.snapshot_id is None:
+            seed = "|".join(
+                (
+                    self.source,
+                    self.theme_id,
+                    datetime_to_wire(parse_timestamp(calculated_at, "calculated_at")),
+                )
+            )
+            object.__setattr__(
+                self,
+                "snapshot_id",
+                f"leadership:{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:24]}",
+            )
+        else:
+            object.__setattr__(
+                self,
+                "snapshot_id",
+                require_non_empty_str(self.snapshot_id, "snapshot_id"),
+            )
         object.__setattr__(self, "members", tuple(self.members))
         object.__setattr__(
             self,
@@ -407,11 +442,23 @@ class ThemeLeadershipSnapshot:
             "leader_name": self.leader_name,
             "reason_codes": list(self.reason_codes),
             "created_at": datetime_to_wire(parse_timestamp(self.created_at, "created_at")),
+            "source": self.source,
+            "snapshot_id": self.snapshot_id,
+            "calculated_at": datetime_to_wire(
+                parse_timestamp(self.calculated_at, "calculated_at")
+            ),
+            "data_age_sec": _age_seconds(self.calculated_at),
+            "watchset_selection_source": None,
             "score_components": dict(self.score_components),
         }
         if include_members:
             data["members"] = [member.to_dict() for member in self.members]
         return data
+
+
+def _age_seconds(value: datetime | str) -> float:
+    calculated_at = parse_timestamp(value, "calculated_at")
+    return round(max((utc_now() - calculated_at).total_seconds(), 0.0), 3)
 
 
 @dataclass(frozen=True, kw_only=True)

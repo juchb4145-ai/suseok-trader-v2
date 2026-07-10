@@ -29,7 +29,11 @@ def latest_theme_leadership_snapshots(
             "status": result.status,
             "observe_only": True,
             "snapshots": [
-                snapshot.to_dict(include_members=include_members) for snapshot in result.snapshots
+                {
+                    **snapshot.to_dict(include_members=include_members),
+                    "watchset_selection_source": result.watchset_selection_source,
+                }
+                for snapshot in result.snapshots
             ],
         }
     finally:

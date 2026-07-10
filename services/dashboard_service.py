@@ -182,6 +182,10 @@ from services.strategy_engine import (
     list_strategy_errors,
     list_strategy_setup_observations,
 )
+from services.theme_coherency import (
+    build_theme_coherency_status,
+    standardize_leadership_rows,
+)
 from services.theme_leadership import rebuild_theme_leadership
 from services.theme_service import (
     get_theme_status,
@@ -227,6 +231,7 @@ DASHBOARD_SECTIONS = [
     "projection_outbox_backlog",
     "incremental_evaluation",
     "pipeline_coherency",
+    "theme_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -297,6 +302,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "projection_outbox_backlog",
     "incremental_evaluation",
     "pipeline_coherency",
+    "theme_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -640,6 +646,17 @@ def build_dashboard_snapshot(
         write_candidate_sources=False,
         settings=settings,
     )
+    theme_leadership_rows = standardize_leadership_rows(theme_leadership)
+    theme_coherency = build_theme_coherency_status(
+        connection,
+        settings=settings,
+        leadership_result=theme_leadership,
+        db_top_rows=top_tradable_themes,
+        limit=10,
+    )
+    theme_dashboard_warnings = list(
+        dict.fromkeys([*theme_dashboard_warnings, *theme_coherency["reason_codes"]])
+    )
 
     errors = build_dashboard_errors(
         connection,
@@ -684,6 +701,7 @@ def build_dashboard_snapshot(
         live_sim_order_plan_uniqueness=live_sim_order_plan_uniqueness,
         order_broker_boundaries=order_broker_boundaries,
         pipeline_coherency=pipeline_coherency,
+        theme_coherency=theme_coherency,
         settings=settings,
     )
 
@@ -737,6 +755,7 @@ def build_dashboard_snapshot(
         "projection_outbox_backlog": projection_outbox_backlog,
         "incremental_evaluation": incremental_evaluation,
         "pipeline_coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "market_data_append_only_controller": market_data_append_only_controller,
@@ -761,12 +780,10 @@ def build_dashboard_snapshot(
             "latest_sample_state_counts": latest_sample_state_counts,
             "dashboard_warnings": theme_dashboard_warnings,
             "top_list_source": "state_filtered_strength_query",
+            "coherency": theme_coherency,
             "leadership": {
                 "status": theme_leadership.status,
-                "top_themes": [
-                    snapshot.to_dict(include_members=False)
-                    for snapshot in theme_leadership.snapshots
-                ],
+                "top_themes": theme_leadership_rows,
                 "watchset": theme_leadership.watchset.to_dict(),
                 "eligible_theme_count": theme_leadership.eligible_theme_count,
                 "watchset_selection_source": theme_leadership.watchset_selection_source,
@@ -1067,6 +1084,7 @@ def build_dashboard_pipeline_summary_fast(
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
     pipeline_coherency: dict[str, Any],
+    theme_coherency: dict[str, Any] | None,
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
@@ -1089,6 +1107,7 @@ def build_dashboard_pipeline_summary_fast(
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
         "coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1415,6 +1434,15 @@ def _build_dashboard_fast_section(
             )
         return context["pipeline_coherency"]
 
+    def theme_coherency() -> dict[str, Any]:
+        if "theme_coherency" not in context:
+            context["theme_coherency"] = build_theme_coherency_status(
+                connection,
+                settings=settings,
+                limit=min(bounded_limit, 100),
+            )
+        return context["theme_coherency"]
+
     if section == "safety":
         return build_safety_section(settings)
     if section == "system":
@@ -1513,6 +1541,8 @@ def _build_dashboard_fast_section(
         return get_incremental_evaluation_status(connection, settings=settings)
     if section == "pipeline_coherency":
         return pipeline_coherency()
+    if section == "theme_coherency":
+        return theme_coherency()
     if section == "market_data_projection_reconcile":
         return market_data_reconcile()
     if section == "market_data_append_only_routing":
@@ -1552,6 +1582,7 @@ def _build_dashboard_fast_section(
                 market_reference_append_only_routing()
             ),
             pipeline_coherency=pipeline_coherency(),
+            theme_coherency=context.get("theme_coherency"),
         )
 
     raise ValueError(f"unsupported dashboard fast section: {section}")
@@ -2044,6 +2075,7 @@ def _pipeline_summary(
     live_sim_order_plan_uniqueness: dict[str, Any],
     order_broker_boundaries: dict[str, Any],
     pipeline_coherency: dict[str, Any],
+    theme_coherency: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -2066,6 +2098,7 @@ def _pipeline_summary(
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
         "coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],
@@ -3244,6 +3277,9 @@ def _with_theme_snapshot_freshness(
         item = dict(row)
         age_sec = _age_seconds(item.get("calculated_at"))
         item["age_sec"] = age_sec
+        item["data_age_sec"] = age_sec
+        item["source"] = "THEME_LATEST_SNAPSHOT"
+        item["watchset_selection_source"] = None
         item["stale"] = age_sec is None or age_sec > settings.theme_snapshot_stale_sec
         item["stale_sec"] = settings.theme_snapshot_stale_sec
         resolved.append(item)

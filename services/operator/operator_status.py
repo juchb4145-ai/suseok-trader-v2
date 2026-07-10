@@ -58,6 +58,7 @@ from services.runtime.market_scan_projection_reconcile import (
     get_latest_market_scan_projection_reconcile,
 )
 from services.runtime.projection_replay import get_projection_replay_status
+from services.theme_coherency import build_theme_coherency_status
 from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
 
@@ -135,6 +136,11 @@ def build_operator_status(
             connection,
             max_age_sec=resolved_settings.entry_timing_stale_max_seconds,
             limit=100,
+        ),
+        "theme_coherency": build_theme_coherency_status(
+            connection,
+            settings=resolved_settings,
+            limit=10,
         ),
         "projection_replay": get_projection_replay_status(),
         "projection_watermarks": get_projection_watermark_status(connection),
