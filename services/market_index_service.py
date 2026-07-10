@@ -376,6 +376,8 @@ def market_index_payload_usability(payload: object) -> dict[str, Any]:
         "index_code": tick.index_code,
         "price": tick.price,
         "change_rate": tick.change_rate,
+        "trade_time": datetime_to_wire(tick.trade_time),
+        "tick_ts": datetime_to_wire(tick.ts),
         "reason_codes": reason_codes,
         "error": None,
     }

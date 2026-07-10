@@ -11,5 +11,6 @@ def reset_settings_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     clear_settings_cache()
     monkeypatch.setenv("TRADING_CORE_TOKEN", "test-token")
     monkeypatch.setenv("TRADING_ENV_FILE", str(tmp_path / "missing.env"))
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "default-test.sqlite3"))
     yield
     clear_settings_cache()

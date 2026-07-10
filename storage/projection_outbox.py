@@ -216,7 +216,20 @@ def claim_projection_outbox_jobs(
                 AND (available_at IS NULL OR julianday(available_at) <= julianday(?))
                 AND julianday(created_at) <= julianday(?)
                 {projection_clause}
-            ORDER BY priority DESC, event_rowid ASC, created_at ASC
+            ORDER BY
+                priority DESC,
+                event_rowid ASC,
+                CASE
+                    WHEN projection_name IN (
+                        'condition_fusion',
+                        'market_regime',
+                        'market_scan'
+                    )
+                    THEN 1
+                    ELSE 0
+                END ASC,
+                created_at ASC,
+                outbox_id ASC
             LIMIT ?
             """,
             tuple(candidate_params),
@@ -365,6 +378,87 @@ def mark_projection_outbox_error(
             normalized_error,
             now,
             processed_at,
+            metadata_json,
+            normalized_outbox_id,
+            normalized_owner_id,
+        ),
+    )
+    connection.commit()
+
+
+def mark_projection_outbox_retryable_error(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    error_message: str,
+    retry_limit: int,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    normalized_outbox_id = _require_non_empty(outbox_id, "outbox_id")
+    normalized_owner_id = _require_non_empty(owner_id, "owner_id")
+    normalized_error = _require_non_empty(error_message, "error_message")
+    now = datetime_to_wire(utc_now())
+    row = connection.execute(
+        """
+        SELECT
+            attempts,
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
+        FROM projection_outbox
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (normalized_outbox_id, normalized_owner_id),
+    ).fetchone()
+    if row is None:
+        return
+    next_attempts = int(row["attempts"]) + 1
+    next_status = "DEAD_LETTER" if next_attempts >= int(retry_limit) else "PENDING"
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=next_status,
+        evidence=evidence,
+        error_message=normalized_error,
+        marked_at=now,
+    )
+    record_projection_event_result(
+        connection,
+        projection_name=row["projection_name"],
+        event_id=row["event_id"],
+        event_rowid=row["event_rowid"],
+        event_type=row["event_type"],
+        status="ERROR",
+        outcome=("DEAD_LETTER" if next_status == "DEAD_LETTER" else "RETRY_PENDING"),
+        error_message=normalized_error,
+        metadata={"source": "projection_outbox", "evidence": dict(evidence or {})},
+        commit=False,
+    )
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            attempts = ?,
+            last_error = ?,
+            available_at = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = ?,
+            processed_at = CASE WHEN ? = 'DEAD_LETTER' THEN ? ELSE NULL END,
+            metadata_json = ?
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (
+            next_status,
+            next_attempts,
+            normalized_error,
+            now,
+            now,
+            next_status,
+            now,
             metadata_json,
             normalized_outbox_id,
             normalized_owner_id,

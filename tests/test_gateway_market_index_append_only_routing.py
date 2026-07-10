@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from apps.core_api import app
 from domain.broker.events import GatewayEvent
 from domain.broker.market_index import BrokerMarketIndexTick
+from domain.broker.utils import datetime_to_wire
 from fastapi.testclient import TestClient
 from services.config import Settings
 from services.market_index_service import process_market_index_event
@@ -95,6 +96,15 @@ def test_gateway_api_preserves_inline_index_and_regime_in_pr15(
     monkeypatch.setenv("GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED", "true")
     monkeypatch.setenv("PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED", "true")
     monkeypatch.setenv("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED", "true")
+    monkeypatch.setenv("GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC", "999999999")
+    monkeypatch.setenv(
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+        "999999999",
+    )
+    monkeypatch.setenv(
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC",
+        "999999999",
+    )
     event = _event(
         "evt_index_gateway_pr15",
         "KOSPI",
@@ -153,6 +163,29 @@ def _seed_pass_reconcile(connection, settings: Settings) -> None:
             limit=1,
             projection_name="market_index",
         )
+    process_projection_outbox_batch(
+        connection,
+        settings=Settings(projection_outbox_shadow_min_age_sec=0),
+        limit=2,
+        projection_name="market_regime",
+    )
+    append_gateway_event(
+        connection,
+        GatewayEvent(
+            event_id="evt_index_gateway_health",
+            event_type="heartbeat",
+            source="test-gateway",
+            ts=TS + timedelta(seconds=2),
+            payload={
+                "market_index_realtime_enabled": True,
+                "market_index_adapter_health": "CALLBACK_ACTIVE",
+                "parsed_market_index_tick_count": 2,
+                "latest_market_index_tick_at": datetime_to_wire(
+                    TS + timedelta(seconds=2)
+                ),
+            },
+        ),
+    )
     result = run_market_index_projection_reconcile(
         connection,
         settings=settings,
@@ -170,6 +203,9 @@ def _settings(**overrides) -> Settings:
         "gateway_market_index_append_only_require_reconcile_pass": True,
         "gateway_market_index_append_only_require_data_usable": True,
         "gateway_market_index_append_only_require_parser_verified": True,
+        "gateway_market_index_append_only_max_event_age_sec": 999_999_999,
+        "gateway_market_index_append_only_max_future_skew_sec": 999_999_999,
+        "gateway_market_index_append_only_gateway_health_max_age_sec": 999_999_999,
         "projection_outbox_apply_projection_enabled": True,
         "projection_outbox_market_index_apply_enabled": True,
         "projection_outbox_market_index_apply_min_age_sec": 0,

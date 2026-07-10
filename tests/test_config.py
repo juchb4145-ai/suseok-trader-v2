@@ -163,10 +163,22 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     )
     assert settings.gateway_market_index_append_only_dry_run_enabled is False
     assert settings.gateway_market_index_append_only_cutover_enabled is False
+    assert settings.gateway_market_index_append_only_global_kill_switch is True
+    assert settings.gateway_market_index_append_only_max_skip_per_minute == 0
+    assert settings.gateway_market_index_append_only_max_pending_within_sla == 1
     assert settings.gateway_market_index_append_only_require_reconcile_pass is True
     assert settings.gateway_market_index_append_only_require_data_usable is True
     assert settings.gateway_market_index_append_only_require_parser_verified is True
+    assert settings.gateway_market_index_append_only_require_worker_regime_refresh is True
+    assert (
+        settings.gateway_market_index_append_only_fail_closed_on_regime_refresh_error
+        is True
+    )
     assert settings.gateway_market_index_append_only_reconcile_max_age_sec == 300
+    assert settings.gateway_market_index_append_only_max_event_age_sec == 30
+    assert settings.gateway_market_index_append_only_max_future_skew_sec == 5
+    assert settings.gateway_market_index_append_only_require_fresh_gateway_health is True
+    assert settings.gateway_market_index_append_only_gateway_health_max_age_sec == 30
     assert settings.gateway_market_index_append_only_effective_skip_disabled_in_pr15 is True
     assert settings.event_store_retention_enabled is False
     assert settings.projection_event_result_backfill_enabled is False
@@ -687,9 +699,16 @@ def test_market_data_interval_settings_are_validated() -> None:
             ),
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH": "false",
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "2",
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "3",
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_DATA_USABLE": "false",
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_PARSER_VERIFIED": "false",
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_WORKER_REGIME_REFRESH": "false",
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_FAIL_CLOSED_ON_REGIME_REFRESH_ERROR": (
+                "false"
+            ),
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "45",
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15": (
                 "false"
@@ -805,9 +824,20 @@ def test_market_data_interval_settings_are_validated() -> None:
     )
     assert routing_settings.gateway_market_index_append_only_dry_run_enabled is True
     assert routing_settings.gateway_market_index_append_only_cutover_enabled is True
+    assert routing_settings.gateway_market_index_append_only_global_kill_switch is False
+    assert routing_settings.gateway_market_index_append_only_max_skip_per_minute == 2
+    assert routing_settings.gateway_market_index_append_only_max_pending_within_sla == 3
     assert routing_settings.gateway_market_index_append_only_require_reconcile_pass is False
     assert routing_settings.gateway_market_index_append_only_require_data_usable is False
     assert routing_settings.gateway_market_index_append_only_require_parser_verified is False
+    assert (
+        routing_settings.gateway_market_index_append_only_require_worker_regime_refresh
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_index_append_only_fail_closed_on_regime_refresh_error
+        is False
+    )
     assert routing_settings.gateway_market_index_append_only_reconcile_max_age_sec == 45
     assert (
         routing_settings.gateway_market_index_append_only_effective_skip_disabled_in_pr15
@@ -833,6 +863,18 @@ def test_market_data_interval_settings_are_validated() -> None:
             assert key in str(exc)
         else:
             raise AssertionError(f"expected invalid market reference setting for {key}")
+    invalid_market_index_cases = {
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "-1",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "0",
+    }
+    for key, value in invalid_market_index_cases.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid market index setting for {key}")
 
     invalid_operator_cases = {
         "OPERATOR_SQLITE_LOCK_RETRY_ATTEMPTS": "0",
@@ -899,6 +941,9 @@ def test_market_data_interval_settings_are_validated() -> None:
         "GATEWAY_MARKET_DATA_APPEND_ONLY_MAX_CONDITION_EVENT_PENDING_WITHIN_SLA": "-1",
         "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_COOLDOWN_SEC": "0",
         "GATEWAY_MARKET_DATA_APPEND_ONLY_HEALTH_STALE_SEC": "0",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC": "0",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC": "-1",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC": "0",
     }
     for key, value in invalid_controller_cases.items():
         try:

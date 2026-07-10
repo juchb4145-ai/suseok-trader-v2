@@ -1,4 +1,4 @@
-# Market Index Projection PR-15 Runbook
+# Market Index Projection PR-15 / PR-16 Runbook
 
 ## 목적
 
@@ -10,7 +10,8 @@
 - parser confidence와 data usability의 독립 판정
 - realtime과 TR bootstrap source의 명시적 구분
 
-PR-15에서는 실제 inline skip을 허용하지 않는다. `market_index`와 `market_regime` inline 경로는 모두 유지된다.
+PR-15에서는 실제 inline skip을 허용하지 않는다. PR-16은 별도 kill switch, 원자적 budget,
+fresh reconcile, worker-side regime 연속성을 모두 통과한 소량 event만 skip한다.
 
 ## 절대 안전 조건
 
@@ -19,6 +20,8 @@ TRADING_MODE=OBSERVE
 TRADING_ALLOW_LIVE_SIM=false
 TRADING_ALLOW_LIVE_REAL=false
 GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED=false
+GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE=0
 GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15=true
 ```
 
@@ -26,17 +29,27 @@ GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15=true
 - NXT tick은 KRX 지수 evidence로 인정하지 않는다.
 - 운영 DB에서 retention apply, destructive migration, 임의 error 삭제를 하지 않는다.
 - `.env`를 수정하지 않고 별도 safe env 또는 process-local 환경변수를 사용한다.
-- worker run-once는 반드시 `projection_name=market_index`, 작은 batch로 실행한다.
+- PR-15 준비 점검은 `projection_name=market_index`, 작은 batch로 실행한다. PR-16
+  effective-skip 검증은 dependency ordering이 적용된 index/regime sibling 2건만 실행한다.
 
 ## 기본 설정
 
 ```text
 GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED=false
 GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED=false
+GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE=0
+GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA=1
 GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_RECONCILE_PASS=true
 GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_DATA_USABLE=true
 GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_PARSER_VERIFIED=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_WORKER_REGIME_REFRESH=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_FAIL_CLOSED_ON_REGIME_REFRESH_ERROR=true
 GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC=300
+GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC=30
+GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC=5
+GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_FRESH_GATEWAY_HEALTH=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC=30
 GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15=true
 
 PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=false
@@ -46,6 +59,9 @@ PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC=1.0
 ```
 
 모든 apply와 dry-run 기본값은 disabled다. worker apply를 점검할 때만 global apply와 market-index apply를 함께 켠다.
+
+PR-16 effective skip은 위 기본값에서 발생하지 않는다. 활성화에는 cutover true, kill switch
+false, legacy PR-15 guard false, 양수 budget이 모두 필요하다.
 
 ## 품질 계약
 
@@ -133,11 +149,24 @@ python tools\ops_market_index_projection_check.py `
   --run-worker
 ```
 
+PR-16 effective skip 1건과 worker-side index/regime closure를 확인:
+
+```powershell
+python tools\ops_market_index_projection_check.py `
+  --core-url http://127.0.0.1:8000 `
+  --token $env:TRADING_CORE_TOKEN `
+  --run-worker `
+  --expect-effective-skip
+```
+
+이 모드는 worker batch 2건을 사용해 sibling `market_index`와 `market_regime` outbox를
+함께 닫는다. 다른 projection backlog가 섞인 운영 환경에서는 먼저 outbox ordering을 확인한다.
+
 report는 `reports/market_index_projection/<UTC stamp>/raw.json`과 `summary.md`에 기록된다.
 
 ## PASS/WARN/FAIL
 
-PASS:
+PR-15 준비 PASS:
 
 - Core OBSERVE, LIVE_SIM/LIVE_REAL false
 - KOSPI/KOSDAQ accepted event coverage
@@ -148,6 +177,14 @@ PASS:
 - parser verified
 - effective skip 0
 - command/order-command delta 0/0
+
+PR-16 `--expect-effective-skip` PASS:
+
+- effective skip 1건 이상과 budget 범위 준수
+- 해당 event의 index worker `APPLIED_BY_WORKER`
+- event-linked regime snapshot과 index/regime outbox `APPLIED`
+- effective-skip pending/error/evidence/artifact/regime missing 0
+- controller PASS, rollback false, command/order-command delta 0/0
 
 WARN:
 
@@ -161,8 +198,44 @@ FAIL:
 - outbox ERROR/DEAD_LETTER/SKIPPED
 - data unusable
 - 현재 미구현 TR bootstrap source 유입
-- PR-15 effective skip 1건 이상
+- PR-15 준비 점검에서 effective skip 1건 이상
+- PR-16 기대 모드에서 effective skip 또는 linked index/regime closure 누락
 - 주문 command 증가 또는 OBSERVE 안전 조건 위반
+
+## PR-16 limited cutover gate
+
+effective skip은 다음 조건을 모두 만족할 때만 1건 예약된다.
+
+- dry-run과 cutover true
+- trading profile/mode OBSERVE, LIVE_SIM/LIVE_REAL 허용 false
+- global kill switch false
+- `GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15=false`
+- budget 1/min 이상이며 현재 minute 잔여량 존재
+- latest reconcile PASS, append-only ready, freshness SLA 이내
+- current payload data usable, parser verified, source REALTIME
+- event age 30초 이내, future skew 5초 이내, KRX 평일 REGULAR session
+- Gateway heartbeat/latest index tick 30초 이내, realtime enabled, adapter `CALLBACK_ACTIVE`, parsed tick 존재
+- market-regime enabled와 worker regime refresh guard true
+- reconcile/data-usability/parser guard와 regime refresh fail-closed 설정 모두 true
+- index/regime outbox ERROR/DEAD_LETTER 0, 각각 pending SLA 이내
+- 이전 effective skip의 index sample, index worker evidence, event-linked regime snapshot,
+  index/regime outbox APPLIED가 모두 존재
+
+worker는 effective-skip event의 index projection 후 regime snapshot evidence에
+`source_event_id`, `source_projection=market_index`, `generated_by`를 기록한다. regime refresh가
+실패하면 index outbox를 retryable PENDING/DEAD_LETTER로 전환하고 다음 skip을 막는다. 같은 lineage는
+schema 50 nullable column에도 기록되며 source-event partial index로 routing 조회를 제한한다.
+
+regime refresh 오류는 index artifact를 지우지 않고 해당 index outbox를 retryable `PENDING`으로
+되돌린다. 다음 worker run은 effective-skip lineage를 확인해 orphaned artifact를
+`MARKET_INDEX_WORKER_ARTIFACT_RECOVERED`/`APPLIED_BY_WORKER`로 닫는다. 반복 실패가
+`PROJECTION_OUTBOX_RETRY_LIMIT`에 도달하면 `DEAD_LETTER`가 되며 자동 cutover는 계속 차단된다.
+
+claim ordering은 같은 event의 `market_index` job을 sibling `market_regime`보다 먼저 처리하되
+다른 event의 전역 priority를 바꾸지 않는다. enqueue commit 직후 worker가 routing decision보다
+먼저 실행되어도 cutover가 armed 상태이면 linked regime snapshot을 먼저 닫는다. 이미 APPLIED인
+index job이 linked snapshot, regime APPLIED,
+`APPLIED_BY_WORKER` evidence를 갖추지 못한 경우 routing은 effective skip 대신 inline fallback한다.
 
 ## Rollback
 
@@ -170,13 +243,15 @@ PR-15는 inline 경로를 제거하지 않으므로 다음 값을 끄면 즉시 
 
 ```text
 GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED=false
+GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH=true
+GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED=false
 PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED=false
 PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=false
 ```
 
 reconcile/routing table은 evidence이므로 삭제하지 않는다. ERROR/DEAD_LETTER row도 원인 확인 전 임의 정리하지 않는다.
 
-## PR-16 진입 조건
+## PR-16 활성화 조건
 
 - reconcile PASS와 `append_only_ready=true`
 - parser verified와 data usable을 각각 확인
@@ -186,4 +261,5 @@ reconcile/routing table은 evidence이므로 삭제하지 않는다. ERROR/DEAD_
 - PR-15 effective skip 0
 - command/order-command delta 0/0
 
-이 조건을 충족해도 PR-16은 별도 kill switch, 1/min budget, fresh reconcile, worker-side regime 연속성 gate를 구현한 뒤에만 진행한다.
+현재 운영 adapter가 `PILOT_UNVERIFIED_FID_MAP`인 동안 effective cutover 활성화는 금지한다.
+KOA Studio 확인과 current KRX session evidence를 확보한 뒤 1/min 한도로만 시작한다.

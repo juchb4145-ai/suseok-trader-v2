@@ -268,9 +268,9 @@ python -m tools.ops_market_index_projection_check `
   --token $env:TRADING_CORE_TOKEN
 ```
 
-PR-15에서는 market-index와 market-regime inline projection을 유지하고 effective skip을
-금지합니다. data usability, parser confidence, realtime/TR-bootstrap source를 별도로
-판정합니다. 절차는
+PR-15는 dry-run만 기록하고, PR-16은 kill switch, 1/min budget, fresh reconcile,
+worker-side event-linked regime evidence를 모두 만족할 때만 limited skip을 허용합니다.
+data usability, parser confidence, realtime/TR-bootstrap source는 별도로 판정합니다. 절차는
 [docs/runbook_market_index_projection_ko.md](docs/runbook_market_index_projection_ko.md)를
 참고하세요.
 

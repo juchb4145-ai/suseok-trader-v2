@@ -21,7 +21,7 @@ from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check PR-15 market_index worker/reconcile/dry-run readiness."
+        description="Check PR-16 market_index limited-cutover readiness."
     )
     parser.add_argument(
         "--core-url",
@@ -35,6 +35,7 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--run-worker", action="store_true")
+    parser.add_argument("--expect-effective-skip", action="store_true")
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "market_index_projection"),
@@ -46,6 +47,7 @@ def main() -> int:
         limit=args.limit,
         timeout_sec=args.timeout_sec,
         run_worker=args.run_worker,
+        expect_effective_skip=args.expect_effective_skip,
         out_dir=Path(args.out_dir),
     )
     print(render_console_summary(report))
@@ -59,6 +61,7 @@ def run_market_index_report(
     limit: int,
     timeout_sec: float,
     run_worker: bool,
+    expect_effective_skip: bool = False,
     out_dir: Path,
 ) -> dict[str, Any]:
     base_url = core_url.rstrip("/")
@@ -84,8 +87,12 @@ def run_market_index_report(
             f"{base_url}/api/operator/projection-outbox/run-once?"
             + urllib.parse.urlencode(
                 {
-                    "projection_name": "market_index",
-                    "limit": 1,
+                    **(
+                        {}
+                        if expect_effective_skip
+                        else {"projection_name": "market_index"}
+                    ),
+                    "limit": 2 if expect_effective_skip else 1,
                     "apply_projection": "true",
                     "live_safe": "true",
                 }
@@ -110,6 +117,7 @@ def run_market_index_report(
         "generated_at": _now(),
         "core_url": base_url,
         "run_worker": bool(run_worker),
+        "expect_effective_skip": bool(expect_effective_skip),
         "core_status": fetch_json(
             f"{base_url}/api/status",
             token=token,
@@ -216,9 +224,13 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     if tr_bootstrap_count:
         failures.append("MARKET_INDEX_TR_BOOTSTRAP_SOURCE_NOT_IMPLEMENTED")
     if parser_unverified_count:
-        warnings.append("MARKET_INDEX_PARSER_UNVERIFIED")
+        (failures if report.get("expect_effective_skip") else warnings).append(
+            "MARKET_INDEX_PARSER_UNVERIFIED"
+        )
     if unknown_source_count:
-        warnings.append("MARKET_INDEX_SOURCE_UNKNOWN")
+        (failures if report.get("expect_effective_skip") else warnings).append(
+            "MARKET_INDEX_SOURCE_UNKNOWN"
+        )
 
     by_projection = outbox.get("by_projection_name")
     index_outbox = (
@@ -232,18 +244,119 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("MARKET_INDEX_OUTBOX_ERROR_OR_DEAD_LETTER")
 
     effective_skip_count = int(routing.get("effective_skip_inline_count") or 0)
-    if effective_skip_count:
+    expect_effective_skip = bool(report.get("expect_effective_skip"))
+    if expect_effective_skip and reconcile_status != "PASS":
+        failures.append("MARKET_INDEX_RECONCILE_NOT_PASS")
+    if expect_effective_skip and not report.get("run_worker"):
+        failures.append("MARKET_INDEX_EXPECT_SKIP_REQUIRES_WORKER_RUN")
+    if effective_skip_count and not expect_effective_skip:
         failures.append("MARKET_INDEX_EFFECTIVE_SKIP_FORBIDDEN_IN_PR15")
+    if expect_effective_skip and effective_skip_count <= 0:
+        failures.append("MARKET_INDEX_EFFECTIVE_SKIP_NOT_OBSERVED")
+    if expect_effective_skip and not bool(routing.get("cutover_enabled")):
+        failures.append("MARKET_INDEX_CUTOVER_DISABLED")
+    if expect_effective_skip and bool(routing.get("global_kill_switch")):
+        failures.append("MARKET_INDEX_GLOBAL_KILL_SWITCH")
+    if expect_effective_skip and bool(
+        routing.get("effective_skip_disabled_in_pr15")
+    ):
+        failures.append("MARKET_INDEX_LEGACY_SKIP_GUARD_ENABLED")
+    if expect_effective_skip and int(routing.get("skip_budget_limit") or 0) != 1:
+        failures.append("MARKET_INDEX_SKIP_BUDGET_NOT_ONE")
+    if expect_effective_skip and str(routing.get("status") or "") != "PASS":
+        failures.append("MARKET_INDEX_CONTROLLER_NOT_PASS")
+    if expect_effective_skip and not bool(routing.get("observe_safe")):
+        failures.append("MARKET_INDEX_ROUTING_NOT_OBSERVE_SAFE")
+    if expect_effective_skip:
+        required_true_fields = (
+            "reconcile_required",
+            "data_usable_required",
+            "parser_verified_required",
+            "regime_continuity_required",
+            "regime_refresh_fail_closed",
+            "gateway_health_required",
+        )
+        for field_name in required_true_fields:
+            if not bool(routing.get(field_name)):
+                failures.append(f"MARKET_INDEX_{field_name.upper()}_DISABLED")
+        if not bool(routing.get("gateway_health_ready")):
+            failures.append("MARKET_INDEX_GATEWAY_HEALTH_NOT_READY")
+    if expect_effective_skip and bool(routing.get("rollback_required")):
+        failures.append("MARKET_INDEX_ROLLBACK_REQUIRED")
+    effective_health = _mapping(routing.get("effective_skip_health"))
+    if expect_effective_skip:
+        latest_decision = _mapping(routing.get("latest_decision"))
+        latest_evidence = _mapping(latest_decision.get("evidence"))
+        latest_gateway_health = _mapping(latest_evidence.get("gateway_health"))
+        if not bool(latest_decision.get("effective_skip_inline")):
+            failures.append("MARKET_INDEX_LATEST_DECISION_NOT_EFFECTIVE_SKIP")
+        if not bool(latest_gateway_health.get("ready")):
+            failures.append("MARKET_INDEX_LATEST_DECISION_GATEWAY_HEALTH_NOT_READY")
+        if int(latest_evidence.get("skip_budget_limit") or 0) != 1:
+            failures.append("MARKET_INDEX_LATEST_DECISION_BUDGET_NOT_ONE")
+        if str(latest_evidence.get("event_market_session") or "") != "REGULAR":
+            failures.append("MARKET_INDEX_LATEST_DECISION_NOT_KRX_REGULAR")
+        if not bool(latest_evidence.get("event_market_weekday")):
+            failures.append("MARKET_INDEX_LATEST_DECISION_NON_TRADING_DAY")
+        event_age_sec = float(latest_evidence.get("event_age_sec") or 0.0)
+        max_event_age_sec = float(latest_evidence.get("max_event_age_sec") or 0.0)
+        if max_event_age_sec <= 0 or event_age_sec > max_event_age_sec:
+            failures.append("MARKET_INDEX_LATEST_DECISION_EVENT_STALE")
+        future_skew_sec = float(
+            latest_evidence.get("event_future_skew_sec") or 0.0
+        )
+        max_future_skew_sec = float(
+            latest_evidence.get("max_future_skew_sec") or 0.0
+        )
+        if (
+            "max_future_skew_sec" not in latest_evidence
+            or max_future_skew_sec < 0
+            or future_skew_sec > max_future_skew_sec
+        ):
+            failures.append("MARKET_INDEX_LATEST_DECISION_FUTURE_SKEW")
+        for key in (
+            "pending_worker_count",
+            "worker_error_count",
+            "worker_apply_evidence_missing_count",
+            "artifact_missing_count",
+            "regime_snapshot_missing_count",
+            "regime_outbox_not_applied_count",
+        ):
+            if int(effective_health.get(key) or 0):
+                failures.append(f"MARKET_INDEX_{key.upper()}")
+        if not bool(routing.get("regime_continuity_ready")):
+            failures.append("MARKET_INDEX_REGIME_CONTINUITY_NOT_READY")
     if str(routing.get("tr_bootstrap_adapter_status") or "") != "NOT_IMPLEMENTED":
         failures.append("MARKET_INDEX_TR_BOOTSTRAP_STATUS_NOT_EXPLICIT")
     if report.get("run_worker"):
+        if str(worker.get("status") or "") not in {"COMPLETED", "NOOP"}:
+            failures.append("MARKET_INDEX_WORKER_NOT_COMPLETED")
         if worker.get("projection_name_filter") != "market_index":
-            failures.append("MARKET_INDEX_WORKER_FILTER_MISMATCH")
+            if not expect_effective_skip or worker.get("projection_name_filter") is not None:
+                failures.append("MARKET_INDEX_WORKER_FILTER_MISMATCH")
         mutated = {str(value) for value in worker.get("mutated_projection_names") or []}
-        if mutated - {"market_index"}:
+        allowed_mutations = (
+            {"market_index", "market_regime"}
+            if expect_effective_skip
+            else {"market_index"}
+        )
+        if mutated - allowed_mutations:
             failures.append("MARKET_INDEX_WORKER_MUTATED_OTHER_PROJECTION")
-        if not bool(worker.get("no_trading_side_effects", True)):
+        if expect_effective_skip and not {"market_index", "market_regime"} <= mutated:
+            failures.append("MARKET_INDEX_REGIME_WORKER_MUTATION_MISSING")
+        if not bool(worker.get("no_trading_side_effects")):
             failures.append("MARKET_INDEX_WORKER_TRADING_SIDE_EFFECT_GUARD_MISSING")
+
+    if expect_effective_skip:
+        regime_outbox = (
+            by_projection.get("market_regime", {})
+            if isinstance(by_projection, Mapping)
+            else {}
+        )
+        if int(regime_outbox.get("error_count") or 0) or int(
+            regime_outbox.get("dead_letter_count") or 0
+        ):
+            failures.append("MARKET_REGIME_OUTBOX_ERROR_OR_DEAD_LETTER")
 
     if not isinstance(dashboard.get("market_indexes"), Mapping):
         failures.append("DASHBOARD_MARKET_INDEX_SECTION_MISSING")
@@ -267,6 +380,11 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "outbox_error_count": outbox_error_count,
         "outbox_dead_letter_count": outbox_dead_letter_count,
         "effective_skip_inline_count": effective_skip_count,
+        "expect_effective_skip": expect_effective_skip,
+        "controller_status": routing.get("status"),
+        "rollback_required": bool(routing.get("rollback_required")),
+        "skip_budget_limit": int(routing.get("skip_budget_limit") or 0),
+        "regime_continuity_ready": bool(routing.get("regime_continuity_ready")),
         "command_count_delta": command_delta,
         "order_command_count_delta": order_command_delta,
     }
@@ -312,12 +430,18 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             f"- outbox_error_count: `{verdict.get('outbox_error_count')}`",
             f"- outbox_dead_letter_count: `{verdict.get('outbox_dead_letter_count')}`",
             f"- effective_skip_inline_count: `{verdict.get('effective_skip_inline_count')}`",
+            f"- expect_effective_skip: `{verdict.get('expect_effective_skip')}`",
+            f"- controller_status: `{verdict.get('controller_status')}`",
+            f"- rollback_required: `{verdict.get('rollback_required')}`",
+            f"- skip_budget_limit: `{verdict.get('skip_budget_limit')}`",
+            f"- regime_continuity_ready: `{verdict.get('regime_continuity_ready')}`",
             f"- command_count_delta: `{verdict.get('command_count_delta')}`",
             f"- order_command_count_delta: `{verdict.get('order_command_count_delta')}`",
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",
             f"- warnings: `{', '.join(verdict.get('warnings') or []) or '-'}`",
             "",
-            "PR-15 is dry-run only. market_index and market_regime inline paths remain enabled.",
+            "PR-16 permits only guarded, budgeted market_index effective skips.",
+            "Worker evidence must close both market_index and event-linked market_regime.",
             "TR bootstrap is not implemented; NXT is not KRX market-index evidence.",
         ]
     )

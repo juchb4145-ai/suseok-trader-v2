@@ -34,9 +34,21 @@ def rebuild_market_regime_snapshot(
     code: str | None = None,
     *,
     settings: Settings | None = None,
+    source_event_id: str | None = None,
+    source_projection: str | None = None,
+    generated_by: str | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
     target_code = REGIME_TARGET_MARKET if code is None else validate_stock_code(code)
+    source_lineage = {
+        key: value
+        for key, value in {
+            "source_event_id": source_event_id,
+            "source_projection": source_projection,
+            "generated_by": generated_by,
+        }.items()
+        if value
+    }
     market, primary_index, secondary_index = _resolve_market_indexes(connection, target_code)
     snapshot_at = datetime_to_wire(utc_now())
 
@@ -49,7 +61,7 @@ def rebuild_market_regime_snapshot(
             regime_status="DATA_WAIT",
             quality_status="DEGRADED",
             reason_codes=["MARKET_REGIME_DISABLED"],
-            evidence={"enabled": False},
+            evidence={"enabled": False, **source_lineage},
             snapshot_at=snapshot_at,
         )
         _insert_snapshot(connection, snapshot)
@@ -82,6 +94,7 @@ def rebuild_market_regime_snapshot(
             ),
         },
         "observe_only": True,
+        **source_lineage,
     }
     snapshot = _snapshot_payload(
         target_code=target_code,
@@ -354,6 +367,9 @@ def _insert_snapshot(connection: sqlite3.Connection, snapshot: Mapping[str, Any]
         """
         INSERT INTO market_regime_snapshots (
             snapshot_id,
+            source_event_id,
+            source_projection,
+            generated_by,
             target_code,
             market,
             primary_index_code,
@@ -368,10 +384,13 @@ def _insert_snapshot(connection: sqlite3.Connection, snapshot: Mapping[str, Any]
             evidence_json,
             snapshot_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot["snapshot_id"],
+            snapshot.get("evidence_json", {}).get("source_event_id"),
+            snapshot.get("evidence_json", {}).get("source_projection"),
+            snapshot.get("evidence_json", {}).get("generated_by"),
             snapshot["target_code"],
             snapshot.get("market"),
             snapshot["primary_index_code"],

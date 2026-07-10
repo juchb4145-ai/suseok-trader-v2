@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2442,6 +2442,17 @@ def _create_market_index_projection_routing_tables(
         ON market_index_projection_routing_decisions (effective_skip_inline, decided_at)
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
 
 
 def _create_market_scan_tables(connection: sqlite3.Connection) -> None:
@@ -2532,6 +2543,9 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS market_regime_snapshots (
             snapshot_id TEXT PRIMARY KEY,
+            source_event_id TEXT,
+            source_projection TEXT,
+            generated_by TEXT,
             target_code TEXT NOT NULL,
             market TEXT,
             primary_index_code TEXT NOT NULL,
@@ -2549,6 +2563,15 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        connection,
+        "market_regime_snapshots",
+        {
+            "source_event_id": "TEXT",
+            "source_projection": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_target_time
@@ -2559,6 +2582,13 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_status_time
         ON market_regime_snapshots (regime_status, snapshot_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_source_event
+        ON market_regime_snapshots (source_event_id)
+        WHERE source_event_id IS NOT NULL
         """
     )
 

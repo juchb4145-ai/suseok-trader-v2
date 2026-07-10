@@ -12,8 +12,14 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
         "market_index_projection_reconcile_issues",
         "market_index_projection_reconcile_runs",
         "market_index_projection_routing_decisions",
+        "market_index_append_only_budget_state",
     ):
         connection.execute(f"DROP TABLE {table_name}")
+    connection.execute("DROP INDEX idx_market_regime_snapshots_source_event")
+    for column_name in ("source_event_id", "source_projection", "generated_by"):
+        connection.execute(
+            f"ALTER TABLE market_regime_snapshots DROP COLUMN {column_name}"
+        )
     connection.execute(
         "UPDATE app_metadata SET value = '48' WHERE key = 'schema_version'"
     )
@@ -27,22 +33,56 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
     tables = {
         row["name"]
         for row in migrated.execute(
-            """
-            SELECT name FROM sqlite_master
-            WHERE type = 'table' AND name LIKE 'market_index_projection_%'
-            """
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table'
+                    AND (
+                        name LIKE 'market_index_projection_%'
+                        OR name = 'market_index_append_only_budget_state'
+                    )
+                """
         ).fetchall()
     }
+    regime_columns = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA table_info(market_regime_snapshots)"
+        ).fetchall()
+    }
+    regime_indexes = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA index_list(market_regime_snapshots)"
+        ).fetchall()
+    }
+    lineage_query_plan = [
+        str(row["detail"])
+        for row in migrated.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT snapshot_id
+            FROM market_regime_snapshots
+            WHERE source_event_id = 'evt_schema_probe'
+            """
+        ).fetchall()
+    ]
     migrated.close()
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "49"
+    assert schema_version == "50"
     assert {
         "market_index_projection_reconcile_issues",
         "market_index_projection_reconcile_runs",
         "market_index_projection_routing_decisions",
+        "market_index_append_only_budget_state",
     } <= tables
+    assert {"source_event_id", "source_projection", "generated_by"} <= regime_columns
+    assert "idx_market_regime_snapshots_source_event" in regime_indexes
+    assert any(
+        "idx_market_regime_snapshots_source_event" in detail
+        for detail in lineage_query_plan
+    )
 
 
 def test_market_index_operator_and_dashboard_surfaces_are_safe(
