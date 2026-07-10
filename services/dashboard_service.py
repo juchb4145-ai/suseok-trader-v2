@@ -20,6 +20,9 @@ from storage.event_store import (
     list_recent_gateway_events,
 )
 from storage.gateway_command_store import FORBIDDEN_ORDER_COMMAND_TYPES
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
 from storage.projection_outbox import get_projection_outbox_status
 
 from services.ai_advisory.storage import (
@@ -161,6 +164,7 @@ DASHBOARD_SECTIONS = [
     "safety",
     "system",
     "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -193,6 +197,7 @@ DASHBOARD_SECTIONS = [
 FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "system",
     "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
     "gateway",
     "market_data",
     "market_reference",
@@ -211,6 +216,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "safety",
     "system",
     "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -327,6 +333,9 @@ def build_dashboard_snapshot(
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
     runtime_execution_locks = get_runtime_execution_lock_status(connection)
+    live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
+        connection
+    )
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -541,6 +550,7 @@ def build_dashboard_snapshot(
         market_reference_reconcile=market_reference_reconcile,
         market_reference_append_only_routing=market_reference_append_only_routing,
         runtime_execution_locks=runtime_execution_locks,
+        live_sim_order_plan_uniqueness=live_sim_order_plan_uniqueness,
         settings=settings,
     )
 
@@ -580,6 +590,7 @@ def build_dashboard_snapshot(
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
@@ -909,6 +920,9 @@ def build_dashboard_pipeline_summary_fast(
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
     runtime_execution_locks = get_runtime_execution_lock_status(connection)
+    live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
+        connection
+    )
     return {
         "fast_path": True,
         "read_only": True,
@@ -920,6 +934,7 @@ def build_dashboard_pipeline_summary_fast(
             "failed_command_count": int(gateway_status.get("failed_command_count") or 0),
         },
         "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1204,6 +1219,8 @@ def _build_dashboard_fast_section(
         )
     if section == "runtime_execution_locks":
         return get_runtime_execution_lock_status(connection)
+    if section == "live_sim_order_plan_uniqueness":
+        return get_live_sim_order_plan_uniqueness_status(connection)
     if section == "market_data":
         return {
             "status": market_data_status(),
@@ -1748,6 +1765,7 @@ def _pipeline_summary(
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
     runtime_execution_locks: dict[str, Any],
+    live_sim_order_plan_uniqueness: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1767,6 +1785,7 @@ def _pipeline_summary(
         ),
         "latest_observe_cycle": latest_observe_cycle,
         "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],

@@ -3,7 +3,11 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 45
+from storage.live_sim_order_plan_uniqueness import (
+    ensure_live_sim_order_plan_uniqueness_schema,
+)
+
+SCHEMA_VERSION = 46
 APP_NAME = "suseok-trader-v2"
 
 
@@ -3636,6 +3640,7 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
             candidate_instance_id TEXT NOT NULL,
             strategy_observation_id TEXT NOT NULL,
             risk_observation_id TEXT NOT NULL,
+            order_plan_id TEXT,
             dry_run_intent_id TEXT,
             dry_run_order_id TEXT,
             trade_date TEXT NOT NULL,
@@ -3660,6 +3665,7 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    ensure_live_sim_order_plan_uniqueness_schema(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS live_sim_orders (

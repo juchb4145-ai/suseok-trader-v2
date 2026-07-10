@@ -481,19 +481,16 @@ def find_live_sim_intent_by_order_plan(
     order_plan_id: str,
 ) -> dict[str, Any] | None:
     normalized_id = require_non_empty_str(order_plan_id, "order_plan_id")
-    rows = connection.execute(
+    row = connection.execute(
         """
         SELECT *
         FROM live_sim_intents
-        ORDER BY created_at DESC, live_sim_intent_id DESC
-        LIMIT 500
-        """
-    ).fetchall()
-    for row in rows:
-        item = _intent_row_to_dict(row)
-        if _json_object(item.get("evidence_json")).get("order_plan_id") == normalized_id:
-            return item
-    return None
+        WHERE order_plan_id = ?
+        LIMIT 1
+        """,
+        (normalized_id,),
+    ).fetchone()
+    return None if row is None else _intent_row_to_dict(row)
 
 
 def find_live_sim_order_by_intent(

@@ -64,6 +64,9 @@ from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
 )
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
 from storage.projection_outbox import get_projection_outbox_status
 from storage.sqlite import open_connection
 from storage.sqlite_locking import (
@@ -253,6 +256,16 @@ def operator_runtime_execution_locks_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_runtime_execution_lock_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/order-plan-uniqueness/status")
+def operator_live_sim_order_plan_uniqueness_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_live_sim_order_plan_uniqueness_status(connection)
     finally:
         connection.close()
 

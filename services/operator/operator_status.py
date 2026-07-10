@@ -5,6 +5,9 @@ from typing import Any
 
 from domain.broker.utils import datetime_to_wire, utc_now
 from storage.event_store import get_gateway_status_values
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
 
 from services.ai_advisory.storage import build_status as build_ai_advisory_status
 from services.candidate_service import get_candidate_status
@@ -86,6 +89,9 @@ def build_operator_status(
             "server_mode": gateway_values.get("server_mode"),
         },
         "runtime_execution_locks": get_runtime_execution_lock_status(connection),
+        "live_sim_order_plan_uniqueness": (
+            get_live_sim_order_plan_uniqueness_status(connection)
+        ),
         "live_sim": {
             "status": live_sim_status,
             "kill_switch": live_sim_status.get("kill_switch"),

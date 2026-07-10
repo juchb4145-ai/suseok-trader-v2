@@ -40,6 +40,7 @@ def test_dashboard_fast_path_does_not_call_heavy_builders(
         Settings(),
         sections={
             "gateway",
+            "live_sim_order_plan_uniqueness",
             "market_data",
             "projection_outbox",
             "pipeline_summary",
@@ -52,6 +53,10 @@ def test_dashboard_fast_path_does_not_call_heavy_builders(
     assert snapshot["fast_path"] is True
     assert snapshot["pipeline_summary"]["fast_path"] is True
     assert snapshot["pipeline_summary"]["no_order_side_effects"] is True
+    assert snapshot["live_sim_order_plan_uniqueness"]["status"] == "PASS"
+    assert snapshot["pipeline_summary"]["live_sim_order_plan_uniqueness"][
+        "status"
+    ] == "PASS"
     assert "ai_explanations" not in snapshot
     assert "no_buy_sentinel" not in snapshot
     assert "themes" not in snapshot
@@ -88,6 +93,7 @@ def test_dashboard_pipeline_summary_fast_includes_outbox_reconcile_and_routing(
     assert summary["market_data_append_only_controller"]["operating_mode"] == "OFF"
     assert summary["market_reference"]["effective_skip_inline_count"] == 0
     assert summary["runtime_execution_locks"]["status"] == "PASS"
+    assert summary["live_sim_order_plan_uniqueness"]["status"] == "PASS"
     assert summary["order_safety"]["order_commands_allowed"] is False
 
 

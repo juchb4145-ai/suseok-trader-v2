@@ -3771,6 +3771,7 @@ def _insert_intent(connection: sqlite3.Connection, intent: LiveSimIntent) -> Non
             candidate_instance_id,
             strategy_observation_id,
             risk_observation_id,
+            order_plan_id,
             dry_run_intent_id,
             dry_run_order_id,
             trade_date,
@@ -3793,13 +3794,14 @@ def _insert_intent(connection: sqlite3.Connection, intent: LiveSimIntent) -> Non
             created_at,
             expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
         """,
         (
             data["live_sim_intent_id"],
             data["candidate_instance_id"],
             data["strategy_observation_id"],
             data["risk_observation_id"],
+            data["order_plan_id"],
             data["dry_run_intent_id"],
             data["dry_run_order_id"],
             data["trade_date"],

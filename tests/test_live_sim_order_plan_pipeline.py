@@ -47,6 +47,7 @@ def test_order_plan_eligibility_and_intent_create_without_command(tmp_path) -> N
     assert intent.status is LiveSimIntentStatus.CREATED
     assert intent.order_type.value == "LIMIT"
     assert intent.side.value == "BUY"
+    assert intent.order_plan_id == order_plan_id
     assert intent.evidence_json["order_plan_id"] == order_plan_id
     assert intent.evidence_json["not_order_intent_source"] is True
     assert intent.evidence_json["converted_to_live_sim_intent"] is True

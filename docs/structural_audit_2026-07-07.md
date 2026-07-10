@@ -2,14 +2,14 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (P0-3 runtime execution lease/fencing 완료)
+최종 업데이트: 2026-07-10 (P1-6 LIVE_SIM order-plan uniqueness 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
 
 - Gateway event store는 `raw_events`/`gateway_events`에 `event_id` PK와 payload hash를 저장하고, 동일 payload 중복은 `duplicate_count`로 흡수하며 payload 충돌은 `CONFLICT`로 거부한다. 근거: `storage/event_store.py`.
 - Gateway command는 `gateway_command_dedupe_keys.idempotency_key` PK를 사용해 active idempotency 중복 enqueue를 차단한다. LIVE_SIM `send_order`/`cancel_order`는 simulation-like mode, `live_sim_only=true`, `live_real_allowed=false`, idempotency 일치 검사를 통과해야 enqueue된다. 근거: `storage/gateway_command_store.py`.
-- LIVE_SIM intent/order 주요 키는 DB 제약이 있다. `live_sim_intents.live_sim_intent_id` PK, `live_sim_intents.idempotency_key` UNIQUE, `live_sim_orders.live_sim_order_id` PK, `live_sim_orders.idempotency_key` UNIQUE, `order_plan_drafts.order_plan_id` PK, `order_plan_drafts.idempotency_key` UNIQUE. 근거: `storage/sqlite.py`.
+- LIVE_SIM intent/order 주요 키는 DB 제약이 있다. `live_sim_intents.live_sim_intent_id` PK, `idempotency_key` UNIQUE, nullable `order_plan_id` partial UNIQUE, `live_sim_orders.live_sim_order_id` PK, `live_sim_orders.idempotency_key` UNIQUE, `order_plan_drafts.order_plan_id` PK, `order_plan_drafts.idempotency_key` UNIQUE. 근거: `storage/sqlite.py`, `storage/live_sim_order_plan_uniqueness.py`.
 - Market index parser의 `parser_status`는 latest row와 dashboard status에 노출된다. `PILOT_UNVERIFIED` 같은 상태를 감지할 수 있다. 근거: `services/market_index_service.py`, `gateway/kiwoom_client.py`.
 - Dashboard top theme 표시는 단순 latest sample만 쓰지 않고 state-filtered query를 별도로 사용한다. 기존 테스트가 DATA_WAIT 최신 표본 뒤에 숨은 LEADING/SPREADING 테마를 검증한다. 근거: `services/dashboard_service.py`, `tests/test_dashboard_service.py`.
 - Stale `DISPATCHED` order command는 timeout 후 `UNCONFIRMED`로 전환되고 운영자 종결 도구가 `command_started`/`command_ack`/CHEJAN/체결 evidence를 확인한다. 근거: `storage/gateway_command_store.py`, `tools/resolve_live_sim_order.py`.
@@ -31,7 +31,7 @@
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
 - PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing을 완료했다. 다음 우선순위는 P1-6 order-plan uniqueness다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness를 완료했다. 다음 우선순위는 P0-4 broker boundary다.
 
 ## P0
 
@@ -51,7 +51,7 @@
 | P1-3 MarketRegime snapshot이 공통 market context가 아니라 후보별 refresh에서 rebuild될 수 있음 | `services/market_regime_service.py::get_market_regime_for_code()`가 `rebuild_market_regime_snapshot(connection, code)`를 직접 호출한다. `candidate_context_latest.market_context_json`은 candidate별 저장이다. | 후보 refresh 수만큼 market_regime snapshot이 생성되고, 동일 평가 run 안에서도 후보별 regime 시점이 달라질 수 있다. index tick missing/stale이면 다수 후보가 `DATA_WAIT`로 동시에 밀린다. | `market_context_snapshots`를 trade_date/market/index watermark 단위로 만들고 후보 context는 snapshot id만 참조한다. KOSPI/KOSDAQ missing은 global DATA_WAIT와 per-market fallback을 구분한다. | SQL: `SELECT target_code,COUNT(*) FROM market_regime_snapshots GROUP BY target_code;` |
 | P1-4 Market index parser_status가 UNVERIFIED일 때 후보/Risk 정책과 운영 표시가 충분히 분리되지 않음 | `gateway/kiwoom_client.py::market_index_parser_evidence()`는 `mapping_status="UNVERIFIED_PILOT"`를 반환하고, tick metadata `parser_status`는 `MARKET_INDEX_PARSER_STATUS`를 담는다. `services/market_index_service.py::_has_unverified_index_parser()`는 status에 `unverified`만 노출한다. | KOSPI/KOSDAQ index tick/bar missing 또는 unverified parser 상태가 시장 전체 `DATA_WAIT`/`RISK_OFF`로 오인될 수 있다. | parser_status를 market_regime quality에 반영하고, `UNVERIFIED`는 trading block이 아니라 adapter confidence warning으로 분리한다. dashboard에 "index data usable vs parser verified"를 별도 표시한다. | 기존 테스트: `tests/test_market_index_service.py::test_market_index_records_unverified_and_implausible_guard`. SQL: `SELECT index_code,metadata_json FROM market_index_ticks_latest;` |
 | P1-5 Dashboard snapshot은 서로 다른 latest table을 같은 화면에 섞어 보여준다 | `services/dashboard_service.py::build_dashboard_snapshot()`이 market_data/theme/candidate/strategy/risk/entry/live_sim latest를 독립 조회한다. pipeline summary에는 `generated_at`만 있고 section별 `source_run_id`, `source_watermark`, `trade_date`, `data_age_sec`, `generated_by`가 없다. | "화면 상태가 동일 평가 run 기준인가?"를 판단할 수 없다. 오래된 order_plan과 최신 risk가 함께 PASS처럼 보일 수 있다. | dashboard `coherency` section을 추가하고 section별 source metadata를 표준화한다. stage row에도 `source_run_id`, `source_watermark`, `data_age_sec`, `trade_date`, `generated_by`를 넣는다. | 추가 테스트: `test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query`. |
-| P1-6 `order_plan_id` 기반 duplicate 방지가 JSON evidence scan에 의존 | `services/live_sim/order_plan_eligibility.py::find_live_sim_intent_by_order_plan()`은 최근 `live_sim_intents` 500개를 읽어 `evidence_json.order_plan_id`를 찾는다. `live_sim_intents`에는 `order_plan_id` 컬럼/UNIQUE가 없다. | idempotency key UNIQUE는 있지만 order_plan_id 자체의 일대일 보장은 DB 제약이 아니다. evidence schema 변경이나 500개 제한에서 duplicate intent 감지가 약해진다. | `live_sim_intents.order_plan_id` nullable 컬럼과 partial unique index를 추가한다. 기존 evidence는 migration으로 backfill한다. | SQL: `PRAGMA table_info(live_sim_intents);`, `SELECT json_extract(evidence_json,'$.order_plan_id'),COUNT(*) FROM live_sim_intents GROUP BY 1 HAVING COUNT(*)>1;` |
+| P1-6 `order_plan_id` 기반 duplicate 방지가 JSON evidence scan에 의존 | 수정 완료. schema 46은 `live_sim_intents.order_plan_id` nullable 컬럼과 `uq_live_sim_intents_order_plan_id` partial UNIQUE index를 추가한다. 기존 JSON evidence는 savepoint migration으로 backfill하고 duplicate, 컬럼/JSON mismatch, invalid order-plan evidence가 있으면 startup을 fail-closed한다. 조회는 `WHERE order_plan_id = ?` 직접 index lookup이다. | 최근 500건 제한과 evidence scan에 의존하지 않고 DB가 order plan당 intent 1건을 강제한다. candidate 기반 일반 intent의 `NULL`은 여러 건 허용한다. | operator API, Dashboard fast section, ops report로 column/index/backfill/duplicate 상태를 상시 확인한다. 운영 duplicate를 임의 삭제하지 않는다. | 테스트: `tests/test_live_sim_order_plan_uniqueness.py`, `tests/test_ops_live_sim_order_plan_uniqueness_check.py`. Runbook: `docs/runbook_live_sim_order_plan_uniqueness_ko.md`. Report: `reports/live_sim_order_plan_uniqueness/20260710T004658Z/summary.md`. |
 
 ## P2
 
@@ -303,20 +303,30 @@ P0-3 runtime execution lock 진행 상태:
 - 2026-07-10 09:21 KST OBSERVE-safe Core API에서 idle lock `PASS`, lock/active/stale/expired-alive `0/0/0/0`, no trading side effects를 확인했다. 공식 report: `reports/runtime_execution_lock/20260710T002121Z/summary.md`.
 - 검증 후 Core supervisor와 inherited socket child를 모두 종료했다. 최종 상태는 health unreachable, 8000 listener `0`, Python runtime process `0`이다.
 
+P1-6 LIVE_SIM order-plan uniqueness 진행 상태:
+
+- schema version 46에서 `live_sim_intents.order_plan_id` nullable 컬럼과 `order_plan_id IS NOT NULL` partial UNIQUE index `uq_live_sim_intents_order_plan_id`를 추가했다. candidate 기반 일반 intent는 `NULL`을 유지한다.
+- migration은 savepoint 안에서 기존 `evidence_json.order_plan_id`를 검사한다. duplicate, 컬럼/JSON mismatch, invalid order-plan evidence가 있으면 backfill과 index 생성을 rollback하고 Core startup을 fail-closed한다. 구버전 DB migration과 재실행 호환을 테스트했다.
+- order-plan intent 모델과 insert가 컬럼을 직접 기록하며 `find_live_sim_intent_by_order_plan()`은 최근 500건 JSON scan 대신 `WHERE order_plan_id = ? LIMIT 1`을 사용한다. 501개 newer generic intent 뒤의 기존 계획도 직접 조회되고 두 번째 non-null 계획 intent는 DB UNIQUE가 거부한다.
+- `GET /api/operator/live-sim/order-plan-uniqueness/status`, operator aggregate status, Dashboard fast `live_sim_order_plan_uniqueness`/pipeline summary, `tools/ops_live_sim_order_plan_uniqueness_check.py`를 추가했다. runbook은 `docs/runbook_live_sim_order_plan_uniqueness_ko.md`다.
+- 운영 DB를 read-only SQLite backup으로 복제한 격리 DB에서 7건 backfill, partial UNIQUE 생성, schema 46 재실행을 검증했다. 1차/2차 상태 모두 `PASS`, duplicate/mismatch/missing backfill `0/0/0`이었다.
+- full pytest suite 863개와 LIVE_SIM/dashboard/SQLite 영향 범위 회귀를 통과했다. duplicate, mismatch, nullable partial UNIQUE, direct lookup, API/dashboard/ops fail-closed 계약을 포함한다.
+- 2026-07-10 09:46 KST OBSERVE-safe Core API에서 `profile/mode=OBSERVE/OBSERVE`, LIVE_SIM/LIVE_REAL false, kill switch true, uniqueness/dashboard `PASS`, intent/backfill `7/7`, duplicate/mismatch/missing `0/0/0`을 확인했다. 과거 order command 5건은 유지됐고 점검 전후 total/order command delta는 `0/0`이었다. 공식 report: `reports/live_sim_order_plan_uniqueness/20260710T004658Z/summary.md`.
+- 검증 후 Core PID를 종료했다. 최종 상태는 health unreachable, 8000 listener `0`, Python runtime process `0`이다. 다음 PR 진입 조건은 `PASS`이며 P0-4 broker boundary로 진행한다.
+
 ## 다음 PR 권장 순서
 
-1. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
-2. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
-3. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
-4. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-5. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-6. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-7. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-8. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-9. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-10. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-11. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-12. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
+2. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
+3. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+4. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+5. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+6. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+7. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+8. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+9. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+10. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+11. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 계획 (순서 3)
 
