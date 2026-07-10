@@ -56,7 +56,7 @@ def test_market_scan_dry_run_would_skip_but_pr20_keeps_inline(tmp_path) -> None:
         connection,
         settings=settings,
     )
-    assert status["status"] == "PASS"
+    assert status["status"] == "WARN"
     assert status["would_skip_inline_count"] == 1
     assert status["effective_skip_inline_count"] == 0
     assert status["inline_market_scan_path_retained"] is True

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from domain.broker.events import GatewayEvent
+from domain.broker.utils import utc_now
 from services.config import Settings, TradingMode, TradingProfile
 from services.market_data_service import process_gateway_event
 from services.market_scan_service import process_market_scan_event
@@ -31,6 +34,17 @@ def market_scan_settings(**overrides) -> Settings:
     return Settings(**values)
 
 
+def market_scan_cutover_settings(**overrides) -> Settings:
+    values = {
+        "gateway_market_scan_append_only_cutover_enabled": True,
+        "gateway_market_scan_append_only_global_kill_switch": False,
+        "gateway_market_scan_append_only_max_skip_per_minute": 1,
+        "gateway_market_scan_append_only_effective_skip_disabled_in_pr20": False,
+    }
+    values.update(overrides)
+    return market_scan_settings(**values)
+
+
 def make_market_scan_event(
     event_id: str,
     *,
@@ -39,12 +53,14 @@ def make_market_scan_event(
     market: str = "KOSPI",
     scan_type: str = "TRADE_VALUE",
     code: str = "005930",
+    ts: datetime | None = None,
 ) -> GatewayEvent:
     suffix = request_suffix or event_id
     return GatewayEvent(
         event_id=event_id,
         event_type="tr_response",
         source="test-gateway",
+        ts=ts or utc_now(),
         payload={
             "request_id": f"market_scan:{scan_type}:{market}:{suffix}",
             "tr_code": "OPT10032" if scan_type == "TRADE_VALUE" else "OPT10027",

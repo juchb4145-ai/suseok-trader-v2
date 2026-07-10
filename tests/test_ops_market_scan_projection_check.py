@@ -41,6 +41,43 @@ def test_market_scan_ops_report_requires_would_skip_when_expected() -> None:
     assert "MARKET_SCAN_DRY_RUN_READY_EVIDENCE_MISSING" in verdict["failures"]
 
 
+def test_market_scan_ops_report_passes_pr21_limited_cutover_contract() -> None:
+    report = _report()
+    report["expect_effective_skip"] = True
+    report["routing_status"]["data"].update(
+        {
+            "cutover_enabled": True,
+            "global_kill_switch": False,
+            "effective_skip_disabled_in_pr20": False,
+            "controller_status": "PASS",
+            "rollback_required": False,
+            "effective_skip_inline_count": 1,
+            "effective_skip_health": {
+                "pending_worker_count": 0,
+                "worker_error_count": 0,
+                "worker_apply_evidence_missing_count": 0,
+                "artifact_missing_count": 0,
+                "worker_lineage_missing_count": 0,
+            },
+        }
+    )
+    report["scan_worker_run"] = {
+        "ok": True,
+        "data": {
+            "status": "COMPLETED",
+            "market_scan_apply_enabled": True,
+            "applied_by_worker_count": 1,
+            "error_count": 0,
+            "mutated_projection_names": ["market_scan"],
+        },
+    }
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "PASS"
+    assert verdict["effective_skip_inline_count"] == 1
+
+
 def _report() -> dict:
     reconcile = {
         "status": "PASS",
@@ -83,6 +120,7 @@ def _report() -> dict:
                 "mutated_projection_names": ["market_scan"],
             },
         },
+        "scan_worker_run": {"ok": True, "data": {"status": "NOT_RUN"}},
         "reconcile_run": {"ok": True, "data": reconcile},
         "latest_reconcile": {
             "ok": True,

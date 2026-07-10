@@ -267,11 +267,19 @@ class Settings:
     gateway_market_regime_append_only_reconcile_max_age_sec: int = 300
     gateway_market_regime_append_only_effective_skip_disabled_in_pr18: bool = True
     gateway_market_scan_append_only_dry_run_enabled: bool = False
+    gateway_market_scan_append_only_cutover_enabled: bool = False
+    gateway_market_scan_append_only_global_kill_switch: bool = True
+    gateway_market_scan_append_only_max_skip_per_minute: int = 0
     gateway_market_scan_append_only_require_reconcile_pass: bool = True
+    gateway_market_scan_append_only_require_prior_event_reconcile: bool = True
     gateway_market_scan_append_only_require_parser_verified: bool = True
     gateway_market_scan_append_only_require_market_data_dependency: bool = True
+    gateway_market_scan_append_only_require_worker_closure: bool = True
+    gateway_market_scan_append_only_fail_closed_on_worker_error: bool = True
     gateway_market_scan_append_only_max_pending_within_sla: int = 4
     gateway_market_scan_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_scan_append_only_max_event_age_sec: int = 120
+    gateway_market_scan_append_only_max_future_skew_sec: int = 5
     gateway_market_scan_append_only_effective_skip_disabled_in_pr20: bool = True
     projection_event_result_backfill_enabled: bool = False
     event_store_retention_enabled: bool = False
@@ -826,6 +834,18 @@ class Settings:
         if self.gateway_market_scan_append_only_max_pending_within_sla < 1:
             raise ValueError(
                 "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_PENDING_WITHIN_SLA must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE must be >= 0"
+            )
+        if self.gateway_market_scan_append_only_max_event_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_max_future_skew_sec < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC must be >= 0"
             )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
@@ -2515,9 +2535,26 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_scan_append_only_dry_run_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED", "false")
         ),
+        gateway_market_scan_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_scan_append_only_global_kill_switch=_parse_bool(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH", "true")
+        ),
+        gateway_market_scan_append_only_max_skip_per_minute=_parse_int(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE", "0"),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
         gateway_market_scan_append_only_require_reconcile_pass=_parse_bool(
             env.get(
                 "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_prior_event_reconcile=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_PRIOR_EVENT_RECONCILE",
                 "true",
             )
         ),
@@ -2530,6 +2567,18 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_scan_append_only_require_market_data_dependency=_parse_bool(
             env.get(
                 "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_MARKET_DATA_DEPENDENCY",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_worker_closure=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_WORKER_CLOSURE",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_fail_closed_on_worker_error=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_FAIL_CLOSED_ON_WORKER_ERROR",
                 "true",
             )
         ),
@@ -2548,6 +2597,22 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             ),
             "GATEWAY_MARKET_SCAN_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
             min_value=1,
+        ),
+        gateway_market_scan_append_only_max_event_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+                "120",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_scan_append_only_max_future_skew_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+                "5",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+            min_value=0,
         ),
         gateway_market_scan_append_only_effective_skip_disabled_in_pr20=(
             _parse_bool(

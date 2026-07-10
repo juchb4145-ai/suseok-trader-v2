@@ -196,11 +196,19 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_regime_append_only_reconcile_max_age_sec == 300
     assert settings.gateway_market_regime_append_only_effective_skip_disabled_in_pr18 is True
     assert settings.gateway_market_scan_append_only_dry_run_enabled is False
+    assert settings.gateway_market_scan_append_only_cutover_enabled is False
+    assert settings.gateway_market_scan_append_only_global_kill_switch is True
+    assert settings.gateway_market_scan_append_only_max_skip_per_minute == 0
     assert settings.gateway_market_scan_append_only_require_reconcile_pass is True
+    assert settings.gateway_market_scan_append_only_require_prior_event_reconcile is True
     assert settings.gateway_market_scan_append_only_require_parser_verified is True
     assert settings.gateway_market_scan_append_only_require_market_data_dependency is True
+    assert settings.gateway_market_scan_append_only_require_worker_closure is True
+    assert settings.gateway_market_scan_append_only_fail_closed_on_worker_error is True
     assert settings.gateway_market_scan_append_only_max_pending_within_sla == 4
     assert settings.gateway_market_scan_append_only_reconcile_max_age_sec == 300
+    assert settings.gateway_market_scan_append_only_max_event_age_sec == 120
+    assert settings.gateway_market_scan_append_only_max_future_skew_sec == 5
     assert settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20 is True
     assert settings.market_context_snapshot_stale_sec == 30
     assert settings.event_store_retention_enabled is False
@@ -512,6 +520,43 @@ def test_projection_outbox_apply_settings_are_validated() -> None:
             assert key in str(exc)
         else:
             raise AssertionError(f"expected invalid projection outbox setting: {key}")
+
+
+def test_market_scan_cutover_settings_parse_and_validate() -> None:
+    settings = load_settings(
+        {
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED": "true",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH": "false",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "3",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_PRIOR_EVENT_RECONCILE": "true",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_WORKER_CLOSURE": "true",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_FAIL_CLOSED_ON_WORKER_ERROR": "true",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC": "90",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC": "4",
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20": "false",
+        }
+    )
+
+    assert settings.gateway_market_scan_append_only_dry_run_enabled is True
+    assert settings.gateway_market_scan_append_only_cutover_enabled is True
+    assert settings.gateway_market_scan_append_only_global_kill_switch is False
+    assert settings.gateway_market_scan_append_only_max_skip_per_minute == 3
+    assert settings.gateway_market_scan_append_only_max_event_age_sec == 90
+    assert settings.gateway_market_scan_append_only_max_future_skew_sec == 4
+    assert settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20 is False
+
+    for key, value in {
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "-1",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC": "0",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC": "-1",
+    }.items():
+        try:
+            load_settings({key: value})
+        except ValueError as exc:
+            assert key in str(exc)
+        else:
+            raise AssertionError(f"expected invalid market scan setting: {key}")
 
 
 def test_trading_profile_capability_matrix() -> None:

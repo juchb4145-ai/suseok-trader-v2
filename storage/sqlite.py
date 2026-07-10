@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 54
+SCHEMA_VERSION = 55
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2651,6 +2651,8 @@ def _create_market_scan_projection_routing_tables(
             event_type TEXT NOT NULL,
             projection_name TEXT NOT NULL DEFAULT 'market_scan',
             dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
             reconcile_required INTEGER NOT NULL DEFAULT 1,
             latest_reconcile_run_id TEXT,
             latest_reconcile_status TEXT,
@@ -2664,6 +2666,13 @@ def _create_market_scan_projection_routing_tables(
             market_data_dependency_ready INTEGER NOT NULL DEFAULT 0,
             worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
             observe_safe INTEGER NOT NULL DEFAULT 1,
+            event_age_sec REAL,
+            event_future_skew_sec REAL,
+            skip_budget_limit INTEGER NOT NULL DEFAULT 0,
+            skip_budget_used INTEGER NOT NULL DEFAULT 0,
+            skip_budget_remaining INTEGER NOT NULL DEFAULT 0,
+            rollback_required INTEGER NOT NULL DEFAULT 0,
+            controller_status TEXT NOT NULL DEFAULT 'WARN',
             would_skip_inline INTEGER NOT NULL DEFAULT 0,
             effective_skip_inline INTEGER NOT NULL DEFAULT 0,
             effective_skip_disabled_in_pr20 INTEGER NOT NULL DEFAULT 1,
@@ -2673,6 +2682,21 @@ def _create_market_scan_projection_routing_tables(
             UNIQUE(event_id, projection_name)
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "market_scan_projection_routing_decisions",
+        {
+            "cutover_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "global_kill_switch": "INTEGER NOT NULL DEFAULT 1",
+            "event_age_sec": "REAL",
+            "event_future_skew_sec": "REAL",
+            "skip_budget_limit": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_used": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_remaining": "INTEGER NOT NULL DEFAULT 0",
+            "rollback_required": "INTEGER NOT NULL DEFAULT 0",
+            "controller_status": "TEXT NOT NULL DEFAULT 'WARN'",
+        },
     )
     connection.execute(
         """
@@ -2684,6 +2708,26 @@ def _create_market_scan_projection_routing_tables(
         """
         CREATE INDEX IF NOT EXISTS idx_market_scan_routing_would_skip
         ON market_scan_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_effective_skip
+        ON market_scan_projection_routing_decisions (
+            effective_skip_inline,
+            decided_at
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
         """
     )
 

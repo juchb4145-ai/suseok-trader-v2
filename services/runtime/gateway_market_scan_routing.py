@@ -27,6 +27,8 @@ class MarketScanAppendOnlyRoutingDecision:
     event_id: str
     event_type: str
     dry_run_enabled: bool
+    cutover_enabled: bool
+    global_kill_switch: bool
     reconcile_required: bool
     latest_reconcile_run_id: str | None
     latest_reconcile_status: str | None
@@ -40,6 +42,13 @@ class MarketScanAppendOnlyRoutingDecision:
     market_data_dependency_ready: bool
     worker_apply_enabled: bool
     observe_safe: bool
+    event_age_sec: float | None
+    event_future_skew_sec: float | None
+    skip_budget_limit: int
+    skip_budget_used: int
+    skip_budget_remaining: int
+    rollback_required: bool
+    controller_status: str
     would_skip_inline: bool
     effective_skip_inline: bool
     effective_skip_disabled_in_pr20: bool
@@ -53,6 +62,8 @@ class MarketScanAppendOnlyRoutingDecision:
             "event_type": self.event_type,
             "projection_name": PROJECTION_NAME_MARKET_SCAN,
             "dry_run_enabled": self.dry_run_enabled,
+            "cutover_enabled": self.cutover_enabled,
+            "global_kill_switch": self.global_kill_switch,
             "reconcile_required": self.reconcile_required,
             "latest_reconcile_run_id": self.latest_reconcile_run_id,
             "latest_reconcile_status": self.latest_reconcile_status,
@@ -66,6 +77,13 @@ class MarketScanAppendOnlyRoutingDecision:
             "market_data_dependency_ready": self.market_data_dependency_ready,
             "worker_apply_enabled": self.worker_apply_enabled,
             "observe_safe": self.observe_safe,
+            "event_age_sec": self.event_age_sec,
+            "event_future_skew_sec": self.event_future_skew_sec,
+            "skip_budget_limit": self.skip_budget_limit,
+            "skip_budget_used": self.skip_budget_used,
+            "skip_budget_remaining": self.skip_budget_remaining,
+            "rollback_required": self.rollback_required,
+            "controller_status": self.controller_status,
             "would_skip_inline": self.would_skip_inline,
             "effective_skip_inline": self.effective_skip_inline,
             "effective_skip_disabled_in_pr20": (
@@ -121,6 +139,28 @@ def decide_market_scan_append_only_routing(
         and latest_status == "PASS"
         and append_only_ready
     )
+    event_age_sec, event_future_skew_sec = _timestamp_age_and_future_skew(event.ts)
+    cutover_enabled = bool(settings.gateway_market_scan_append_only_cutover_enabled)
+    global_kill_switch = bool(
+        settings.gateway_market_scan_append_only_global_kill_switch
+    )
+    legacy_effective_skip_guard = bool(
+        settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20
+    )
+    skip_budget_limit = int(
+        settings.gateway_market_scan_append_only_max_skip_per_minute
+    )
+    skip_budget_used = _skip_budget_used(connection)
+    skip_budget_remaining = max(skip_budget_limit - skip_budget_used, 0)
+    effective_skip_health = _effective_skip_health(
+        connection,
+        exclude_event_id=event.event_id,
+    )
+    rollback_reason_codes = _rollback_reason_codes(
+        outbox_counts=outbox_counts,
+        effective_skip_health=effective_skip_health,
+        settings=settings,
+    )
 
     reasons: list[str] = []
     if not settings.gateway_market_scan_append_only_dry_run_enabled:
@@ -135,6 +175,8 @@ def decide_market_scan_append_only_routing(
         reasons.append("MARKET_SCAN_WORKER_APPLY_DISABLED")
     if not settings.gateway_market_scan_append_only_require_reconcile_pass:
         reasons.append("MARKET_SCAN_RECONCILE_GUARD_DISABLED")
+    if not settings.gateway_market_scan_append_only_require_prior_event_reconcile:
+        reasons.append("MARKET_SCAN_PRIOR_RECONCILE_GUARD_DISABLED")
     if latest_status != "PASS" or not append_only_ready:
         reasons.append("MARKET_SCAN_RECONCILE_NOT_READY")
     if latest_age_sec is None or (
@@ -149,10 +191,23 @@ def decide_market_scan_append_only_routing(
         reasons.append("MARKET_SCAN_PARSER_UNVERIFIED")
     if not readiness.data_usable:
         reasons.append("MARKET_SCAN_DATA_UNUSABLE")
+    if event_age_sec is None or (
+        event_age_sec > settings.gateway_market_scan_append_only_max_event_age_sec
+    ):
+        reasons.append("MARKET_SCAN_EVENT_STALE")
+    if event_future_skew_sec is None or (
+        event_future_skew_sec
+        > settings.gateway_market_scan_append_only_max_future_skew_sec
+    ):
+        reasons.append("MARKET_SCAN_EVENT_FUTURE_SKEW")
     if not settings.gateway_market_scan_append_only_require_market_data_dependency:
         reasons.append("MARKET_SCAN_MARKET_DATA_DEPENDENCY_GUARD_DISABLED")
     if not dependency["ready"]:
         reasons.append("MARKET_SCAN_MARKET_DATA_DEPENDENCY_NOT_READY")
+    if not settings.gateway_market_scan_append_only_require_worker_closure:
+        reasons.append("MARKET_SCAN_WORKER_CLOSURE_GUARD_DISABLED")
+    if not settings.gateway_market_scan_append_only_fail_closed_on_worker_error:
+        reasons.append("MARKET_SCAN_WORKER_ERROR_FAIL_CLOSED_DISABLED")
     if current_outbox is None:
         reasons.append("MARKET_SCAN_OUTBOX_JOB_MISSING")
     elif str(current_outbox["status"]).upper() not in {"PENDING", "PROCESSING"}:
@@ -166,22 +221,64 @@ def decide_market_scan_append_only_routing(
         > settings.gateway_market_scan_append_only_max_pending_within_sla
     ):
         reasons.append("MARKET_SCAN_OUTBOX_BACKLOG_NOT_READY")
+    if rollback_reason_codes:
+        reasons.append("MARKET_SCAN_INLINE_ROLLBACK_REQUIRED")
+        reasons.extend(rollback_reason_codes)
 
     would_skip_inline = not reasons
     blocked_reason_codes = list(reasons)
+    effective_skip_inline = False
     if would_skip_inline:
-        blocked_reason_codes.extend(
-            (
-                "DRY_RUN_WOULD_SKIP_INLINE",
-                MARKET_SCAN_EFFECTIVE_SKIP_DISABLED_REASON,
+        blocked_reason_codes.append("DRY_RUN_WOULD_SKIP_INLINE")
+        if not cutover_enabled:
+            blocked_reason_codes.append("MARKET_SCAN_CUTOVER_DISABLED")
+        if global_kill_switch:
+            blocked_reason_codes.append("MARKET_SCAN_GLOBAL_KILL_SWITCH")
+        if legacy_effective_skip_guard:
+            blocked_reason_codes.append(MARKET_SCAN_EFFECTIVE_SKIP_DISABLED_REASON)
+        if skip_budget_limit <= 0:
+            blocked_reason_codes.append("MARKET_SCAN_SKIP_BUDGET_EXHAUSTED")
+        if (
+            cutover_enabled
+            and not global_kill_switch
+            and not legacy_effective_skip_guard
+            and skip_budget_limit > 0
+        ):
+            reserved_budget_used = _reserve_skip_budget(
+                connection,
+                event_id=event.event_id,
+                limit=skip_budget_limit,
             )
-        )
-    elif settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20:
+            if reserved_budget_used is None:
+                blocked_reason_codes.append("MARKET_SCAN_SKIP_BUDGET_EXHAUSTED")
+                skip_budget_used = _skip_budget_used(connection)
+            else:
+                effective_skip_inline = True
+                skip_budget_used = reserved_budget_used
+                blocked_reason_codes.append(
+                    "MARKET_SCAN_LIMITED_CUTOVER_EFFECTIVE_SKIP"
+                )
+            skip_budget_remaining = max(skip_budget_limit - skip_budget_used, 0)
+    elif legacy_effective_skip_guard:
         blocked_reason_codes.append(MARKET_SCAN_EFFECTIVE_SKIP_DISABLED_REASON)
+    controller_status = _controller_status(
+        settings=settings,
+        observe_safe=observe_safe,
+        worker_apply_enabled=worker_apply_enabled,
+        latest_status=latest_status,
+        append_only_ready=append_only_ready,
+        latest_age_sec=latest_age_sec,
+        reconcile_covers_prior_event=reconcile_covers_prior_event,
+        event_age_sec=event_age_sec,
+        event_future_skew_sec=event_future_skew_sec,
+        rollback_reason_codes=rollback_reason_codes,
+    )
     decision = MarketScanAppendOnlyRoutingDecision(
         event_id=event.event_id,
         event_type=event_type,
         dry_run_enabled=settings.gateway_market_scan_append_only_dry_run_enabled,
+        cutover_enabled=cutover_enabled,
+        global_kill_switch=global_kill_switch,
         reconcile_required=(
             settings.gateway_market_scan_append_only_require_reconcile_pass
         ),
@@ -197,20 +294,34 @@ def decide_market_scan_append_only_routing(
         market_data_dependency_ready=bool(dependency["ready"]),
         worker_apply_enabled=worker_apply_enabled,
         observe_safe=observe_safe,
+        event_age_sec=event_age_sec,
+        event_future_skew_sec=event_future_skew_sec,
+        skip_budget_limit=skip_budget_limit,
+        skip_budget_used=skip_budget_used,
+        skip_budget_remaining=skip_budget_remaining,
+        rollback_required=bool(rollback_reason_codes),
+        controller_status=controller_status,
         would_skip_inline=would_skip_inline,
-        effective_skip_inline=False,
+        effective_skip_inline=effective_skip_inline,
         effective_skip_disabled_in_pr20=(
             settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20
         ),
         blocked_reason_codes=tuple(dict.fromkeys(blocked_reason_codes)),
         evidence={
-            "pr": "PR-20",
+            "pr": "PR-21",
             "readiness": readiness.to_dict(),
             "market_data_dependency": dependency,
             "prior_event_id": prior_event_id,
             "reconcile_covers_prior_event": reconcile_covers_prior_event,
             "outbox_counts": outbox_counts,
-            "inline_market_scan_path_retained": True,
+            "effective_skip_health": effective_skip_health,
+            "rollback_reason_codes": list(rollback_reason_codes),
+            "event_age_sec": event_age_sec,
+            "event_future_skew_sec": event_future_skew_sec,
+            "skip_budget_limit": skip_budget_limit,
+            "skip_budget_used": skip_budget_used,
+            "skip_budget_remaining": skip_budget_remaining,
+            "inline_market_scan_path_retained": not effective_skip_inline,
             "nxt_may_validate_only_explicit_venue_neutral_scan_inputs": True,
             "no_order_side_effects": True,
             "no_trading_side_effects": True,
@@ -230,9 +341,27 @@ def get_latest_market_scan_append_only_routing_status(
     latest = decisions[0] if decisions else None
     reconcile = get_latest_market_scan_projection_reconcile(connection)
     outbox = _outbox_counts(connection)
+    effective_skip_health = _effective_skip_health(connection)
+    rollback_reason_codes = _rollback_reason_codes(
+        outbox_counts=outbox,
+        effective_skip_health=effective_skip_health,
+        settings=settings,
+    )
+    skip_budget_limit = int(
+        settings.gateway_market_scan_append_only_max_skip_per_minute
+    )
+    skip_budget_used = _skip_budget_used(connection)
+    controller_status = str((latest or {}).get("controller_status") or "WARN").upper()
+    if rollback_reason_codes:
+        controller_status = "FAIL"
     return {
-        "status": "PASS" if latest and latest.get("would_skip_inline") else "WARN",
+        "status": controller_status,
+        "controller_status": controller_status,
         "dry_run_enabled": settings.gateway_market_scan_append_only_dry_run_enabled,
+        "cutover_enabled": settings.gateway_market_scan_append_only_cutover_enabled,
+        "global_kill_switch": (
+            settings.gateway_market_scan_append_only_global_kill_switch
+        ),
         "effective_skip_disabled_in_pr20": (
             settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20
         ),
@@ -240,6 +369,9 @@ def get_latest_market_scan_append_only_routing_status(
             settings.projection_outbox_apply_projection_enabled
             and settings.projection_outbox_market_scan_apply_enabled
         ),
+        "skip_budget_limit": skip_budget_limit,
+        "skip_budget_used": skip_budget_used,
+        "skip_budget_remaining": max(skip_budget_limit - skip_budget_used, 0),
         "decision_count": _count_decisions(connection),
         "would_skip_inline_count": _count_decisions(
             connection, field_name="would_skip_inline"
@@ -250,6 +382,13 @@ def get_latest_market_scan_append_only_routing_status(
         "latest_decision": latest,
         "latest_reconcile": reconcile,
         "outbox": outbox,
+        "effective_skip_health": effective_skip_health,
+        "rollback_required": bool(rollback_reason_codes),
+        "rollback_reason_codes": list(rollback_reason_codes),
+        "rollback_hint": (
+            "set GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH=true or "
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED=false"
+        ),
         "inline_market_scan_path_retained": True,
         "read_only": True,
         "no_trading_side_effects": True,
@@ -279,16 +418,25 @@ def _persist_decision(
         """
         INSERT INTO market_scan_projection_routing_decisions (
             event_id, event_type, projection_name, dry_run_enabled,
-            reconcile_required, latest_reconcile_run_id, latest_reconcile_status,
+            cutover_enabled, global_kill_switch, reconcile_required,
+            latest_reconcile_run_id, latest_reconcile_status,
             latest_reconcile_created_at, latest_reconcile_age_sec, append_only_ready,
             outbox_status, outbox_job_present, parser_verified, data_usable,
             market_data_dependency_ready, worker_apply_enabled, observe_safe,
+            event_age_sec, event_future_skew_sec, skip_budget_limit,
+            skip_budget_used, skip_budget_remaining, rollback_required,
+            controller_status,
             would_skip_inline, effective_skip_inline,
             effective_skip_disabled_in_pr20, blocked_reason_codes_json,
             evidence_json, decided_at
-        ) VALUES (?, ?, 'market_scan', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (
+            ?, ?, 'market_scan', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
         ON CONFLICT(event_id, projection_name) DO UPDATE SET
             dry_run_enabled = excluded.dry_run_enabled,
+            cutover_enabled = excluded.cutover_enabled,
+            global_kill_switch = excluded.global_kill_switch,
             reconcile_required = excluded.reconcile_required,
             latest_reconcile_run_id = excluded.latest_reconcile_run_id,
             latest_reconcile_status = excluded.latest_reconcile_status,
@@ -302,8 +450,15 @@ def _persist_decision(
             market_data_dependency_ready = excluded.market_data_dependency_ready,
             worker_apply_enabled = excluded.worker_apply_enabled,
             observe_safe = excluded.observe_safe,
+            event_age_sec = excluded.event_age_sec,
+            event_future_skew_sec = excluded.event_future_skew_sec,
+            skip_budget_limit = excluded.skip_budget_limit,
+            skip_budget_used = excluded.skip_budget_used,
+            skip_budget_remaining = excluded.skip_budget_remaining,
+            rollback_required = excluded.rollback_required,
+            controller_status = excluded.controller_status,
             would_skip_inline = excluded.would_skip_inline,
-            effective_skip_inline = 0,
+            effective_skip_inline = excluded.effective_skip_inline,
             effective_skip_disabled_in_pr20 = excluded.effective_skip_disabled_in_pr20,
             blocked_reason_codes_json = excluded.blocked_reason_codes_json,
             evidence_json = excluded.evidence_json,
@@ -313,6 +468,8 @@ def _persist_decision(
             decision.event_id,
             decision.event_type,
             int(decision.dry_run_enabled),
+            int(decision.cutover_enabled),
+            int(decision.global_kill_switch),
             int(decision.reconcile_required),
             decision.latest_reconcile_run_id,
             decision.latest_reconcile_status,
@@ -326,8 +483,15 @@ def _persist_decision(
             int(decision.market_data_dependency_ready),
             int(decision.worker_apply_enabled),
             int(decision.observe_safe),
+            decision.event_age_sec,
+            decision.event_future_skew_sec,
+            decision.skip_budget_limit,
+            decision.skip_budget_used,
+            decision.skip_budget_remaining,
+            int(decision.rollback_required),
+            decision.controller_status,
             int(decision.would_skip_inline),
-            0,
+            int(decision.effective_skip_inline),
             int(decision.effective_skip_disabled_in_pr20),
             json.dumps(
                 list(decision.blocked_reason_codes),
@@ -441,6 +605,8 @@ def _decision_row(row: sqlite3.Row) -> dict[str, Any]:
     data = {key: row[key] for key in row.keys()}
     for key in (
         "dry_run_enabled",
+        "cutover_enabled",
+        "global_kill_switch",
         "reconcile_required",
         "append_only_ready",
         "outbox_job_present",
@@ -449,6 +615,7 @@ def _decision_row(row: sqlite3.Row) -> dict[str, Any]:
         "market_data_dependency_ready",
         "worker_apply_enabled",
         "observe_safe",
+        "rollback_required",
         "would_skip_inline",
         "effective_skip_inline",
         "effective_skip_disabled_in_pr20",
@@ -476,6 +643,214 @@ def _count_decisions(
     else:
         raise ValueError("unsupported field_name")
     return int(row["count"] if row else 0)
+
+
+def _effective_skip_health(
+    connection: sqlite3.Connection,
+    *,
+    exclude_event_id: str | None = None,
+) -> dict[str, int]:
+    row = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN outbox.status IS NULL OR outbox.status <> 'APPLIED'
+                     THEN 1 ELSE 0 END) AS pending_worker_count,
+            SUM(CASE WHEN outbox.status IN ('ERROR', 'DEAD_LETTER')
+                     THEN 1 ELSE 0 END) AS worker_error_count,
+            SUM(CASE WHEN COALESCE(
+                        json_extract(
+                            outbox.metadata_json,
+                            '$.last_worker_evidence.apply_result'
+                        ),
+                        ''
+                     ) <> 'APPLIED_BY_WORKER'
+                     THEN 1 ELSE 0 END) AS worker_apply_evidence_missing_count,
+            SUM(CASE WHEN NOT EXISTS (
+                        SELECT 1 FROM market_scan_snapshots AS snapshot
+                        WHERE snapshot.source_event_id = decision.event_id
+                     ) THEN 1 ELSE 0 END) AS artifact_missing_count,
+            SUM(CASE WHEN NOT EXISTS (
+                        SELECT 1 FROM market_scan_snapshots AS snapshot
+                        WHERE snapshot.source_event_id = decision.event_id
+                          AND snapshot.generated_by LIKE 'projection_outbox_worker:%'
+                     ) THEN 1 ELSE 0 END) AS worker_lineage_missing_count
+        FROM market_scan_projection_routing_decisions AS decision
+        LEFT JOIN projection_outbox AS outbox
+          ON outbox.projection_name = 'market_scan'
+         AND outbox.event_id = decision.event_id
+        WHERE decision.effective_skip_inline = 1
+          AND (? IS NULL OR decision.event_id <> ?)
+        """,
+        (exclude_event_id, exclude_event_id),
+    ).fetchone()
+    return {
+        "pending_worker_count": int(row["pending_worker_count"] or 0),
+        "worker_error_count": int(row["worker_error_count"] or 0),
+        "worker_apply_evidence_missing_count": int(
+            row["worker_apply_evidence_missing_count"] or 0
+        ),
+        "artifact_missing_count": int(row["artifact_missing_count"] or 0),
+        "worker_lineage_missing_count": int(
+            row["worker_lineage_missing_count"] or 0
+        ),
+    }
+
+
+def _rollback_reason_codes(
+    *,
+    outbox_counts: Mapping[str, int],
+    effective_skip_health: Mapping[str, int],
+    settings: Settings,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if int(outbox_counts.get("error_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_OUTBOX_ERROR")
+    if int(outbox_counts.get("dead_letter_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_OUTBOX_DEAD_LETTER")
+    if int(outbox_counts.get("processing_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_OUTBOX_PROCESSING_ACTIVE")
+    if int(outbox_counts.get("pending_count") or 0) > int(
+        settings.gateway_market_scan_append_only_max_pending_within_sla
+    ):
+        reasons.append("MARKET_SCAN_OUTBOX_PENDING_EXCEEDED")
+    if int(effective_skip_health.get("pending_worker_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_EFFECTIVE_SKIP_PENDING_WORKER")
+    if int(effective_skip_health.get("worker_error_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_EFFECTIVE_SKIP_WORKER_ERROR")
+    if int(
+        effective_skip_health.get("worker_apply_evidence_missing_count") or 0
+    ) > 0:
+        reasons.append("MARKET_SCAN_EFFECTIVE_SKIP_WORKER_EVIDENCE_MISSING")
+    if int(effective_skip_health.get("artifact_missing_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_EFFECTIVE_SKIP_ARTIFACT_MISSING")
+    if int(effective_skip_health.get("worker_lineage_missing_count") or 0) > 0:
+        reasons.append("MARKET_SCAN_EFFECTIVE_SKIP_WORKER_LINEAGE_MISSING")
+    return tuple(sorted(set(reasons)))
+
+
+def _controller_status(
+    *,
+    settings: Settings,
+    observe_safe: bool,
+    worker_apply_enabled: bool,
+    latest_status: str | None,
+    append_only_ready: bool,
+    latest_age_sec: float | None,
+    reconcile_covers_prior_event: bool,
+    event_age_sec: float | None,
+    event_future_skew_sec: float | None,
+    rollback_reason_codes: Sequence[str],
+) -> str:
+    if rollback_reason_codes:
+        return "FAIL"
+    ready = bool(
+        settings.gateway_market_scan_append_only_dry_run_enabled
+        and settings.gateway_market_scan_append_only_cutover_enabled
+        and not settings.gateway_market_scan_append_only_global_kill_switch
+        and not settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20
+        and settings.gateway_market_scan_append_only_max_skip_per_minute > 0
+        and settings.gateway_market_scan_append_only_require_reconcile_pass
+        and settings.gateway_market_scan_append_only_require_prior_event_reconcile
+        and settings.gateway_market_scan_append_only_require_parser_verified
+        and settings.gateway_market_scan_append_only_require_market_data_dependency
+        and settings.gateway_market_scan_append_only_require_worker_closure
+        and settings.gateway_market_scan_append_only_fail_closed_on_worker_error
+        and observe_safe
+        and worker_apply_enabled
+        and latest_status == "PASS"
+        and append_only_ready
+        and latest_age_sec is not None
+        and latest_age_sec
+        <= settings.gateway_market_scan_append_only_reconcile_max_age_sec
+        and reconcile_covers_prior_event
+        and event_age_sec is not None
+        and event_age_sec <= settings.gateway_market_scan_append_only_max_event_age_sec
+        and event_future_skew_sec is not None
+        and event_future_skew_sec
+        <= settings.gateway_market_scan_append_only_max_future_skew_sec
+    )
+    if ready:
+        return "PASS"
+    cutover_requested = bool(
+        settings.gateway_market_scan_append_only_cutover_enabled
+        and not settings.gateway_market_scan_append_only_global_kill_switch
+        and not settings.gateway_market_scan_append_only_effective_skip_disabled_in_pr20
+    )
+    return "FAIL" if cutover_requested else "WARN"
+
+
+def _skip_budget_used(connection: sqlite3.Connection) -> int:
+    row = connection.execute(
+        """
+        SELECT used_count FROM market_scan_append_only_budget_state
+        WHERE budget_name = 'market_scan_global' AND minute_bucket = ?
+        """,
+        (_budget_minute_bucket(),),
+    ).fetchone()
+    return 0 if row is None else int(row["used_count"])
+
+
+def _reserve_skip_budget(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    limit: int,
+) -> int | None:
+    existing = connection.execute(
+        """
+        SELECT effective_skip_inline
+        FROM market_scan_projection_routing_decisions
+        WHERE projection_name = 'market_scan' AND event_id = ?
+        """,
+        (event_id,),
+    ).fetchone()
+    if existing is not None and bool(existing["effective_skip_inline"]):
+        return _skip_budget_used(connection)
+    minute_bucket = _budget_minute_bucket()
+    now = datetime_to_wire(utc_now())
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute(
+            """
+            INSERT INTO market_scan_append_only_budget_state (
+                budget_name, minute_bucket, used_count, last_event_id, updated_at
+            ) VALUES ('market_scan_global', ?, 1, ?, ?)
+            ON CONFLICT(budget_name) DO UPDATE SET
+                minute_bucket = excluded.minute_bucket,
+                used_count = CASE
+                    WHEN market_scan_append_only_budget_state.minute_bucket
+                         = excluded.minute_bucket
+                    THEN market_scan_append_only_budget_state.used_count + 1
+                    ELSE 1
+                END,
+                last_event_id = excluded.last_event_id,
+                updated_at = excluded.updated_at
+            WHERE market_scan_append_only_budget_state.minute_bucket
+                  <> excluded.minute_bucket
+               OR market_scan_append_only_budget_state.used_count < ?
+            """,
+            (minute_bucket, event_id, now, int(limit)),
+        )
+        if cursor.rowcount != 1:
+            connection.rollback()
+            return None
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return _skip_budget_used(connection)
+
+
+def _budget_minute_bucket() -> str:
+    return datetime_to_wire(utc_now().replace(second=0, microsecond=0))
+
+
+def _timestamp_age_and_future_skew(value: object) -> tuple[float | None, float | None]:
+    try:
+        delta = (utc_now() - parse_timestamp(value, "timestamp")).total_seconds()
+    except Exception:
+        return None, None
+    return max(delta, 0.0), max(-delta, 0.0)
 
 
 def _mapping(value: object) -> dict[str, Any]:

@@ -21,7 +21,7 @@ from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check PR-20 market_scan worker/reconcile/dry-run preparation."
+        description="Check PR-20 preparation or PR-21 market_scan limited cutover."
     )
     parser.add_argument(
         "--core-url",
@@ -37,6 +37,7 @@ def main() -> int:
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--run-worker", action="store_true")
     parser.add_argument("--expect-dry-run-ready", action="store_true")
+    parser.add_argument("--expect-effective-skip", action="store_true")
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "market_scan_projection"),
@@ -50,6 +51,7 @@ def main() -> int:
         timeout_sec=args.timeout_sec,
         run_worker=args.run_worker,
         expect_dry_run_ready=args.expect_dry_run_ready,
+        expect_effective_skip=args.expect_effective_skip,
         out_dir=Path(args.out_dir),
     )
     print(render_console_summary(report))
@@ -65,6 +67,7 @@ def run_market_scan_report(
     timeout_sec: float,
     run_worker: bool,
     expect_dry_run_ready: bool,
+    expect_effective_skip: bool = False,
     out_dir: Path,
 ) -> dict[str, Any]:
     base_url = core_url.rstrip("/")
@@ -79,6 +82,31 @@ def run_market_scan_report(
             f"{base_url}/api/operator/projection-outbox/run-once?"
             + urllib.parse.urlencode(
                 {
+                    **(
+                        {}
+                        if expect_effective_skip
+                        else {"projection_name": "market_scan"}
+                    ),
+                    "limit": min(
+                        max(int(worker_limit), 2 if expect_effective_skip else 1),
+                        20,
+                    ),
+                    "apply_projection": "true",
+                    "live_safe": "true",
+                }
+            ),
+            token=token,
+            method="POST",
+            timeout_sec=timeout_sec,
+        )
+        if run_worker
+        else {"ok": True, "data": {"status": "NOT_RUN"}}
+    )
+    scan_worker_run = (
+        fetch_json(
+            f"{base_url}/api/operator/projection-outbox/run-once?"
+            + urllib.parse.urlencode(
+                {
                     "projection_name": "market_scan",
                     "limit": min(max(int(worker_limit), 1), 20),
                     "apply_projection": "true",
@@ -89,7 +117,7 @@ def run_market_scan_report(
             method="POST",
             timeout_sec=timeout_sec,
         )
-        if run_worker
+        if run_worker and expect_effective_skip
         else {"ok": True, "data": {"status": "NOT_RUN"}}
     )
     reconcile_run = fetch_json(
@@ -117,6 +145,7 @@ def run_market_scan_report(
         "core_url": base_url,
         "run_worker": bool(run_worker),
         "expect_dry_run_ready": bool(expect_dry_run_ready),
+        "expect_effective_skip": bool(expect_effective_skip),
         "core_status": fetch_json(
             f"{base_url}/api/status",
             token=token,
@@ -125,6 +154,7 @@ def run_market_scan_report(
         ),
         "command_status_before": command_before,
         "worker_run": worker_run,
+        "scan_worker_run": scan_worker_run,
         "reconcile_run": reconcile_run,
         "latest_reconcile": fetch_json(
             f"{base_url}/api/operator/market-scan-projection-reconcile/latest",
@@ -180,11 +210,16 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         payload = report.get(key)
         if not isinstance(payload, Mapping) or not payload.get("ok", True):
             failures.append(f"{key.upper()}_API_ERROR")
+    if report.get("run_worker") and report.get("expect_effective_skip"):
+        payload = report.get("scan_worker_run")
+        if not isinstance(payload, Mapping) or not payload.get("ok", True):
+            failures.append("SCAN_WORKER_RUN_API_ERROR")
 
     core = _data(report, "core_status")
     before = _data(report, "command_status_before")
     after = _data(report, "command_status_after")
     worker = _data(report, "worker_run")
+    scan_worker = _data(report, "scan_worker_run")
     reconcile = _data(report, "reconcile_run")
     routing = _data(report, "routing_status")
     outbox = _data(report, "projection_outbox")
@@ -220,10 +255,28 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
 
     effective_skip_count = int(routing.get("effective_skip_inline_count") or 0)
     would_skip_count = int(routing.get("would_skip_inline_count") or 0)
-    if effective_skip_count:
+    expect_effective_skip = bool(report.get("expect_effective_skip"))
+    legacy_guard = bool(routing.get("effective_skip_disabled_in_pr20", True))
+    if expect_effective_skip:
+        if effective_skip_count <= 0:
+            failures.append("MARKET_SCAN_EFFECTIVE_SKIP_EVIDENCE_MISSING")
+        if not bool(routing.get("cutover_enabled")):
+            failures.append("MARKET_SCAN_CUTOVER_DISABLED")
+        if bool(routing.get("global_kill_switch", True)):
+            failures.append("MARKET_SCAN_GLOBAL_KILL_SWITCH_ENABLED")
+        if legacy_guard:
+            failures.append("MARKET_SCAN_PR20_GUARD_ENABLED")
+        if str(routing.get("controller_status") or "").upper() != "PASS":
+            failures.append("MARKET_SCAN_CONTROLLER_NOT_PASS")
+        if bool(routing.get("rollback_required")):
+            failures.append("MARKET_SCAN_ROLLBACK_REQUIRED")
+        health = _mapping(routing.get("effective_skip_health"))
+        if any(int(value or 0) for value in health.values()):
+            failures.append("MARKET_SCAN_EFFECTIVE_SKIP_WORKER_CLOSURE_FAILED")
+    elif legacy_guard and effective_skip_count:
         failures.append("MARKET_SCAN_EFFECTIVE_SKIP_FORBIDDEN_IN_PR20")
-    if not bool(routing.get("effective_skip_disabled_in_pr20", True)):
-        failures.append("MARKET_SCAN_PR20_GUARD_DISABLED")
+    elif effective_skip_count:
+        warnings.append("MARKET_SCAN_HISTORICAL_EFFECTIVE_SKIP_PRESENT")
     if report.get("expect_dry_run_ready") and would_skip_count <= 0:
         failures.append("MARKET_SCAN_DRY_RUN_READY_EVIDENCE_MISSING")
 
@@ -235,15 +288,33 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("MARKET_SCAN_OUTBOX_DEAD_LETTER_PRESENT")
 
     if report.get("run_worker"):
-        if not bool(worker.get("market_scan_apply_enabled")):
+        closure_worker = scan_worker if expect_effective_skip else worker
+        if not bool(closure_worker.get("market_scan_apply_enabled")):
             failures.append("MARKET_SCAN_WORKER_APPLY_DISABLED")
-        if int(worker.get("error_count") or 0):
+        if int(worker.get("error_count") or 0) or int(
+            scan_worker.get("error_count") or 0
+        ):
             failures.append("MARKET_SCAN_WORKER_ERROR")
-        mutated = {str(value) for value in worker.get("mutated_projection_names") or []}
-        if int(worker.get("applied_by_worker_count") or 0) > 0 and mutated != {
-            "market_scan"
-        }:
+        mutated = {
+            str(value)
+            for value in (
+                list(worker.get("mutated_projection_names") or [])
+                + list(scan_worker.get("mutated_projection_names") or [])
+            )
+        }
+        allowed_mutations = {"market_data", "market_scan"}
+        if not mutated <= allowed_mutations:
             failures.append("MARKET_SCAN_WORKER_MUTATION_SCOPE_INVALID")
+        if (
+            expect_effective_skip
+            and (
+                int(worker.get("applied_by_worker_count") or 0)
+                + int(scan_worker.get("applied_by_worker_count") or 0)
+            )
+            > 0
+            and "market_scan" not in mutated
+        ):
+            failures.append("MARKET_SCAN_WORKER_MUTATION_EVIDENCE_MISSING")
 
     if "market_scan_projection_reconcile" not in dashboard:
         failures.append("DASHBOARD_MARKET_SCAN_RECONCILE_MISSING")
@@ -309,7 +380,8 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"- failures: `{json.dumps(failures, ensure_ascii=False)}`",
             f"- warnings: `{json.dumps(warnings, ensure_ascii=False)}`",
             "",
-            "PR-20 keeps market_scan inline projection enabled; effective skip must remain zero.",
+            "PR-20 keeps effective skip at zero. PR-21 requires explicit cutover, "
+            "budget, worker closure, and rollback evidence.",
         )
     )
 
