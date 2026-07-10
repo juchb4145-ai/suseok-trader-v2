@@ -106,7 +106,7 @@ def test_schema_48_additively_migrates_market_index_and_context_tables(tmp_path)
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "53"
+    assert schema_version == "54"
     assert {
         "market_index_projection_reconcile_issues",
         "market_index_projection_reconcile_runs",

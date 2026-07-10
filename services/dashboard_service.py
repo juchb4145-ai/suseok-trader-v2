@@ -111,6 +111,7 @@ from services.market_index_service import (
     list_latest_market_index_ticks,
 )
 from services.market_regime_service import get_market_regime_status
+from services.market_scan_service import get_market_scan_status
 from services.oms.dry_run_service import (
     get_dry_run_status,
     list_dry_run_errors,
@@ -137,6 +138,9 @@ from services.runtime.gateway_market_reference_routing import (
 from services.runtime.gateway_market_regime_routing import (
     get_latest_market_regime_append_only_routing_status,
 )
+from services.runtime.gateway_market_scan_routing import (
+    get_latest_market_scan_append_only_routing_status,
+)
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
@@ -158,6 +162,9 @@ from services.runtime.market_reference_projection_reconcile import (
 )
 from services.runtime.market_regime_projection_reconcile import (
     get_latest_market_regime_projection_reconcile,
+)
+from services.runtime.market_scan_projection_reconcile import (
+    get_latest_market_scan_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -196,6 +203,7 @@ DASHBOARD_SECTIONS = [
     "market_indexes",
     "market_context",
     "market_regime",
+    "market_scan",
     "realtime_subscription",
     "themes",
     "candidates",
@@ -220,6 +228,8 @@ DASHBOARD_SECTIONS = [
     "market_index_append_only_routing",
     "market_regime_projection_reconcile",
     "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
 ]
 
@@ -245,6 +255,8 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "market_index_append_only_routing",
     "market_regime_projection_reconcile",
     "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
     "errors",
 )
@@ -265,6 +277,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_indexes",
     "market_context",
     "market_regime",
+    "market_scan",
     "realtime_subscription",
     "recent_events",
     "errors",
@@ -279,6 +292,8 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_index_append_only_routing",
     "market_regime_projection_reconcile",
     "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
 }
 
@@ -433,6 +448,14 @@ def build_dashboard_snapshot(
     )
     market_regime_append_only_routing = (
         get_latest_market_regime_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_scan_status = get_market_scan_status(connection, settings=settings)
+    market_scan_reconcile = get_latest_market_scan_projection_reconcile(connection)
+    market_scan_append_only_routing = (
+        get_latest_market_scan_append_only_routing_status(
             connection,
             settings=settings,
         )
@@ -673,6 +696,7 @@ def build_dashboard_snapshot(
         },
         "market_context": market_context_status,
         "market_regime": market_regime_status,
+        "market_scan": market_scan_status,
         "realtime_subscription": realtime_subscription,
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
@@ -691,6 +715,8 @@ def build_dashboard_snapshot(
         "market_index_append_only_routing": market_index_append_only_routing,
         "market_regime_projection_reconcile": market_regime_reconcile,
         "market_regime_append_only_routing": market_regime_append_only_routing,
+        "market_scan_projection_reconcile": market_scan_reconcile,
+        "market_scan_append_only_routing": market_scan_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -1304,6 +1330,23 @@ def _build_dashboard_fast_section(
             )
         return context["market_regime_append_only_routing"]
 
+    def market_scan_reconcile() -> dict[str, Any]:
+        if "market_scan_reconcile" not in context:
+            context["market_scan_reconcile"] = (
+                get_latest_market_scan_projection_reconcile(connection)
+            )
+        return context["market_scan_reconcile"]
+
+    def market_scan_append_only_routing() -> dict[str, Any]:
+        if "market_scan_append_only_routing" not in context:
+            context["market_scan_append_only_routing"] = (
+                get_latest_market_scan_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_scan_append_only_routing"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1397,6 +1440,8 @@ def _build_dashboard_fast_section(
         }
     if section == "market_regime":
         return get_market_regime_status(connection, settings=settings)
+    if section == "market_scan":
+        return get_market_scan_status(connection, settings=settings)
     if section == "market_context":
         return get_market_context_status(connection, settings=settings)
     if section == "realtime_subscription":
@@ -1438,6 +1483,10 @@ def _build_dashboard_fast_section(
         return market_regime_reconcile()
     if section == "market_regime_append_only_routing":
         return market_regime_append_only_routing()
+    if section == "market_scan_projection_reconcile":
+        return market_scan_reconcile()
+    if section == "market_scan_append_only_routing":
+        return market_scan_append_only_routing()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,

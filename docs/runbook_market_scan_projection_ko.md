@@ -1,0 +1,140 @@
+# Market Scan Projection 운영 Runbook
+
+## 목적
+
+PR-20은 `market_scan` projection을 Gateway request path 밖으로 옮기기 위한 준비 단계다.
+이번 단계는 worker apply, reconcile, append-only dry-run evidence까지만 제공한다.
+`effective_skip_inline`은 항상 `false`이며 Gateway inline scan projection은 유지된다.
+
+## 안전 기본값
+
+- `TRADING_PROFILE=OBSERVE`
+- `TRADING_MODE=OBSERVE`
+- `TRADING_ALLOW_LIVE_SIM=false`
+- `TRADING_ALLOW_LIVE_REAL=false`
+- `MARKET_SCAN_ENABLED=false`
+- `PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED=false`
+- `GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED=false`
+- `GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20=true`
+
+실제 주문, 정정, 취소, SOR 주문은 이 경로에서 생성하지 않는다. scan worker가 변경할 수
+있는 projection은 `market_scan`뿐이며 candidate ingest도 실행하지 않는다.
+
+## 구조 계약
+
+schema 54는 다음 항목을 additive하게 추가한다.
+
+- `market_scan_snapshots`와 `market_scan_latest`의 `source_event_id`, `request_id`,
+  `parser_status`, `generated_by`
+- `market_scan_projection_reconcile_runs/issues`
+- `market_scan_projection_routing_decisions`
+- `source_event_id`와 `request_id` 조회 index
+
+scan id는 Python process hash 대신 SHA-256 기반 결정적 id를 사용한다. 늦게 처리된 과거
+이벤트는 snapshot에는 보존되지만 `market_scan_latest.scanned_at`을 과거로 되돌리지 않는다.
+
+## Worker 선행 조건
+
+scan 관련 `tr_response`에는 `market_data`와 `market_scan` outbox job이 함께 생성된다.
+worker는 같은 이벤트의 `market_data` artifact 또는 APPLIED outbox를 먼저 확인한다.
+선행 projection이 없으면 scan job은 retryable error로 PENDING에 복귀하고 retry limit 이후에만
+DEAD_LETTER가 된다.
+
+worker apply를 격리 환경에서만 준비할 때 사용하는 설정은 다음과 같다.
+
+```text
+PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=true
+PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED=true
+PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED=true
+PROJECTION_OUTBOX_MARKET_SCAN_APPLY_BATCH_SIZE=1
+PROJECTION_OUTBOX_MARKET_SCAN_APPLY_MIN_AGE_SEC=0
+```
+
+Core 기동 전 별도 safe env의 DB path와 OBSERVE-safe 상태를 확인한다. 저장소 `.env`를 직접
+수정하지 않는다.
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/status
+Invoke-RestMethod -Method Post `
+  'http://127.0.0.1:8000/api/operator/projection-outbox/run-once?projection_name=market_scan&limit=1&apply_projection=true&live_safe=true' `
+  -Headers @{'X-Local-Token'=$env:TRADING_CORE_TOKEN}
+```
+
+worker evidence는 다음을 만족해야 한다.
+
+- `market_scan_apply_enabled=true`
+- `applied_by_worker_count` 또는 `applied_by_verify_count`가 기대 건수와 일치
+- worker mutation이 발생했다면 `mutated_projection_names=['market_scan']`
+- `candidate_ingest_executed=false`
+- command/order-command delta `0/0`
+- outbox `ERROR=0`, `DEAD_LETTER=0`
+
+## Reconcile
+
+```powershell
+Invoke-RestMethod -Method Post `
+  'http://127.0.0.1:8000/api/operator/market-scan-projection-reconcile/run-once?limit=100&persist=true&live_safe=true' `
+  -Headers @{'X-Local-Token'=$env:TRADING_CORE_TOKEN}
+```
+
+PASS 조건은 최신 scan stream별로 다음을 모두 충족하는 것이다.
+
+- accepted scan TR source row가 snapshot 또는 명시적 row error로 terminal 처리됨
+- row projection error가 없음
+- parser status가 `VERIFIED`, `KOA_STUDIO_VERIFIED`, `PRODUCTION_VERIFIED` 중 하나임
+- 성공 응답에 usable row가 있음
+- 같은 이벤트의 `market_data` dependency가 완료됨
+- scan outbox가 APPLIED이고 ERROR/DEAD_LETTER가 없음
+
+기본 `MARKET_SCAN_PARSER_STATUS=PILOT_UNVERIFIED`에서는 reconcile이 WARN이며 cutover 준비
+PASS로 해석하지 않는다.
+
+## Dry-run Routing
+
+prior event reconcile PASS 뒤 아래 flag로 새 scan 이벤트의 `would_skip_inline`만 관측한다.
+
+```text
+GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED=true
+GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_RECONCILE_PASS=true
+GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_PARSER_VERIFIED=true
+GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_MARKET_DATA_DEPENDENCY=true
+GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_PENDING_WITHIN_SLA=4
+GATEWAY_MARKET_SCAN_APPEND_ONLY_RECONCILE_MAX_AGE_SEC=300
+GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20=true
+```
+
+기대 결과는 `would_skip_inline>0`, `effective_skip_inline=0`, inline `market_scan` APPLIED다.
+PR-20 guard를 끄더라도 코드가 실제 skip을 수행하지 않는다. 제한적 cutover는 별도 PR에서
+budget, global kill switch, prior effective-skip closure를 추가한 뒤 진행한다.
+
+## 통합 점검
+
+```powershell
+python tools/ops_market_scan_projection_check.py `
+  --core-url http://127.0.0.1:8000 `
+  --token $env:TRADING_CORE_TOKEN `
+  --run-worker `
+  --expect-dry-run-ready
+```
+
+결과는 `reports/market_scan_projection/<UTC>/raw.json`과 `summary.md`에 저장된다.
+
+## NXT 사용 원칙
+
+NXT는 event의 `exchange` 또는 `venue`가 실제 `NXT`로 식별되고 scan 입력 계약이
+venue-neutral임이 확인된 경우에만 worker ordering, outbox, lock, replay 검증에 사용할 수 있다.
+기본 `OPT10032`/`OPT10027` KOSPI/KOSDAQ scan은 KRX 기준이므로 NXT tick만으로 parser 검증,
+market coverage 또는 KRX 장중 PASS를 만들지 않는다. venue를 식별할 수 없는 SOR/통합시세는
+`UNKNOWN/SOR`로 분리하고 NXT evidence로 인정하지 않는다.
+
+## 즉시 복귀
+
+오류가 관측되면 다음 flag를 false로 되돌리고 inline 경로를 유지한다.
+
+```text
+GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED=false
+PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED=false
+```
+
+DB row를 삭제하거나 retention apply를 실행하지 않는다. 원인은 reconcile issue와 outbox
+worker evidence로 보존한다.

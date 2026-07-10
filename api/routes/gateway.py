@@ -33,6 +33,10 @@ from services.runtime.gateway_market_regime_routing import (
     MarketRegimeAppendOnlyRoutingDecision,
     decide_market_regime_append_only_routing,
 )
+from services.runtime.gateway_market_scan_routing import (
+    MarketScanAppendOnlyRoutingDecision,
+    decide_market_scan_append_only_routing,
+)
 from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
     decide_market_data_projection_routing,
@@ -85,6 +89,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     market_reference_routing: dict[str, Any] | None = None
     market_index_routing: dict[str, Any] | None = None
     market_regime_routing: dict[str, Any] | None = None
+    market_scan_routing: dict[str, Any] | None = None
     broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
@@ -322,13 +327,35 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                 projection_statuses["market_regime"] = "SKIPPED_RECENT"
                                 projection_statuses["market_context"] = "SKIPPED_RECENT"
                 if event_type in SCAN_EVENT_TYPES:
-                    scan_result = process_market_scan_event(
+                    scan_routing = _decide_market_scan_append_only_routing(
                         connection,
                         event,
                         settings=settings,
+                        outbox_status=outbox_status,
                     )
-                    if scan_result.status != "IGNORED":
-                        projection_statuses["market_scan"] = scan_result.status
+                    if scan_routing is None:
+                        projection_statuses["market_scan_append_only_dry_run"] = "ERROR"
+                        projection_statuses["market_scan_effective_skip_inline"] = "FALSE"
+                    else:
+                        market_scan_routing = scan_routing.to_dict()
+                        projection_statuses["market_scan_append_only_dry_run"] = (
+                            _market_scan_append_only_dry_run_status(scan_routing)
+                        )
+                        projection_statuses["market_scan_effective_skip_inline"] = (
+                            "TRUE" if scan_routing.effective_skip_inline else "FALSE"
+                        )
+                    if scan_routing is not None and scan_routing.effective_skip_inline:
+                        projection_statuses["market_scan"] = (
+                            "SKIPPED_INLINE_APPEND_ONLY_MARKET_SCAN"
+                        )
+                    else:
+                        scan_result = process_market_scan_event(
+                            connection,
+                            event,
+                            settings=settings,
+                        )
+                        if scan_result.status != "IGNORED":
+                            projection_statuses["market_scan"] = scan_result.status
             if result.status == "ACCEPTED" and not result.duplicate:
                 handle_live_sim_gateway_event(connection, event, settings=settings)
             if event.command_id:
@@ -376,6 +403,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["market_index_append_only_routing"] = market_index_routing
     if market_regime_routing is not None:
         response["market_regime_append_only_routing"] = market_regime_routing
+    if market_scan_routing is not None:
+        response["market_scan_append_only_routing"] = market_scan_routing
     return response
 
 
@@ -447,6 +476,25 @@ def _decide_market_reference_append_only_routing(
         return None
 
 
+def _decide_market_scan_append_only_routing(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+    outbox_status: str | None,
+) -> MarketScanAppendOnlyRoutingDecision | None:
+    try:
+        return decide_market_scan_append_only_routing(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+        )
+    except Exception:
+        logger.exception("market_scan append-only dry-run routing decision failed")
+        return None
+
+
 def _decide_market_index_append_only_routing(
     connection,
     event: GatewayEvent,
@@ -491,6 +539,18 @@ def _market_reference_append_only_dry_run_status(
 
 def _market_index_append_only_dry_run_status(
     decision: MarketIndexAppendOnlyRoutingDecision,
+) -> str:
+    if decision.effective_skip_inline:
+        return "EFFECTIVE_SKIP_INLINE"
+    if decision.would_skip_inline:
+        return "WOULD_SKIP_INLINE_WITH_INLINE_FALLBACK"
+    if not decision.dry_run_enabled:
+        return "DISABLED"
+    return "BLOCKED"
+
+
+def _market_scan_append_only_dry_run_status(
+    decision: MarketScanAppendOnlyRoutingDecision,
 ) -> str:
     if decision.effective_skip_inline:
         return "EFFECTIVE_SKIP_INLINE"

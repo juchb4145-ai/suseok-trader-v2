@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
@@ -20,7 +21,11 @@ from domain.broker.utils import (
     require_non_empty_str,
     utc_now,
 )
-from storage.gateway_command_store import EnqueueCommandResult, canonical_json, enqueue_command
+from storage.gateway_command_store import (
+    EnqueueCommandResult,
+    canonical_json,
+    enqueue_command,
+)
 
 from services.config import Settings, load_settings
 
@@ -131,6 +136,86 @@ class MarketScanProcessResult:
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class MarketScanEventReadiness:
+    recognized: bool
+    parser_status: str
+    parser_verified: bool
+    data_usable: bool
+    response_success: bool
+    row_count: int
+    scan_type: str | None = None
+    market: str | None = None
+    request_id: str | None = None
+    reason_codes: Sequence[str] = field(default_factory=tuple)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "recognized": self.recognized,
+            "parser_status": self.parser_status,
+            "parser_verified": self.parser_verified,
+            "data_usable": self.data_usable,
+            "response_success": self.response_success,
+            "row_count": self.row_count,
+            "scan_type": self.scan_type,
+            "market": self.market,
+            "request_id": self.request_id,
+            "reason_codes": list(self.reason_codes),
+        }
+
+
+def inspect_market_scan_event(
+    event: GatewayEvent,
+    *,
+    settings: Settings | None = None,
+) -> MarketScanEventReadiness:
+    resolved_settings = settings or load_settings()
+    parser_status = _event_parser_status(event, settings=resolved_settings)
+    parser_verified = is_market_scan_parser_verified(parser_status)
+    try:
+        response = BrokerTrResponse.from_dict(event.payload)
+    except Exception:
+        return MarketScanEventReadiness(
+            recognized=False,
+            parser_status=parser_status,
+            parser_verified=parser_verified,
+            data_usable=False,
+            response_success=False,
+            row_count=0,
+            reason_codes=("MARKET_SCAN_TR_RESPONSE_PARSE_FAILED",),
+        )
+    context = _scan_context(response, settings=resolved_settings)
+    reasons: list[str] = []
+    if context is None:
+        reasons.append("MARKET_SCAN_EVENT_NOT_RECOGNIZED")
+    if not parser_verified:
+        reasons.append("MARKET_SCAN_PARSER_UNVERIFIED")
+    if not response.success:
+        reasons.append("MARKET_SCAN_TR_RESPONSE_FAILED")
+    if not response.rows:
+        reasons.append("MARKET_SCAN_ROWS_EMPTY")
+    return MarketScanEventReadiness(
+        recognized=context is not None,
+        parser_status=parser_status,
+        parser_verified=parser_verified,
+        data_usable=bool(context is not None and response.success and response.rows),
+        response_success=bool(response.success),
+        row_count=len(response.rows),
+        scan_type=None if context is None else context[0],
+        market=None if context is None else context[1],
+        request_id=response.request_id,
+        reason_codes=tuple(reasons),
+    )
+
+
+def is_market_scan_parser_verified(value: object) -> bool:
+    return str(value or "").strip().upper() in {
+        "VERIFIED",
+        "KOA_STUDIO_VERIFIED",
+        "PRODUCTION_VERIFIED",
+    }
+
+
 def run_market_scan_once(
     connection: sqlite3.Connection,
     *,
@@ -202,6 +287,7 @@ def process_market_scan_event(
     event: GatewayEvent,
     *,
     settings: Settings | None = None,
+    generated_by: str = "gateway_inline",
 ) -> MarketScanProcessResult:
     resolved_settings = settings or load_settings()
     event_type = event.event_type.strip().lower()
@@ -241,6 +327,7 @@ def process_market_scan_event(
             ignored_count=1,
         )
     scan_type, market = context
+    parser_status = _event_parser_status(event, settings=resolved_settings)
 
     if _event_already_projected(connection, event.event_id, response.request_id):
         return MarketScanProcessResult(
@@ -275,7 +362,13 @@ def process_market_scan_event(
         )
 
     scanned_at, _received_at = _event_store_times(connection, event)
-    scan_id = _scan_id(response, scan_type=scan_type, market=market, scanned_at=scanned_at)
+    scan_id = _scan_id(
+        response,
+        event_id=event.event_id,
+        scan_type=scan_type,
+        market=market,
+        scanned_at=scanned_at,
+    )
     applied_count = 0
     error_count = 0
     try:
@@ -290,8 +383,10 @@ def process_market_scan_event(
                     fallback_rank=fallback_rank,
                     scanned_at=scanned_at,
                     source=event.source,
+                    source_event_id=event.event_id,
+                    generated_by=generated_by,
+                    parser_status=parser_status,
                     response=response,
-                    settings=resolved_settings,
                 )
             except _RowParseError as exc:
                 error_count += 1
@@ -558,8 +653,10 @@ def _parse_scan_row(
     fallback_rank: int,
     scanned_at: str,
     source: str,
+    source_event_id: str,
+    generated_by: str,
+    parser_status: str,
     response: BrokerTrResponse,
-    settings: Settings,
 ) -> dict[str, Any]:
     normalized = normalize_payload(row)
     try:
@@ -597,10 +694,12 @@ def _parse_scan_row(
     )
     metadata = {
         "raw": normalized,
+        "source_event_id": source_event_id,
         "request_id": response.request_id,
         "tr_code": response.tr_code,
         "request_name": response.request_name,
-        "parser_status": settings.market_scan_parser_status,
+        "parser_status": parser_status,
+        "generated_by": generated_by,
         "observe_only": True,
         "no_order_side_effects": True,
     }
@@ -617,6 +716,10 @@ def _parse_scan_row(
         "volume": volume,
         "scanned_at": scanned_at,
         "source": source,
+        "source_event_id": source_event_id,
+        "request_id": response.request_id,
+        "parser_status": parser_status,
+        "generated_by": generated_by,
         "metadata": metadata,
     }
 
@@ -646,9 +749,13 @@ def _insert_scan_snapshot(connection: sqlite3.Connection, item: Mapping[str, Any
             volume,
             scanned_at,
             source,
+            source_event_id,
+            request_id,
+            parser_status,
+            generated_by,
             metadata_json
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(scan_id, scan_type, market, code) DO UPDATE SET
             name = excluded.name,
             rank = excluded.rank,
@@ -658,6 +765,10 @@ def _insert_scan_snapshot(connection: sqlite3.Connection, item: Mapping[str, Any
             volume = excluded.volume,
             scanned_at = excluded.scanned_at,
             source = excluded.source,
+            source_event_id = excluded.source_event_id,
+            request_id = excluded.request_id,
+            parser_status = excluded.parser_status,
+            generated_by = excluded.generated_by,
             metadata_json = excluded.metadata_json
         """,
         (
@@ -673,6 +784,10 @@ def _insert_scan_snapshot(connection: sqlite3.Connection, item: Mapping[str, Any
             item["volume"],
             item["scanned_at"],
             item["source"],
+            item["source_event_id"],
+            item["request_id"],
+            item["parser_status"],
+            item["generated_by"],
             canonical_json(item["metadata"]),
         ),
     )
@@ -694,10 +809,14 @@ def _upsert_scan_latest(connection: sqlite3.Connection, item: Mapping[str, Any])
             volume,
             scanned_at,
             source,
+            source_event_id,
+            request_id,
+            parser_status,
+            generated_by,
             metadata_json,
             updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(code) DO UPDATE SET
             scan_id = excluded.scan_id,
             scan_type = excluded.scan_type,
@@ -710,8 +829,13 @@ def _upsert_scan_latest(connection: sqlite3.Connection, item: Mapping[str, Any])
             volume = excluded.volume,
             scanned_at = excluded.scanned_at,
             source = excluded.source,
+            source_event_id = excluded.source_event_id,
+            request_id = excluded.request_id,
+            parser_status = excluded.parser_status,
+            generated_by = excluded.generated_by,
             metadata_json = excluded.metadata_json,
             updated_at = excluded.updated_at
+        WHERE julianday(excluded.scanned_at) >= julianday(market_scan_latest.scanned_at)
         """,
         (
             item["code"],
@@ -726,6 +850,10 @@ def _upsert_scan_latest(connection: sqlite3.Connection, item: Mapping[str, Any])
             item["volume"],
             item["scanned_at"],
             item["source"],
+            item["source_event_id"],
+            item["request_id"],
+            item["parser_status"],
+            item["generated_by"],
             canonical_json(item["metadata"]),
             datetime_to_wire(utc_now()),
         ),
@@ -779,10 +907,12 @@ def _event_already_projected(
         """
         SELECT 1
         FROM market_scan_snapshots
-        WHERE json_extract(metadata_json, '$.request_id') = ?
+        WHERE source_event_id = ?
+           OR request_id = ?
+           OR json_extract(metadata_json, '$.request_id') = ?
         LIMIT 1
         """,
-        (request_id,),
+        (event_id, request_id, request_id),
     ).fetchone()
     if row is not None:
         return True
@@ -818,12 +948,31 @@ def _event_store_times(
 def _scan_id(
     response: BrokerTrResponse,
     *,
+    event_id: str,
     scan_type: str,
     market: str,
     scanned_at: str,
 ) -> str:
-    base = f"{response.request_id}:{response.tr_code}:{scan_type}:{market}:{scanned_at}"
-    return f"market_scan_{abs(hash(base)):x}"
+    base = ":".join(
+        (event_id, response.request_id, response.tr_code, scan_type, market, scanned_at)
+    )
+    return f"market_scan_{hashlib.sha256(base.encode('utf-8')).hexdigest()[:32]}"
+
+
+def _event_parser_status(event: GatewayEvent, *, settings: Settings) -> str:
+    metadata = event.payload.get("metadata")
+    return _event_parser_status_from_payload(
+        response_payload=metadata if isinstance(metadata, Mapping) else {},
+        default=settings.market_scan_parser_status,
+    )
+
+
+def _event_parser_status_from_payload(
+    *,
+    response_payload: Mapping[str, Any],
+    default: str,
+) -> str:
+    return str(response_payload.get("parser_status") or default).strip().upper()
 
 
 def _first_value(row: Mapping[str, Any], *keys: str) -> Any:

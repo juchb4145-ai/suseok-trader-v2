@@ -546,6 +546,12 @@ def get_projection_outbox_status(
     market_index_apply_enabled = bool(
         getattr(settings, "projection_outbox_market_index_apply_enabled", False)
     )
+    market_regime_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_regime_apply_enabled", False)
+    )
+    market_scan_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_scan_apply_enabled", False)
+    )
     processing_ttl_sec = int(getattr(settings, "projection_outbox_processing_ttl_sec", 60))
     stale_cutoff = datetime_to_wire(
         utc_now() - timedelta(seconds=max(processing_ttl_sec, 0))
@@ -574,6 +580,8 @@ def get_projection_outbox_status(
         "market_data_apply_enabled": market_data_apply_enabled,
         "market_reference_apply_enabled": market_reference_apply_enabled,
         "market_index_apply_enabled": market_index_apply_enabled,
+        "market_regime_apply_enabled": market_regime_apply_enabled,
+        "market_scan_apply_enabled": market_scan_apply_enabled,
         "batch_size": int(getattr(settings, "projection_outbox_batch_size", 100)),
         "apply_batch_size": int(
             getattr(settings, "projection_outbox_apply_batch_size", 50)
@@ -602,12 +610,26 @@ def get_projection_outbox_status(
         "market_index_apply_min_age_sec": float(
             getattr(settings, "projection_outbox_market_index_apply_min_age_sec", 1.0)
         ),
+        "market_regime_apply_batch_size": int(
+            getattr(settings, "projection_outbox_market_regime_apply_batch_size", 20)
+        ),
+        "market_regime_apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_market_regime_apply_min_age_sec", 1.0)
+        ),
+        "market_scan_apply_batch_size": int(
+            getattr(settings, "projection_outbox_market_scan_apply_batch_size", 20)
+        ),
+        "market_scan_apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_market_scan_apply_min_age_sec", 1.0)
+        ),
         "read_only": True,
         "projection_side_effects_allowed": apply_enabled
         and (
             market_data_apply_enabled
             or market_reference_apply_enabled
             or market_index_apply_enabled
+            or market_regime_apply_enabled
+            or market_scan_apply_enabled
         ),
         "last_apply_mode": None if last_apply_mode is None else last_apply_mode["apply_mode"],
         "warnings": [

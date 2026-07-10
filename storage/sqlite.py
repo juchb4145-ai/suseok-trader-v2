@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 53
+SCHEMA_VERSION = 54
 APP_NAME = "suseok-trader-v2"
 
 
@@ -56,6 +56,8 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_index_projection_reconcile_tables(connection)
     _create_market_index_projection_routing_tables(connection)
     _create_market_scan_tables(connection)
+    _create_market_scan_projection_reconcile_tables(connection)
+    _create_market_scan_projection_routing_tables(connection)
     _create_market_regime_tables(connection)
     _create_market_regime_projection_reconcile_tables(connection)
     _create_market_regime_projection_routing_tables(connection)
@@ -2538,6 +2540,150 @@ def _create_market_scan_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_scan_errors_created_at
         ON market_scan_errors (created_at)
+        """
+    )
+    _ensure_columns(
+        connection,
+        "market_scan_snapshots",
+        {
+            "source_event_id": "TEXT",
+            "request_id": "TEXT",
+            "parser_status": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
+    _ensure_columns(
+        connection,
+        "market_scan_latest",
+        {
+            "source_event_id": "TEXT",
+            "request_id": "TEXT",
+            "parser_status": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_source_event
+        ON market_scan_snapshots (source_event_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_request
+        ON market_scan_snapshots (request_id)
+        """
+    )
+
+
+def _create_market_scan_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            source_row_count INTEGER NOT NULL,
+            projected_row_count INTEGER NOT NULL,
+            projection_error_row_count INTEGER NOT NULL,
+            event_covered_count INTEGER NOT NULL,
+            parser_verified_event_count INTEGER NOT NULL,
+            data_usable_event_count INTEGER NOT NULL,
+            market_data_dependency_ready_count INTEGER NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            latest_event_id TEXT,
+            latest_event_ts TEXT,
+            latest_event_covered INTEGER NOT NULL DEFAULT 0,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            scan_type TEXT,
+            market TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_reconcile_runs_created
+        ON market_scan_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_reconcile_issues_run
+        ON market_scan_projection_reconcile_issues (run_id)
+        """
+    )
+
+
+def _create_market_scan_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_scan',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            parser_verified INTEGER NOT NULL DEFAULT 0,
+            data_usable INTEGER NOT NULL DEFAULT 0,
+            market_data_dependency_ready INTEGER NOT NULL DEFAULT 0,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            observe_safe INTEGER NOT NULL DEFAULT 1,
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_disabled_in_pr20 INTEGER NOT NULL DEFAULT 1,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_decided
+        ON market_scan_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_would_skip
+        ON market_scan_projection_routing_decisions (would_skip_inline, decided_at)
         """
     )
 
