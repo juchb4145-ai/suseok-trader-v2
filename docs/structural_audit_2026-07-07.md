@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (`PR-13` NXT 장중 OBSERVE-safe 검증 완료)
+최종 업데이트: 2026-07-10 (`PR-14` market_reference NXT limited cutover 검증 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -30,13 +30,14 @@
 - PR-11: `condition_event` limited inline skip과 worker-side deferred `condition_fusion` refresh를 strict flag, reconcile/backlog readiness, per-minute budget 뒤에서 허용했다. worker의 candidate ingest는 계속 금지한다.
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-13의 장중 OBSERVE-safe 검증을 완료했다. PR-14 market_reference limited cutover는 작은 budget과 strict rollback gate 뒤에서 구현할 수 있다.
+- PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14의 장중 OBSERVE-safe 검증을 완료했다. 다음 우선순위는 P0-3 runtime execution lock fencing이다.
 
 ## P0
 
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
 |---|---|---|---|---|---|
-| P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12의 guarded mode에서만 `process_gateway_event()`를 건너뛸 수 있다. `market_reference`는 PR-13에서도 `process_market_symbols_event()`를 항상 실행하며, market_index/regime/scan과 `handle_live_sim_gateway_event()`도 request path에 남아 있다. | MarketData의 제한적 event type은 worker로 이관할 수 있지만, 나머지 inline projection 비용과 DB write lock 경합은 여전히 Gateway POST latency와 같은 critical path에 있다. | PR-13 장중 검증 후 PR-14에서 market_reference limited cutover를 검토하고, 이후 projection별 worker/watermark/error/retry 정책을 확정한다. 최종적으로 POST는 raw append + outbox enqueue만 수행한다. | MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. SQL: `SELECT projection_name,event_type,status,COUNT(*) FROM projection_outbox GROUP BY 1,2,3;` |
+| P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12의 guarded mode에서, `market_reference`는 PR-14 guarded mode에서만 inline projection을 건너뛸 수 있다. market_index/regime/scan과 `handle_live_sim_gateway_event()`는 request path에 남아 있다. | 제한된 market_data/reference event는 worker로 이관할 수 있지만, 나머지 inline projection 비용과 DB write lock 경합은 여전히 Gateway POST latency와 같은 critical path에 있다. | projection별 worker/watermark/error/retry 정책과 lifecycle consumer를 확정한다. 최종적으로 POST는 raw append + outbox enqueue만 수행한다. | MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. SQL: `SELECT projection_name,event_type,status,COUNT(*) FROM projection_outbox GROUP BY 1,2,3;` |
 | P0-2 Candidate quote refresh TR response synthetic price_tick `event_id` collision | 수정 완료. `_process_tr_response()`는 row별 synthetic child `GatewayEvent.event_id`를 deterministic하게 생성하고, parent metadata를 보존한다. 근거: `services/market_data_service.py::_synthetic_price_tick_event_id()`, `_with_synthetic_price_tick_metadata()`. | 다중 code row TR response가 `market_tick_samples.event_id` PK 충돌 없이 projection된다. | 유지보수 방향: child id 포맷과 metadata contract를 replay/reconcile 문서에 계속 고정한다. | 테스트: `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`. SQL: `SELECT event_id, metadata_json FROM market_tick_samples WHERE event_id LIKE '%synthetic_price_tick%';` |
 | P0-3 `runtime_execution_lock` TTL 만료 시 첫 owner 실행 중에도 두 번째 owner가 lock 획득 가능 | `services/runtime/evaluation_run_guard.py::_acquire_lock()`은 `expires_at <= now`이면 같은 `lock_name` row를 새 owner로 upsert한다. lock holder의 heartbeat/lease renewal/fencing token이 없다. `apps/core_api.py::lifespan()`은 시작 시 `clear_runtime_execution_locks()`로 모든 lock을 삭제한다. | long-running observe cycle/entry timing/LIVE_SIM loop가 TTL을 넘기면 incremental worker가 같은 `evaluation_pipeline`을 재획득할 수 있다. multi-process 배포에서 한 Core process startup이 다른 process의 active lock을 삭제할 수 있다. latest tables가 서로 다른 run의 결과로 덮인다. | lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 추가한다. 실행 중 lease renewal을 하고, startup clear는 expired/self-owned lock만 대상으로 제한한다. run write 시 fencing token을 검증한다. | 추가 테스트: `test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running`. SQL: `SELECT * FROM runtime_execution_locks;` |
 | P0-4 order command가 `DISPATCHED`로 claim된 뒤 Gateway가 SendOrder 전 죽으면 broker boundary 상태가 불명확 | `storage/gateway_command_store.py::_dispatch_ready_commands()`가 poll 시 `QUEUED -> DISPATCHED`를 커밋한다. `gateway/kiwoom_command_handlers.py::_handle_send_order()`에서 그 뒤 `command_started`, `order_pre_ack`, SendOrder, `command_ack` 순으로 이벤트가 생성된다. | Core에는 `DISPATCHED`만 남고 `order_pre_ack`가 없으면 broker 도달 전/후를 DB 상태만으로 구분하기 어렵다. timeout 후 `UNCONFIRMED`로 가더라도 operator가 broker absent 여부를 수동 확인해야 한다. | command 상태 모델에 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 분리한다. `order_pre_ack`를 file journal뿐 아니라 DB pre_ack table/unique key로 durable하게 저장한다. | 추가 테스트: `test_order_command_lifecycle_detects_dispatched_without_pre_ack`. SQL: `SELECT c.command_id FROM gateway_commands c WHERE c.status='DISPATCHED' AND c.command_type IN ('send_order','cancel_order') AND NOT EXISTS (SELECT 1 FROM gateway_events e WHERE e.command_id=c.command_id AND e.event_type='order_pre_ack');` |
@@ -278,22 +279,34 @@ PR-13 진행 상태:
   - `tests/test_dashboard_market_reference_section.py`
   - `tests/test_ops_market_reference_projection_check.py`
 
+PR-14 진행 상태:
+
+- production 기본값은 `cutover=false`, `global_kill_switch=true`, `max_skip_per_minute=0`, legacy PR-13 guard ON이다. `-MarketReferenceLimitedCutover` launcher switch에서만 process-local로 cutover ON, kill switch OFF, budget `1/min`, worker apply ON을 설정한다.
+- schema version 44에 venue와 무관한 단일 `market_reference_append_only_budget_state` row를 추가했다. SQLite upsert reservation은 같은 minute bucket에서 limit을 넘는 increment를 원자적으로 거부하므로 NXT/KRX 전환이나 Gateway 재시작으로 budget이 초기화되지 않는다.
+- effective skip gate는 accepted/non-empty `market_symbols`, current outbox ready, fresh reconcile `PASS/append_only_ready`, membership minimum, worker apply, market_reference pending/processing/error/dead-letter health, 이전 effective skip의 durable `APPLIED_BY_WORKER` evidence를 모두 요구한다.
+- gate 실패, routing exception, worker pending/error, latest artifact missing 시 `process_market_symbols_event()` inline fallback을 유지한다. latest snapshot이 과거 event_id를 supersede하는 정상 동작은 durable worker evidence로 판별해 오탐 rollback하지 않는다.
+- Dashboard fast summary와 operator routing status는 controller `PASS/WARN/FAIL`, kill switch, decision/current-minute budget, rollback reasons, effective-skip worker health를 노출한다. ops script의 `--run-worker --expect-effective-skip`는 latest actual decision과 latest market_symbols event id, venue/login, decision budget `1/1`, worker `APPLIED_BY_WORKER`, dashboard count 일치를 검증한다.
+- 2026-07-10 08:53 KST 실제 Kiwoom NXT Gateway에서 `kiwoom_logged_in=true`, `server_mode=SIMULATION`, `realtime_exchange=NXT`, heartbeat fresh를 확인했다. actual `market_symbols` event `evt_b0538e276e4344c984ef676f0620019a`가 `effective_skip_inline=true`였고 decision evidence는 budget limit/used `1/1`이었다.
+- skip 직후 controller는 worker 미적용을 감지해 fail-closed `FAIL`이었고, reference-only `limit=1` worker가 `APPLIED_BY_WORKER=1`로 membership을 생성한 뒤 reconcile/controller가 `PASS`로 복구됐다. membership `4053`, missing `0`, effective-skip pending/artifact/evidence-missing `0/0/0`, outbox pending/error/dead-letter `0/0/0`, rollback `false`였다.
+- limited Core 시작 시각 이후 신규 Gateway command와 주문형 command는 각각 `0/0`이었다. command queue `0`, `order_commands_allowed=false`, worker `no_trading_side_effects=true`를 확인했으며 검증 후 Core/Gateway PID와 8000 listener를 모두 종료했다.
+- 공식 ops report는 `PASS`다. 근거: `reports/market_reference_projection/20260710T000023Z/summary.md`; decision budget/venue raw evidence는 같은 디렉터리 `raw.json`에 있다.
+- market_reference/Gateway/outbox/dashboard/config/SQLite 영향 범위 회귀와 full pytest suite를 통과했다. runbook: `docs/runbook_market_reference_projection_ko.md`.
+
 ## 다음 PR 권장 순서
 
-1. PR-14에서 market_reference limited cutover를 구현한다. `1/min` skip budget, fresh reconcile PASS, reference-only worker apply, membership coverage, outbox readiness, 즉시 inline rollback을 선행 조건으로 둔다.
-2. runtime lock에 heartbeat/lease renewal/fencing token을 추가하고 startup clear를 expired/self-owned lock으로 제한한다.
-3. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
-4. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
-5. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
-6. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-7. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-8. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-9. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-10. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-11. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-12. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-13. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-14. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. runtime lock에 heartbeat/lease renewal/fencing token을 추가하고 startup clear를 expired/self-owned lock으로 제한한다.
+2. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
+3. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
+4. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
+5. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+6. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+7. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+8. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+9. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+10. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+11. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+12. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+13. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 계획 (순서 3)
 

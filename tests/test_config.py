@@ -151,8 +151,11 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_data_append_only_min_outbox_status == "ENQUEUED"
     assert settings.gateway_market_reference_append_only_dry_run_enabled is False
     assert settings.gateway_market_reference_append_only_cutover_enabled is False
+    assert settings.gateway_market_reference_append_only_global_kill_switch is True
+    assert settings.gateway_market_reference_append_only_max_skip_per_minute == 0
+    assert settings.gateway_market_reference_append_only_max_pending_within_sla == 1
     assert settings.gateway_market_reference_append_only_require_reconcile_pass is True
-    assert settings.gateway_market_reference_append_only_reconcile_max_age_sec == 1800
+    assert settings.gateway_market_reference_append_only_reconcile_max_age_sec == 300
     assert settings.gateway_market_reference_append_only_min_membership_count == 100
     assert (
         settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
@@ -654,6 +657,9 @@ def test_market_data_interval_settings_are_validated() -> None:
             "GATEWAY_MARKET_DATA_APPEND_ONLY_MIN_OUTBOX_STATUS": "enqueued",
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED": "true",
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED": "true",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH": "false",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "1",
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "2",
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "90",
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MIN_MEMBERSHIP_COUNT": "3",
@@ -745,6 +751,18 @@ def test_market_data_interval_settings_are_validated() -> None:
     assert routing_settings.gateway_market_reference_append_only_dry_run_enabled is True
     assert routing_settings.gateway_market_reference_append_only_cutover_enabled is True
     assert (
+        routing_settings.gateway_market_reference_append_only_global_kill_switch
+        is False
+    )
+    assert (
+        routing_settings.gateway_market_reference_append_only_max_skip_per_minute
+        == 1
+    )
+    assert (
+        routing_settings.gateway_market_reference_append_only_max_pending_within_sla
+        == 2
+    )
+    assert (
         routing_settings.gateway_market_reference_append_only_require_reconcile_pass
         is False
     )
@@ -766,6 +784,8 @@ def test_market_data_interval_settings_are_validated() -> None:
         raise AssertionError("expected invalid market data reconcile limit")
     invalid_market_reference_cases = {
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE": "-1",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA": "0",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MIN_MEMBERSHIP_COUNT": "-1",
     }
     for key, value in invalid_market_reference_cases.items():

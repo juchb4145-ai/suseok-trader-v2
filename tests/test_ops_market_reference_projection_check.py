@@ -34,6 +34,98 @@ def test_ops_market_reference_projection_check_blocks_pr14_without_worker_eviden
     assert verdict["block_pr14"] is True
 
 
+def test_ops_market_reference_projection_check_passes_limited_cutover_evidence() -> None:
+    report = _report()
+    report["expect_effective_skip"] = True
+    routing = report["routing_status"]["data"]
+    routing.update(
+        {
+            "status": "PASS",
+            "cutover_enabled": True,
+            "global_kill_switch": False,
+            "worker_apply_enabled": True,
+            "skip_budget_limit": 1,
+            "skip_budget_used_current_minute": 1,
+            "effective_skip_inline_count": 1,
+            "rollback_required": False,
+            "effective_skip_health": {
+                "pending_worker_count": 0,
+                "worker_error_count": 0,
+                "artifact_missing_count": 0,
+            },
+            "latest_decision": {
+                "event_id": "evt_ref_latest",
+                "effective_skip_inline": True,
+                "evidence": {"skip_budget_limit": 1, "skip_budget_used": 1},
+            },
+        }
+    )
+    report["market_reference_status"]["data"][
+        "latest_market_symbols_event_id"
+    ] = "evt_ref_latest"
+    report["market_reference_status"]["data"]["effective_skip_inline_count"] = 1
+    report["market_reference_status"]["data"]["latest_outbox_job"]["metadata"][
+        "last_worker_evidence"
+    ]["apply_result"] = "APPLIED_BY_WORKER"
+    report["dashboard_snapshot"]["data"]["market_reference"][
+        "effective_skip_inline_count"
+    ] = 1
+    report["dashboard_snapshot"]["data"]["gateway"] = {
+        "realtime_exchange": "NXT",
+        "kiwoom_logged_in": True,
+    }
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "PASS"
+    assert verdict["controller_status"] == "PASS"
+    assert verdict["effective_skip_inline_count"] == 1
+    assert verdict["block_next_pr"] is False
+
+
+def test_ops_market_reference_projection_check_fails_pending_effective_skip() -> None:
+    report = _report()
+    report["expect_effective_skip"] = True
+    routing = report["routing_status"]["data"]
+    routing.update(
+        {
+            "status": "FAIL",
+            "cutover_enabled": True,
+            "global_kill_switch": False,
+            "worker_apply_enabled": True,
+            "skip_budget_limit": 1,
+            "effective_skip_inline_count": 1,
+            "rollback_required": True,
+            "effective_skip_health": {
+                "pending_worker_count": 1,
+                "worker_error_count": 0,
+                "artifact_missing_count": 1,
+            },
+            "latest_decision": {
+                "event_id": "evt_ref_latest",
+                "effective_skip_inline": True,
+                "evidence": {"skip_budget_limit": 1, "skip_budget_used": 1},
+            },
+        }
+    )
+    report["market_reference_status"]["data"][
+        "latest_market_symbols_event_id"
+    ] = "evt_ref_latest"
+    report["dashboard_snapshot"]["data"]["market_reference"][
+        "effective_skip_inline_count"
+    ] = 1
+    report["dashboard_snapshot"]["data"]["gateway"] = {
+        "realtime_exchange": "NXT",
+        "kiwoom_logged_in": True,
+    }
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "FAIL"
+    assert "MARKET_REFERENCE_EFFECTIVE_SKIP_PENDING_WORKER" in verdict["failures"]
+    assert verdict["block_next_pr"] is True
+
+
 def _report() -> dict:
     latest_run = {
         "status": "PASS",
@@ -51,9 +143,16 @@ def _report() -> dict:
         "routing_status": {
             "ok": True,
             "data": {
+                "status": "WARN",
                 "dry_run_enabled": True,
+                "cutover_enabled": False,
+                "global_kill_switch": True,
+                "worker_apply_enabled": True,
+                "skip_budget_limit": 0,
+                "rollback_required": False,
                 "effective_skip_inline_count": 0,
                 "would_skip_inline_count": 1,
+                "effective_skip_health": {},
             },
         },
         "market_reference_status": {
@@ -72,6 +171,7 @@ def _report() -> dict:
                         }
                     },
                 },
+                "latest_market_symbols_event_id": "evt_ref_latest",
             },
         },
         "projection_outbox": {
@@ -88,6 +188,10 @@ def _report() -> dict:
         "dashboard_snapshot": {
             "ok": True,
             "data": {
+                "gateway": {
+                    "realtime_exchange": "NXT",
+                    "kiwoom_logged_in": True,
+                },
                 "market_reference": {
                     "effective_skip_inline_count": 0,
                 }

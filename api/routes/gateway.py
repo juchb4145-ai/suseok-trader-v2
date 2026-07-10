@@ -186,6 +186,9 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         projection_statuses[
                             "market_reference_append_only_dry_run"
                         ] = "ERROR"
+                        projection_statuses[
+                            "market_reference_effective_skip_inline"
+                        ] = "FALSE"
                     else:
                         projection_statuses[
                             "market_reference_append_only_dry_run"
@@ -193,11 +196,23 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             reference_routing
                         )
                         market_reference_routing = reference_routing.to_dict()
-                    projection_statuses["market_reference_effective_skip_inline"] = (
-                        "FALSE"
-                    )
-                    reference_result = process_market_symbols_event(connection, event)
-                    projection_statuses["market_reference"] = reference_result.status
+                        projection_statuses[
+                            "market_reference_effective_skip_inline"
+                        ] = (
+                            "TRUE"
+                            if reference_routing.effective_skip_inline
+                            else "FALSE"
+                        )
+                    if (
+                        reference_routing is not None
+                        and reference_routing.effective_skip_inline
+                    ):
+                        projection_statuses["market_reference"] = (
+                            "SKIPPED_INLINE_APPEND_ONLY_MARKET_REFERENCE"
+                        )
+                    else:
+                        reference_result = process_market_symbols_event(connection, event)
+                        projection_statuses["market_reference"] = reference_result.status
                 if event_type in MARKET_INDEX_EVENT_TYPES:
                     index_result = process_market_index_event(
                         connection,
@@ -300,7 +315,7 @@ def _decide_market_reference_append_only_routing(
             outbox_status=outbox_status,
         )
     except Exception:
-        logger.exception("market_reference append-only dry-run routing decision failed")
+        logger.exception("market_reference append-only routing decision failed")
         return None
 
 
@@ -319,9 +334,9 @@ def _market_reference_append_only_dry_run_status(
     decision: MarketReferenceAppendOnlyRoutingDecision,
 ) -> str:
     if decision.effective_skip_inline:
-        return "EFFECTIVE_SKIP_FORBIDDEN_IN_PR13"
+        return "EFFECTIVE_SKIP_INLINE_PR14_LIMITED"
     if decision.would_skip_inline:
-        return "WOULD_SKIP_INLINE_DRY_RUN_ONLY"
+        return "WOULD_SKIP_INLINE_WITH_INLINE_FALLBACK"
     if not decision.dry_run_enabled:
         return "DISABLED"
     return "BLOCKED"

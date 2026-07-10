@@ -105,6 +105,42 @@ def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> Non
     }
 
 
+def test_sqlite_reinitialization_adds_market_reference_budget_state(tmp_path) -> None:
+    db_path = tmp_path / "legacy-market-reference.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('schema_version', '43')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    connection = initialize_database(db_path)
+    table = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name = 'market_reference_append_only_budget_state'
+        """
+    ).fetchone()
+    metadata = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    connection.close()
+
+    assert table["name"] == "market_reference_append_only_budget_state"
+    assert metadata["value"] == str(SCHEMA_VERSION)
+
+
 def test_sqlite_initialization_creates_projection_watermark_and_retention_tables(
     tmp_path,
 ) -> None:

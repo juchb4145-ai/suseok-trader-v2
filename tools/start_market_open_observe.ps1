@@ -21,6 +21,7 @@ param(
     [int]$CoreWaitSeconds = 30,
     [int]$GatewayWaitSeconds = 30,
     [switch]$MarketReferenceProjectionValidation,
+    [switch]$MarketReferenceLimitedCutover,
     [switch]$RunObserveCycle,
     [switch]$RunCore,
     [switch]$RunGateway,
@@ -155,6 +156,9 @@ function Write-ObserveEnvOverrideFile {
         "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13)",
         "AI_EXTERNAL_LLM_ALLOW_NETWORK=$($env:AI_EXTERNAL_LLM_ALLOW_NETWORK)",
         "AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS=$($env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS)"
@@ -165,7 +169,7 @@ function Write-ObserveEnvOverrideFile {
     if (-not [string]::IsNullOrWhiteSpace($env:GATEWAY_CORE_TOKEN)) {
         $OverrideLines += "GATEWAY_CORE_TOKEN=$($env:GATEWAY_CORE_TOKEN)"
     }
-    if ($MarketReferenceProjectionValidation) {
+    if ($MarketReferenceValidationRequested) {
         $OverrideLines += @(
             "CONDITION_FUSION_SWEEP_ENABLED=$($env:CONDITION_FUSION_SWEEP_ENABLED)",
             "INCREMENTAL_EVALUATION_WORKER_ENABLED=$($env:INCREMENTAL_EVALUATION_WORKER_ENABLED)",
@@ -300,6 +304,9 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
 $RunCoreRequested = $RunAll -or $RunCore
 $RunGatewayRequested = $RunAll -or $RunGateway
 $RunThemeRefreshLoopRequested = $RunAll -or $RunThemeRefreshLoop
+$MarketReferenceValidationRequested = (
+    $MarketReferenceProjectionValidation -or $MarketReferenceLimitedCutover
+)
 
 $env:TRADING_PROFILE = "OBSERVE"
 $env:TRADING_MODE = "OBSERVE"
@@ -336,13 +343,16 @@ $env:LIVE_SIM_OPERATING_LOOP_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
 $env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"
-$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
+$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
 $env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"
-$env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if ($MarketReferenceProjectionValidation) { "true" } else { "false" }
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = "false"
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = "true"
-if ($MarketReferenceProjectionValidation) {
+$env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = if ($MarketReferenceLimitedCutover) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($MarketReferenceLimitedCutover) { "false" } else { "true" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($MarketReferenceLimitedCutover) { "1" } else { "0" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA = "1"
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = if ($MarketReferenceLimitedCutover) { "false" } else { "true" }
+if ($MarketReferenceValidationRequested) {
     $env:CONDITION_FUSION_SWEEP_ENABLED = "false"
     $env:INCREMENTAL_EVALUATION_WORKER_ENABLED = "false"
     $env:EVENT_STORE_RETENTION_ENABLED = "false"
@@ -420,6 +430,7 @@ $ConditionMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfile
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
 Write-Host "Market reference projection validation: $($MarketReferenceProjectionValidation.IsPresent)"
+Write-Host "Market reference limited cutover: $($MarketReferenceLimitedCutover.IsPresent)"
 Write-Host "Core URL: $CoreUrl"
 Write-Host "Dashboard URL: $CoreUrl/dashboard"
 Write-Host "Condition mode: $ConditionMode"

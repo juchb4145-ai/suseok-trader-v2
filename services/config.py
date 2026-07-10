@@ -231,8 +231,11 @@ class Settings:
     gateway_market_data_append_only_min_outbox_status: str = "ENQUEUED"
     gateway_market_reference_append_only_dry_run_enabled: bool = False
     gateway_market_reference_append_only_cutover_enabled: bool = False
+    gateway_market_reference_append_only_global_kill_switch: bool = True
+    gateway_market_reference_append_only_max_skip_per_minute: int = 0
+    gateway_market_reference_append_only_max_pending_within_sla: int = 1
     gateway_market_reference_append_only_require_reconcile_pass: bool = True
-    gateway_market_reference_append_only_reconcile_max_age_sec: int = 1800
+    gateway_market_reference_append_only_reconcile_max_age_sec: int = 300
     gateway_market_reference_append_only_min_membership_count: int = 100
     gateway_market_reference_append_only_effective_skip_disabled_in_pr13: bool = True
     event_store_retention_enabled: bool = False
@@ -717,6 +720,16 @@ class Settings:
         if self.gateway_market_reference_append_only_reconcile_max_age_sec < 1:
             raise ValueError(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC "
+                "must be >= 1"
+            )
+        if self.gateway_market_reference_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE "
+                "must be >= 0"
+            )
+        if self.gateway_market_reference_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA "
                 "must be >= 1"
             )
         if self.gateway_market_reference_append_only_min_membership_count < 0:
@@ -2167,6 +2180,28 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_reference_append_only_cutover_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED", "false")
         ),
+        gateway_market_reference_append_only_global_kill_switch=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH",
+                "true",
+            )
+        ),
+        gateway_market_reference_append_only_max_skip_per_minute=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+                "0",
+            ),
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_reference_append_only_max_pending_within_sla=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+                "1",
+            ),
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
         gateway_market_reference_append_only_require_reconcile_pass=_parse_bool(
             env.get(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
@@ -2176,7 +2211,7 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_reference_append_only_reconcile_max_age_sec=_parse_int(
             env.get(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
-                "1800",
+                "300",
             ),
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
             min_value=1,

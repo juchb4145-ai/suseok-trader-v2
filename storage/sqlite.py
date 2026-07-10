@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2049,6 +2049,17 @@ def _create_market_reference_projection_routing_tables(
         ON market_reference_projection_routing_decisions (
             effective_skip_inline,
             decided_at
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_reference_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
     )

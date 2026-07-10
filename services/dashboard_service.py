@@ -2105,7 +2105,8 @@ def _market_reference_summary(
     if not isinstance(outbox, Mapping):
         outbox = {}
     return {
-        "pr": "PR-13",
+        "pr": "PR-14",
+        "controller_status": routing_payload.get("status"),
         "health": status_payload.get("latest_reconcile_status")
         or (latest_run.get("status") if isinstance(latest_run, Mapping) else None),
         "append_only_ready": bool(status_payload.get("append_only_ready")),
@@ -2127,6 +2128,24 @@ def _market_reference_summary(
         "effective_skip_inline_count": int(
             routing_payload.get("effective_skip_inline_count") or 0
         ),
+        "global_kill_switch": bool(routing_payload.get("global_kill_switch")),
+        "cutover_enabled": bool(routing_payload.get("cutover_enabled")),
+        "worker_apply_enabled": bool(routing_payload.get("worker_apply_enabled")),
+        "skip_budget_limit": int(routing_payload.get("skip_budget_limit") or 0),
+        "skip_budget_used_current_minute": int(
+            routing_payload.get("skip_budget_used_current_minute") or 0
+        ),
+        "skip_budget_remaining_current_minute": int(
+            routing_payload.get("skip_budget_remaining_current_minute") or 0
+        ),
+        "rollback_required": bool(routing_payload.get("rollback_required")),
+        "rollback_reason_codes": list(
+            routing_payload.get("rollback_reason_codes") or []
+        ),
+        "effective_skip_health": dict(
+            routing_payload.get("effective_skip_health") or {}
+        ),
+        "rollback_hint": routing_payload.get("rollback_hint"),
         "warnings": list(status_payload.get("warnings") or []),
         "read_only": True,
         "no_trading_side_effects": True,

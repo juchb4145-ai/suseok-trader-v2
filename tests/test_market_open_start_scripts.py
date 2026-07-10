@@ -33,23 +33,36 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "RunAll" in script
     assert "RunGateway" in script
     assert "MarketReferenceProjectionValidation" in script
+    assert "MarketReferenceLimitedCutover" in script
     assert '$env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"' in script
     assert '$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"' in script
     assert (
         '$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if '
-        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+        '($MarketReferenceValidationRequested) { "true" } else { "false" }'
     ) in script
     assert (
         '$env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if '
-        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+        '($MarketReferenceValidationRequested) { "true" } else { "false" }'
     ) in script
     assert (
         '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if '
-        '($MarketReferenceProjectionValidation) { "true" } else { "false" }'
+        '($MarketReferenceValidationRequested) { "true" } else { "false" }'
     ) in script
-    assert '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = "false"' in script
     assert (
-        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = "true"'
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = if '
+        '($MarketReferenceLimitedCutover) { "true" } else { "false" }'
+    ) in script
+    assert (
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH = if '
+        '($MarketReferenceLimitedCutover) { "false" } else { "true" }'
+    ) in script
+    assert (
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if '
+        '($MarketReferenceLimitedCutover) { "1" } else { "0" }'
+    ) in script
+    assert (
+        '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = if '
+        '($MarketReferenceLimitedCutover) { "false" } else { "true" }'
         in script
     )
     assert '$env:CONDITION_FUSION_SWEEP_ENABLED = "false"' in script

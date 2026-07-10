@@ -59,6 +59,16 @@ def test_dashboard_fast_path_includes_market_reference_section(
         snapshot["pipeline_summary"]["market_reference"]["effective_skip_inline_count"]
         == 0
     )
+    assert snapshot["pipeline_summary"]["market_reference"]["pr"] == "PR-14"
+    assert snapshot["pipeline_summary"]["market_reference"][
+        "controller_status"
+    ] == "WARN"
+    assert snapshot["pipeline_summary"]["market_reference"][
+        "global_kill_switch"
+    ] is True
+    assert snapshot["pipeline_summary"]["market_reference"][
+        "skip_budget_limit"
+    ] == 0
     assert "market_data controller unaffected" in snapshot["market_reference"]["warnings"]
 
 
