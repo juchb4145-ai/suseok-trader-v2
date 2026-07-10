@@ -271,6 +271,9 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                 projection_statuses[
                                     "market_regime_append_only_dry_run"
                                 ] = "ERROR"
+                                projection_statuses[
+                                    "market_regime_effective_skip_inline"
+                                ] = "FALSE"
                             else:
                                 market_regime_routing = regime_routing.to_dict()
                                 projection_statuses[
@@ -282,8 +285,22 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                 )
                                 projection_statuses[
                                     "market_regime_effective_skip_inline"
-                                ] = "FALSE"
-                            if should_rebuild_market_context_snapshots(
+                                ] = (
+                                    "TRUE"
+                                    if regime_routing.effective_skip_inline
+                                    else "FALSE"
+                                )
+                            if (
+                                regime_routing is not None
+                                and regime_routing.effective_skip_inline
+                            ):
+                                projection_statuses["market_regime"] = (
+                                    "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_MARKET_REGIME"
+                                )
+                                projection_statuses["market_context"] = (
+                                    "DEFERRED_TO_PROJECTION_OUTBOX_WORKER_MARKET_REGIME"
+                                )
+                            elif should_rebuild_market_context_snapshots(
                                 connection,
                                 settings=settings,
                             ):

@@ -1088,16 +1088,31 @@ def _apply_market_regime_continuity_verification(
             )
     elif standalone_apply_enabled:
         linked_before = _market_regime_snapshot_for_event(connection, event_id)
+        regime_effective_skip = _market_regime_routing_effective_skip(
+            connection,
+            event_id,
+        )
         superseded = _market_regime_source_event_superseded(
             connection,
             source_event,
             event_id=event_id,
         )
+        if regime_effective_skip and superseded:
+            return _verification_error(
+                "MARKET_REGIME_EFFECTIVE_SKIP_SOURCE_SUPERSEDED",
+                "effective-skip source was superseded before worker context refresh",
+                event_id=event_id,
+                apply_result="APPLY_ERROR",
+                retryable=True,
+            )
         rebuild_required = bool(
             not superseded
-            and should_rebuild_market_context_snapshots(
-                connection,
-                settings=settings,
+            and (
+                regime_effective_skip
+                or should_rebuild_market_context_snapshots(
+                    connection,
+                    settings=settings,
+                )
             )
         )
         rebuild_result: dict[str, Any] | None = None
@@ -1129,6 +1144,26 @@ def _apply_market_regime_continuity_verification(
                 apply_result="APPLY_ERROR",
                 retryable=True,
             )
+        if regime_effective_skip and linked_after is None:
+            return _verification_error(
+                "MARKET_REGIME_EFFECTIVE_SKIP_SNAPSHOT_MISSING",
+                "effective-skip worker did not create an event-linked regime snapshot",
+                event_id=event_id,
+                apply_result="APPLY_ERROR",
+                retryable=True,
+            )
+        if regime_effective_skip and not _market_context_source_event_ready(
+            context_status,
+            event_id=event_id,
+        ):
+            return _verification_error(
+                "MARKET_REGIME_EFFECTIVE_SKIP_CONTEXT_PAIR_MISSING",
+                "effective-skip worker did not publish the event-linked context pair",
+                event_id=event_id,
+                market_context_status=context_status,
+                apply_result="APPLY_ERROR",
+                retryable=True,
+            )
         if linked_before is None and linked_after is not None:
             mutated_projection_names.append("market_regime")
         if rebuild_result is not None and int(rebuild_result.get("created_count") or 0):
@@ -1140,6 +1175,7 @@ def _apply_market_regime_continuity_verification(
                 else "APPLIED_BY_VERIFY"
             ),
             "rebuild_required": rebuild_required,
+            "effective_skip": regime_effective_skip,
             "source_event_superseded": superseded,
             "source_event_id": event_id,
             "linked_regime_snapshot_id": (
@@ -1201,6 +1237,21 @@ def _market_context_projection_ready(status: Mapping[str, Any]) -> bool:
         and status.get("latest_watermark_coherent") is True
         and status.get("latest_regime_coherent") is True
         and int(status.get("regime_reference_missing_count") or 0) == 0
+    )
+
+
+def _market_context_source_event_ready(
+    status: Mapping[str, Any],
+    *,
+    event_id: str,
+) -> bool:
+    latest = status.get("latest")
+    if not isinstance(latest, Mapping):
+        return False
+    return all(
+        isinstance(latest.get(market), Mapping)
+        and str(latest[market].get("source_event_id") or "") == event_id
+        for market in ("KOSPI", "KOSDAQ")
     )
 
 
@@ -1595,7 +1646,10 @@ def _verify_market_regime(
     connection: sqlite3.Connection,
     event_id: str,
 ) -> ProjectionOutboxVerificationResult:
-    if _market_index_routing_effective_skip(connection, event_id):
+    if _market_index_routing_effective_skip(
+        connection,
+        event_id,
+    ) or _market_regime_routing_effective_skip(connection, event_id):
         snapshot = _market_regime_snapshot_for_event(connection, event_id)
         if snapshot is not None:
             return _verification_applied(
@@ -2083,6 +2137,22 @@ def _market_index_routing_effective_skip(
         SELECT effective_skip_inline
         FROM market_index_projection_routing_decisions
         WHERE event_id = ? AND projection_name = 'market_index'
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+    return bool(row is not None and row["effective_skip_inline"])
+
+
+def _market_regime_routing_effective_skip(
+    connection: sqlite3.Connection,
+    event_id: str,
+) -> bool:
+    row = connection.execute(
+        """
+        SELECT effective_skip_inline
+        FROM market_regime_projection_routing_decisions
+        WHERE event_id = ? AND projection_name = 'market_regime'
         LIMIT 1
         """,
         (event_id,),

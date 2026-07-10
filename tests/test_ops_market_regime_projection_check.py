@@ -49,6 +49,41 @@ def test_market_regime_ops_report_fails_on_skip_outbox_or_safety_gap(tmp_path) -
     assert paths["summary_md"].exists()
 
 
+def test_market_regime_ops_report_passes_limited_cutover_contract() -> None:
+    report = _report()
+    report["expect_effective_skip"] = True
+    routing = report["routing_status"]["data"]
+    routing.update(
+        {
+            "cutover_enabled": True,
+            "global_kill_switch": False,
+            "effective_skip_disabled_in_pr18": False,
+            "skip_budget_limit": 1,
+            "controller_status": "PASS",
+            "rollback_required": False,
+            "effective_skip_inline_count": 1,
+            "latest_decision": {
+                "effective_skip_inline": True,
+                "index_routing_ready": True,
+                "observe_safe": True,
+            },
+            "effective_skip_health": {
+                "pending_worker_count": 0,
+                "worker_error_count": 0,
+                "worker_apply_evidence_missing_count": 0,
+                "regime_snapshot_missing_count": 0,
+                "context_pair_missing_count": 0,
+            },
+        }
+    )
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "PASS"
+    assert verdict["effective_skip_inline_count"] == 1
+    assert verdict["controller_status"] == "PASS"
+
+
 def _report() -> dict:
     reconcile = {
         "run_id": "reconcile-1",
@@ -60,8 +95,12 @@ def _report() -> dict:
         "no_trading_side_effects": True,
     }
     routing = {
-        "status": "PASS",
+        "status": "WARN",
+        "controller_status": "WARN",
+        "cutover_enabled": False,
+        "global_kill_switch": True,
         "effective_skip_disabled_in_pr18": True,
+        "skip_budget_limit": 0,
         "would_skip_inline_count": 1,
         "effective_skip_inline_count": 0,
         "no_trading_side_effects": True,
@@ -90,6 +129,7 @@ def _report() -> dict:
                 "status": "COMPLETED",
                 "projection_name_filter": "market_regime",
                 "market_regime_apply_enabled": True,
+                "applied_by_worker_count": 1,
                 "mutated_projection_names": ["market_regime", "market_context"],
                 "no_trading_side_effects": True,
             },
@@ -111,9 +151,7 @@ def _report() -> dict:
         "projection_outbox": {
             "ok": True,
             "data": {
-                "by_projection_name": {
-                    "market_regime": {"error_count": 0, "dead_letter_count": 0}
-                }
+                "by_projection_name": {"market_regime": {"error_count": 0, "dead_letter_count": 0}}
             },
         },
         "dashboard_snapshot": {

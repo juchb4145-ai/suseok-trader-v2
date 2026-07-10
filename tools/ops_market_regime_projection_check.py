@@ -21,7 +21,7 @@ from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Check PR-18 market_regime worker, reconcile, and dry-run routing."
+        description="Check PR-18 preparation or PR-19 market_regime limited cutover."
     )
     parser.add_argument(
         "--core-url",
@@ -29,13 +29,13 @@ def main() -> int:
     )
     parser.add_argument(
         "--token",
-        default=os.environ.get("TRADING_CORE_TOKEN")
-        or os.environ.get("GATEWAY_CORE_TOKEN", ""),
+        default=os.environ.get("TRADING_CORE_TOKEN") or os.environ.get("GATEWAY_CORE_TOKEN", ""),
     )
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--worker-limit", type=int, default=2)
     parser.add_argument("--timeout-sec", type=float, default=30.0)
     parser.add_argument("--run-worker", action="store_true")
+    parser.add_argument("--expect-effective-skip", action="store_true")
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "market_regime_projection"),
@@ -48,6 +48,7 @@ def main() -> int:
         worker_limit=args.worker_limit,
         timeout_sec=args.timeout_sec,
         run_worker=args.run_worker,
+        expect_effective_skip=args.expect_effective_skip,
         out_dir=Path(args.out_dir),
     )
     print(render_console_summary(report))
@@ -62,6 +63,7 @@ def run_market_regime_report(
     worker_limit: int,
     timeout_sec: float,
     run_worker: bool,
+    expect_effective_skip: bool = False,
     out_dir: Path,
 ) -> dict[str, Any]:
     base_url = core_url.rstrip("/")
@@ -91,9 +93,7 @@ def run_market_regime_report(
     )
     reconcile_run = fetch_json(
         f"{base_url}/api/operator/market-regime-projection-reconcile/run-once?"
-        + urllib.parse.urlencode(
-            {"limit": limit, "persist": "true", "live_safe": "true"}
-        ),
+        + urllib.parse.urlencode({"limit": limit, "persist": "true", "live_safe": "true"}),
         token=token,
         method="POST",
         timeout_sec=timeout_sec,
@@ -113,6 +113,7 @@ def run_market_regime_report(
         "generated_at": _now(),
         "core_url": base_url,
         "run_worker": bool(run_worker),
+        "expect_effective_skip": bool(expect_effective_skip),
         "core_status": fetch_json(
             f"{base_url}/api/status",
             token=token,
@@ -201,9 +202,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("LIVE_SIM_ALLOWED")
     if bool(core.get("live_real_allowed")):
         failures.append("LIVE_REAL_ALLOWED")
-    if bool(before.get("order_commands_allowed")) or bool(
-        after.get("order_commands_allowed")
-    ):
+    if bool(before.get("order_commands_allowed")) or bool(after.get("order_commands_allowed")):
         failures.append("ORDER_COMMANDS_ALLOWED")
 
     command_delta = _command_count(after) - _command_count(before)
@@ -243,10 +242,45 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("MARKET_REGIME_OUTBOX_DEAD_LETTER_PRESENT")
 
     effective_skip_count = int(routing.get("effective_skip_inline_count") or 0)
-    if effective_skip_count:
+    expect_effective_skip = bool(report.get("expect_effective_skip"))
+    if effective_skip_count and not expect_effective_skip:
         failures.append("MARKET_REGIME_EFFECTIVE_SKIP_FORBIDDEN_IN_PR18")
-    if not bool(routing.get("effective_skip_disabled_in_pr18")):
+    if expect_effective_skip and effective_skip_count <= 0:
+        failures.append("MARKET_REGIME_EFFECTIVE_SKIP_NOT_OBSERVED")
+    if not expect_effective_skip and not bool(routing.get("effective_skip_disabled_in_pr18")):
         failures.append("MARKET_REGIME_PR18_SKIP_GUARD_DISABLED")
+    if expect_effective_skip:
+        if not report.get("run_worker"):
+            failures.append("MARKET_REGIME_EXPECT_SKIP_REQUIRES_WORKER_RUN")
+        if not bool(routing.get("cutover_enabled")):
+            failures.append("MARKET_REGIME_CUTOVER_DISABLED")
+        if bool(routing.get("global_kill_switch")):
+            failures.append("MARKET_REGIME_GLOBAL_KILL_SWITCH")
+        if bool(routing.get("effective_skip_disabled_in_pr18")):
+            failures.append("MARKET_REGIME_LEGACY_SKIP_GUARD_ENABLED")
+        if int(routing.get("skip_budget_limit") or 0) != 1:
+            failures.append("MARKET_REGIME_SKIP_BUDGET_NOT_ONE")
+        if str(routing.get("controller_status") or "") != "PASS":
+            failures.append("MARKET_REGIME_CONTROLLER_NOT_PASS")
+        if bool(routing.get("rollback_required")):
+            failures.append("MARKET_REGIME_ROLLBACK_REQUIRED")
+        latest_decision = _mapping(routing.get("latest_decision"))
+        if not bool(latest_decision.get("effective_skip_inline")):
+            failures.append("MARKET_REGIME_LATEST_DECISION_NOT_EFFECTIVE_SKIP")
+        if not bool(latest_decision.get("index_routing_ready")):
+            failures.append("MARKET_REGIME_INDEX_ROUTING_NOT_READY")
+        if not bool(latest_decision.get("observe_safe")):
+            failures.append("MARKET_REGIME_ROUTING_NOT_OBSERVE_SAFE")
+        effective_health = _mapping(routing.get("effective_skip_health"))
+        for key in (
+            "pending_worker_count",
+            "worker_error_count",
+            "worker_apply_evidence_missing_count",
+            "regime_snapshot_missing_count",
+            "context_pair_missing_count",
+        ):
+            if int(effective_health.get(key) or 0):
+                failures.append(f"MARKET_REGIME_{key.upper()}")
 
     if report.get("run_worker"):
         if str(worker.get("status") or "") not in {"COMPLETED", "NOOP"}:
@@ -255,13 +289,16 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
             failures.append("MARKET_REGIME_WORKER_FILTER_MISMATCH")
         if not bool(worker.get("market_regime_apply_enabled")):
             failures.append("MARKET_REGIME_WORKER_APPLY_DISABLED")
-        mutations = {
-            str(value) for value in worker.get("mutated_projection_names") or []
-        }
+        mutations = {str(value) for value in worker.get("mutated_projection_names") or []}
         if mutations - {"market_regime", "market_context"}:
             failures.append("MARKET_REGIME_WORKER_MUTATED_OTHER_PROJECTION")
         if not bool(worker.get("no_trading_side_effects")):
             failures.append("MARKET_REGIME_WORKER_SIDE_EFFECT_GUARD_MISSING")
+        if expect_effective_skip:
+            if int(worker.get("applied_by_worker_count") or 0) <= 0:
+                failures.append("MARKET_REGIME_WORKER_APPLY_EVIDENCE_MISSING")
+            if not {"market_regime", "market_context"} <= mutations:
+                failures.append("MARKET_REGIME_WORKER_CONTEXT_MUTATION_MISSING")
 
     for section in (
         "market_regime_projection_reconcile",
@@ -276,6 +313,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "failures": sorted(set(failures)),
         "warnings": sorted(set(warnings)),
         "block_pr18": bool(failures),
+        "block_pr19": bool(failures),
         "reconcile_status": reconcile_status or None,
         "append_only_ready": bool(reconcile.get("append_only_ready")),
         "checked_event_count": int(reconcile.get("checked_event_count") or 0),
@@ -284,6 +322,10 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "outbox_dead_letter_count": outbox_dead_letter_count,
         "would_skip_inline_count": int(routing.get("would_skip_inline_count") or 0),
         "effective_skip_inline_count": effective_skip_count,
+        "expect_effective_skip": expect_effective_skip,
+        "controller_status": routing.get("controller_status"),
+        "rollback_required": bool(routing.get("rollback_required")),
+        "skip_budget_limit": int(routing.get("skip_budget_limit") or 0),
         "command_count_delta": command_delta,
         "order_command_count_delta": order_command_delta,
         "no_trading_side_effects": True,
@@ -307,12 +349,13 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
     verdict = _mapping(report.get("verdict"))
     return "\n".join(
         [
-            "# Market Regime Projection PR-18 Check",
+            "# Market Regime Projection PR-18 / PR-19 Check",
             "",
             f"- generated_at: `{report.get('generated_at')}`",
             f"- verdict: `{verdict.get('status')}`",
             f"- reconcile: `{verdict.get('reconcile_status')}`",
             f"- append_only_ready: `{verdict.get('append_only_ready')}`",
+            f"- expect_effective_skip: `{verdict.get('expect_effective_skip')}`",
             f"- checked_event_count: `{verdict.get('checked_event_count')}`",
             f"- context_status: `{verdict.get('context_status')}`",
             (
@@ -330,7 +373,10 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",
             f"- warnings: `{', '.join(verdict.get('warnings') or []) or '-'}`",
             "",
-            "PR-18 records dry-run evidence only; effective inline skip must remain zero.",
+            (
+                "Without --expect-effective-skip, PR-18 safety remains active and "
+                "effective inline skip must be zero."
+            ),
         ]
     )
 
@@ -338,7 +384,7 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
 def render_console_summary(report: Mapping[str, Any]) -> str:
     verdict = _mapping(report.get("verdict"))
     return (
-        "Market regime PR-18: "
+        "Market regime PR-18/19: "
         f"{verdict.get('status')} reconcile={verdict.get('reconcile_status')} "
         f"events={verdict.get('checked_event_count')} "
         f"effective_skip={verdict.get('effective_skip_inline_count')}"
@@ -353,9 +399,7 @@ def _data(report: Mapping[str, Any], key: str) -> dict[str, Any]:
     return dict(data) if isinstance(data, Mapping) else dict(payload)
 
 
-def _projection_status(
-    status: Mapping[str, Any], projection_name: str
-) -> dict[str, Any]:
+def _projection_status(status: Mapping[str, Any], projection_name: str) -> dict[str, Any]:
     by_projection = status.get("by_projection_name")
     if not isinstance(by_projection, Mapping):
         return {}

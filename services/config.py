@@ -255,7 +255,15 @@ class Settings:
     gateway_market_index_append_only_gateway_health_max_age_sec: int = 30
     gateway_market_index_append_only_effective_skip_disabled_in_pr15: bool = True
     gateway_market_regime_append_only_dry_run_enabled: bool = False
+    gateway_market_regime_append_only_cutover_enabled: bool = False
+    gateway_market_regime_append_only_global_kill_switch: bool = True
+    gateway_market_regime_append_only_max_skip_per_minute: int = 0
+    gateway_market_regime_append_only_max_pending_within_sla: int = 1
     gateway_market_regime_append_only_require_reconcile_pass: bool = True
+    gateway_market_regime_append_only_require_prior_event_reconcile: bool = True
+    gateway_market_regime_append_only_require_index_routing_guard: bool = True
+    gateway_market_regime_append_only_require_worker_context_refresh: bool = True
+    gateway_market_regime_append_only_fail_closed_on_context_refresh_error: bool = True
     gateway_market_regime_append_only_reconcile_max_age_sec: int = 300
     gateway_market_regime_append_only_effective_skip_disabled_in_pr18: bool = True
     projection_event_result_backfill_enabled: bool = False
@@ -792,6 +800,14 @@ class Settings:
         if self.gateway_market_regime_append_only_reconcile_max_age_sec < 1:
             raise ValueError(
                 "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_regime_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE must be >= 0"
+            )
+        if self.gateway_market_regime_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA must be >= 1"
             )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
@@ -2409,10 +2425,52 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_regime_append_only_dry_run_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED", "false")
         ),
+        gateway_market_regime_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_regime_append_only_global_kill_switch=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_GLOBAL_KILL_SWITCH", "true")
+        ),
+        gateway_market_regime_append_only_max_skip_per_minute=_parse_int(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE", "0"),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_regime_append_only_max_pending_within_sla=_parse_int(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA", "1"),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
         gateway_market_regime_append_only_require_reconcile_pass=_parse_bool(
             env.get(
                 "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
                 "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_prior_event_reconcile=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_PRIOR_EVENT_RECONCILE",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_index_routing_guard=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_INDEX_ROUTING_GUARD",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_worker_context_refresh=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_WORKER_CONTEXT_REFRESH",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_fail_closed_on_context_refresh_error=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_REGIME_APPEND_ONLY_FAIL_CLOSED_ON_CONTEXT_REFRESH_ERROR",
+                    "true",
+                )
             )
         ),
         gateway_market_regime_append_only_reconcile_max_age_sec=_parse_int(

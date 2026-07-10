@@ -16,9 +16,7 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
         "market_regime_projection_routing_decisions",
     ):
         connection.execute(f"DROP TABLE {table_name}")
-    connection.execute(
-        "UPDATE app_metadata SET value = '51' WHERE key = 'schema_version'"
-    )
+    connection.execute("UPDATE app_metadata SET value = '51' WHERE key = 'schema_version'")
     connection.commit()
     connection.close()
 
@@ -51,7 +49,7 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "52"
+    assert schema_version == "53"
     assert {
         "market_regime_projection_reconcile_issues",
         "market_regime_projection_reconcile_runs",
@@ -60,6 +58,64 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
     assert "idx_market_regime_reconcile_runs_created" in reconcile_indexes
     assert "idx_market_regime_routing_event" in routing_indexes
     assert "idx_market_regime_routing_decided" in routing_indexes
+
+
+def test_schema_52_adds_market_regime_cutover_budget_and_routing_columns(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "market-regime-cutover-schema.sqlite3"
+    connection = initialize_database(db_path)
+    connection.execute("DROP INDEX idx_market_regime_routing_effective_skip")
+    connection.execute("DROP TABLE market_regime_append_only_budget_state")
+    new_columns = (
+        "cutover_enabled",
+        "global_kill_switch",
+        "skip_budget_limit",
+        "skip_budget_used",
+        "skip_budget_remaining",
+        "observe_safe",
+        "index_routing_ready",
+        "rollback_required",
+        "controller_status",
+    )
+    for column_name in new_columns:
+        connection.execute(
+            f"ALTER TABLE market_regime_projection_routing_decisions DROP COLUMN {column_name}"
+        )
+    connection.execute("UPDATE app_metadata SET value = '52' WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
+
+    migrated = initialize_database(db_path)
+    schema_version = migrated.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchone()["value"]
+    columns = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA table_info(market_regime_projection_routing_decisions)"
+        ).fetchall()
+    }
+    indexes = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA index_list(market_regime_projection_routing_decisions)"
+        ).fetchall()
+    }
+    budget_exists = migrated.execute(
+        """
+        SELECT COUNT(*) AS count FROM sqlite_master
+        WHERE type = 'table' AND name = 'market_regime_append_only_budget_state'
+        """
+    ).fetchone()["count"]
+    migrated.close()
+    rerun = initialize_database(db_path)
+    rerun.close()
+
+    assert schema_version == "53"
+    assert set(new_columns) <= columns
+    assert "idx_market_regime_routing_effective_skip" in indexes
+    assert budget_exists == 1
 
 
 def test_market_regime_operator_and_dashboard_surfaces_are_observe_safe(
@@ -78,18 +134,14 @@ def test_market_regime_operator_and_dashboard_surfaces_are_observe_safe(
     monkeypatch.setenv("TRADING_ALLOW_LIVE_REAL", "false")
 
     with TestClient(app) as client:
-        unauthorized = client.post(
-            "/api/operator/market-regime-projection-reconcile/run-once"
-        )
+        unauthorized = client.post("/api/operator/market-regime-projection-reconcile/run-once")
         reconcile = client.post(
             "/api/operator/market-regime-projection-reconcile/run-once?limit=10",
             headers={"X-Local-Token": "test-token"},
         )
         latest = client.get("/api/operator/market-regime-projection-reconcile/latest")
         routing = client.get("/api/operator/market-regime-append-only-routing/status")
-        decisions = client.get(
-            "/api/operator/market-regime-append-only-routing/decisions?limit=10"
-        )
+        decisions = client.get("/api/operator/market-regime-append-only-routing/decisions?limit=10")
         operator_status = client.get("/api/operator/status")
         dashboard = client.get(
             "/api/dashboard/snapshot?fast=true&sections="
