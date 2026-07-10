@@ -247,6 +247,19 @@ candidate/incremental side effect table 쓰기는 SQLite authorizer가 차단합
 [docs/runbook_market_data_replay_verification_ko.md](docs/runbook_market_data_replay_verification_ko.md)를
 참고하세요.
 
+projection success/error watermark와 retention RCA:
+
+```powershell
+python -m tools.ops_projection_retention_check `
+  --core-url http://127.0.0.1:8000 `
+  --token $env:TRADING_CORE_TOKEN
+```
+
+기본 retention은 disabled이며, accepted projection event는 outbox `APPLIED`, event result
+`SUCCESS`, projection success watermark를 모두 만족해야 삭제 후보가 됩니다. 운영 절차는
+[docs/runbook_projection_watermark_retention_ko.md](docs/runbook_projection_watermark_retention_ko.md)를
+참고하세요.
+
 ## Dashboard 확인 방법
 
 Core 실행 후 브라우저에서 확인합니다.

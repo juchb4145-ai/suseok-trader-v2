@@ -162,6 +162,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
         is True
     )
     assert settings.event_store_retention_enabled is False
+    assert settings.projection_event_result_backfill_enabled is False
     assert settings.event_store_retention_days == 30
     assert settings.event_store_retention_batch_size == 5000
     assert settings.event_store_retention_interval_sec == 86400

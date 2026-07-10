@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (격리 replay inline-worker parity 완료)
+최종 업데이트: 2026-07-10 (projection watermark/retention RCA 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -32,7 +32,7 @@
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
 - PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
 - Replay 기반: accepted event export/import, source rowid/received_at 및 order hash 보존, 새 격리 DB 강제, inline-shadow와 worker-apply projection hash/reconcile 비교, strict SQLite write authorizer, KRX/NXT 분리 evidence를 구현했다. operator/API Dashboard는 report read-only status만 제공하고 replay 실행 endpoint는 없다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay 기반을 완료했다. 다음 우선순위는 projection별 success/error watermark와 retention/RCA다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay, P1-2/P2-4 projection watermark/retention RCA를 완료했다. 다음 우선순위는 market_index worker apply/reconcile 준비다.
 
 ## P0
 
@@ -48,7 +48,7 @@
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
 |---|---|---|---|---|---|
 | P1-1 Incremental evaluation은 Candidate -> Strategy -> Risk까지만 처리하고 EntryTiming/OrderPlan은 별도 loop에 남아 있음 | `services/runtime/incremental_evaluation.py::process_incremental_evaluation_batch()`는 `refresh_candidate_context()`, `evaluate_candidate_strategy()`, `evaluate_risk_for_candidate()` 후 queue row를 삭제한다. `evaluate_entry_timing()`은 `services/runtime/market_open_observe_cycle.py`와 `services/runtime/live_sim_operating_orchestrator.py`에서 별도 호출된다. | price tick 하나의 변경이 order_plan까지 같은 run/snapshot으로 이어지지 않는다. Strategy/Risk latest와 EntryTiming/OrderPlan latest의 source 시점이 달라질 수 있다. | incremental worker에 선택적 EntryTiming/OrderPlan stage를 붙이거나, order_plan 생성 시 strategy/risk/candidate/tick source ids를 검증한다. `source_run_id`, `source_watermark`, `data_age_sec`를 latest row에 저장한다. | Dashboard mismatch guard: `test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query`. SQL: strategy/risk/order_plan latest를 candidate_id로 join해 observation id 불일치를 집계한다. |
-| P1-2 projection watermark가 `market_data` 하나에 집중되어 있고 retention gating도 price_tick 중심 | `storage/projection_watermarks.py`는 generic table이지만 `services/market_data_service.py`만 적극 사용한다. `storage/event_retention.py`의 `WATERMARK_GATED_EVENT_TYPES`는 `{"price_tick"}`뿐이다. market_index/reference/scan/regime에는 projection watermark가 없다. | future replay에서 market_symbols, market_index_tick, tr_response, scan event가 retention으로 삭제되면 해당 projection rebuild가 완전하지 않을 수 있다. market_data도 tr_response projection 실패 후 watermark 전진 위험이 있다. | projection별 watermark를 추가하고 event retention은 모든 replayable event type을 각 projection watermark로 gate한다. failed projection event는 retry queue로 남기고 성공 watermark와 error watermark를 분리한다. | SQL: `SELECT * FROM projection_watermarks;`, `SELECT event_type,COUNT(*) FROM gateway_events GROUP BY event_type;` |
+| P1-2 projection별 success/error watermark와 retention gate | 수정 완료. schema 48은 기존 `last_event_*` 호환 컬럼과 별도로 `last_success_*`, `last_error_*`를 저장하고 `(projection_name,event_id)` 최신 `SUCCESS/ERROR` ledger를 둔다. market-data inline 오류는 success watermark를 전진시키지 않으며 outbox terminal 상태와 result update는 같은 commit이다. | accepted replayable event는 모든 required outbox가 `APPLIED`, result가 `SUCCESS`, projection success watermark가 event rowid 이상일 때만 retention eligible이다. evidence 없는 legacy event, ERROR/DEAD_LETTER/SKIPPED/missing result는 fail-closed한다. | `EVENT_STORE_RETENTION_ENABLED=false`, `PROJECTION_EVENT_RESULT_BACKFILL_ENABLED=false`가 기본이다. 실제 prune은 retention enabled와 old blocker 0을 모두 요구하며, blocker 하나가 전체 apply를 HTTP 409로 막는다. legacy backfill은 APPLIED outbox만 대상으로 dry-run 기본이다. | 테스트: `tests/test_projection_watermarks_retention.py`, `tests/test_event_retention.py`. API: `/api/operator/projection-watermarks/*`, `/api/operator/event-retention/status`. Runbook: `docs/runbook_projection_watermark_retention_ko.md`. |
 | P1-3 MarketRegime snapshot이 공통 market context가 아니라 후보별 refresh에서 rebuild될 수 있음 | `services/market_regime_service.py::get_market_regime_for_code()`가 `rebuild_market_regime_snapshot(connection, code)`를 직접 호출한다. `candidate_context_latest.market_context_json`은 candidate별 저장이다. | 후보 refresh 수만큼 market_regime snapshot이 생성되고, 동일 평가 run 안에서도 후보별 regime 시점이 달라질 수 있다. index tick missing/stale이면 다수 후보가 `DATA_WAIT`로 동시에 밀린다. | `market_context_snapshots`를 trade_date/market/index watermark 단위로 만들고 후보 context는 snapshot id만 참조한다. KOSPI/KOSDAQ missing은 global DATA_WAIT와 per-market fallback을 구분한다. | SQL: `SELECT target_code,COUNT(*) FROM market_regime_snapshots GROUP BY target_code;` |
 | P1-4 Market index parser_status가 UNVERIFIED일 때 후보/Risk 정책과 운영 표시가 충분히 분리되지 않음 | `gateway/kiwoom_client.py::market_index_parser_evidence()`는 `mapping_status="UNVERIFIED_PILOT"`를 반환하고, tick metadata `parser_status`는 `MARKET_INDEX_PARSER_STATUS`를 담는다. `services/market_index_service.py::_has_unverified_index_parser()`는 status에 `unverified`만 노출한다. | KOSPI/KOSDAQ index tick/bar missing 또는 unverified parser 상태가 시장 전체 `DATA_WAIT`/`RISK_OFF`로 오인될 수 있다. | parser_status를 market_regime quality에 반영하고, `UNVERIFIED`는 trading block이 아니라 adapter confidence warning으로 분리한다. dashboard에 "index data usable vs parser verified"를 별도 표시한다. | 기존 테스트: `tests/test_market_index_service.py::test_market_index_records_unverified_and_implausible_guard`. SQL: `SELECT index_code,metadata_json FROM market_index_ticks_latest;` |
 | P1-5 Dashboard snapshot은 서로 다른 latest table을 같은 화면에 섞어 보여준다 | `services/dashboard_service.py::build_dashboard_snapshot()`이 market_data/theme/candidate/strategy/risk/entry/live_sim latest를 독립 조회한다. pipeline summary에는 `generated_at`만 있고 section별 `source_run_id`, `source_watermark`, `trade_date`, `data_age_sec`, `generated_by`가 없다. | "화면 상태가 동일 평가 run 기준인가?"를 판단할 수 없다. 오래된 order_plan과 최신 risk가 함께 PASS처럼 보일 수 있다. | dashboard `coherency` section을 추가하고 section별 source metadata를 표준화한다. stage row에도 `source_run_id`, `source_watermark`, `data_age_sec`, `trade_date`, `generated_by`를 넣는다. | 추가 테스트: `test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query`. |
@@ -61,7 +61,7 @@
 | P2-1 incremental queue status는 backlog/stale age alert가 없다 | `services/runtime/incremental_evaluation.py::get_incremental_evaluation_status()`는 `queued_count`, `retry_exhausted_count`, `oldest_enqueued_at`, `max_attempts`를 반환하지만 stale threshold 평가와 reason code는 없다. | queue가 오래 쌓여도 dashboard/operator가 즉시 `STALE_QUEUE`로 해석하기 어렵다. | status에 `oldest_age_sec`, `stale_queue_count`, `backlog_status`, `reason_codes`를 추가한다. retry exhausted row는 별도 dead-letter/retry reset 운영 경로를 둔다. | 추가 테스트: `test_incremental_queue_backlog_and_stale_rows_are_detectable`. SQL: `SELECT COUNT(*),MIN(enqueued_at),MAX(attempts) FROM incremental_evaluation_queue;` |
 | P2-2 top theme DB/leadership source가 둘 다 표시되지만 coherency warning은 제한적 | `services/dashboard_service.py`는 DB top tradable과 leadership fallback을 함께 다루며 `DASHBOARD_SAMPLE_LIMIT_HIDES_TRADABLE_THEME`는 있다. 그러나 DB snapshot과 leadership snapshot의 생성 run/watermark는 표시하지 않는다. | 운영자가 DB top theme와 leadership top theme가 같은 관측 universe인지 구분하기 어렵다. | theme/leadership section에 `source`, `snapshot_id`, `calculated_at`, `data_age_sec`, `watchset_selection_source`를 동일 포맷으로 표시한다. | 기존 테스트: `tests/test_dashboard_service.py::test_dashboard_top_theme_query_does_not_hide_tradable_themes_behind_latest_sample`. |
 | P2-3 Market index TR bootstrap 설정은 status에 보이지만 Core projection과 bootstrap replay 경계가 약함 | `gateway/kiwoom_runtime.py`는 `market_index_tr_bootstrap_enabled`를 heartbeat/status에 싣지만, Core projection은 `market_index_tick` 이벤트 중심이다. | realtime callback이 막힐 때 index bootstrap이 runtime status와 projection freshness를 어떻게 보완하는지 운영자가 확인하기 어렵다. | bootstrap TR 응답을 명시적 `market_index_tick` child event 또는 `market_index_bootstrap_snapshot` projection으로 분리하고 source를 dashboard에 표시한다. | SQL: `SELECT key,value FROM gateway_status WHERE key LIKE 'market_index%';` |
-| P2-4 projection 오류와 retention 상태가 dashboard에서 root cause 단위로 묶이지 않음 | `services/dashboard_service.py`는 projection errors를 나열하지만 watermark, retention candidate, projection error recent window를 하나의 RCA card로 묶지는 않는다. | "이 event가 projection 실패 후 retention 대상인지", "replay 가능성이 남아 있는지"를 수동 SQL로 봐야 한다. | event_id 기준 projection status view를 만들고 dashboard errors에 retention eligibility와 watermark position을 함께 표시한다. | SQL: `SELECT ge.rowid,ge.event_id,pw.last_event_rowid FROM gateway_events ge CROSS JOIN projection_watermarks pw WHERE pw.projection_name='market_data' ORDER BY ge.rowid DESC LIMIT 20;` |
+| P2-4 event별 projection-retention RCA | 수정 완료. `projection_retention_event_rca` SQL view와 read-only RCA service가 Gateway/raw event, required outbox, result, success/error watermark, replay availability, KRX/NXT venue, eligibility reason을 event_id 단위로 결합한다. | 운영자는 `PROJECTION_OUTBOX_MISSING/NOT_APPLIED`, `PROJECTION_RESULT_MISSING/ERROR`, `PROJECTION_SUCCESS_WATERMARK_BEHIND`, raw/command 보호 사유를 API/Dashboard에서 바로 확인한다. | Dashboard full/fast `projection_watermarks`, `projection_retention`, errors RCA card와 ops report를 추가했다. fast status는 bounded blocker probe, exact count는 명시적 ops 요청으로 분리한다. | API: `/api/operator/projection-retention/rca`. Ops: `tools/ops_projection_retention_check.py`. Report: `reports/projection_retention/20260710T031456Z/summary.md`. |
 
 ## 추가된 Guard Tests
 
@@ -331,15 +331,14 @@ P0-4 durable order broker boundary 진행 상태:
 
 ## 다음 PR 권장 순서
 
-1. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-2. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-3. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-4. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-5. LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-6. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-7. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-8. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-9. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+2. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+3. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+4. LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+5. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+6. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+7. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+8. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 완료
 
@@ -351,9 +350,21 @@ P0-4 durable order broker boundary 진행 상태:
 - 반복 fixture `tests/fixtures/projection_replay/market_data_events.json`은 KRX price, 명시적 NXT price, KRX condition, TR response를 포함한다. targeted tests는 export/import order 보존, tamper/운영 DB 거부, exact parity, write guard, operator/dashboard read-only 계약을 검증하며 최종 full pytest suite `887`개를 통과했다.
 - operator `GET /api/operator/projection-replay/status`, Dashboard full/fast `projection_replay`는 최신 report만 읽고 실행 control을 제공하지 않는다. Runbook: `docs/runbook_market_data_replay_verification_ko.md`.
 - 2026-07-10 fixture evidence는 event `4`(KRX `2`, NXT `1`, UNKNOWN `1`), inline/worker hash 일치, 양쪽 reconcile `PASS`, market_data outbox `APPLIED=4`, PENDING/PROCESSING/ERROR/DEAD_LETTER `0`, 주문/trading side effect `0`이다. Report: `reports/projection_replay/20260710T021342Z_660e648e/summary.md`.
-- 다음 PR 진입 판정은 `PASS`다. 이 완료는 장중 cutover나 10거래일 flag cleanup 근거를 대체하지 않으며 다음 범위는 P1-2/P2-4 watermark/retention/RCA다.
+- 다음 PR 진입 판정은 `PASS`다. 이 완료는 장중 cutover나 10거래일 flag cleanup 근거를 대체하지 않는다. P1-2/P2-4 watermark/retention/RCA까지 완료했으며 다음 범위는 market_index worker apply/reconcile 준비다.
 
-## Flag 정리 계획 (최종 순서 9)
+## Projection watermark / retention RCA 완료
+
+- schema 48은 projection별 `last_success_*`/`last_error_*` watermark, `(projection_name,event_id)` 단위 `projection_event_results`, event별 `projection_retention_event_rca` view를 추가했다. 기존 `last_event_*`는 호환 목적으로 유지한다. inline/worker 성공은 success watermark와 result를 기록하고, 오류는 error watermark만 전진시킨다. outbox의 `APPLIED` 및 `ERROR/DEAD_LETTER` terminal 전이와 result/watermark 갱신은 같은 commit이다.
+- accepted replayable event의 retention은 raw event가 존재하고, required outbox가 모두 `APPLIED`, result가 모두 `SUCCESS`, 각 success watermark가 event rowid 이상인 경우에만 허용한다. missing outbox/result, ERROR/DEAD_LETTER/SKIPPED, watermark lag, command 연결 event는 event별 reason code로 fail-closed한다.
+- 운영 기본값은 `EVENT_STORE_RETENTION_ENABLED=false`, `PROJECTION_EVENT_RESULT_BACKFILL_ENABLED=false`다. backfill API는 APPLIED legacy outbox만 대상으로 dry-run이 기본이며 apply flag 없이는 HTTP 409다. retention apply는 enabled와 old blocker 0을 동시에 요구하고 blocker 하나라도 있으면 전체 prune을 거부한다.
+- Dashboard full/fast와 operator aggregate에 `projection_watermarks`/`projection_retention`을 추가했다. fast status는 partial index를 사용하는 bounded blocker probe이고, 정확한 eligible/blocked count는 명시적 ops 요청으로 분리했다. event RCA는 KRX/NXT/UNKNOWN/MIXED venue와 replay availability를 함께 표시한다.
+- 26.7GB 운영 DB를 read-only SQLite online backup으로 격리했다. source는 backup 시점에 이미 schema `48`(`schema_metadata.updated_at=2026-07-10 02:40:45Z`)이었고 `projection_event_results=0`이었다. 이 additive schema 변경의 실행 주체는 확인되지 않았다. source에 migration, backfill apply, retention apply는 실행하지 않았고 source `quick_check`는 제한 시간 안에 끝나지 않아 성공으로 기록하지 않는다.
+- 실제 구버전 migration 검증은 격리 copy에서 신규 객체를 제거해 schema 47 상태를 재현한 뒤 수행했다. `47 -> 48`은 `9.619s`, 재실행은 `0.043s`, 최종 격리 DB `quick_check=ok`(`524.195s`)였다. 30일 status는 `0.001s`, 1일 fast bounded status는 5,020,589 age-eligible event에서 `0.525s`, 1일 exact는 `116.080s`였고 eligible/blocked는 `1,251,085/3,769,504`였다. query plan은 retention partial index를 사용했다. 근거: `reports/projection_retention_migration/20260710T024503Z/summary.md`.
+- OBSERVE-safe Core를 격리 migrated DB에만 띄워 API matrix를 확인했다. `LIVE_SIM/LIVE_REAL=false`, projection/background apply와 retention/backfill apply는 disabled였고, legacy APPLIED backfill candidate `65,159`, applied `0`, unresolved projection error `0`, command/order-command delta `0/0`이었다. 실제 NXT event `evt_3bd65e3120e147a1b075f8d7192ec51d`의 RCA venue count `NXT=1`을 확인했다.
+- 최종 API verdict는 `WARN`이며 유일한 reason은 의도한 안전 기본값 `EVENT_RETENTION_DISABLED_SAFE_DEFAULT`다. failures는 없고 점검 후 Core와 port 8018 listener를 종료했다. 근거: `reports/projection_retention/20260710T031456Z/summary.md`, runbook: `docs/runbook_projection_watermark_retention_ko.md`.
+- targeted migration/idempotency/atomicity/fail-closed/API/dashboard/ops tests와 최종 full pytest suite `895`개를 통과했다. 다음 PR 진입 판정은 `WARN_ALLOWED_RETENTION_DISABLED_SAFE_DEFAULT`이며 market_index worker apply/reconcile 준비로 진행한다.
+
+## Flag 정리 계획 (최종 순서 8)
 
 - 전제 조건 (exit criteria): `price_tick`/`tr_response`/`condition_event` cutover가 모두 기본 경로로 동작하고, 연속 10거래일 reconcile PASS, invalid effective skip 0건, deferred side-effect 누락 0건.
 - 1단계: `GATEWAY_MARKET_DATA_APPEND_ONLY_*` 계열 scaffolding flag(dry-run, per-type cutover, budget, require-*, reconcile max age 등 약 20개)와 `PROJECTION_OUTBOX_SHADOW_MODE`/`PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED`/`PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED` apply 게이트를 제거하고, append-only를 기본 동작으로 만든다. inline projection 경로는 긴급 rollback용 단일 flag 하나 뒤에만 유지한다.

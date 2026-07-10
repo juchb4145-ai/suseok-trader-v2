@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 47
+SCHEMA_VERSION = 48
 APP_NAME = "suseok-trader-v2"
 
 
@@ -1328,6 +1328,13 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         ON gateway_events (event_type, status)
         """
     )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_events_retention_received_type_status
+        ON gateway_events (received_at, event_type, status)
+        WHERE command_id IS NULL
+        """
+    )
 
 
 def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
@@ -1344,10 +1351,82 @@ def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        connection,
+        "projection_watermarks",
+        {
+            "last_success_event_rowid": "INTEGER NOT NULL DEFAULT 0",
+            "last_success_event_id": "TEXT",
+            "last_success_event_received_at": "TEXT",
+            "last_success_processed_at": "TEXT",
+            "last_error_event_rowid": "INTEGER NOT NULL DEFAULT 0",
+            "last_error_event_id": "TEXT",
+            "last_error_event_received_at": "TEXT",
+            "last_error_processed_at": "TEXT",
+            "last_error_message": "TEXT",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_projection_watermarks_updated_at
         ON projection_watermarks (updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projection_event_results (
+            projection_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            event_rowid INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'ERROR')),
+            outcome TEXT NOT NULL,
+            error_message TEXT,
+            first_processed_at TEXT NOT NULL,
+            processed_at TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (projection_name, event_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_event_results_event
+        ON projection_event_results (event_rowid, event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_event_results_status
+        ON projection_event_results (projection_name, status, processed_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE VIEW IF NOT EXISTS projection_retention_event_rca AS
+        SELECT
+            ge.rowid AS event_rowid,
+            ge.event_id,
+            ge.event_type,
+            ge.status AS gateway_event_status,
+            ge.received_at,
+            po.projection_name,
+            po.status AS outbox_status,
+            po.last_error AS outbox_error,
+            per.status AS projection_result_status,
+            per.outcome AS projection_outcome,
+            per.error_message AS projection_error,
+            per.processed_at AS projection_processed_at,
+            CASE
+                WHEN po.status = 'APPLIED' AND per.status = 'SUCCESS' THEN 1
+                ELSE 0
+            END AS projection_retention_ready
+        FROM gateway_events AS ge
+        LEFT JOIN projection_outbox AS po ON po.event_id = ge.event_id
+        LEFT JOIN projection_event_results AS per
+            ON per.event_id = ge.event_id
+            AND per.projection_name = po.projection_name
         """
     )
 
@@ -1406,6 +1485,12 @@ def _create_projection_outbox_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_event_status_projection
+        ON projection_outbox (event_id, status, projection_name)
+        """
+    )
+    connection.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_projection_outbox_updated_at
         ON projection_outbox (updated_at)
         """
@@ -1426,9 +1511,25 @@ def _create_event_retention_tables(connection: sqlite3.Connection) -> None:
             deleted_raw_event_count INTEGER NOT NULL,
             market_data_watermark_rowid INTEGER NOT NULL,
             prunable_event_types_json TEXT NOT NULL,
+            age_eligible_event_count INTEGER NOT NULL DEFAULT 0,
+            projection_blocked_event_count INTEGER NOT NULL DEFAULT 0,
+            projection_watermarks_json TEXT NOT NULL DEFAULT '{}',
+            blocked_reason_counts_json TEXT NOT NULL DEFAULT '{}',
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "event_retention_runs",
+        {
+            "age_eligible_event_count": "INTEGER NOT NULL DEFAULT 0",
+            "projection_blocked_event_count": "INTEGER NOT NULL DEFAULT 0",
+            "projection_watermarks_json": "TEXT NOT NULL DEFAULT '{}'",
+            "blocked_reason_counts_json": "TEXT NOT NULL DEFAULT '{}'",
+            "no_trading_side_effects": "INTEGER NOT NULL DEFAULT 1",
+        },
     )
     connection.execute(
         """

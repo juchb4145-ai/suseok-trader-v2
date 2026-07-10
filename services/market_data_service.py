@@ -27,6 +27,7 @@ from storage.projection_watermarks import (
     ProjectionWatermark,
     advance_projection_watermark,
     get_projection_watermark,
+    record_projection_event_result,
     reset_projection_watermark,
 )
 
@@ -175,12 +176,43 @@ def process_gateway_event(
             applied_count = _process_condition_event(connection, event)
         else:
             applied_count = _process_tr_response(connection, event, resolved_settings)
-        _advance_market_data_watermark_for_event(connection, event, commit=False)
+        projection_error = _projection_error_message(connection, event.event_id)
+        if projection_error is None:
+            record_projection_event_result(
+                connection,
+                projection_name=MARKET_DATA_PROJECTION_NAME,
+                event_id=event.event_id,
+                status="SUCCESS",
+                outcome="APPLIED" if applied_count else "IGNORED",
+                metadata={"event_type": event_type},
+                commit=False,
+            )
+            _advance_market_data_watermark_for_event(connection, event, commit=False)
+        else:
+            record_projection_event_result(
+                connection,
+                projection_name=MARKET_DATA_PROJECTION_NAME,
+                event_id=event.event_id,
+                status="ERROR",
+                outcome="INLINE_PROJECTION_ERROR",
+                error_message=projection_error,
+                metadata={"event_type": event_type},
+                commit=False,
+            )
         connection.commit()
     except Exception as exc:
         connection.rollback()
         _record_projection_error(connection, event, error_message=str(exc))
-        _advance_market_data_watermark_for_event(connection, event, commit=False)
+        record_projection_event_result(
+            connection,
+            projection_name=MARKET_DATA_PROJECTION_NAME,
+            event_id=event.event_id,
+            status="ERROR",
+            outcome="INLINE_PROJECTION_EXCEPTION",
+            error_message=str(exc),
+            metadata={"event_type": event_type},
+            commit=False,
+        )
         connection.commit()
         return MarketDataProcessResult(
             event_id=event.event_id,
@@ -1506,6 +1538,23 @@ def _record_projection_error(
     )
 
 
+def _projection_error_message(
+    connection: sqlite3.Connection,
+    event_id: str,
+) -> str | None:
+    row = connection.execute(
+        """
+        SELECT error_message
+        FROM market_projection_errors
+        WHERE event_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (event_id,),
+    ).fetchone()
+    return None if row is None else str(row["error_message"])
+
+
 def _payload_code(payload: Mapping[str, Any]) -> str | None:
     value = payload.get("code")
     if value is None:
@@ -1658,6 +1707,15 @@ def _with_market_data_watermark(
     *,
     commit: bool,
 ) -> MarketDataProcessResult:
+    record_projection_event_result(
+        connection,
+        projection_name=MARKET_DATA_PROJECTION_NAME,
+        event_id=event.event_id,
+        status="SUCCESS",
+        outcome=result.status,
+        metadata={"event_type": event.event_type.strip().lower()},
+        commit=False,
+    )
     _advance_market_data_watermark_for_event(connection, event, commit=commit)
     return result
 

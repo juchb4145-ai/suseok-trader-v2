@@ -238,6 +238,7 @@ class Settings:
     gateway_market_reference_append_only_reconcile_max_age_sec: int = 300
     gateway_market_reference_append_only_min_membership_count: int = 100
     gateway_market_reference_append_only_effective_skip_disabled_in_pr13: bool = True
+    projection_event_result_backfill_enabled: bool = False
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
     event_store_retention_batch_size: int = 5000
@@ -2231,6 +2232,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
                     "true",
                 )
             )
+        ),
+        projection_event_result_backfill_enabled=_parse_bool(
+            env.get("PROJECTION_EVENT_RESULT_BACKFILL_ENABLED", "false")
         ),
         event_store_retention_enabled=_parse_bool(
             env.get("EVENT_STORE_RETENTION_ENABLED", "false")

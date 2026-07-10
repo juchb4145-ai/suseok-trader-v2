@@ -4,11 +4,13 @@ import sqlite3
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, utc_now
+from storage.event_retention import get_event_retention_status
 from storage.event_store import get_gateway_status_values
 from storage.gateway_order_broker_boundary import get_order_broker_boundary_status
 from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
 )
+from storage.projection_watermarks import get_projection_watermark_status
 
 from services.ai_advisory.storage import build_status as build_ai_advisory_status
 from services.candidate_service import get_candidate_status
@@ -96,6 +98,11 @@ def build_operator_status(
         ),
         "order_broker_boundaries": get_order_broker_boundary_status(connection),
         "projection_replay": get_projection_replay_status(),
+        "projection_watermarks": get_projection_watermark_status(connection),
+        "event_retention": get_event_retention_status(
+            connection,
+            settings=resolved_settings,
+        ),
         "live_sim": {
             "status": live_sim_status,
             "kill_switch": live_sim_status.get("kill_switch"),

@@ -62,6 +62,7 @@ from services.runtime.projection_outbox_bulk_retire import (
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
 from services.runtime.projection_replay import get_projection_replay_status
 from storage.event_retention import (
+    EventRetentionSafetyError,
     get_event_retention_status,
     prune_event_store_events,
 )
@@ -73,6 +74,13 @@ from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
 )
 from storage.projection_outbox import get_projection_outbox_status
+from storage.projection_retention import build_projection_retention_rca
+from storage.projection_watermarks import (
+    ProjectionWatermarkBackfillSafetyError,
+    backfill_projection_event_results_from_outbox,
+    get_projection_watermark_status,
+    list_projection_event_results,
+)
 from storage.sqlite import open_connection
 from storage.sqlite_locking import (
     configure_sqlite_busy_timeout,
@@ -983,6 +991,7 @@ def operator_incremental_evaluation_run_once(
 @router.get("/event-retention/status")
 def operator_event_retention_status(
     retention_days: int | None = Query(default=None, ge=1),
+    exact_counts: bool = Query(default=False),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -991,6 +1000,7 @@ def operator_event_retention_status(
             connection,
             settings=settings,
             retention_days=retention_days,
+            exact_counts=exact_counts,
         )
         payload["read_only"] = True
         return payload
@@ -1007,13 +1017,19 @@ def operator_event_retention_prune(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        result = prune_event_store_events(
-            connection,
-            settings=settings,
-            retention_days=retention_days,
-            dry_run=dry_run,
-            limit=limit,
-        )
+        try:
+            result = prune_event_store_events(
+                connection,
+                settings=settings,
+                retention_days=retention_days,
+                dry_run=dry_run,
+                limit=limit,
+            )
+        except EventRetentionSafetyError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
         return result.to_dict()
     finally:
         connection.close()
@@ -1056,6 +1072,97 @@ def operator_realtime_subscriptions_run_once(
             queue_commands=queue_commands,
         )
         return plan.to_dict()
+    finally:
+        connection.close()
+
+
+@router.get("/projection-watermarks/status")
+def operator_projection_watermarks_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_projection_watermark_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/projection-watermarks/results")
+def operator_projection_watermark_results(
+    projection_name: str | None = Query(default=None, min_length=1, max_length=64),
+    status: str | None = Query(default=None, min_length=1, max_length=16),
+    event_id: str | None = Query(default=None, min_length=1, max_length=128),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_projection_event_results(
+            connection,
+            projection_name=projection_name,
+            status=status,
+            event_id=event_id,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/projection-watermarks/backfill",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_projection_watermark_backfill(
+    limit: int = Query(default=100, ge=1, le=5000),
+    dry_run: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            return backfill_projection_event_results_from_outbox(
+                connection,
+                limit=limit,
+                dry_run=dry_run,
+                apply_enabled=settings.projection_event_result_backfill_enabled,
+            )
+        except ProjectionWatermarkBackfillSafetyError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
+    finally:
+        connection.close()
+
+
+@router.get("/projection-retention/rca")
+def operator_projection_retention_rca(
+    event_id: str | None = Query(default=None, min_length=1, max_length=128),
+    retention_days: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    blocked_only: bool = Query(default=False),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        retention = get_event_retention_status(
+            connection,
+            settings=settings,
+            retention_days=retention_days,
+        )
+        return build_projection_retention_rca(
+            connection,
+            cutoff_at=str(retention["cutoff_at"]),
+            event_id=event_id,
+            limit=limit,
+            blocked_only=blocked_only,
+        )
     finally:
         connection.close()
 

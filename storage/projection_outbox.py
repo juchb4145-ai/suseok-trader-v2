@@ -11,6 +11,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 
 from storage.gateway_command_store import canonical_json
+from storage.projection_watermarks import record_projection_event_result
 
 PROJECTION_OUTBOX_STATUSES: tuple[str, ...] = (
     "PENDING",
@@ -208,7 +209,7 @@ def claim_projection_outbox_jobs(
     try:
         connection.execute("BEGIN IMMEDIATE")
         candidates = connection.execute(
-            """
+            f"""
             SELECT outbox_id
             FROM projection_outbox
             WHERE status = 'PENDING'
@@ -217,7 +218,7 @@ def claim_projection_outbox_jobs(
                 {projection_clause}
             ORDER BY priority DESC, event_rowid ASC, created_at ASC
             LIMIT ?
-            """.format(projection_clause=projection_clause),
+            """,
             tuple(candidate_params),
         ).fetchall()
         for candidate in candidates:
@@ -308,7 +309,13 @@ def mark_projection_outbox_error(
     now = datetime_to_wire(utc_now())
     row = connection.execute(
         """
-        SELECT attempts, metadata_json
+        SELECT
+            attempts,
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
         FROM projection_outbox
         WHERE outbox_id = ? AND locked_by = ?
         """,
@@ -326,6 +333,18 @@ def mark_projection_outbox_error(
         marked_at=now,
     )
     processed_at = now if next_status == "DEAD_LETTER" else None
+    record_projection_event_result(
+        connection,
+        projection_name=row["projection_name"],
+        event_id=row["event_id"],
+        event_rowid=row["event_rowid"],
+        event_type=row["event_type"],
+        status="ERROR",
+        outcome=next_status,
+        error_message=normalized_error,
+        metadata={"source": "projection_outbox", "evidence": dict(evidence or {})},
+        commit=False,
+    )
     connection.execute(
         """
         UPDATE projection_outbox
@@ -548,7 +567,12 @@ def _mark_projection_outbox_terminal(
     now = datetime_to_wire(utc_now())
     row = connection.execute(
         """
-        SELECT metadata_json
+        SELECT
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
         FROM projection_outbox
         WHERE outbox_id = ? AND locked_by = ?
         """,
@@ -562,6 +586,21 @@ def _mark_projection_outbox_terminal(
         evidence=evidence,
         marked_at=now,
     )
+    if status == "APPLIED":
+        record_projection_event_result(
+            connection,
+            projection_name=row["projection_name"],
+            event_id=row["event_id"],
+            event_rowid=row["event_rowid"],
+            event_type=row["event_type"],
+            status="SUCCESS",
+            outcome="OUTBOX_APPLIED",
+            metadata={
+                "source": "projection_outbox",
+                "evidence": dict(evidence or {}),
+            },
+            commit=False,
+        )
     connection.execute(
         """
         UPDATE projection_outbox

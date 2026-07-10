@@ -57,13 +57,22 @@ DEFAULT_WORK_ROOT = REPOSITORY_ROOT / "storage" / "replay" / "projection_parity"
 
 _EVENTS_FILE_NAME = "events.jsonl"
 _MANIFEST_FILE_NAME = "manifest.json"
-_NONDETERMINISTIC_COLUMNS = frozenset({"created_at", "updated_at", "last_processed_at"})
+_NONDETERMINISTIC_COLUMNS = frozenset(
+    {
+        "created_at",
+        "updated_at",
+        "last_processed_at",
+        "last_success_processed_at",
+        "last_error_processed_at",
+    }
+)
 _REPLAY_WRITABLE_TABLES = frozenset(
     {
         "raw_events",
         "gateway_events",
         "gateway_status",
         "projection_outbox",
+        "projection_event_results",
         "projection_watermarks",
         "sqlite_sequence",
         *MARKET_PROJECTION_TABLES,

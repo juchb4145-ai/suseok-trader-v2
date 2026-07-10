@@ -14,6 +14,7 @@ from domain.candidate.state import CandidateState
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
 from domain.theme.state import ThemeState
+from storage.event_retention import get_event_retention_status
 from storage.event_store import (
     count_recent_gateway_events,
     get_gateway_status_values,
@@ -27,6 +28,8 @@ from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
 )
 from storage.projection_outbox import get_projection_outbox_status
+from storage.projection_retention import build_projection_retention_rca
+from storage.projection_watermarks import get_projection_watermark_status
 
 from services.ai_advisory.storage import (
     build_status as build_ai_advisory_status,
@@ -171,6 +174,8 @@ DASHBOARD_SECTIONS = [
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
     "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -206,6 +211,8 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
     "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "market_data",
     "market_reference",
@@ -227,6 +234,8 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
     "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -354,6 +363,11 @@ def build_dashboard_snapshot(
     )
     order_broker_boundaries = get_order_broker_boundary_status(connection)
     projection_replay = get_projection_replay_status()
+    projection_watermarks = get_projection_watermark_status(connection)
+    projection_retention = get_event_retention_status(
+        connection,
+        settings=settings,
+    )
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -533,7 +547,12 @@ def build_dashboard_snapshot(
         settings=settings,
     )
 
-    errors = build_dashboard_errors(connection, settings=settings, limit=bounded_limit)
+    errors = build_dashboard_errors(
+        connection,
+        settings=settings,
+        limit=bounded_limit,
+        projection_retention_status=projection_retention,
+    )
     pipeline_summary = _pipeline_summary(
         gateway_status=gateway_status,
         market_data_status=market_data_status,
@@ -612,6 +631,8 @@ def build_dashboard_snapshot(
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
         "projection_replay": projection_replay,
+        "projection_watermarks": projection_watermarks,
+        "projection_retention": projection_retention,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
@@ -1216,6 +1237,14 @@ def _build_dashboard_fast_section(
             )
         return context["projection_outbox_backlog"]
 
+    def projection_retention_status() -> dict[str, Any]:
+        if "projection_retention_status" not in context:
+            context["projection_retention_status"] = get_event_retention_status(
+                connection,
+                settings=settings,
+            )
+        return context["projection_retention_status"]
+
     if section == "safety":
         return build_safety_section(settings)
     if section == "system":
@@ -1248,6 +1277,10 @@ def _build_dashboard_fast_section(
         return get_order_broker_boundary_status(connection)
     if section == "projection_replay":
         return get_projection_replay_status()
+    if section == "projection_watermarks":
+        return get_projection_watermark_status(connection)
+    if section == "projection_retention":
+        return projection_retention_status()
     if section == "market_data":
         return {
             "status": market_data_status(),
@@ -1291,6 +1324,7 @@ def _build_dashboard_fast_section(
             connection,
             settings=settings,
             limit=min(bounded_limit, 20),
+            projection_retention_status=projection_retention_status(),
         )
     if section == "projection_outbox":
         projection_outbox_backlog()
@@ -1432,6 +1466,7 @@ def build_dashboard_errors(
     *,
     settings: Settings,
     limit: int | None = None,
+    projection_retention_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     bounded_limit = _bounded_limit(limit, settings)
     recent_gateway_events = list_recent_gateway_events(connection, limit=bounded_limit)
@@ -1440,8 +1475,18 @@ def build_dashboard_errors(
         for event in recent_gateway_events
         if event.get("status") not in {"ACCEPTED", None} or event.get("error_message")
     ]
+    retention = dict(projection_retention_status or {})
+    if not retention:
+        retention = get_event_retention_status(connection, settings=settings)
+    projection_retention_rca = build_projection_retention_rca(
+        connection,
+        cutoff_at=str(retention["cutoff_at"]),
+        limit=min(bounded_limit, 20),
+        blocked_only=True,
+    )
     return {
         "market_projection_errors": list_projection_errors(connection, limit=bounded_limit),
+        "projection_retention_rca": projection_retention_rca,
         "theme_projection_errors": list_theme_projection_errors(
             connection,
             limit=bounded_limit,

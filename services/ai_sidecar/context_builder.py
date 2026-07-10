@@ -1494,9 +1494,24 @@ def _gateway_transport_status(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def _pipeline_counts(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+    market_data = get_market_data_status(connection, settings=settings)
+    watermark = market_data.get("projection_watermark")
+    if isinstance(watermark, Mapping):
+        market_data["projection_watermark"] = {
+            key: watermark.get(key)
+            for key in (
+                "projection_name",
+                "last_event_rowid",
+                "last_event_id",
+                "last_success_event_rowid",
+                "last_success_event_id",
+                "last_error_event_rowid",
+                "last_error_event_id",
+            )
+        }
     return {
         "gateway_events": _count_rows(connection, "gateway_events"),
-        "market_data": get_market_data_status(connection, settings=settings),
+        "market_data": market_data,
         "themes": get_theme_status(connection, settings=settings),
         "candidates": get_candidate_status(connection, settings=settings),
         "strategy": get_strategy_status(connection, settings),
