@@ -40,6 +40,7 @@ from services.runtime.evaluation_run_guard import (
     clear_runtime_execution_locks,
 )
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
+from services.runtime.live_sim_lifecycle_consumer import process_live_sim_lifecycle_batch
 from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
 from storage.event_retention import prune_event_store_events
 from storage.sqlite import initialize_database, open_connection
@@ -69,6 +70,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         and settings.incremental_evaluation_worker_enabled
         else None
     )
+    live_sim_lifecycle_consumer_task = (
+        asyncio.create_task(_live_sim_lifecycle_consumer_loop(settings))
+        if settings.live_sim_lifecycle_consumer_enabled
+        and settings.live_sim_lifecycle_worker_enabled
+        else None
+    )
     live_sim_operating_cycle_task = _maybe_create_live_sim_operating_cycle_task(settings)
     event_retention_task = (
         asyncio.create_task(_event_retention_loop(settings))
@@ -86,6 +93,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             incremental_evaluation_task.cancel()
             with suppress(asyncio.CancelledError):
                 await incremental_evaluation_task
+        if live_sim_lifecycle_consumer_task is not None:
+            live_sim_lifecycle_consumer_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await live_sim_lifecycle_consumer_task
         if live_sim_operating_cycle_task is not None:
             live_sim_operating_cycle_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -139,6 +150,24 @@ def _run_incremental_evaluation_once(settings: Settings) -> None:
     connection = _open_runtime_database_connection(settings.trading_db_path)
     try:
         process_incremental_evaluation_batch(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+async def _live_sim_lifecycle_consumer_loop(settings: Settings) -> None:
+    interval_sec = max(float(settings.live_sim_lifecycle_worker_interval_sec), 0.1)
+    while True:
+        try:
+            await asyncio.to_thread(_run_live_sim_lifecycle_consumer_once, settings)
+        except Exception:
+            logger.exception("LIVE_SIM lifecycle consumer worker failed")
+        await asyncio.sleep(interval_sec)
+
+
+def _run_live_sim_lifecycle_consumer_once(settings: Settings) -> None:
+    connection = _open_runtime_database_connection(settings.trading_db_path)
+    try:
+        process_live_sim_lifecycle_batch(connection, settings=settings)
     finally:
         connection.close()
 

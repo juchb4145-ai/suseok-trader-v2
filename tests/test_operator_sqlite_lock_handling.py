@@ -78,6 +78,36 @@ def test_market_data_reconcile_run_once_falls_back_to_read_only_on_lock(
     assert payload["no_trading_side_effects"] is True
 
 
+def test_lifecycle_consumer_run_once_returns_locked_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "operator-locked-lifecycle.sqlite3"
+    initialize_database(db_path).close()
+    _set_env(monkeypatch, db_path)
+
+    def raise_locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        "api.routes.operator.process_live_sim_lifecycle_batch",
+        raise_locked,
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/operator/live-sim/lifecycle-consumer/run-once?limit=1",
+            headers={"X-Local-Token": "secret-token"},
+        )
+
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["status"] == "LOCKED_RETRYABLE"
+    assert detail["locked_retry_count"] == 2
+    assert detail["lifecycle_state_applied"] is False
+    assert detail["no_order_commands_created"] is True
+
+
 @dataclass(frozen=True)
 class _FakeReconcileResult:
     def to_dict(self) -> dict[str, Any]:

@@ -400,6 +400,13 @@ class Settings:
     live_sim_lifecycle_retry_limit: int = 3
     live_sim_lifecycle_processing_ttl_sec: int = 60
     live_sim_lifecycle_retry_delay_sec: float = 1.0
+    live_sim_lifecycle_cutover_dry_run_enabled: bool = False
+    live_sim_lifecycle_cutover_enabled: bool = False
+    live_sim_lifecycle_global_kill_switch: bool = True
+    live_sim_lifecycle_inline_fallback_enabled: bool = True
+    live_sim_lifecycle_require_worker_health: bool = True
+    live_sim_lifecycle_worker_health_max_age_sec: int = 10
+    live_sim_lifecycle_max_unresolved_count: int = 100
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -1037,6 +1044,12 @@ class Settings:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
         if self.live_sim_lifecycle_retry_delay_sec < 0:
             raise ValueError("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC must be >= 0")
+        for field_name in (
+            "live_sim_lifecycle_worker_health_max_age_sec",
+            "live_sim_lifecycle_max_unresolved_count",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
         if not self.projection_outbox_shadow_mode:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
         _validate_timezone(self.candidate_trade_date_timezone)
@@ -3100,6 +3113,31 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC", "1.0"),
             "LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC",
             min_value=0.0,
+        ),
+        live_sim_lifecycle_cutover_dry_run_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED", "false")
+        ),
+        live_sim_lifecycle_cutover_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_global_kill_switch=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH", "true")
+        ),
+        live_sim_lifecycle_inline_fallback_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_INLINE_FALLBACK_ENABLED", "true")
+        ),
+        live_sim_lifecycle_require_worker_health=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_REQUIRE_WORKER_HEALTH", "true")
+        ),
+        live_sim_lifecycle_worker_health_max_age_sec=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_HEALTH_MAX_AGE_SEC", "10"),
+            "LIVE_SIM_LIFECYCLE_WORKER_HEALTH_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        live_sim_lifecycle_max_unresolved_count=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_MAX_UNRESOLVED_COUNT", "100"),
+            "LIVE_SIM_LIFECYCLE_MAX_UNRESOLVED_COUNT",
+            min_value=1,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),

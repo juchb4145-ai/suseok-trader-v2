@@ -194,6 +194,7 @@ def process_live_sim_lifecycle_batch(
 ) -> LiveSimLifecycleBatchResult:
     resolved_settings = settings or load_settings()
     run_id = new_message_id("live_sim_lifecycle_consumer")
+    started_at = datetime_to_wire(utc_now())
     if not (
         resolved_settings.live_sim_lifecycle_consumer_enabled
         and resolved_settings.live_sim_lifecycle_worker_enabled
@@ -260,7 +261,7 @@ def process_live_sim_lifecycle_batch(
         status = "COMPLETED_WITH_ERRORS" if errors else "COMPLETED"
     if blocked and not errors:
         status = "BLOCKED_DEAD_LETTER"
-    return LiveSimLifecycleBatchResult(
+    result = LiveSimLifecycleBatchResult(
         run_id=run_id,
         status=status,
         claimed_count=claimed_count,
@@ -272,6 +273,8 @@ def process_live_sim_lifecycle_batch(
         blocked_by_dead_letter=blocked,
         errors=tuple(errors),
     )
+    _record_consumer_run(connection, result, started_at=started_at)
+    return result
 
 
 def reset_stale_live_sim_lifecycle_processing(
@@ -476,6 +479,7 @@ def get_live_sim_lifecycle_consumer_status(
         connection,
         LIVE_SIM_LIFECYCLE_PROJECTION,
     ).to_dict()
+    latest_worker_run = get_latest_live_sim_lifecycle_consumer_run(connection)
     failures: list[str] = []
     warnings: list[str] = []
     if counts["DEAD_LETTER"]:
@@ -515,12 +519,31 @@ def get_live_sim_lifecycle_consumer_status(
         "blocked_by_dead_letter": _earliest_unresolved_status(connection) == "DEAD_LETTER",
         "oldest_unresolved": None if oldest is None else dict(oldest),
         "watermark": watermark,
+        "latest_worker_run": latest_worker_run,
         "inbox_started_at": started_at,
         "supported_event_types": list(event_types),
         "read_only": True,
         "no_order_commands_created": True,
         "live_real_allowed": False,
     }
+
+
+def get_latest_live_sim_lifecycle_consumer_run(
+    connection: sqlite3.Connection,
+) -> dict[str, Any] | None:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM live_sim_lifecycle_consumer_runs
+        ORDER BY completed_at DESC, run_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    result = dict(row)
+    result["evidence"] = _json_object(result.pop("evidence_json", "{}"))
+    return result
 
 
 def _apply_lifecycle_event(
@@ -721,6 +744,54 @@ def _mark_lifecycle_failure(
         "error_message": error_message,
         "retryable": status == "PENDING",
     }
+
+
+def _record_consumer_run(
+    connection: sqlite3.Connection,
+    result: LiveSimLifecycleBatchResult,
+    *,
+    started_at: str,
+) -> None:
+    completed_at = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_consumer_runs (
+            run_id,
+            status,
+            claimed_count,
+            applied_count,
+            duplicate_count,
+            error_count,
+            dead_letter_count,
+            stale_reset_count,
+            started_at,
+            completed_at,
+            evidence_json
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            result.run_id,
+            result.status,
+            result.claimed_count,
+            result.applied_count,
+            result.duplicate_count,
+            result.error_count,
+            result.dead_letter_count,
+            result.stale_reset_count,
+            started_at,
+            completed_at,
+            _json_dumps(
+                {
+                    "blocked_by_dead_letter": result.blocked_by_dead_letter,
+                    "errors": list(result.errors),
+                    "no_order_commands_created": True,
+                    "live_real_allowed": False,
+                }
+            ),
+        ),
+    )
+    connection.commit()
 
 
 def _claim_next_inbox_row(

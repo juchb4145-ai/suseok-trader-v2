@@ -167,6 +167,16 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         warnings.append("LIFECYCLE_CONSUMER_DISABLED_PREPARATION")
     if not bool(status.get("worker_enabled")):
         warnings.append("LIFECYCLE_WORKER_DISABLED_PREPARATION")
+    cutover_enabled = bool(status.get("cutover_enabled"))
+    if cutover_enabled:
+        if bool(status.get("global_kill_switch")):
+            failures.append("LIFECYCLE_CUTOVER_KILL_SWITCH_ON")
+        worker_health = status.get("worker_health")
+        worker_health = worker_health if isinstance(worker_health, Mapping) else {}
+        if not bool(worker_health.get("healthy")):
+            failures.append("LIFECYCLE_CUTOVER_WORKER_UNHEALTHY")
+        if int(status.get("effective_defer_count") or 0) <= 0:
+            warnings.append("LIFECYCLE_CUTOVER_NOT_EXERCISED")
     if not bool(inbox.get("read_only")):
         failures.append("LIFECYCLE_INBOX_NOT_READ_ONLY")
     if not dashboard_status:
@@ -187,6 +197,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "inbox_total_count": int(status.get("total_count") or 0),
         "inbox_applied_count": int(status.get("applied_count") or 0),
         "inbox_dead_letter_count": int(status.get("dead_letter_count") or 0),
+        "cutover_enabled": cutover_enabled,
+        "effective_defer_count": int(status.get("effective_defer_count") or 0),
         "read_only_check": True,
         "no_order_commands_created": True,
         "live_real_allowed": False,
@@ -218,6 +230,8 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             f"- inbox_total_count: `{verdict.get('inbox_total_count')}`",
             f"- inbox_applied_count: `{verdict.get('inbox_applied_count')}`",
             f"- inbox_dead_letter_count: `{verdict.get('inbox_dead_letter_count')}`",
+            f"- cutover_enabled: `{verdict.get('cutover_enabled')}`",
+            f"- effective_defer_count: `{verdict.get('effective_defer_count')}`",
             f"- command_count_delta: `{verdict.get('command_count_delta')}`",
             f"- order_command_count_delta: `{verdict.get('order_command_count_delta')}`",
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",

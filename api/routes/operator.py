@@ -25,6 +25,11 @@ from services.runtime.evaluation_run_guard import (
     EvaluationRunLockError,
     get_runtime_execution_lock_status,
 )
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    build_live_sim_lifecycle_cutover_status,
+    get_latest_live_sim_lifecycle_routing_status,
+    list_live_sim_lifecycle_routing_decisions,
+)
 from services.runtime.gateway_market_index_routing import (
     get_latest_market_index_append_only_routing_status,
     list_market_index_append_only_routing_decisions,
@@ -51,7 +56,6 @@ from services.runtime.incremental_evaluation import (
     process_incremental_evaluation_batch,
 )
 from services.runtime.live_sim_lifecycle_consumer import (
-    get_live_sim_lifecycle_consumer_status,
     list_live_sim_lifecycle_inbox,
     process_live_sim_lifecycle_batch,
     reset_live_sim_lifecycle_dead_letter,
@@ -361,7 +365,7 @@ def operator_live_sim_lifecycle_consumer_status() -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        return get_live_sim_lifecycle_consumer_status(connection, settings=settings)
+        return build_live_sim_lifecycle_cutover_status(connection, settings=settings)
     finally:
         connection.close()
 
@@ -390,6 +394,38 @@ def operator_live_sim_lifecycle_consumer_inbox(
         connection.close()
 
 
+@router.get("/live-sim/lifecycle-consumer/routing/status")
+def operator_live_sim_lifecycle_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_live_sim_lifecycle_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/routing")
+def operator_live_sim_lifecycle_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_live_sim_lifecycle_routing_decisions(connection, limit=limit)
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_commands_created": True,
+            "live_real_allowed": False,
+        }
+    finally:
+        connection.close()
+
+
 @router.post(
     "/live-sim/lifecycle-consumer/run-once",
     dependencies=[Depends(require_local_token)],
@@ -400,12 +436,53 @@ def operator_live_sim_lifecycle_consumer_run_once(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
     try:
-        return process_live_sim_lifecycle_batch(
-            connection,
-            settings=settings,
-            limit=limit,
-        ).to_dict()
+        try:
+            result = retry_sqlite_locked(
+                lambda: process_live_sim_lifecycle_batch(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked_error(exc):
+                raise
+            payload = {
+                "status": "LOCKED_RETRYABLE",
+                "retryable": True,
+                "reason_codes": ["SQLITE_DATABASE_LOCKED"],
+                "endpoint": "live_sim_lifecycle_consumer_run_once",
+                "locked_retry_count": locked_retry_count,
+                "lock_metadata": sqlite_lock_retry_metadata(
+                    exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                ),
+                "lifecycle_state_applied": False,
+                "no_order_commands_created": True,
+                "live_real_allowed": False,
+                "operator_action": "retry a smaller batch after ingest pressure drops",
+            }
+            configured_status = int(settings.operator_run_once_locked_http_status)
+            if configured_status == 200:
+                return payload
+            raise HTTPException(status_code=configured_status, detail=payload) from exc
+        payload = result.to_dict()
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
     finally:
         connection.close()
 

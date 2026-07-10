@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (PR-22 LIVE_SIM lifecycle durable consumer 준비 구현 완료)
+최종 업데이트: 2026-07-10 (PR-23 LIVE_SIM lifecycle guarded cutover 구현 및 격리 검증 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -39,14 +39,15 @@
 - PR-20: schema 54에 market-scan source lineage, reconcile/routing evidence를 추가하고 scan worker apply를 준비했다. 같은 event의 market_data dependency가 먼저 완료돼야 하며 parser VERIFIED/data usable/row terminal coverage/fresh prior reconcile을 모두 만족해도 `effective_skip_inline`은 강제로 false다.
 - PR-21: schema 55에 market-scan cutover/controller/budget/rollback evidence를 추가했다. fresh prior reconcile, parser/data/event freshness, market_data dependency, outbox SLA와 이전 effective-skip worker closure가 모두 PASS일 때만 global `1/min` budget으로 inline scan을 제한적으로 건너뛴다.
 - PR-22: schema 56에 LIVE_SIM lifecycle durable inbox와 event-id idempotent consumer를 추가했다. handler write, inbox APPLIED와 success watermark를 한 transaction으로 묶고 ordered retry/dead-letter/reset을 제공한다. 기본 consumer/worker는 disabled이며 Gateway inline compatibility는 유지한다.
+- PR-23: schema 57에 lifecycle worker heartbeat와 routing evidence를 추가했다. healthy worker, inbox 무결성, backlog gate, cutover ON, kill switch OFF일 때만 inline lifecycle apply를 건너뛰며 worker 오류 또는 health 실패는 sequence-safe inline fallback으로 복귀한다.
 - Replay 기반: accepted event export/import, source rowid/received_at 및 order hash 보존, 새 격리 DB 강제, inline-shadow와 worker-apply projection hash/reconcile 비교, strict SQLite write authorizer, KRX/NXT 분리 evidence를 구현했다. operator/API Dashboard는 report read-only status만 제공하고 replay 실행 endpoint는 없다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay, P1-2/P2-4 projection watermark/retention RCA, PR-15/16 market_index, PR-17 common context, PR-18/19 market_regime, PR-20/21 market_scan, PR-22 lifecycle consumer 준비를 완료했다. 다음 구현 범위는 lifecycle guarded cutover이며 market-regime/scan 운영 gate는 `PENDING_KRX_SESSION`/`PENDING_KOA_STUDIO_CONFIRMATION`이다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay, P1-2/P2-4 projection watermark/retention RCA, PR-15/16 market_index, PR-17 common context, PR-18/19 market_regime, PR-20/21 market_scan, PR-22/23 lifecycle durable consumer와 guarded cutover를 완료했다. 다음 구현 범위는 P2-1 incremental queue 운영 경로이며 market-regime/scan 운영 gate는 `PENDING_KRX_SESSION`/`PENDING_KOA_STUDIO_CONFIRMATION`이다.
 
 ## P0
 
 | ID | 증상 | 코드 근거 | 운영 영향 | 최소 수정 방향 | 테스트/SQL 검증 |
 |---|---|---|---|---|---|
-| P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12, `market_reference`는 PR-14, `market_index`는 PR-16, `market_regime`/common context는 PR-19, `market_scan`은 PR-21 guarded mode에서 inline projection을 건너뛸 수 있다. PR-22는 direct handler call을 durable inbox wrapper로 바꿨지만 inline compatibility가 lifecycle write를 request path에서 실행한다. | 제한된 projection event는 worker로 이관할 수 있지만 cutover 전 LIVE_SIM lifecycle write는 Gateway POST latency와 같은 critical path에 있다. | PR-22 inbox/ordered retry/watermark evidence를 확인한 뒤 guarded worker cutover를 추가하고, 전체 consumer 안정화 및 10거래일 exit criteria 후 Gateway POST를 raw append + durable enqueue로 제한한다. | Lifecycle: `docs/runbook_live_sim_lifecycle_consumer_ko.md`. MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. MarketIndex: `docs/runbook_market_index_projection_ko.md`. MarketRegime: `docs/runbook_market_regime_projection_ko.md`. MarketScan: `docs/runbook_market_scan_projection_ko.md`. |
+| P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12, `market_reference`는 PR-14, `market_index`는 PR-16, `market_regime`/common context는 PR-19, `market_scan`은 PR-21 guarded mode에서 inline projection을 건너뛸 수 있다. PR-22/23 lifecycle event도 healthy durable worker에서 `effective_defer_inline=true`가 가능하지만 emergency inline fallback은 남아 있다. | guarded projection/lifecycle event는 worker로 이관할 수 있으나 kill switch 또는 health failure에서는 Gateway request path가 inline fallback을 실행한다. | 전체 consumer 안정화 및 10거래일 exit criteria 후 Gateway POST를 raw append + durable enqueue로 제한하고 단일 emergency rollback flag 안정화 뒤 최종 inline 코드를 제거한다. | Lifecycle: `docs/runbook_live_sim_lifecycle_consumer_ko.md`. MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. MarketIndex: `docs/runbook_market_index_projection_ko.md`. MarketRegime: `docs/runbook_market_regime_projection_ko.md`. MarketScan: `docs/runbook_market_scan_projection_ko.md`. |
 | P0-2 Candidate quote refresh TR response synthetic price_tick `event_id` collision | 수정 완료. `_process_tr_response()`는 row별 synthetic child `GatewayEvent.event_id`를 deterministic하게 생성하고, parent metadata를 보존한다. 근거: `services/market_data_service.py::_synthetic_price_tick_event_id()`, `_with_synthetic_price_tick_metadata()`. | 다중 code row TR response가 `market_tick_samples.event_id` PK 충돌 없이 projection된다. | 유지보수 방향: child id 포맷과 metadata contract를 replay/reconcile 문서에 계속 고정한다. | 테스트: `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`. SQL: `SELECT event_id, metadata_json FROM market_tick_samples WHERE event_id LIKE '%synthetic_price_tick%';` |
 | P0-3 runtime execution lock lease/fencing | 수정 완료. lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 저장하고 별도 monotonic fence sequence를 유지한다. daemon heartbeat가 lease를 갱신하며 TTL이 지나도 owner process/thread가 살아 있으면 takeover를 차단한다. evaluation transaction과 cycle commit 경계는 현재 owner/token을 검증한다. startup cleanup은 expired/dead-owner 또는 self-owned row만 삭제한다. | 장시간 run의 TTL overlap, 다른 Core startup의 active-lock 삭제, stale owner latest-row write를 fail-closed로 차단한다. | 운영 상태는 operator API/dashboard fast/ops report로 확인한다. active owner를 수동 전체 삭제하지 않는다. | 테스트: `tests/test_evaluation_run_guard.py`, `tests/test_live_sim_operating_loop.py`, `tests/test_ops_runtime_execution_lock_check.py`. Runbook: `docs/runbook_runtime_execution_lock_ko.md`. |
 | P0-4 order command broker boundary와 durable DB pre-ack | 수정 완료. schema 47의 `gateway_order_broker_boundaries`가 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 저장한다. Gateway는 local journal 이후 Core에 `order_pre_ack`를 동기 POST하고 `accepted=true`, `durable_pre_ack_recorded=true`를 모두 확인한 경우에만 Kiwoom 주문/cancel method를 호출한다. | Core 응답 실패/유실은 `DURABLE_DB_PRE_ACK_FAILED`로 fail-closed한다. timeout은 `UNCONFIRMED`로 격리하고 신규 BUY routing을 차단하되 lifecycle cancel은 허용한다. 늦은 ack/Chejan은 상태를 복구하며 out-of-order lower state는 역행시키지 않는다. | operator API, Dashboard fast section, ops report로 missing/gap/duplicate/mismatch와 historical unconfirmed를 확인한다. 기존 미확정 row를 evidence 없이 종결하지 않는다. | 테스트: `tests/test_gateway_order_broker_boundary.py`, `tests/test_ops_order_broker_boundary_check.py`, `tests/test_structural_audit_guards.py::test_order_command_lifecycle_detects_claimed_without_pre_ack`. Runbook: `docs/runbook_order_broker_boundary_ko.md`. Reports: `reports/order_broker_boundary_migration/20260710T012452Z/summary.md`, `reports/order_broker_boundary/20260710T013001Z/summary.md`. |
@@ -339,11 +340,10 @@ P0-4 durable order broker boundary 진행 상태:
 
 ## 다음 PR 권장 순서
 
-1. PR-22 lifecycle inbox evidence 뒤 guarded worker cutover를 완료한다.
-2. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-3. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-4. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-5. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+2. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+3. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+4. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 완료
 
@@ -454,6 +454,15 @@ P0-4 durable order broker boundary 진행 상태:
 - operator status/list/run-once/reset API, aggregate operator status, Dashboard full/fast `live_sim_lifecycle_consumer`, `tools/ops_live_sim_lifecycle_consumer_check.py`, `docs/runbook_live_sim_lifecycle_consumer_ko.md`를 추가했다. ops verdict는 OBSERVE/LIVE flags, command/order-command delta, inbox gap, stale processing, applied-result gap과 dead-letter를 함께 검사한다.
 - schema-56 격리 Core를 port 8026에서 OBSERVE-safe로 기동해 lifecycle event와 duplicate를 API로 입력했다. 첫 event는 APPLIED, duplicate는 DUPLICATE였고 inbox APPLIED/DEAD_LETTER `1/0`, gap/stale/result-gap `0/0/0`, command/order-command delta `0/0`, `quick_check=ok`였다. consumer/worker disabled warning만 남긴 준비단계 verdict는 `WARN_EXPECTED_PREPARATION`이며 report는 `reports/live_sim_lifecycle_consumer_prep/20260710T081308Z/summary.md`다. Core와 fixture DB/WAL/SHM/log는 검증 후 정리했다.
 - migration 재실행, inline idempotency/watermark, worker rowid 순서, handler write rollback, retry/dead-letter/reset, Gateway duplicate, operator/dashboard 계약 테스트와 full pytest suite `1001`개를 통과했다. 다음 논리 PR은 worker health와 kill switch 뒤에서 inline compatibility를 제한적으로 건너뛰는 lifecycle guarded cutover다.
+
+## PR-23 LIVE_SIM lifecycle guarded cutover 완료
+
+- schema 57은 `live_sim_lifecycle_consumer_runs` worker heartbeat와 event-id unique `live_sim_lifecycle_routing_decisions`를 추가한다. 기본은 consumer/worker/cutover OFF, global kill switch ON, inline fallback ON이므로 production 동작을 자동 전환하지 않는다.
+- effective defer는 consumer/worker enabled, healthy latest IDLE/COMPLETED run, current inbox PENDING/PROCESSING, dead-letter/stale/gap/result-gap 0, unresolved backlog limit, cutover ON, kill switch OFF를 모두 요구한다. dry-run은 `would_defer_inline`만 관측하고 inline compatibility를 유지한다.
+- gate 실패에서 current event가 sequence 선두이면 inline fallback을 실행한다. 앞선 unresolved/dead-letter가 있으면 newer event를 out-of-order inline 적용하지 않고 `BLOCKED_ORDERED_BACKLOG`로 보존한다. kill switch는 설정 파일을 자동 수정하지 않으며 재기동 후 즉시 inline compatibility를 선택한다.
+- Core lifespan은 consumer/worker가 명시적으로 enabled일 때만 background task를 시작하고 첫 loop에서 즉시 heartbeat를 남긴다. operator routing status/list, aggregate status, Dashboard full/fast와 ops report는 worker age, effective defer count, fallback/block reason을 노출한다.
+- schema-57 격리 Core를 port 8027에서 OBSERVE-safe로 기동했다. worker health PASS 뒤 event 1건은 `DEFERRED_TO_DURABLE_WORKER`, effective defer true, inline fallback false였고 run-once limit 1에서 APPLIED됐다. duplicate는 DUPLICATE였으며 inbox APPLIED/DEAD_LETTER `1/0`, effective routing `1`, success result `1`, command row `0`, command/order-command delta `0/0`, `quick_check=ok`였다. 최종 ops verdict는 PASS이고 report는 `reports/live_sim_lifecycle_consumer_cutover/20260710T082720Z/summary.md`다. Core와 fixture DB/WAL/SHM/log는 검증 후 정리했다.
+- migration/re-run, default kill-switch fallback, dry-run, effective defer/worker closure, missing worker health fallback, prior dead-letter ordered block, background API, lock contention, ops 판정과 영향 범위 테스트 `117`개 및 full pytest suite `1010`개를 통과했다. 다음 논리 PR은 P2-1 incremental queue 운영 경로다.
 
 ## Flag 정리 계획 (최종 순서 8)
 

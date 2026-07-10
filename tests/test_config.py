@@ -282,6 +282,13 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_lifecycle_retry_limit == 3
     assert settings.live_sim_lifecycle_processing_ttl_sec == 60
     assert settings.live_sim_lifecycle_retry_delay_sec == 1.0
+    assert settings.live_sim_lifecycle_cutover_dry_run_enabled is False
+    assert settings.live_sim_lifecycle_cutover_enabled is False
+    assert settings.live_sim_lifecycle_global_kill_switch is True
+    assert settings.live_sim_lifecycle_inline_fallback_enabled is True
+    assert settings.live_sim_lifecycle_require_worker_health is True
+    assert settings.live_sim_lifecycle_worker_health_max_age_sec == 10
+    assert settings.live_sim_lifecycle_max_unresolved_count == 100
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300

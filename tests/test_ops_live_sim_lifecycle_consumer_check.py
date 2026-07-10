@@ -1,7 +1,12 @@
 from tools.ops_live_sim_lifecycle_consumer_check import evaluate_report
 
 
-def _report(*, dead_letter_count: int = 0, command_delta: int = 0):
+def _report(
+    *,
+    dead_letter_count: int = 0,
+    command_delta: int = 0,
+    cutover_enabled: bool = False,
+):
     before_total = 4
     return {
         "core_status": {
@@ -23,6 +28,10 @@ def _report(*, dead_letter_count: int = 0, command_delta: int = 0):
             "status": "WARN",
             "consumer_enabled": False,
             "worker_enabled": False,
+            "cutover_enabled": cutover_enabled,
+            "global_kill_switch": not cutover_enabled,
+            "worker_health": {"healthy": cutover_enabled},
+            "effective_defer_count": 1 if cutover_enabled else 0,
             "total_count": 3,
             "applied_count": 3,
             "pending_count": 0,
@@ -54,3 +63,14 @@ def test_ops_lifecycle_consumer_fails_on_dead_letter_or_command_delta() -> None:
     assert verdict["status"] == "FAIL"
     assert "LIFECYCLE_DEAD_LETTER_COUNT" in verdict["failures"]
     assert "COMMAND_COUNT_CHANGED_DURING_CHECK" in verdict["failures"]
+
+
+def test_ops_lifecycle_consumer_accepts_exercised_healthy_cutover() -> None:
+    report = _report(cutover_enabled=True)
+    report["consumer_status"]["consumer_enabled"] = True
+    report["consumer_status"]["worker_enabled"] = True
+
+    verdict = evaluate_report(report)
+
+    assert verdict["status"] == "PASS"
+    assert verdict["effective_defer_count"] == 1

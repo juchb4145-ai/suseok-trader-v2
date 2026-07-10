@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 56
+SCHEMA_VERSION = 57
 APP_NAME = "suseok-trader-v2"
 
 
@@ -70,6 +70,7 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_dry_run_exit_tables(connection)
     _create_live_sim_tables(connection)
     _create_live_sim_lifecycle_consumer_tables(connection)
+    _create_live_sim_lifecycle_cutover_tables(connection)
     _create_operator_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
@@ -4777,5 +4778,70 @@ def _create_live_sim_lifecycle_consumer_tables(connection: sqlite3.Connection) -
         INSERT INTO app_metadata (key, value)
         VALUES ('live_sim_lifecycle_inbox_started_at', datetime('now'))
         ON CONFLICT(key) DO NOTHING
+        """
+    )
+
+
+def _create_live_sim_lifecycle_cutover_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_consumer_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            claimed_count INTEGER NOT NULL DEFAULT 0,
+            applied_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            dead_letter_count INTEGER NOT NULL DEFAULT 0,
+            stale_reset_count INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_consumer_runs_completed
+        ON live_sim_lifecycle_consumer_runs (completed_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_routing_decisions (
+            decision_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL UNIQUE,
+            event_rowid INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            would_defer_inline INTEGER NOT NULL DEFAULT 0,
+            effective_defer_inline INTEGER NOT NULL DEFAULT 0,
+            inline_fallback INTEGER NOT NULL DEFAULT 1,
+            ordered_backlog_blocked INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
+            consumer_enabled INTEGER NOT NULL DEFAULT 0,
+            worker_enabled INTEGER NOT NULL DEFAULT 0,
+            worker_healthy INTEGER NOT NULL DEFAULT 0,
+            pending_count INTEGER NOT NULL DEFAULT 0,
+            processing_count INTEGER NOT NULL DEFAULT 0,
+            dead_letter_count INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_routing_created
+        ON live_sim_lifecycle_routing_decisions (created_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_routing_effective
+        ON live_sim_lifecycle_routing_decisions (effective_defer_inline, created_at DESC)
+        WHERE effective_defer_inline = 1
         """
     )

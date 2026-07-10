@@ -7,14 +7,41 @@ schema 56은 Gateway에서 수신한 LIVE_SIM lifecycle event를
 `gateway_inline_compatibility` 경로에서 계속 실행되지만, handler write와 inbox 종결,
 `live_sim_lifecycle` success watermark는 하나의 SQLite transaction으로 커밋된다.
 
-이 단계는 준비 PR이다.
+schema 57은 worker heartbeat와 Gateway routing decision을 추가한다. healthy worker,
+consumer/worker enable, cutover enable, kill switch OFF, inbox 무결성, backlog limit을 모두
+통과한 event만 request path의 inline compatibility를 건너뛴다.
 
 - `LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED=false`
 - `LIVE_SIM_LIFECYCLE_WORKER_ENABLED=false`
+- `LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED=false`
+- `LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH=true`
 - Gateway inline compatibility 유지
 - LIVE_REAL 허용 없음
 - broker 주문, 정정, 취소 command 생성 없음
-- request path 제거와 비동기 cutover는 후속 guarded PR 범위
+- 최종 request path 제거는 10거래일 exit criteria 뒤의 후속 범위
+
+## Guarded cutover
+
+다음 조건이 모두 충족되어야 `effective_defer_inline=true`가 된다.
+
+- consumer와 worker enabled
+- cutover enabled
+- global kill switch OFF
+- latest worker run `IDLE` 또는 `COMPLETED`
+- worker run age가 `LIVE_SIM_LIFECYCLE_WORKER_HEALTH_MAX_AGE_SEC` 이내
+- dead-letter, stale processing, inbox gap, applied-result gap 0
+- unresolved count가 configured limit 이하
+- current inbox row가 `PENDING` 또는 worker-owned `PROCESSING`
+
+gate가 닫혔고 current event가 sequence 선두이면 inline compatibility로 즉시 복귀한다.
+앞선 unresolved/dead-letter가 있으면 새 event를 out-of-order inline 적용하지 않고
+`BLOCKED_ORDERED_BACKLOG`로 inbox에 보존한다. 이 경우 dead-letter 원인을 먼저 해결해야
+한다.
+
+schema 57 evidence table:
+
+- `live_sim_lifecycle_consumer_runs`
+- `live_sim_lifecycle_routing_decisions`
 
 ## Event 계약
 
@@ -60,6 +87,8 @@ TRADING_ALLOW_LIVE_SIM=false
 TRADING_ALLOW_LIVE_REAL=false
 LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED=false
 LIVE_SIM_LIFECYCLE_WORKER_ENABLED=false
+LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED=false
+LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH=true
 ```
 
 상태 확인:
@@ -84,6 +113,8 @@ python -m tools.ops_live_sim_lifecycle_consumer_check `
 
 - `GET /api/operator/live-sim/lifecycle-consumer/status`
 - `GET /api/operator/live-sim/lifecycle-consumer/inbox?limit=100`
+- `GET /api/operator/live-sim/lifecycle-consumer/routing/status`
+- `GET /api/operator/live-sim/lifecycle-consumer/routing?limit=100`
 - `POST /api/operator/live-sim/lifecycle-consumer/run-once?limit=20`
 - `POST /api/operator/live-sim/lifecycle-consumer/reset-dead-letter?event_id=...`
 - Dashboard fast section: `live_sim_lifecycle_consumer`
@@ -119,6 +150,17 @@ LEFT JOIN projection_event_results AS result
  AND result.event_id = inbox.event_id
 WHERE inbox.status = 'APPLIED'
   AND result.event_id IS NULL;
+
+SELECT event_id,
+       would_defer_inline,
+       effective_defer_inline,
+       inline_fallback,
+       ordered_backlog_blocked,
+       reason_codes_json,
+       created_at
+FROM live_sim_lifecycle_routing_decisions
+ORDER BY created_at DESC
+LIMIT 20;
 ```
 
 ## Dead-letter 복구
@@ -133,7 +175,8 @@ WHERE inbox.status = 'APPLIED'
 
 ## Rollback
 
-준비 단계 rollback은 consumer/worker flag를 false로 유지하는 것이다. Gateway inline
-compatibility는 계속 lifecycle을 적용한다. inbox와 watermark는 감사 evidence이므로
-삭제하지 않는다. 후속 cutover에서 worker 오류, dead-letter, stale processing 또는 inbox
-gap이 발생하면 즉시 inline compatibility로 복귀해야 한다.
+가장 빠른 rollback은 `LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH=true`로 재기동하는 것이다.
+current event가 sequence 선두이면 Gateway inline compatibility가 lifecycle을 적용한다.
+worker 오류, dead-letter, stale processing 또는 inbox gap을 근거 없이 삭제하지 않는다.
+준비 단계로 완전히 복귀할 때는 consumer/worker와 cutover flag도 false로 둔다. inbox,
+consumer run, routing decision과 watermark는 감사 evidence이므로 삭제하지 않는다.

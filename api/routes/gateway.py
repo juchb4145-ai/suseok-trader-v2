@@ -20,6 +20,9 @@ from services.market_reference_service import (
     process_market_symbols_event,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    route_live_sim_lifecycle_gateway_event,
+)
 from services.runtime.gateway_market_index_routing import (
     MarketIndexAppendOnlyRoutingDecision,
     decide_market_index_append_only_routing,
@@ -42,7 +45,6 @@ from services.runtime.gateway_projection_routing import (
 )
 from services.runtime.live_sim_lifecycle_consumer import (
     is_live_sim_lifecycle_event,
-    process_live_sim_lifecycle_inline,
 )
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
@@ -361,7 +363,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         if scan_result.status != "IGNORED":
                             projection_statuses["market_scan"] = scan_result.status
             if result.status == "ACCEPTED" and is_live_sim_lifecycle_event(event.event_type):
-                live_sim_lifecycle = process_live_sim_lifecycle_inline(
+                live_sim_lifecycle = route_live_sim_lifecycle_gateway_event(
                     connection,
                     event,
                     settings=settings,

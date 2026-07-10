@@ -128,6 +128,9 @@ from services.risk_gate import (
     list_risk_errors,
 )
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    build_live_sim_lifecycle_cutover_status,
+)
 from services.runtime.gateway_market_index_routing import (
     get_latest_market_index_append_only_routing_status,
 )
@@ -143,9 +146,6 @@ from services.runtime.gateway_market_scan_routing import (
 )
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
-)
-from services.runtime.live_sim_lifecycle_consumer import (
-    get_live_sim_lifecycle_consumer_status,
 )
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
@@ -411,7 +411,7 @@ def build_dashboard_snapshot(
         connection
     )
     order_broker_boundaries = get_order_broker_boundary_status(connection)
-    live_sim_lifecycle_consumer = get_live_sim_lifecycle_consumer_status(
+    live_sim_lifecycle_consumer = build_live_sim_lifecycle_cutover_status(
         connection,
         settings=settings,
     )
@@ -1415,7 +1415,7 @@ def _build_dashboard_fast_section(
     if section == "order_broker_boundaries":
         return get_order_broker_boundary_status(connection)
     if section == "live_sim_lifecycle_consumer":
-        return get_live_sim_lifecycle_consumer_status(connection, settings=settings)
+        return build_live_sim_lifecycle_cutover_status(connection, settings=settings)
     if section == "projection_replay":
         return get_projection_replay_status()
     if section == "projection_watermarks":
