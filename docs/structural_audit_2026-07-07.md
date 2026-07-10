@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (`PR-14` market_reference NXT limited cutover 검증 완료)
+최종 업데이트: 2026-07-10 (P0-3 runtime execution lease/fencing 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -31,7 +31,7 @@
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
 - PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14의 장중 OBSERVE-safe 검증을 완료했다. 다음 우선순위는 P0-3 runtime execution lock fencing이다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing을 완료했다. 다음 우선순위는 P1-6 order-plan uniqueness다.
 
 ## P0
 
@@ -39,7 +39,7 @@
 |---|---|---|---|---|---|
 | P0-1 Gateway ingestion request path에 inline projection이 남아 있음 (부분 완화) | `api/routes/gateway.py::post_gateway_event()`는 append/outbox 기록 후 routing decision을 평가한다. `market_data`는 PR-7/9/11/12의 guarded mode에서, `market_reference`는 PR-14 guarded mode에서만 inline projection을 건너뛸 수 있다. market_index/regime/scan과 `handle_live_sim_gateway_event()`는 request path에 남아 있다. | 제한된 market_data/reference event는 worker로 이관할 수 있지만, 나머지 inline projection 비용과 DB write lock 경합은 여전히 Gateway POST latency와 같은 critical path에 있다. | projection별 worker/watermark/error/retry 정책과 lifecycle consumer를 확정한다. 최종적으로 POST는 raw append + outbox enqueue만 수행한다. | MarketData: `docs/runbook_market_data_append_only_controller_ko.md`. MarketReference: `docs/runbook_market_reference_projection_ko.md`. SQL: `SELECT projection_name,event_type,status,COUNT(*) FROM projection_outbox GROUP BY 1,2,3;` |
 | P0-2 Candidate quote refresh TR response synthetic price_tick `event_id` collision | 수정 완료. `_process_tr_response()`는 row별 synthetic child `GatewayEvent.event_id`를 deterministic하게 생성하고, parent metadata를 보존한다. 근거: `services/market_data_service.py::_synthetic_price_tick_event_id()`, `_with_synthetic_price_tick_metadata()`. | 다중 code row TR response가 `market_tick_samples.event_id` PK 충돌 없이 projection된다. | 유지보수 방향: child id 포맷과 metadata contract를 replay/reconcile 문서에 계속 고정한다. | 테스트: `tests/test_structural_audit_guards.py::test_synthetic_tr_response_multiple_ticks_uses_unique_child_event_ids`. SQL: `SELECT event_id, metadata_json FROM market_tick_samples WHERE event_id LIKE '%synthetic_price_tick%';` |
-| P0-3 `runtime_execution_lock` TTL 만료 시 첫 owner 실행 중에도 두 번째 owner가 lock 획득 가능 | `services/runtime/evaluation_run_guard.py::_acquire_lock()`은 `expires_at <= now`이면 같은 `lock_name` row를 새 owner로 upsert한다. lock holder의 heartbeat/lease renewal/fencing token이 없다. `apps/core_api.py::lifespan()`은 시작 시 `clear_runtime_execution_locks()`로 모든 lock을 삭제한다. | long-running observe cycle/entry timing/LIVE_SIM loop가 TTL을 넘기면 incremental worker가 같은 `evaluation_pipeline`을 재획득할 수 있다. multi-process 배포에서 한 Core process startup이 다른 process의 active lock을 삭제할 수 있다. latest tables가 서로 다른 run의 결과로 덮인다. | lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 추가한다. 실행 중 lease renewal을 하고, startup clear는 expired/self-owned lock만 대상으로 제한한다. run write 시 fencing token을 검증한다. | 추가 테스트: `test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running`. SQL: `SELECT * FROM runtime_execution_locks;` |
+| P0-3 runtime execution lock lease/fencing | 수정 완료. lock row에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 저장하고 별도 monotonic fence sequence를 유지한다. daemon heartbeat가 lease를 갱신하며 TTL이 지나도 owner process/thread가 살아 있으면 takeover를 차단한다. evaluation transaction과 cycle commit 경계는 현재 owner/token을 검증한다. startup cleanup은 expired/dead-owner 또는 self-owned row만 삭제한다. | 장시간 run의 TTL overlap, 다른 Core startup의 active-lock 삭제, stale owner latest-row write를 fail-closed로 차단한다. | 운영 상태는 operator API/dashboard fast/ops report로 확인한다. active owner를 수동 전체 삭제하지 않는다. | 테스트: `tests/test_evaluation_run_guard.py`, `tests/test_live_sim_operating_loop.py`, `tests/test_ops_runtime_execution_lock_check.py`. Runbook: `docs/runbook_runtime_execution_lock_ko.md`. |
 | P0-4 order command가 `DISPATCHED`로 claim된 뒤 Gateway가 SendOrder 전 죽으면 broker boundary 상태가 불명확 | `storage/gateway_command_store.py::_dispatch_ready_commands()`가 poll 시 `QUEUED -> DISPATCHED`를 커밋한다. `gateway/kiwoom_command_handlers.py::_handle_send_order()`에서 그 뒤 `command_started`, `order_pre_ack`, SendOrder, `command_ack` 순으로 이벤트가 생성된다. | Core에는 `DISPATCHED`만 남고 `order_pre_ack`가 없으면 broker 도달 전/후를 DB 상태만으로 구분하기 어렵다. timeout 후 `UNCONFIRMED`로 가더라도 operator가 broker absent 여부를 수동 확인해야 한다. | command 상태 모델에 `CLAIMED`, `GATEWAY_STARTED`, `PRE_ACK_RECORDED`, `BROKER_ACCEPTED`, `CHEJAN_CONFIRMED`, `UNCONFIRMED`를 분리한다. `order_pre_ack`를 file journal뿐 아니라 DB pre_ack table/unique key로 durable하게 저장한다. | 추가 테스트: `test_order_command_lifecycle_detects_dispatched_without_pre_ack`. SQL: `SELECT c.command_id FROM gateway_commands c WHERE c.status='DISPATCHED' AND c.command_type IN ('send_order','cancel_order') AND NOT EXISTS (SELECT 1 FROM gateway_events e WHERE e.command_id=c.command_id AND e.event_type='order_pre_ack');` |
 
 ## P1
@@ -292,21 +292,31 @@ PR-14 진행 상태:
 - 공식 ops report는 `PASS`다. 근거: `reports/market_reference_projection/20260710T000023Z/summary.md`; decision budget/venue raw evidence는 같은 디렉터리 `raw.json`에 있다.
 - market_reference/Gateway/outbox/dashboard/config/SQLite 영향 범위 회귀와 full pytest suite를 통과했다. runbook: `docs/runbook_market_reference_projection_ko.md`.
 
+P0-3 runtime execution lock 진행 상태:
+
+- schema version 45에서 `runtime_execution_locks`에 `process_id`, `thread_id`, `heartbeat_at`, `fencing_token`을 추가하고 `runtime_execution_lock_fences`에 lock별 monotonic token을 보존한다. release와 cleanup은 fence sequence를 삭제하지 않는다.
+- `runtime_execution_lock()`은 별도 SQLite connection을 사용하는 daemon heartbeat로 lease를 갱신한다. TTL이 수동 만료돼도 owner PID/thread가 살아 있으면 `OWNER_ALIVE_AFTER_TTL`로 takeover를 거부한다.
+- lock takeover가 발생한 경우 stale lease의 `immediate_transaction()`과 context 종료는 `EVALUATION_RUN_FENCE_LOST`로 차단된다. Strategy/Risk/EntryTiming transaction, observe-cycle final run write, incremental candidate commit, theme-refresh run write에 fence 검증을 연결했다.
+- Core startup cleanup은 현재 process 소유 residual row와 expired/dead-owner row만 제거한다. active 타 process row와 expired-but-alive row는 보존한다. 기존 live-sim stop/runbook의 "모든 residual lock 자동 삭제" 문구도 수정했다.
+- `GET /api/operator/runtime-execution-locks/status`, operator aggregate status, Dashboard fast `runtime_execution_locks`/pipeline summary, `tools/ops_runtime_execution_lock_check.py`를 추가했다. 상태는 `ACTIVE`, `EXPIRED_OWNER_ALIVE`, `STALE_EXPIRED`를 구분한다.
+- heartbeat renewal, live-owner TTL takeover 거부, release 이후 token 증가, stale-owner write rollback, old schema migration, startup selective cleanup, API/dashboard/ops 계약을 테스트했다. lock 영향 범위 회귀 157개 테스트를 통과했다.
+- 2026-07-10 09:21 KST OBSERVE-safe Core API에서 idle lock `PASS`, lock/active/stale/expired-alive `0/0/0/0`, no trading side effects를 확인했다. 공식 report: `reports/runtime_execution_lock/20260710T002121Z/summary.md`.
+- 검증 후 Core supervisor와 inherited socket child를 모두 종료했다. 최종 상태는 health unreachable, 8000 listener `0`, Python runtime process `0`이다.
+
 ## 다음 PR 권장 순서
 
-1. runtime lock에 heartbeat/lease renewal/fencing token을 추가하고 startup clear를 expired/self-owned lock으로 제한한다.
-2. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
-3. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
-4. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
-5. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-6. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-7. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-8. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-9. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-10. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-11. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-12. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-13. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. `live_sim_intents.order_plan_id` backfill 및 partial UNIQUE index를 추가한 뒤 JSON scan을 직접 조회로 바꾼다.
+2. order lifecycle state와 durable DB pre-ack을 broker boundary 중심으로 세분화한다.
+3. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
+4. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+5. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+6. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+7. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+8. P0-4 완료 후 LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+9. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+10. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+11. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+12. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
 ## Replay 검증 계획 (순서 3)
 

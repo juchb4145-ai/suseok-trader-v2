@@ -23,6 +23,7 @@ from services.operator.no_buy_sentinel import (
     get_latest_no_buy_sentinel_snapshot,
 )
 from services.realtime_subscription import build_realtime_subscription_plan
+from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.live_sim_pilot_pipeline import list_live_sim_pilot_runs
 from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
@@ -84,6 +85,7 @@ def build_operator_status(
             "broker_env": gateway_values.get("broker_env"),
             "server_mode": gateway_values.get("server_mode"),
         },
+        "runtime_execution_locks": get_runtime_execution_lock_status(connection),
         "live_sim": {
             "status": live_sim_status,
             "kill_switch": live_sim_status.get("kill_switch"),

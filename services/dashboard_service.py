@@ -123,6 +123,7 @@ from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
 )
+from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -159,6 +160,7 @@ DashboardDetail = Literal["summary", "full"]
 DASHBOARD_SECTIONS = [
     "safety",
     "system",
+    "runtime_execution_locks",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -190,6 +192,7 @@ DASHBOARD_SECTIONS = [
 
 FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "system",
+    "runtime_execution_locks",
     "gateway",
     "market_data",
     "market_reference",
@@ -207,6 +210,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
 FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "safety",
     "system",
+    "runtime_execution_locks",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -322,6 +326,7 @@ def build_dashboard_snapshot(
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
+    runtime_execution_locks = get_runtime_execution_lock_status(connection)
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -535,6 +540,7 @@ def build_dashboard_snapshot(
         market_reference_status=market_reference_status,
         market_reference_reconcile=market_reference_reconcile,
         market_reference_append_only_routing=market_reference_append_only_routing,
+        runtime_execution_locks=runtime_execution_locks,
         settings=settings,
     )
 
@@ -573,6 +579,7 @@ def build_dashboard_snapshot(
         },
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
+        "runtime_execution_locks": runtime_execution_locks,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
@@ -901,6 +908,7 @@ def build_dashboard_pipeline_summary_fast(
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
+    runtime_execution_locks = get_runtime_execution_lock_status(connection)
     return {
         "fast_path": True,
         "read_only": True,
@@ -911,6 +919,7 @@ def build_dashboard_pipeline_summary_fast(
             "queued_command_count": int(gateway_status.get("queued_command_count") or 0),
             "failed_command_count": int(gateway_status.get("failed_command_count") or 0),
         },
+        "runtime_execution_locks": runtime_execution_locks,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1193,6 +1202,8 @@ def _build_dashboard_fast_section(
             profiles,
             fallback_profiles=status.get("condition_profile_metrics", []),
         )
+    if section == "runtime_execution_locks":
+        return get_runtime_execution_lock_status(connection)
     if section == "market_data":
         return {
             "status": market_data_status(),
@@ -1736,6 +1747,7 @@ def _pipeline_summary(
     market_reference_status: dict[str, Any],
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
+    runtime_execution_locks: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1754,6 +1766,7 @@ def _pipeline_summary(
             latest_observe_cycle=latest_observe_cycle,
         ),
         "latest_observe_cycle": latest_observe_cycle,
+        "runtime_execution_locks": runtime_execution_locks,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],

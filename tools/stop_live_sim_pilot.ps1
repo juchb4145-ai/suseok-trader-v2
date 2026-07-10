@@ -108,4 +108,4 @@ $State | Add-Member -NotePropertyName "stopped_at" -NotePropertyValue (Get-Date)
 $State | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $PidFile -Encoding UTF8
 
 Write-Ok "LIVE_SIM 파일럿 정리 완료"
-Write-Host "runtime_execution_locks 잔여 락은 Core 재기동 시 자동 정리됩니다. 이 스크립트는 DB를 직접 수정하지 않습니다."
+Write-Host "Core 재기동은 expired/dead-owner 또는 self-owned runtime_execution_locks만 정리합니다. 이 스크립트는 DB를 직접 수정하지 않습니다."

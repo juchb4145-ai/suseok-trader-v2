@@ -4,6 +4,7 @@ import json
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from domain.broker.commands import GatewayCommand
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
@@ -20,6 +21,7 @@ from services.market_data_service import (
 )
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
+    EvaluationRunLockError,
     runtime_execution_lock,
 )
 from services.runtime.incremental_evaluation import get_incremental_evaluation_status
@@ -282,7 +284,7 @@ def test_projection_outbox_excludes_non_projection_gateway_events(tmp_path) -> N
     assert jobs == []
 
 
-def test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running(
+def test_runtime_execution_lock_blocks_reacquire_after_ttl_while_owner_still_running(
     tmp_path,
 ) -> None:
     db_path = tmp_path / "ttl-overlap.sqlite3"
@@ -310,22 +312,26 @@ def test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_ru
             )
             first.commit()
 
-            with runtime_execution_lock(
-                second,
-                EVALUATION_PIPELINE_LOCK,
-                owner_id="owner-two",
-                ttl_sec=60,
-            ):
-                row = second.execute(
-                    """
-                    SELECT owner_id
-                    FROM runtime_execution_locks
-                    WHERE lock_name = ?
-                    """,
-                    (EVALUATION_PIPELINE_LOCK,),
-                ).fetchone()
+            with pytest.raises(EvaluationRunLockError) as exc_info:
+                with runtime_execution_lock(
+                    second,
+                    EVALUATION_PIPELINE_LOCK,
+                    owner_id="owner-two",
+                    ttl_sec=60,
+                ):
+                    raise AssertionError("live owner lock must not be replaced")
 
-        assert row["owner_id"] == "owner-two"
+            row = second.execute(
+                """
+                SELECT owner_id
+                FROM runtime_execution_locks
+                WHERE lock_name = ?
+                """,
+                (EVALUATION_PIPELINE_LOCK,),
+            ).fetchone()
+
+        assert exc_info.value.reason == "OWNER_ALIVE_AFTER_TTL"
+        assert row["owner_id"] == "owner-one"
     finally:
         first.close()
         second.close()

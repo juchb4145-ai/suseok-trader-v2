@@ -20,7 +20,12 @@ from services.entry_timing.service import evaluate_entry_timing, get_entry_timin
 from services.live_sim.live_sim_service import get_live_sim_status
 from services.realtime_subscription import run_realtime_subscription_once
 from services.risk_gate import evaluate_risk_observations, get_risk_status
-from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runtime_execution_lock
+from services.runtime.evaluation_run_guard import (
+    EVALUATION_PIPELINE_LOCK,
+    assert_runtime_execution_fence,
+    immediate_transaction,
+    runtime_execution_lock,
+)
 from services.runtime.preflight import OperatingMode, run_live_sim_preflight
 from services.strategy_engine import evaluate_candidates, get_strategy_status
 from services.theme_leadership import rebuild_theme_leadership
@@ -167,6 +172,7 @@ def _run_market_open_observe_cycle_once(
     theme_snapshot_payload: dict[str, Any] = {}
     leadership_payload: dict[str, Any] = {}
     try:
+        assert_runtime_execution_fence(connection)
         realtime_subscription_plan = run_realtime_subscription_once(
             connection,
             trade_date=trade_date,
@@ -186,6 +192,7 @@ def _run_market_open_observe_cycle_once(
         )
 
     try:
+        assert_runtime_execution_fence(connection)
         theme_before = get_theme_status(connection, settings=resolved_settings)
         snapshot_result = calculate_all_theme_snapshots(
             connection,
@@ -212,6 +219,7 @@ def _run_market_open_observe_cycle_once(
         stages["Theme"] = _blocked_stage("Theme", "THEME_SNAPSHOT_NOT_BUILT", str(exc))
 
     try:
+        assert_runtime_execution_fence(connection)
         candidate_result = rebuild_candidates_from_observations(
             connection,
             trade_date=trade_date,
@@ -256,6 +264,7 @@ def _run_market_open_observe_cycle_once(
         )
 
     try:
+        assert_runtime_execution_fence(connection)
         strategy_result = evaluate_candidates(
             connection,
             trade_date=trade_date,
@@ -275,6 +284,7 @@ def _run_market_open_observe_cycle_once(
         stages["Strategy"] = _blocked_stage("Strategy", "STRATEGY_EVALUATE_NOT_RUN", str(exc))
 
     try:
+        assert_runtime_execution_fence(connection)
         risk_result = evaluate_risk_observations(
             connection,
             trade_date=trade_date,
@@ -294,6 +304,7 @@ def _run_market_open_observe_cycle_once(
         stages["Risk"] = _blocked_stage("Risk", "RISK_EVALUATE_NOT_RUN", str(exc))
 
     try:
+        assert_runtime_execution_fence(connection)
         entry_result = evaluate_entry_timing(
             connection,
             trade_date=trade_date,
@@ -398,8 +409,8 @@ def _run_market_open_observe_cycle_once(
         ),
     )
     if write_run:
-        save_market_open_observe_cycle_run(connection, result)
-        connection.commit()
+        with immediate_transaction(connection):
+            save_market_open_observe_cycle_run(connection, result)
     return result
 
 

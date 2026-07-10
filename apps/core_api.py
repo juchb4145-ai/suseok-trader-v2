@@ -116,7 +116,10 @@ def _run_condition_fusion_sweep_once(settings: Settings) -> None:
 
 def _clear_startup_runtime_execution_locks(connection) -> int:
     deleted_count = clear_runtime_execution_locks(connection)
-    logger.info("cleared runtime execution locks on startup: count=%s", deleted_count)
+    logger.info(
+        "cleared expired/self-owned runtime execution locks on startup: count=%s",
+        deleted_count,
+    )
     return deleted_count
 
 

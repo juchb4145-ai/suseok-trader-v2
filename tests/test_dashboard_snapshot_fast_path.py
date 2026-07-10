@@ -5,6 +5,7 @@ import time
 
 from services import dashboard_service
 from services.config import Settings
+from services.runtime.evaluation_run_guard import runtime_execution_lock
 from storage.sqlite import initialize_database
 
 
@@ -86,7 +87,35 @@ def test_dashboard_pipeline_summary_fast_includes_outbox_reconcile_and_routing(
     assert "market_reference" in summary
     assert summary["market_data_append_only_controller"]["operating_mode"] == "OFF"
     assert summary["market_reference"]["effective_skip_inline_count"] == 0
+    assert summary["runtime_execution_locks"]["status"] == "PASS"
     assert summary["order_safety"]["order_commands_allowed"] is False
+
+
+def test_dashboard_fast_path_exposes_active_runtime_execution_lease(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "dashboard-runtime-lock.sqlite3")
+
+    with runtime_execution_lock(
+        connection,
+        owner_id="dashboard-lock-owner",
+        heartbeat_interval_sec=0,
+    ) as lease:
+        snapshot = dashboard_service.build_dashboard_snapshot_sections(
+            connection,
+            Settings(),
+            sections={"runtime_execution_locks", "pipeline_summary"},
+            limit=20,
+        )
+
+    connection.close()
+
+    status = snapshot["runtime_execution_locks"]
+    assert status["status"] == "PASS"
+    assert status["active_count"] == 1
+    assert status["locks"][0]["owner_id"] == "dashboard-lock-owner"
+    assert status["locks"][0]["fencing_token"] == lease.fencing_token
+    summary_status = snapshot["pipeline_summary"]["runtime_execution_locks"]
+    assert summary_status["status"] == "PASS"
+    assert summary_status["locks"][0]["fencing_token"] == lease.fencing_token
 
 
 def test_dashboard_fast_path_includes_projection_outbox_backlog(

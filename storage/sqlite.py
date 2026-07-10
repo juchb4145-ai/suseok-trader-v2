@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 APP_NAME = "suseok-trader-v2"
 
 
@@ -763,7 +763,31 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
             owner_id TEXT NOT NULL,
             acquired_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
+            process_id INTEGER NOT NULL DEFAULT 0,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            heartbeat_at TEXT,
+            fencing_token INTEGER NOT NULL DEFAULT 0,
             detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "runtime_execution_locks",
+        {
+            "process_id": "INTEGER NOT NULL DEFAULT 0",
+            "thread_id": "INTEGER NOT NULL DEFAULT 0",
+            "heartbeat_at": "TEXT",
+            "fencing_token": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_execution_lock_fences (
+            lock_name TEXT PRIMARY KEY,
+            last_fencing_token INTEGER NOT NULL DEFAULT 0
+                CHECK (last_fencing_token >= 0),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
     )
@@ -771,6 +795,18 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_expires
         ON runtime_execution_locks (expires_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_heartbeat
+        ON runtime_execution_locks (heartbeat_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_process
+        ON runtime_execution_locks (process_id, thread_id)
         """
     )
     connection.execute(

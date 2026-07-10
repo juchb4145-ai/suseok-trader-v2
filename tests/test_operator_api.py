@@ -15,6 +15,7 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
 
     with TestClient(app) as client:
         status = client.get("/api/operator/status?trade_date=2026-06-27")
+        lock_status = client.get("/api/operator/runtime-execution-locks/status")
         no_buy = client.get("/api/operator/no-buy?trade_date=2026-06-27")
         latest_before = client.get("/api/operator/no-buy/latest?trade_date=2026-06-27")
         unauthorized = client.post("/api/operator/no-buy/rebuild?trade_date=2026-06-27")
@@ -43,6 +44,10 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
 
     assert status.status_code == 200
     assert status.json()["read_only"] is True
+    assert status.json()["runtime_execution_locks"]["status"] == "PASS"
+    assert lock_status.status_code == 200
+    assert lock_status.json()["lock_count"] == 0
+    assert lock_status.json()["read_only"] is True
     assert no_buy.status_code == 200
     assert no_buy.json()["no_order_side_effects"] is True
     assert latest_before.status_code == 200

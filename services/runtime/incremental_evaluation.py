@@ -19,7 +19,11 @@ from domain.candidate.state import CandidateState
 from services.candidate_service import refresh_candidate_context
 from services.config import Settings, load_settings
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
-from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK, runtime_execution_lock
+from services.runtime.evaluation_run_guard import (
+    EVALUATION_PIPELINE_LOCK,
+    assert_runtime_execution_fence,
+    runtime_execution_lock,
+)
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 
 DIRTY_REASON_PRICE_TICK = "PRICE_TICK"
@@ -343,6 +347,7 @@ def process_incremental_evaluation_batch(
             for row in rows:
                 candidate_id = str(row["candidate_instance_id"])
                 try:
+                    assert_runtime_execution_fence(connection)
                     if not _is_candidate_active(connection, candidate_id):
                         _delete_queue_row(connection, candidate_id)
                         connection.commit()
@@ -380,6 +385,7 @@ def process_incremental_evaluation_batch(
                         chunk_risk_count += 1
 
                     _delete_queue_row(connection, candidate_id)
+                    assert_runtime_execution_fence(connection)
                     connection.commit()
                     chunk_processed_count += 1
                 except Exception as exc:
@@ -391,6 +397,7 @@ def process_incremental_evaluation_batch(
                     }
                     errors.append(error)
                     _mark_queue_error(connection, candidate_id, str(exc))
+                    assert_runtime_execution_fence(connection)
                     connection.commit()
 
             processed_count += chunk_processed_count
