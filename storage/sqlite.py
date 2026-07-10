@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 58
+SCHEMA_VERSION = 59
 APP_NAME = "suseok-trader-v2"
 
 
@@ -3508,7 +3508,14 @@ def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3528,8 +3535,36 @@ def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
             confidence REAL NOT NULL DEFAULT 0,
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
+        """
+    )
+    for table_name in ("strategy_observations", "strategy_observations_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_latest_source_watermark
+        ON strategy_observations_latest (source_watermark_hash)
+        WHERE source_watermark_hash IS NOT NULL
         """
     )
     connection.execute(
@@ -3642,7 +3677,14 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3663,8 +3705,36 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
             pass_count INTEGER NOT NULL DEFAULT 0,
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
+        """
+    )
+    for table_name in ("risk_observations", "risk_observations_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_latest_source_watermark
+        ON risk_observations_latest (source_watermark_hash)
+        WHERE source_watermark_hash IS NOT NULL
         """
     )
     connection.execute(
@@ -3779,7 +3849,16 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
-            not_order_intent INTEGER NOT NULL DEFAULT 1
+            not_order_intent INTEGER NOT NULL DEFAULT 1,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3816,7 +3895,17 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
             not_order_intent INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            entry_timing_evaluation_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3853,7 +3942,69 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
             not_order_intent INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            entry_timing_evaluation_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "entry_timing_evaluations",
+        {
+            "strategy_observation_id": "TEXT",
+            "risk_observation_id": "TEXT",
+            "source_run_id": "TEXT",
+            "source_watermark": "TEXT",
+            "source_watermark_hash": "TEXT",
+            "source_event_id": "TEXT",
+            "source_observed_at": "TEXT",
+            "data_age_sec": "REAL",
+            "generated_by": "TEXT",
+        },
+    )
+    for table_name in ("order_plan_drafts", "order_plan_drafts_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "entry_timing_evaluation_id": "TEXT",
+                "strategy_observation_id": "TEXT",
+                "risk_observation_id": "TEXT",
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_timing_candidate_lineage
+        ON entry_timing_evaluations (
+            candidate_instance_id,
+            evaluated_at DESC,
+            source_watermark_hash
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_plan_latest_candidate_lineage
+        ON order_plan_drafts_latest (
+            candidate_instance_id,
+            created_at DESC,
+            source_watermark_hash
         )
         """
     )

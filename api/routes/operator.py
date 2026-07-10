@@ -17,6 +17,7 @@ from services.operator.no_buy_sentinel import (
     rebuild_no_buy_sentinel_snapshot,
 )
 from services.operator.operator_status import build_operator_status
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import (
     build_realtime_subscription_plan,
     run_realtime_subscription_once,
@@ -282,6 +283,24 @@ def operator_incremental_evaluation_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_incremental_evaluation_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.get("/pipeline-coherency/status")
+def operator_pipeline_coherency_status(
+    trade_date: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_pipeline_coherency_status(
+            connection,
+            trade_date=trade_date,
+            max_age_sec=settings.entry_timing_stale_max_seconds,
+            limit=limit,
+        )
     finally:
         connection.close()
 

@@ -31,6 +31,7 @@ from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
 )
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import build_realtime_subscription_plan
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.gateway_live_sim_lifecycle_routing import (
@@ -129,6 +130,11 @@ def build_operator_status(
         "incremental_evaluation": get_incremental_evaluation_status(
             connection,
             settings=resolved_settings,
+        ),
+        "pipeline_coherency": build_pipeline_coherency_status(
+            connection,
+            max_age_sec=resolved_settings.entry_timing_stale_max_seconds,
+            limit=100,
         ),
         "projection_replay": get_projection_replay_status(),
         "projection_watermarks": get_projection_watermark_status(connection),

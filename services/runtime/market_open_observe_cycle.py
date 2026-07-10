@@ -272,6 +272,7 @@ def _run_market_open_observe_cycle_once(
             limit=limit,
             settings=resolved_settings,
             manage_run_lock=False,
+            source_run_id=run_id,
         )
         strategy_status = get_strategy_status(connection, resolved_settings)
         stages["Strategy"] = _strategy_stage(
@@ -292,6 +293,7 @@ def _run_market_open_observe_cycle_once(
             limit=limit,
             settings=resolved_settings,
             manage_run_lock=False,
+            source_run_id=run_id,
         )
         risk_status = get_risk_status(connection, resolved_settings)
         stages["Risk"] = _risk_stage(
@@ -312,6 +314,7 @@ def _run_market_open_observe_cycle_once(
             write_order_plan_drafts=True,
             settings=resolved_settings,
             manage_run_lock=False,
+            source_run_id=run_id,
         )
         entry_status = get_entry_timing_status(connection, settings=resolved_settings)
         stages["EntryTiming"] = _entry_timing_stage(

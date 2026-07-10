@@ -120,6 +120,7 @@ from services.oms.dry_run_service import (
     list_dry_run_positions,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import build_realtime_subscription_plan
 from services.risk_gate import (
     get_risk_status,
@@ -225,6 +226,7 @@ DASHBOARD_SECTIONS = [
     "projection_outbox",
     "projection_outbox_backlog",
     "incremental_evaluation",
+    "pipeline_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -254,6 +256,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "projection_outbox",
     "projection_outbox_backlog",
     "incremental_evaluation",
+    "pipeline_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -293,6 +296,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "projection_outbox",
     "projection_outbox_backlog",
     "incremental_evaluation",
+    "pipeline_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
@@ -429,6 +433,11 @@ def build_dashboard_snapshot(
     incremental_evaluation = get_incremental_evaluation_status(
         connection,
         settings=settings,
+    )
+    pipeline_coherency = build_pipeline_coherency_status(
+        connection,
+        max_age_sec=settings.entry_timing_stale_max_seconds,
+        limit=bounded_limit,
     )
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -674,6 +683,7 @@ def build_dashboard_snapshot(
         runtime_execution_locks=runtime_execution_locks,
         live_sim_order_plan_uniqueness=live_sim_order_plan_uniqueness,
         order_broker_boundaries=order_broker_boundaries,
+        pipeline_coherency=pipeline_coherency,
         settings=settings,
     )
 
@@ -726,6 +736,7 @@ def build_dashboard_snapshot(
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "incremental_evaluation": incremental_evaluation,
+        "pipeline_coherency": pipeline_coherency,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "market_data_append_only_controller": market_data_append_only_controller,
@@ -1055,6 +1066,7 @@ def build_dashboard_pipeline_summary_fast(
     market_reference_status: dict[str, Any],
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
+    pipeline_coherency: dict[str, Any],
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
@@ -1076,6 +1088,7 @@ def build_dashboard_pipeline_summary_fast(
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
+        "coherency": pipeline_coherency,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1393,6 +1406,15 @@ def _build_dashboard_fast_section(
             )
         return context["projection_retention_status"]
 
+    def pipeline_coherency() -> dict[str, Any]:
+        if "pipeline_coherency" not in context:
+            context["pipeline_coherency"] = build_pipeline_coherency_status(
+                connection,
+                max_age_sec=settings.entry_timing_stale_max_seconds,
+                limit=bounded_limit,
+            )
+        return context["pipeline_coherency"]
+
     if section == "safety":
         return build_safety_section(settings)
     if section == "system":
@@ -1489,6 +1511,8 @@ def _build_dashboard_fast_section(
         return projection_outbox_backlog()
     if section == "incremental_evaluation":
         return get_incremental_evaluation_status(connection, settings=settings)
+    if section == "pipeline_coherency":
+        return pipeline_coherency()
     if section == "market_data_projection_reconcile":
         return market_data_reconcile()
     if section == "market_data_append_only_routing":
@@ -1527,6 +1551,7 @@ def _build_dashboard_fast_section(
             market_reference_append_only_routing=(
                 market_reference_append_only_routing()
             ),
+            pipeline_coherency=pipeline_coherency(),
         )
 
     raise ValueError(f"unsupported dashboard fast section: {section}")
@@ -2018,6 +2043,7 @@ def _pipeline_summary(
     runtime_execution_locks: dict[str, Any],
     live_sim_order_plan_uniqueness: dict[str, Any],
     order_broker_boundaries: dict[str, Any],
+    pipeline_coherency: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -2039,6 +2065,7 @@ def _pipeline_summary(
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
+        "coherency": pipeline_coherency,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],

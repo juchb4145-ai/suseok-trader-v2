@@ -350,7 +350,9 @@ def test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query(
     assert snapshot["pipeline_summary"]["strategy"]["latest_observation_count"] == 1
     assert snapshot["pipeline_summary"]["risk"]["latest_observation_count"] == 1
     assert snapshot["pipeline_summary"]["entry_timing"]["latest_plan_count"] == 1
-    assert "coherency" not in snapshot["pipeline_summary"]
+    assert snapshot["pipeline_summary"]["coherency"]["status"] == "FAIL"
+    assert snapshot["pipeline_coherency"]["status"] == "FAIL"
+    assert snapshot["pipeline_coherency"]["mismatch_count"] == 1
     assert mismatches == [
         {
             "candidate_instance_id": "candidate-mixed",

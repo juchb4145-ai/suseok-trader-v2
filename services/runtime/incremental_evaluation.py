@@ -433,7 +433,11 @@ def process_incremental_evaluation_batch(
                             candidate_id,
                             settings=resolved_settings,
                         )
-                        save_strategy_observation(connection, strategy_observation)
+                        save_strategy_observation(
+                            connection,
+                            strategy_observation,
+                            source_run_id=run_id,
+                        )
                         chunk_strategy_count += 1
                     if resolved_settings.risk_gate_enabled:
                         risk_observation = evaluate_risk_for_candidate(
@@ -441,7 +445,11 @@ def process_incremental_evaluation_batch(
                             candidate_id,
                             settings=resolved_settings,
                         )
-                        save_risk_observation(connection, risk_observation)
+                        save_risk_observation(
+                            connection,
+                            risk_observation,
+                            source_run_id=run_id,
+                        )
                         chunk_risk_count += 1
 
                     _delete_queue_row(connection, candidate_id)
