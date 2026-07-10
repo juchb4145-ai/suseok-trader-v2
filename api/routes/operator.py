@@ -34,6 +34,10 @@ from services.runtime.gateway_market_reference_routing import (
     get_latest_market_reference_append_only_routing_status,
     list_market_reference_append_only_routing_decisions,
 )
+from services.runtime.gateway_market_regime_routing import (
+    get_latest_market_regime_append_only_routing_status,
+    list_market_regime_append_only_routing_decisions,
+)
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
     list_market_data_append_only_routing_decisions,
@@ -63,6 +67,10 @@ from services.runtime.market_open_observe_cycle import (
 from services.runtime.market_reference_projection_reconcile import (
     get_latest_market_reference_projection_reconcile,
     run_market_reference_projection_reconcile,
+)
+from services.runtime.market_regime_projection_reconcile import (
+    get_latest_market_regime_projection_reconcile,
+    run_market_regime_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -1125,6 +1133,107 @@ def operator_market_index_projection_reconcile_run_once(
         return payload
     finally:
         connection.close()
+
+
+@router.get("/market-regime-projection-reconcile/latest")
+def operator_market_regime_projection_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_regime_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-regime-projection-reconcile/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_regime_projection_reconcile_run_once(
+    limit: int = Query(default=100, ge=1, le=5000),
+    persist: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    del live_safe
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: run_market_regime_projection_reconcile(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    persist=persist,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_regime_projection_reconcile_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action="retry later or call with persist=false",
+                )
+            raise
+        payload = result.to_dict()
+        payload["read_only"] = True
+        payload["persist_requested"] = bool(persist)
+        payload["retryable"] = False
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-regime-append-only-routing/status")
+def operator_market_regime_append_only_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_regime_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-regime-append-only-routing/decisions")
+def operator_market_regime_append_only_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        decisions = list_market_regime_append_only_routing_decisions(
+            connection,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {
+        "decisions": decisions,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
 
 
 @router.get("/market-index-append-only-routing/status")

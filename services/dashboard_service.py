@@ -134,6 +134,9 @@ from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
 )
+from services.runtime.gateway_market_regime_routing import (
+    get_latest_market_regime_append_only_routing_status,
+)
 from services.runtime.gateway_projection_routing import (
     get_latest_market_data_append_only_routing_status,
 )
@@ -152,6 +155,9 @@ from services.runtime.market_open_observe_cycle import (
 )
 from services.runtime.market_reference_projection_reconcile import (
     get_latest_market_reference_projection_reconcile,
+)
+from services.runtime.market_regime_projection_reconcile import (
+    get_latest_market_regime_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -212,6 +218,8 @@ DASHBOARD_SECTIONS = [
     "market_reference_append_only_routing",
     "market_index_projection_reconcile",
     "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
     "pipeline_summary",
 ]
 
@@ -235,6 +243,8 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "market_reference_append_only_routing",
     "market_index_projection_reconcile",
     "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
     "pipeline_summary",
     "errors",
 )
@@ -267,6 +277,8 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_reference_append_only_routing",
     "market_index_projection_reconcile",
     "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
     "pipeline_summary",
 }
 
@@ -412,6 +424,15 @@ def build_dashboard_snapshot(
     market_index_reconcile = get_latest_market_index_projection_reconcile(connection)
     market_index_append_only_routing = (
         get_latest_market_index_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_regime_reconcile = get_latest_market_regime_projection_reconcile(
+        connection
+    )
+    market_regime_append_only_routing = (
+        get_latest_market_regime_append_only_routing_status(
             connection,
             settings=settings,
         )
@@ -668,6 +689,8 @@ def build_dashboard_snapshot(
         "market_reference_append_only_routing": market_reference_append_only_routing,
         "market_index_projection_reconcile": market_index_reconcile,
         "market_index_append_only_routing": market_index_append_only_routing,
+        "market_regime_projection_reconcile": market_regime_reconcile,
+        "market_regime_append_only_routing": market_regime_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -1264,6 +1287,23 @@ def _build_dashboard_fast_section(
             )
         return context["market_index_append_only_routing"]
 
+    def market_regime_reconcile() -> dict[str, Any]:
+        if "market_regime_reconcile" not in context:
+            context["market_regime_reconcile"] = (
+                get_latest_market_regime_projection_reconcile(connection)
+            )
+        return context["market_regime_reconcile"]
+
+    def market_regime_append_only_routing() -> dict[str, Any]:
+        if "market_regime_append_only_routing" not in context:
+            context["market_regime_append_only_routing"] = (
+                get_latest_market_regime_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_regime_append_only_routing"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1394,6 +1434,10 @@ def _build_dashboard_fast_section(
         return market_index_reconcile()
     if section == "market_index_append_only_routing":
         return market_index_append_only_routing()
+    if section == "market_regime_projection_reconcile":
+        return market_regime_reconcile()
+    if section == "market_regime_append_only_routing":
+        return market_regime_append_only_routing()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,

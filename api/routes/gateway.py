@@ -29,6 +29,10 @@ from services.runtime.gateway_market_reference_routing import (
     MarketReferenceAppendOnlyRoutingDecision,
     decide_market_reference_append_only_routing,
 )
+from services.runtime.gateway_market_regime_routing import (
+    MarketRegimeAppendOnlyRoutingDecision,
+    decide_market_regime_append_only_routing,
+)
 from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
     decide_market_data_projection_routing,
@@ -80,6 +84,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     market_data_routing: dict[str, Any] | None = None
     market_reference_routing: dict[str, Any] | None = None
     market_index_routing: dict[str, Any] | None = None
+    market_regime_routing: dict[str, Any] | None = None
     broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
@@ -256,6 +261,28 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             index_result.status == "APPLIED"
                             and settings.market_regime_enabled
                         ):
+                            regime_routing = _decide_market_regime_append_only_routing(
+                                connection,
+                                event,
+                                settings=settings,
+                                outbox_status=outbox_status,
+                            )
+                            if regime_routing is None:
+                                projection_statuses[
+                                    "market_regime_append_only_dry_run"
+                                ] = "ERROR"
+                            else:
+                                market_regime_routing = regime_routing.to_dict()
+                                projection_statuses[
+                                    "market_regime_append_only_dry_run"
+                                ] = (
+                                    "WOULD_SKIP_INLINE"
+                                    if regime_routing.would_skip_inline
+                                    else "WOULD_KEEP_INLINE"
+                                )
+                                projection_statuses[
+                                    "market_regime_effective_skip_inline"
+                                ] = "FALSE"
                             if should_rebuild_market_context_snapshots(
                                 connection,
                                 settings=settings,
@@ -330,6 +357,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
         response["market_reference_append_only_routing"] = market_reference_routing
     if market_index_routing is not None:
         response["market_index_append_only_routing"] = market_index_routing
+    if market_regime_routing is not None:
+        response["market_regime_append_only_routing"] = market_regime_routing
     return response
 
 
@@ -360,6 +389,25 @@ def _decide_market_data_projection_routing(
         )
     except Exception:
         logger.exception("market_data append-only dry-run routing decision failed")
+        return None
+
+
+def _decide_market_regime_append_only_routing(
+    connection,
+    event: GatewayEvent,
+    *,
+    settings,
+    outbox_status: str | None,
+) -> MarketRegimeAppendOnlyRoutingDecision | None:
+    try:
+        return decide_market_regime_append_only_routing(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+        )
+    except Exception:
+        logger.exception("market_regime append-only routing decision failed")
         return None
 
 

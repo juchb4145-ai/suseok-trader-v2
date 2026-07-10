@@ -254,6 +254,10 @@ class Settings:
     gateway_market_index_append_only_require_fresh_gateway_health: bool = True
     gateway_market_index_append_only_gateway_health_max_age_sec: int = 30
     gateway_market_index_append_only_effective_skip_disabled_in_pr15: bool = True
+    gateway_market_regime_append_only_dry_run_enabled: bool = False
+    gateway_market_regime_append_only_require_reconcile_pass: bool = True
+    gateway_market_regime_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_regime_append_only_effective_skip_disabled_in_pr18: bool = True
     projection_event_result_backfill_enabled: bool = False
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
@@ -343,14 +347,17 @@ class Settings:
     projection_outbox_market_data_apply_enabled: bool = False
     projection_outbox_market_reference_apply_enabled: bool = False
     projection_outbox_market_index_apply_enabled: bool = False
+    projection_outbox_market_regime_apply_enabled: bool = False
     projection_outbox_apply_batch_size: int = 50
     projection_outbox_market_reference_apply_batch_size: int = 20
     projection_outbox_market_index_apply_batch_size: int = 20
+    projection_outbox_market_regime_apply_batch_size: int = 20
     projection_outbox_live_run_once_batch_size: int = 50
     projection_outbox_run_once_max_wall_ms: int = 5000
     projection_outbox_apply_min_age_sec: float = 1.0
     projection_outbox_market_reference_apply_min_age_sec: float = 1.0
     projection_outbox_market_index_apply_min_age_sec: float = 1.0
+    projection_outbox_market_regime_apply_min_age_sec: float = 1.0
     projection_outbox_shadow_min_age_sec: float = 0.5
     projection_outbox_backlog_warn_pending_count: int = 1000
     projection_outbox_backlog_fail_pending_count: int = 10000
@@ -782,6 +789,10 @@ class Settings:
             raise ValueError(
                 "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC must be >= 1"
             )
+        if self.gateway_market_regime_append_only_reconcile_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
         if self.market_context_snapshot_stale_sec < 1:
@@ -918,6 +929,7 @@ class Settings:
             "projection_outbox_apply_batch_size",
             "projection_outbox_market_reference_apply_batch_size",
             "projection_outbox_market_index_apply_batch_size",
+            "projection_outbox_market_regime_apply_batch_size",
             "projection_outbox_live_run_once_batch_size",
             "projection_outbox_run_once_max_wall_ms",
             "projection_outbox_retry_limit",
@@ -943,6 +955,10 @@ class Settings:
         if self.projection_outbox_market_index_apply_min_age_sec < 0:
             raise ValueError(
                 "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC must be >= 0"
+            )
+        if self.projection_outbox_market_regime_apply_min_age_sec < 0:
+            raise ValueError(
+                "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC must be >= 0"
             )
         if not self.projection_outbox_shadow_mode:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
@@ -2390,6 +2406,31 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
                 )
             )
         ),
+        gateway_market_regime_append_only_dry_run_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED", "false")
+        ),
+        gateway_market_regime_append_only_require_reconcile_pass=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_reconcile_max_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+                "300",
+            ),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_regime_append_only_effective_skip_disabled_in_pr18=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18",
+                    "true",
+                )
+            )
+        ),
         projection_event_result_backfill_enabled=_parse_bool(
             env.get("PROJECTION_EVENT_RESULT_BACKFILL_ENABLED", "false")
         ),
@@ -2702,6 +2743,9 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_index_apply_enabled=_parse_bool(
             env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED", "false")
         ),
+        projection_outbox_market_regime_apply_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED", "false")
+        ),
         projection_outbox_apply_batch_size=_parse_int(
             env.get("PROJECTION_OUTBOX_APPLY_BATCH_SIZE", "50"),
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE",
@@ -2715,6 +2759,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_index_apply_batch_size=_parse_int(
             env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE", "20"),
             "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_market_regime_apply_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE", "20"),
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE",
             min_value=1,
         ),
         projection_outbox_live_run_once_batch_size=_parse_int(
@@ -2740,6 +2789,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_index_apply_min_age_sec=_parse_float(
             env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC", "1.0"),
             "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC",
+            min_value=0.0,
+        ),
+        projection_outbox_market_regime_apply_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC", "1.0"),
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC",
             min_value=0.0,
         ),
         projection_outbox_shadow_min_age_sec=_parse_float(

@@ -180,6 +180,10 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_index_append_only_require_fresh_gateway_health is True
     assert settings.gateway_market_index_append_only_gateway_health_max_age_sec == 30
     assert settings.gateway_market_index_append_only_effective_skip_disabled_in_pr15 is True
+    assert settings.gateway_market_regime_append_only_dry_run_enabled is False
+    assert settings.gateway_market_regime_append_only_require_reconcile_pass is True
+    assert settings.gateway_market_regime_append_only_reconcile_max_age_sec == 300
+    assert settings.gateway_market_regime_append_only_effective_skip_disabled_in_pr18 is True
     assert settings.market_context_snapshot_stale_sec == 30
     assert settings.event_store_retention_enabled is False
     assert settings.projection_event_result_backfill_enabled is False
@@ -231,14 +235,17 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.projection_outbox_market_data_apply_enabled is False
     assert settings.projection_outbox_market_reference_apply_enabled is False
     assert settings.projection_outbox_market_index_apply_enabled is False
+    assert settings.projection_outbox_market_regime_apply_enabled is False
     assert settings.projection_outbox_apply_batch_size == 50
     assert settings.projection_outbox_market_reference_apply_batch_size == 20
     assert settings.projection_outbox_market_index_apply_batch_size == 20
+    assert settings.projection_outbox_market_regime_apply_batch_size == 20
     assert settings.projection_outbox_live_run_once_batch_size == 50
     assert settings.projection_outbox_run_once_max_wall_ms == 5000
     assert settings.projection_outbox_apply_min_age_sec == 1.0
     assert settings.projection_outbox_market_reference_apply_min_age_sec == 1.0
     assert settings.projection_outbox_market_index_apply_min_age_sec == 1.0
+    assert settings.projection_outbox_market_regime_apply_min_age_sec == 1.0
     assert settings.candidate_fsm_enabled is True
     assert settings.candidate_trade_date_timezone == "Asia/Seoul"
     assert settings.candidate_source_stale_sec == 300
@@ -425,14 +432,17 @@ def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> 
             "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED": "true",
             "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED": "true",
             "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED": "true",
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED": "true",
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "7",
             "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE": "5",
             "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE": "4",
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE": "3",
             "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "9",
             "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "1500",
             "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "0.25",
             "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC": "0.5",
             "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC": "0.75",
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC": "1.25",
         }
     )
 
@@ -440,14 +450,17 @@ def test_projection_outbox_market_data_apply_settings_parse_explicit_flags() -> 
     assert settings.projection_outbox_market_data_apply_enabled is True
     assert settings.projection_outbox_market_reference_apply_enabled is True
     assert settings.projection_outbox_market_index_apply_enabled is True
+    assert settings.projection_outbox_market_regime_apply_enabled is True
     assert settings.projection_outbox_apply_batch_size == 7
     assert settings.projection_outbox_market_reference_apply_batch_size == 5
     assert settings.projection_outbox_market_index_apply_batch_size == 4
+    assert settings.projection_outbox_market_regime_apply_batch_size == 3
     assert settings.projection_outbox_live_run_once_batch_size == 9
     assert settings.projection_outbox_run_once_max_wall_ms == 1500
     assert settings.projection_outbox_apply_min_age_sec == 0.25
     assert settings.projection_outbox_market_reference_apply_min_age_sec == 0.5
     assert settings.projection_outbox_market_index_apply_min_age_sec == 0.75
+    assert settings.projection_outbox_market_regime_apply_min_age_sec == 1.25
 
 
 def test_projection_outbox_apply_settings_are_validated() -> None:
@@ -455,11 +468,13 @@ def test_projection_outbox_apply_settings_are_validated() -> None:
         "PROJECTION_OUTBOX_APPLY_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE": "0",
+        "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_LIVE_RUN_ONCE_BATCH_SIZE": "0",
         "PROJECTION_OUTBOX_RUN_ONCE_MAX_WALL_MS": "0",
         "PROJECTION_OUTBOX_APPLY_MIN_AGE_SEC": "-0.1",
         "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC": "-0.1",
         "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC": "-0.1",
+        "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC": "-0.1",
     }
     for key, value in invalid_cases.items():
         try:
@@ -714,6 +729,12 @@ def test_market_data_interval_settings_are_validated() -> None:
             "GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15": (
                 "false"
             ),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED": "true",
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_RECONCILE_PASS": "false",
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "75",
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18": (
+                "false"
+            ),
         }
     )
     assert routing_settings.gateway_market_data_append_only_dry_run_enabled is True
@@ -844,6 +865,16 @@ def test_market_data_interval_settings_are_validated() -> None:
         routing_settings.gateway_market_index_append_only_effective_skip_disabled_in_pr15
         is False
     )
+    assert routing_settings.gateway_market_regime_append_only_dry_run_enabled is True
+    assert (
+        routing_settings.gateway_market_regime_append_only_require_reconcile_pass
+        is False
+    )
+    assert routing_settings.gateway_market_regime_append_only_reconcile_max_age_sec == 75
+    assert (
+        routing_settings.gateway_market_regime_append_only_effective_skip_disabled_in_pr18
+        is False
+    )
 
     try:
         load_settings({"MARKET_DATA_PROJECTION_RECONCILE_LIMIT": "0"})
@@ -945,6 +976,7 @@ def test_market_data_interval_settings_are_validated() -> None:
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC": "0",
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC": "-1",
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC": "0",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC": "0",
         "MARKET_CONTEXT_SNAPSHOT_STALE_SEC": "0",
     }
     for key, value in invalid_controller_cases.items():

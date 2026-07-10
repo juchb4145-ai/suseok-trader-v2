@@ -246,7 +246,7 @@ def test_schema_48_migrates_legacy_watermark_and_retention_tables(tmp_path) -> N
     connection.close()
     initialize_database(db_path).close()
 
-    assert metadata["value"] == str(SCHEMA_VERSION) == "51"
+    assert metadata["value"] == str(SCHEMA_VERSION) == "52"
     assert {"last_success_event_rowid", "last_error_event_rowid"}.issubset(
         watermark_columns
     )
