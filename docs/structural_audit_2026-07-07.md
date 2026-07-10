@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (P0-4 durable order broker boundary 완료)
+최종 업데이트: 2026-07-10 (격리 replay inline-worker parity 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -31,7 +31,8 @@
 - PR-12: `price_tick`/`tr_response`/`condition_event` cutover를 중앙 `operating_mode`, global kill switch, global budget, auto rollback gate로 통제하는 MarketData append-only controller를 추가했다. 기본 mode는 `OFF`, kill switch는 enabled다.
 - PR-13: `market_reference` worker apply 준비, reconcile, dry-run routing, operator/dashboard/ops evidence를 추가했다. Gateway의 `process_market_symbols_event()`는 항상 실행되고 `effective_skip_inline=False`이므로 아직 cutover가 아니다.
 - PR-14: `market_reference` limited cutover를 global kill switch, 원자적 `1/min` budget, fresh reconcile, worker apply, outbox/membership health, 즉시 inline rollback 뒤에서 허용했다. 기본값은 cutover OFF, kill switch ON, budget 0이다.
-- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary를 완료했다. 다음 우선순위는 격리 replay 기반이다.
+- Replay 기반: accepted event export/import, source rowid/received_at 및 order hash 보존, 새 격리 DB 강제, inline-shadow와 worker-apply projection hash/reconcile 비교, strict SQLite write authorizer, KRX/NXT 분리 evidence를 구현했다. operator/API Dashboard는 report read-only status만 제공하고 replay 실행 endpoint는 없다.
+- 현재 판정: MarketData PR-12와 MarketReference PR-14 장중 검증, P0-3 runtime execution lock fencing, P1-6 LIVE_SIM order-plan uniqueness, P0-4 durable broker boundary, 격리 replay 기반을 완료했다. 다음 우선순위는 projection별 success/error watermark와 retention/RCA다.
 
 ## P0
 
@@ -330,26 +331,29 @@ P0-4 durable order broker boundary 진행 상태:
 
 ## 다음 PR 권장 순서
 
-1. Replay 검증을 도입해 inline/worker parity를 격리 DB에서 반복 검증한다.
-2. projection별 success/error watermark와 retention/RCA contract를 확정한다.
-3. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
-4. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
-5. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
-6. LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
-7. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
-8. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
-9. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
-10. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
+1. projection별 success/error watermark와 retention/RCA contract를 확정한다.
+2. market_index apply 준비와 limited cutover를 분리하고 parser confidence/bootstrap source를 명시한다.
+3. 공통 market_context snapshot 이후 market_regime worker/reconcile/cutover를 단계화한다.
+4. market_scan worker apply/reconcile/dry-run과 limited cutover를 분리한다.
+5. LIVE_SIM lifecycle을 durable idempotent consumer로 옮긴다.
+6. incremental queue stale/backlog/dead-letter/retry-reset 운영 경로를 추가한다.
+7. pipeline source lineage/freshness guard와 dashboard/theme coherency를 완성한다.
+8. 모든 consumer 안정화 후 Gateway POST를 raw append + durable enqueue로 제한한다.
+9. 연속 10거래일 exit criteria를 충족한 뒤에만 append-only scaffolding flag와 최종 inline 경로를 정리한다.
 
-## Replay 검증 계획 (다음 순서 1)
+## Replay 검증 완료
 
-- 목적: cutover PR 검증이 "장중 run-once + reconcile" 1일 1회 사이클에 묶이지 않도록, 기록된 이벤트를 오프라인에서 재주입해 하루에 여러 PR을 검증할 수 있게 한다.
-- 방식: `raw_events`/`gateway_events`에서 하루치 이벤트를 export하고, 격리된 replay DB에 두 경로를 재실행한다 — (a) Gateway POST inline projection 경로, (b) `projection_outbox` worker apply 경로. 결과는 기존 `market_data` dual-run reconcile(PR-5)로 대조한다.
-- 산출물: event export/재주입 스크립트, replay 전용 DB fixture, `docs/runbook_market_data_replay_verification_ko.md`.
-- 안전 제약: replay는 검증 전용이며 production DB에 쓰지 않는다. 주문/LIVE_SIM/LIVE_REAL side effect는 replay에서 항상 차단한다. 안전 원칙(주문 정책 완화 없음)은 replay 환경에도 동일 적용한다.
-- 연계: P1-2 projection watermark/retention 정책과 event export 포맷을 공유한다. retention gating이 확정되기 전에는 replay 대상 이벤트가 삭제되지 않도록 export를 먼저 수행한다.
+- `services/runtime/projection_replay.py`와 `tools/ops_projection_replay.py`가 accepted event를 `manifest.json`+`events.jsonl` bundle로 export/import한다. sequence, source rowid, source `received_at`, payload hash, 전체 record hash와 authoritative event-order hash를 검증하며 unsafe/order event type을 거부한다.
+- import/parity target은 존재하지 않는 새 DB만 허용하고 설정된 운영 DB와 같은 경로 또는 기존 파일을 fail-closed한다. source export는 SQLite `mode=ro`+`query_only`다.
+- 동일 bundle의 (a) inline projection+outbox shadow verify, (b) outbox worker apply를 두 격리 DB에서 실행한다. market-data projection table과 logical watermark의 canonical hash, table별 hash/count, KRX/NXT sample count 및 5,000 event chunk별 기존 reconcile을 비교한다.
+- strict authorizer allowlist 밖의 `gateway_commands`, broker boundary, order plan, incremental/candidate/theme/strategy/risk/entry/exit, DRY_RUN/LIVE_SIM table write는 차단하며 blocked attempt 자체를 FAIL 처리한다. replay settings는 `OBSERVE`, LIVE_SIM/LIVE_REAL false, candidate ingest 및 incremental/condition-fusion side effect disabled다.
+- `tr_response` synthetic price tick이 실행 시각을 사용하던 비결정성을 찾아 parent event의 저장 `event_ts`/`received_at`을 상속하도록 수정했다.
+- 반복 fixture `tests/fixtures/projection_replay/market_data_events.json`은 KRX price, 명시적 NXT price, KRX condition, TR response를 포함한다. targeted tests는 export/import order 보존, tamper/운영 DB 거부, exact parity, write guard, operator/dashboard read-only 계약을 검증하며 최종 full pytest suite `887`개를 통과했다.
+- operator `GET /api/operator/projection-replay/status`, Dashboard full/fast `projection_replay`는 최신 report만 읽고 실행 control을 제공하지 않는다. Runbook: `docs/runbook_market_data_replay_verification_ko.md`.
+- 2026-07-10 fixture evidence는 event `4`(KRX `2`, NXT `1`, UNKNOWN `1`), inline/worker hash 일치, 양쪽 reconcile `PASS`, market_data outbox `APPLIED=4`, PENDING/PROCESSING/ERROR/DEAD_LETTER `0`, 주문/trading side effect `0`이다. Report: `reports/projection_replay/20260710T021342Z_660e648e/summary.md`.
+- 다음 PR 진입 판정은 `PASS`다. 이 완료는 장중 cutover나 10거래일 flag cleanup 근거를 대체하지 않으며 다음 범위는 P1-2/P2-4 watermark/retention/RCA다.
 
-## Flag 정리 계획 (최종 순서 10)
+## Flag 정리 계획 (최종 순서 9)
 
 - 전제 조건 (exit criteria): `price_tick`/`tr_response`/`condition_event` cutover가 모두 기본 경로로 동작하고, 연속 10거래일 reconcile PASS, invalid effective skip 0건, deferred side-effect 누락 0건.
 - 1단계: `GATEWAY_MARKET_DATA_APPEND_ONLY_*` 계열 scaffolding flag(dry-run, per-type cutover, budget, require-*, reconcile max age 등 약 20개)와 `PROJECTION_OUTBOX_SHADOW_MODE`/`PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED`/`PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED` apply 게이트를 제거하고, append-only를 기본 동작으로 만든다. inline projection 경로는 긴급 rollback용 단일 flag 하나 뒤에만 유지한다.

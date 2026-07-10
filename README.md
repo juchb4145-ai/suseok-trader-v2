@@ -226,6 +226,27 @@ python -m tools.replay_observe_pipeline `
 전후 row count delta를 남깁니다. `--speed 0`은 최대속도이고, 양수는 이벤트 간격을
 해당 배율로 재생합니다.
 
+market-data inline/worker 격리 parity:
+
+```powershell
+python -m tools.ops_projection_replay export `
+  --source-db storage\suseok-trader-v2.sqlite3 `
+  --trade-date 2026-07-10 `
+  --bundle-dir reports\projection_replay_bundles\2026-07-10
+
+python -m tools.ops_projection_replay parity `
+  --bundle-dir reports\projection_replay_bundles\2026-07-10 `
+  --operational-db storage\suseok-trader-v2.sqlite3 `
+  --batch-size 10
+```
+
+export는 source DB를 read-only로 열고, parity는 같은 event order hash를 가진 새 격리
+DB 두 개에서 inline apply와 worker apply를 비교합니다. 주문/DRY_RUN/LIVE_SIM 및
+candidate/incremental side effect table 쓰기는 SQLite authorizer가 차단합니다. 자세한
+절차와 KRX/NXT evidence 규칙은
+[docs/runbook_market_data_replay_verification_ko.md](docs/runbook_market_data_replay_verification_ko.md)를
+참고하세요.
+
 ## Dashboard 확인 방법
 
 Core 실행 후 브라우저에서 확인합니다.

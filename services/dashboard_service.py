@@ -147,6 +147,7 @@ from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
     projection_outbox_backlog_summary_fields,
 )
+from services.runtime.projection_replay import get_projection_replay_status
 from services.strategy_engine import (
     get_strategy_status,
     list_latest_strategy_observations,
@@ -169,6 +170,7 @@ DASHBOARD_SECTIONS = [
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "projection_replay",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -203,6 +205,7 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "projection_replay",
     "gateway",
     "market_data",
     "market_reference",
@@ -223,6 +226,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "runtime_execution_locks",
     "live_sim_order_plan_uniqueness",
     "order_broker_boundaries",
+    "projection_replay",
     "gateway",
     "condition_fusion",
     "market_data",
@@ -349,6 +353,7 @@ def build_dashboard_snapshot(
         connection
     )
     order_broker_boundaries = get_order_broker_boundary_status(connection)
+    projection_replay = get_projection_replay_status()
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
@@ -606,6 +611,7 @@ def build_dashboard_snapshot(
         "runtime_execution_locks": runtime_execution_locks,
         "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
         "order_broker_boundaries": order_broker_boundaries,
+        "projection_replay": projection_replay,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
         "market_data_projection_reconcile": market_data_reconcile,
@@ -1240,6 +1246,8 @@ def _build_dashboard_fast_section(
         return get_live_sim_order_plan_uniqueness_status(connection)
     if section == "order_broker_boundaries":
         return get_order_broker_boundary_status(connection)
+    if section == "projection_replay":
+        return get_projection_replay_status()
     if section == "market_data":
         return {
             "status": market_data_status(),

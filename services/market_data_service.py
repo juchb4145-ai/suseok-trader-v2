@@ -1426,6 +1426,21 @@ def _event_store_times(
     ).fetchone()
     if row is not None:
         return row["event_ts"], row["received_at"]
+    metadata = event.payload.get("metadata")
+    parent_event_id = (
+        metadata.get("parent_event_id") if isinstance(metadata, Mapping) else None
+    )
+    if parent_event_id:
+        parent_row = connection.execute(
+            """
+            SELECT event_ts, received_at
+            FROM gateway_events
+            WHERE event_id = ?
+            """,
+            (str(parent_event_id),),
+        ).fetchone()
+        if parent_row is not None:
+            return parent_row["event_ts"], parent_row["received_at"]
     return datetime_to_wire(event.ts), datetime_to_wire(utc_now())
 
 

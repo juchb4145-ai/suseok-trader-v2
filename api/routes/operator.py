@@ -60,6 +60,7 @@ from services.runtime.projection_outbox_bulk_retire import (
     bulk_retire_projection_outbox,
 )
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
+from services.runtime.projection_replay import get_projection_replay_status
 from storage.event_retention import (
     get_event_retention_status,
     prune_event_store_events,
@@ -252,6 +253,11 @@ def operator_projection_outbox_status() -> dict[str, Any]:
         return status
     finally:
         connection.close()
+
+
+@router.get("/projection-replay/status")
+def operator_projection_replay_status() -> dict[str, Any]:
+    return get_projection_replay_status()
 
 
 @router.get("/runtime-execution-locks/status")

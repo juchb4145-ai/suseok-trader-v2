@@ -29,6 +29,7 @@ from services.operator.no_buy_sentinel import (
 from services.realtime_subscription import build_realtime_subscription_plan
 from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
 from services.runtime.live_sim_pilot_pipeline import list_live_sim_pilot_runs
+from services.runtime.projection_replay import get_projection_replay_status
 from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
 
@@ -94,6 +95,7 @@ def build_operator_status(
             get_live_sim_order_plan_uniqueness_status(connection)
         ),
         "order_broker_boundaries": get_order_broker_boundary_status(connection),
+        "projection_replay": get_projection_replay_status(),
         "live_sim": {
             "status": live_sim_status,
             "kill_switch": live_sim_status.get("kill_switch"),
