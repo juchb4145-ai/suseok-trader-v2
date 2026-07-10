@@ -6,7 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from services.config import load_settings
+from services.config import TradingMode, TradingProfile, load_settings
+from services.market_context_service import (
+    get_market_context_status,
+    rebuild_market_context_snapshots,
+)
 from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
@@ -979,6 +983,85 @@ def operator_market_index_projection_reconcile_latest() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_latest_market_index_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/market-context/status")
+def operator_market_context_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_market_context_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-context/rebuild",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_context_rebuild(
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    if (
+        not live_safe
+        or settings.trading_profile is not TradingProfile.OBSERVE
+        or settings.trading_mode is not TradingMode.OBSERVE
+        or settings.trading_allow_live_sim
+        or settings.trading_allow_live_real
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="market context rebuild requires OBSERVE-safe runtime settings",
+        )
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        connection.rollback()
+        locked_retry_count += 1
+
+    try:
+        try:
+            payload = retry_sqlite_locked(
+                lambda: rebuild_market_context_snapshots(
+                    connection,
+                    settings=settings,
+                    source_projection="operator",
+                    generated_by="operator_market_context_rebuild",
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_context_rebuild",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=False,
+                    operator_action="retry after live ingest pressure drops",
+                )
+            raise
+        payload["market_context_status"] = get_market_context_status(
+            connection,
+            settings=settings,
+        )
+        payload["observe_safe"] = True
+        payload["locked_retry_count"] = locked_retry_count
+        payload["retryable"] = False
+        return payload
     finally:
         connection.close()
 

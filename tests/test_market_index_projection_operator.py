@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from storage.sqlite import initialize_database, open_connection
 
 
-def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) -> None:
+def test_schema_48_additively_migrates_market_index_and_context_tables(tmp_path) -> None:
     db_path = tmp_path / "market-index-schema.sqlite3"
     connection = initialize_database(db_path)
     for table_name in (
@@ -16,6 +16,12 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
     ):
         connection.execute(f"DROP TABLE {table_name}")
     connection.execute("DROP INDEX idx_market_regime_snapshots_source_event")
+    connection.execute("DROP INDEX idx_candidate_context_market_snapshot")
+    connection.execute(
+        "ALTER TABLE candidate_context_latest DROP COLUMN market_context_snapshot_id"
+    )
+    connection.execute("DROP TABLE market_context_latest")
+    connection.execute("DROP TABLE market_context_snapshots")
     for column_name in ("source_event_id", "source_projection", "generated_by"):
         connection.execute(
             f"ALTER TABLE market_regime_snapshots DROP COLUMN {column_name}"
@@ -39,6 +45,7 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
                     AND (
                         name LIKE 'market_index_projection_%'
                         OR name = 'market_index_append_only_budget_state'
+                        OR name LIKE 'market_context_%'
                     )
                 """
         ).fetchall()
@@ -55,6 +62,35 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
             "PRAGMA index_list(market_regime_snapshots)"
         ).fetchall()
     }
+    candidate_context_columns = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA table_info(candidate_context_latest)"
+        ).fetchall()
+    }
+    candidate_context_indexes = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA index_list(candidate_context_latest)"
+        ).fetchall()
+    }
+    market_context_indexes = {
+        row["name"]
+        for row in migrated.execute(
+            "PRAGMA index_list(market_context_snapshots)"
+        ).fetchall()
+    }
+    market_context_query_plan = [
+        str(row["detail"])
+        for row in migrated.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT snapshot_id
+            FROM market_context_snapshots
+            WHERE source_event_id = 'evt_context_schema_probe'
+            """
+        ).fetchall()
+    ]
     lineage_query_plan = [
         str(row["detail"])
         for row in migrated.execute(
@@ -70,15 +106,25 @@ def test_schema_48_additively_migrates_market_index_projection_tables(tmp_path) 
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "50"
+    assert schema_version == "51"
     assert {
         "market_index_projection_reconcile_issues",
         "market_index_projection_reconcile_runs",
         "market_index_projection_routing_decisions",
         "market_index_append_only_budget_state",
+        "market_context_snapshots",
+        "market_context_latest",
     } <= tables
     assert {"source_event_id", "source_projection", "generated_by"} <= regime_columns
     assert "idx_market_regime_snapshots_source_event" in regime_indexes
+    assert "market_context_snapshot_id" in candidate_context_columns
+    assert "idx_candidate_context_market_snapshot" in candidate_context_indexes
+    assert "idx_market_context_snapshots_market_time" in market_context_indexes
+    assert "idx_market_context_snapshots_source_event" in market_context_indexes
+    assert any(
+        "idx_market_context_snapshots_source_event" in detail
+        for detail in market_context_query_plan
+    )
     assert any(
         "idx_market_regime_snapshots_source_event" in detail
         for detail in lineage_query_plan

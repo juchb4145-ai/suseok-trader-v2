@@ -180,6 +180,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.gateway_market_index_append_only_require_fresh_gateway_health is True
     assert settings.gateway_market_index_append_only_gateway_health_max_age_sec == 30
     assert settings.gateway_market_index_append_only_effective_skip_disabled_in_pr15 is True
+    assert settings.market_context_snapshot_stale_sec == 30
     assert settings.event_store_retention_enabled is False
     assert settings.projection_event_result_backfill_enabled is False
     assert settings.event_store_retention_days == 30
@@ -944,6 +945,7 @@ def test_market_data_interval_settings_are_validated() -> None:
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC": "0",
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC": "-1",
         "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC": "0",
+        "MARKET_CONTEXT_SNAPSHOT_STALE_SEC": "0",
     }
     for key, value in invalid_controller_cases.items():
         try:

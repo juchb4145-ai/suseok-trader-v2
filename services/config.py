@@ -260,6 +260,7 @@ class Settings:
     event_store_retention_batch_size: int = 5000
     event_store_retention_interval_sec: int = 86400
     market_regime_enabled: bool = True
+    market_context_snapshot_stale_sec: int = 30
     market_index_stale_sec: int = 30
     market_scan_enabled: bool = False
     market_scan_interval_sec: int = 120
@@ -783,6 +784,8 @@ class Settings:
             )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
+        if self.market_context_snapshot_stale_sec < 1:
+            raise ValueError("MARKET_CONTEXT_SNAPSHOT_STALE_SEC must be >= 1")
         if self.market_scan_interval_sec < 1:
             raise ValueError("MARKET_SCAN_INTERVAL_SEC must be >= 1")
         if self.market_scan_top_n < 1:
@@ -2409,6 +2412,11 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             min_value=60,
         ),
         market_regime_enabled=_parse_bool(env.get("MARKET_REGIME_ENABLED", "true")),
+        market_context_snapshot_stale_sec=_parse_int(
+            env.get("MARKET_CONTEXT_SNAPSHOT_STALE_SEC", "30"),
+            "MARKET_CONTEXT_SNAPSHOT_STALE_SEC",
+            min_value=1,
+        ),
         market_index_stale_sec=_parse_int(
             env.get("MARKET_INDEX_STALE_SEC", "30"),
             "MARKET_INDEX_STALE_SEC",

@@ -28,6 +28,7 @@ from storage.projection_outbox import (
 from storage.sqlite_locking import retry_sqlite_locked
 
 from services.config import Settings, TradingMode, TradingProfile, load_settings
+from services.market_context_service import rebuild_market_context_snapshots
 from services.market_data_service import (
     MARKET_DATA_EVENT_TYPES,
     QUOTE_ONLY_REAL_TYPES,
@@ -39,7 +40,6 @@ from services.market_reference_service import (
     market_symbols_payload_has_symbols,
     process_market_symbols_event,
 )
-from services.market_regime_service import rebuild_market_regime_snapshot
 from services.runtime.gateway_projection_routing import (
     record_market_data_post_apply_deferred_side_effects,
 )
@@ -1059,9 +1059,7 @@ def _apply_market_index_projection(
                 market_regime_continuity=regime_continuity,
                 retryable=True,
             )
-        mutated_names = (
-            ["market_regime"] if regime_continuity.get("refreshed") else []
-        )
+        mutated_names = _market_index_continuity_mutations(regime_continuity)
         return _verification_applied(
             (
                 "MARKET_INDEX_WORKER_ARTIFACT_RECOVERED"
@@ -1185,7 +1183,7 @@ def _apply_market_index_projection(
             evidence["mutated_projection_name"] = "market_index"
             evidence["mutated_projection_names"] = [
                 "market_index",
-                *(["market_regime"] if regime_continuity.get("refreshed") else []),
+                *_market_index_continuity_mutations(regime_continuity),
             ]
         else:
             evidence["apply_result"] = "APPLIED_BY_VERIFY"
@@ -1773,17 +1771,6 @@ def _ensure_market_index_regime_continuity(
             "cutover_armed": cutover_armed,
         }
     existing = _market_regime_snapshot_for_event(connection, event_id)
-    if existing is not None:
-        return {
-            "status": "APPLIED_BY_VERIFY",
-            "required": True,
-            "refreshed": False,
-            "snapshot_id": existing.get("snapshot_id"),
-            "regime_status": existing.get("regime_status"),
-            "quality_status": existing.get("quality_status"),
-            "effective_skip": effective_skip,
-            "cutover_armed": cutover_armed,
-        }
     if not settings.market_regime_enabled:
         return {
             "status": "ERROR",
@@ -1795,7 +1782,7 @@ def _ensure_market_index_regime_continuity(
             "cutover_armed": cutover_armed,
         }
     try:
-        snapshot = rebuild_market_regime_snapshot(
+        market_context = rebuild_market_context_snapshots(
             connection,
             settings=settings,
             source_event_id=event_id,
@@ -1807,7 +1794,7 @@ def _ensure_market_index_regime_continuity(
             "status": "ERROR",
             "required": True,
             "refreshed": False,
-            "reason": "MARKET_REGIME_REFRESH_EXCEPTION",
+            "reason": "MARKET_CONTEXT_REFRESH_EXCEPTION",
             "error": str(exc),
             "effective_skip": effective_skip,
             "cutover_armed": cutover_armed,
@@ -1819,21 +1806,44 @@ def _ensure_market_index_regime_continuity(
             "required": True,
             "refreshed": False,
             "reason": "MARKET_REGIME_EVENT_LINK_MISSING",
-            "error": "market_regime refresh did not persist source_event_id",
+            "error": "market context refresh did not persist source_event_id",
             "effective_skip": effective_skip,
             "cutover_armed": cutover_armed,
         }
+    regime_refreshed = existing is None
+    context_created_count = int(market_context.get("created_count") or 0)
     return {
-        "status": "APPLIED_BY_WORKER",
+        "status": (
+            "APPLIED_BY_WORKER"
+            if regime_refreshed or context_created_count
+            else "APPLIED_BY_VERIFY"
+        ),
         "required": True,
-        "refreshed": True,
-        "snapshot_id": snapshot.get("snapshot_id"),
-        "regime_status": snapshot.get("regime_status"),
-        "quality_status": snapshot.get("quality_status"),
+        "refreshed": regime_refreshed,
+        "market_context_refreshed": context_created_count > 0,
+        "market_context_created_count": context_created_count,
+        "market_context_snapshot_ids": [
+            str(item.get("snapshot_id"))
+            for item in market_context.get("snapshots") or []
+            if isinstance(item, Mapping) and item.get("snapshot_id")
+        ],
+        "source_watermark_hash": market_context.get("source_watermark_hash"),
+        "snapshot_id": linked.get("snapshot_id"),
+        "regime_status": linked.get("regime_status"),
+        "quality_status": linked.get("quality_status"),
         "source_event_id": event_id,
         "effective_skip": effective_skip,
         "cutover_armed": cutover_armed,
     }
+
+
+def _market_index_continuity_mutations(continuity: Mapping[str, Any]) -> list[str]:
+    mutations: list[str] = []
+    if continuity.get("refreshed"):
+        mutations.append("market_regime")
+    if continuity.get("market_context_refreshed"):
+        mutations.append("market_context")
+    return mutations
 
 
 def _market_index_regime_continuity_required(

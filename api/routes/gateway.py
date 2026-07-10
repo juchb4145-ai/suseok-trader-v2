@@ -10,15 +10,15 @@ from domain.broker.utils import BrokerValidationError
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from services.config import load_settings
 from services.live_sim.live_sim_service import handle_live_sim_gateway_event
+from services.market_context_service import (
+    rebuild_market_context_snapshots,
+    should_rebuild_market_context_snapshots,
+)
 from services.market_data_service import MARKET_DATA_EVENT_TYPES, process_gateway_event
 from services.market_index_service import MARKET_INDEX_EVENT_TYPES, process_market_index_event
 from services.market_reference_service import (
     MARKET_SYMBOL_EVENT_TYPES,
     process_market_symbols_event,
-)
-from services.market_regime_service import (
-    rebuild_market_regime_snapshot,
-    should_rebuild_market_regime_snapshot,
 )
 from services.market_scan_service import SCAN_EVENT_TYPES, process_market_scan_event
 from services.runtime.gateway_market_index_routing import (
@@ -256,16 +256,27 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             index_result.status == "APPLIED"
                             and settings.market_regime_enabled
                         ):
-                            if should_rebuild_market_regime_snapshot(connection):
-                                regime = rebuild_market_regime_snapshot(
+                            if should_rebuild_market_context_snapshots(
+                                connection,
+                                settings=settings,
+                            ):
+                                market_context = rebuild_market_context_snapshots(
                                     connection,
                                     settings=settings,
+                                    source_event_id=event.event_id,
+                                    source_projection="market_index",
+                                    generated_by="gateway_inline",
                                 )
-                                projection_statuses["market_regime"] = regime[
-                                    "regime_status"
-                                ]
+                                regime = market_context.get("global_regime") or {}
+                                projection_statuses["market_regime"] = str(
+                                    regime.get("regime_status") or "DATA_WAIT"
+                                )
+                                projection_statuses["market_context"] = str(
+                                    market_context["status"]
+                                )
                             else:
                                 projection_statuses["market_regime"] = "SKIPPED_RECENT"
+                                projection_statuses["market_context"] = "SKIPPED_RECENT"
                 if event_type in SCAN_EVENT_TYPES:
                     scan_result = process_market_scan_event(
                         connection,

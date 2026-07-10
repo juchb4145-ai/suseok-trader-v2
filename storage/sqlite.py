@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 51
 APP_NAME = "suseok-trader-v2"
 
 
@@ -2591,6 +2591,55 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         WHERE source_event_id IS NOT NULL
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_context_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            market TEXT NOT NULL CHECK (market IN ('KOSPI', 'KOSDAQ')),
+            source_watermark_hash TEXT NOT NULL,
+            source_watermark_json TEXT NOT NULL,
+            source_regime_snapshot_id TEXT,
+            source_event_id TEXT,
+            regime_status TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            parser_confidence_status TEXT NOT NULL,
+            data_quality_status TEXT NOT NULL,
+            trading_data_usable INTEGER NOT NULL DEFAULT 0,
+            market_regime_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            snapshot_at TEXT NOT NULL,
+            generated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(market, source_watermark_hash)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_context_snapshots_market_time
+        ON market_context_snapshots (market, snapshot_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_context_snapshots_source_event
+        ON market_context_snapshots (source_event_id)
+        WHERE source_event_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_context_latest (
+            market TEXT PRIMARY KEY CHECK (market IN ('KOSPI', 'KOSDAQ')),
+            snapshot_id TEXT NOT NULL UNIQUE,
+            trade_date TEXT NOT NULL,
+            source_watermark_hash TEXT NOT NULL,
+            snapshot_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
 
 
 def _create_theme_projection_tables(connection: sqlite3.Connection) -> None:
@@ -2935,6 +2984,7 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS candidate_context_latest (
             candidate_instance_id TEXT PRIMARY KEY,
+            market_context_snapshot_id TEXT,
             trade_date TEXT NOT NULL,
             code TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -2944,6 +2994,18 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
             readiness_json TEXT NOT NULL DEFAULT '{}',
             refreshed_at TEXT NOT NULL
         )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "candidate_context_latest",
+        {"market_context_snapshot_id": "TEXT"},
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_context_market_snapshot
+        ON candidate_context_latest (market_context_snapshot_id)
+        WHERE market_context_snapshot_id IS NOT NULL
         """
     )
     connection.execute(

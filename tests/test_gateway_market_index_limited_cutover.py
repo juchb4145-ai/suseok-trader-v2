@@ -74,7 +74,11 @@ def test_market_index_limited_cutover_applies_index_and_regime_by_worker(tmp_pat
     assert sample_before == 0
     assert sample_after == 1
     assert worker.applied_by_worker_count == 1
-    assert set(worker.mutated_projection_names) == {"market_index", "market_regime"}
+    assert set(worker.mutated_projection_names) == {
+        "market_context",
+        "market_index",
+        "market_regime",
+    }
     assert index_job["status"] == "APPLIED"
     assert regime_job["status"] == "APPLIED"
     assert regime_snapshot is not None
@@ -303,10 +307,10 @@ def test_market_index_regime_refresh_failure_is_fail_closed(
         del args, kwargs
         raise RuntimeError("forced regime refresh failure")
 
-    original_rebuild = projection_outbox_worker.rebuild_market_regime_snapshot
+    original_rebuild = projection_outbox_worker.rebuild_market_context_snapshots
     monkeypatch.setattr(
         projection_outbox_worker,
-        "rebuild_market_regime_snapshot",
+        "rebuild_market_context_snapshots",
         fail_regime,
     )
     worker = process_projection_outbox_batch(
@@ -328,7 +332,7 @@ def test_market_index_regime_refresh_failure_is_fail_closed(
     )
     monkeypatch.setattr(
         projection_outbox_worker,
-        "rebuild_market_regime_snapshot",
+        "rebuild_market_context_snapshots",
         original_rebuild,
     )
     recovery = process_projection_outbox_batch(
@@ -406,7 +410,7 @@ def test_market_index_regime_retry_exhaustion_reaches_dead_letter(
 
     monkeypatch.setattr(
         projection_outbox_worker,
-        "rebuild_market_regime_snapshot",
+        "rebuild_market_context_snapshots",
         fail_regime,
     )
     first = process_projection_outbox_batch(
@@ -782,6 +786,7 @@ def test_market_index_gateway_api_limited_skip_closes_worker_regime(
     ] is True
     assert worker.status_code == 200
     assert set(worker.json()["mutated_projection_names"]) == {
+        "market_context",
         "market_index",
         "market_regime",
     }

@@ -51,7 +51,11 @@ def test_market_index_ops_report_accepts_closed_pr16_effective_skip() -> None:
     report["worker_run"]["data"] = {
         "status": "COMPLETED",
         "projection_name_filter": None,
-        "mutated_projection_names": ["market_index", "market_regime"],
+        "mutated_projection_names": [
+            "market_context",
+            "market_index",
+            "market_regime",
+        ],
         "no_trading_side_effects": True,
     }
     report["routing_status"]["data"].update(
@@ -115,7 +119,11 @@ def test_market_index_ops_report_rejects_pr16_controller_or_guard_gap() -> None:
         {
             "status": "COMPLETED",
             "projection_name_filter": None,
-            "mutated_projection_names": ["market_index", "market_regime"],
+            "mutated_projection_names": [
+                "market_context",
+                "market_index",
+                "market_regime",
+            ],
             "no_trading_side_effects": True,
         }
     )

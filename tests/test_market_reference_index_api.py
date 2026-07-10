@@ -83,7 +83,7 @@ def test_market_index_api_reads_projection_after_gateway_post(tmp_path, monkeypa
     assert regime.json()["latest"]["primary_index_code"] == "KOSPI"
 
 
-def test_gateway_index_event_throttles_recent_market_regime_rebuild(
+def test_gateway_index_event_throttles_recent_common_context_rebuild(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -104,6 +104,11 @@ def test_gateway_index_event_throttles_recent_market_regime_rebuild(
 
     assert first_response.status_code == 200
     assert second_response.status_code == 200
-    assert first_response.json()["projection_statuses"]["market_regime"] != "SKIPPED_RECENT"
+    assert first_response.json()["projection_statuses"]["market_context"] == "APPLIED"
     assert second_response.json()["projection_statuses"]["market_index"] == "APPLIED"
-    assert second_response.json()["projection_statuses"]["market_regime"] == "SKIPPED_RECENT"
+    assert second_response.json()["projection_statuses"]["market_context"] == (
+        "SKIPPED_RECENT"
+    )
+    assert second_response.json()["projection_statuses"]["market_regime"] == (
+        "SKIPPED_RECENT"
+    )

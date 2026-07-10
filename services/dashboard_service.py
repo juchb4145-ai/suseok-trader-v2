@@ -99,6 +99,7 @@ from services.live_sim.live_sim_service import (
     list_live_sim_reconcile_snapshots,
     list_live_sim_rejections,
 )
+from services.market_context_service import get_market_context_status
 from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
@@ -187,6 +188,7 @@ DASHBOARD_SECTIONS = [
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_context",
     "market_regime",
     "realtime_subscription",
     "themes",
@@ -251,6 +253,7 @@ FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_context",
     "market_regime",
     "realtime_subscription",
     "recent_events",
@@ -337,6 +340,7 @@ def build_dashboard_snapshot(
 
     market_data_status = get_market_data_status(connection, settings=settings)
     market_index_status = get_market_index_status(connection, settings=settings)
+    market_context_status = get_market_context_status(connection, settings=settings)
     market_regime_status = get_market_regime_status(connection, settings=settings)
     realtime_subscription = build_realtime_subscription_plan(
         connection,
@@ -646,6 +650,7 @@ def build_dashboard_snapshot(
             "projection_reconcile": market_index_reconcile,
             "append_only_routing": market_index_append_only_routing,
         },
+        "market_context": market_context_status,
         "market_regime": market_regime_status,
         "realtime_subscription": realtime_subscription,
         "runtime_execution_locks": runtime_execution_locks,
@@ -1352,6 +1357,8 @@ def _build_dashboard_fast_section(
         }
     if section == "market_regime":
         return get_market_regime_status(connection, settings=settings)
+    if section == "market_context":
+        return get_market_context_status(connection, settings=settings)
     if section == "realtime_subscription":
         return build_realtime_subscription_plan(
             connection,

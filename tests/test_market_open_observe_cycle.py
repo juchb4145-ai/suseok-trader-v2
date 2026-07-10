@@ -8,6 +8,7 @@ from domain.broker.utils import datetime_to_wire, utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.config import Settings, candidate_timezone
+from services.market_context_service import rebuild_market_context_snapshots
 from services.market_index_service import process_market_index_event
 from services.market_reference_service import process_market_symbols_event
 from services.runtime.evaluation_run_guard import EVALUATION_PIPELINE_LOCK
@@ -330,6 +331,11 @@ def _insert_fresh_market_inputs(db_path) -> None:
             assert process_market_index_event(connection, event, settings=settings).status == (
                 "APPLIED"
             )
+        rebuild_market_context_snapshots(
+            connection,
+            settings=settings,
+            generated_by="observe_cycle_fixture",
+        )
         connection.commit()
     finally:
         connection.close()

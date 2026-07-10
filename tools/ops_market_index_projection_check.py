@@ -336,13 +336,17 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
                 failures.append("MARKET_INDEX_WORKER_FILTER_MISMATCH")
         mutated = {str(value) for value in worker.get("mutated_projection_names") or []}
         allowed_mutations = (
-            {"market_index", "market_regime"}
+            {"market_index", "market_regime", "market_context"}
             if expect_effective_skip
             else {"market_index"}
         )
         if mutated - allowed_mutations:
             failures.append("MARKET_INDEX_WORKER_MUTATED_OTHER_PROJECTION")
-        if expect_effective_skip and not {"market_index", "market_regime"} <= mutated:
+        if expect_effective_skip and not {
+            "market_index",
+            "market_regime",
+            "market_context",
+        } <= mutated:
             failures.append("MARKET_INDEX_REGIME_WORKER_MUTATION_MISSING")
         if not bool(worker.get("no_trading_side_effects")):
             failures.append("MARKET_INDEX_WORKER_TRADING_SIDE_EFFECT_GUARD_MISSING")
