@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from apps.core_api import app
@@ -14,6 +15,9 @@ from services.market_index_service import (
 )
 from services.market_index_tr_bootstrap import (
     MARKET_INDEX_TR_BOOTSTRAP_CONTRACT_VERSION,
+    MARKET_INDEX_TR_BOOTSTRAP_FIELDS,
+    MARKET_INDEX_TR_BOOTSTRAP_OUTPUT_RECORD_NAME,
+    MARKET_INDEX_TR_BOOTSTRAP_ROW_MODE,
     MARKET_INDEX_TR_BOOTSTRAP_SOURCE,
     get_market_index_tr_bootstrap_status,
     inspect_market_index_tr_bootstrap_event,
@@ -94,6 +98,13 @@ def test_bootstrap_queue_creates_only_request_tr_commands(tmp_path, monkeypatch)
     assert {row["command_type"] for row in rows} == {"request_tr"}
     assert {row["source"] for row in rows} == {MARKET_INDEX_TR_BOOTSTRAP_SOURCE}
     assert all("send_order" not in row["payload_json"] for row in rows)
+    payloads = [json.loads(row["payload_json"]) for row in rows]
+    assert all(payload["fields"] == list(MARKET_INDEX_TR_BOOTSTRAP_FIELDS) for payload in payloads)
+    assert all(payload["row_mode"] == MARKET_INDEX_TR_BOOTSTRAP_ROW_MODE for payload in payloads)
+    assert all(
+        payload["output_record_name"] == MARKET_INDEX_TR_BOOTSTRAP_OUTPUT_RECORD_NAME
+        for payload in payloads
+    )
     assert status["adapter_status"] == "IMPLEMENTED"
     assert status["command_count"] == 2
     assert status["status"] == "READY_KOA_PENDING"

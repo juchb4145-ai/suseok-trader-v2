@@ -292,7 +292,7 @@ class Settings:
     market_index_tr_bootstrap_enabled: bool = False
     market_index_tr_bootstrap_tr_code: str = "OPT20001"
     market_index_tr_bootstrap_screen_no: str = "5701"
-    market_index_tr_bootstrap_parser_status: str = "PILOT_UNVERIFIED_KOA_STUDIO"
+    market_index_tr_bootstrap_parser_status: str = "VERIFIED"
     market_index_tr_bootstrap_index_codes: tuple[str, ...] = ("KOSPI", "KOSDAQ")
     market_index_tr_bootstrap_market_types: Mapping[str, str] = field(
         default_factory=lambda: {"KOSPI": "0", "KOSDAQ": "1"}
@@ -2773,7 +2773,7 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         ),
         market_index_tr_bootstrap_parser_status=env.get(
             "MARKET_INDEX_TR_BOOTSTRAP_PARSER_STATUS",
-            "PILOT_UNVERIFIED_KOA_STUDIO",
+            "VERIFIED",
         ),
         market_index_tr_bootstrap_index_codes=_parse_csv_list(
             env.get("KIWOOM_MARKET_INDEX_CODES", "KOSPI,KOSDAQ"),

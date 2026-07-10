@@ -107,6 +107,8 @@ class KiwoomTrRunner:
         continuation_key: str | None = None,
         fields: list[str] | None = None,
         screen_no: str = "8700",
+        row_mode: str = "auto",
+        output_record_name: str | None = None,
     ) -> TrRequestResult:
         completed_results: list[TrRequestResult] = []
         submission = self.submit(
@@ -117,6 +119,8 @@ class KiwoomTrRunner:
             continuation_key=continuation_key,
             fields=fields,
             screen_no=screen_no,
+            row_mode=row_mode,
+            output_record_name=output_record_name,
             on_complete=completed_results.append,
             schedule_timeout=False,
         )
@@ -140,6 +144,8 @@ class KiwoomTrRunner:
         continuation_key: str | None = None,
         fields: list[str] | None = None,
         screen_no: str = "8700",
+        row_mode: str = "auto",
+        output_record_name: str | None = None,
         on_complete,
         schedule_timeout: bool = True,
     ) -> TrRequestSubmission:
@@ -152,6 +158,15 @@ class KiwoomTrRunner:
             request_name=normalized_request_name,
         )
         requested_fields = fields or DEFAULT_TR_FIELDS.get(normalized_tr_code, [])
+        normalized_row_mode = str(row_mode or "auto").strip().lower()
+        if normalized_row_mode not in {"auto", "single"}:
+            result.errors.append(f"TR_ROW_MODE_INVALID:{normalized_row_mode}")
+            return TrRequestSubmission(
+                key="",
+                request_code=-1,
+                result=result,
+                completed=True,
+            )
         prev_next = 2 if str(continuation_key or "").strip() == "2" else 0
         key = _pending_key(normalized_screen_no, normalized_request_name, normalized_tr_code)
 
@@ -164,6 +179,8 @@ class KiwoomTrRunner:
             "tr_code": normalized_tr_code,
             "request_name": normalized_request_name,
             "screen_no": normalized_screen_no,
+            "row_mode": normalized_row_mode,
+            "output_record_name": str(output_record_name or "").strip(),
             "on_complete": on_complete,
         }
         request_code = int(
@@ -218,7 +235,13 @@ class KiwoomTrRunner:
         active = self._pending_requests.pop(key)
         result = active["result"]
         fields = list(active["fields"])
-        rows = self._extract_rows(result, meta, fields)
+        rows = self._extract_rows(
+            result,
+            meta,
+            fields,
+            row_mode=str(active.get("row_mode") or "auto"),
+            output_record_name=str(active.get("output_record_name") or ""),
+        )
         result.pages.append(TrPage(meta=meta, rows=rows))
         on_complete = active["on_complete"]
         if callable(on_complete):
@@ -256,14 +279,30 @@ class KiwoomTrRunner:
         result: TrRequestResult,
         meta: TrResponseMeta,
         fields: list[str],
+        *,
+        row_mode: str = "auto",
+        output_record_name: str = "",
     ) -> list[dict[str, str]]:
         if not fields:
             result.warnings.append(f"TR_FIELDS_EMPTY:{result.tr_code}:{result.request_name}")
             return []
         tr_code = meta.tr_code or result.tr_code
         record_candidates = _dedupe(
-            [meta.rq_name, meta.record_name, result.request_name, result.tr_code]
+            [
+                output_record_name,
+                meta.record_name,
+                meta.rq_name,
+                result.request_name,
+                result.tr_code,
+            ]
         )
+        if row_mode == "single":
+            row = self._extract_single_row(tr_code, record_candidates, fields)
+            if row:
+                result.warnings.append(f"TR_SINGLE_ROW_EXPLICIT:{result.tr_code}")
+                return [row]
+            result.warnings.append(f"TR_PAGE_EMPTY:{result.tr_code}:{result.request_name}")
+            return []
         record_name, repeat_count = self._repeat_count(tr_code, record_candidates)
         if repeat_count <= 0:
             row = self._extract_single_row(tr_code, record_candidates, fields)

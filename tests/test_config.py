@@ -214,9 +214,7 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.market_index_tr_bootstrap_enabled is False
     assert settings.market_index_tr_bootstrap_tr_code == "OPT20001"
     assert settings.market_index_tr_bootstrap_screen_no == "5701"
-    assert settings.market_index_tr_bootstrap_parser_status == (
-        "PILOT_UNVERIFIED_KOA_STUDIO"
-    )
+    assert settings.market_index_tr_bootstrap_parser_status == "VERIFIED"
     assert settings.market_index_tr_bootstrap_index_codes == ("KOSPI", "KOSDAQ")
     assert settings.market_index_tr_bootstrap_market_types == {
         "KOSPI": "0",

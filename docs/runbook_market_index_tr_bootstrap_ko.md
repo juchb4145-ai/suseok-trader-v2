@@ -7,8 +7,9 @@
 직접 연결한다. 주문, 정정, 취소, SOR command는 생성하지 않는다.
 
 OpenAPI+ 공식 개발가이드는 TR별 입력/출력 항목을 KOA Studio에서 확인하도록 안내한다.
-따라서 adapter 코드는 구현되어 있어도 기본 parser status는
-`PILOT_UNVERIFIED_KOA_STUDIO`이며 실제 KOA Studio 확인 전에는 `VERIFIED`로 바꾸지 않는다.
+2026-07-10 KOA StudioSA 2.34와 격리 OBSERVE Core에서 `OPT20001` KOSPI/KOSDAQ
+실제 callback을 확인했으므로 parser status 기본값은 `VERIFIED`다. bootstrap enable 기본값과
+realtime cutover gate는 별개이며 계속 disabled/fail-closed다.
 
 ## 기본 안전 설정
 
@@ -20,7 +21,7 @@ TRADING_ALLOW_LIVE_REAL=false
 KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED=false
 MARKET_INDEX_TR_BOOTSTRAP_TR_CODE=OPT20001
 MARKET_INDEX_TR_BOOTSTRAP_SCREEN_NO=5701
-MARKET_INDEX_TR_BOOTSTRAP_PARSER_STATUS=PILOT_UNVERIFIED_KOA_STUDIO
+MARKET_INDEX_TR_BOOTSTRAP_PARSER_STATUS=VERIFIED
 MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES=KOSPI=0,KOSDAQ=1
 MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES=KOSPI=001,KOSDAQ=101
 ```
@@ -39,6 +40,7 @@ MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES=KOSPI=001,KOSDAQ=101
 - request name: `market_index_tr_bootstrap_<index_code>`
 - `tr_bootstrap_contract_version=v1`
 - metadata의 `index_code`, `market_type`, `industry_code`, `parser_status`
+- `row_mode=single`, `output_record_name=업종현재가`
 - `observe_only=true`, `no_order_side_effects=true`
 
 같은 trade date/1분 bucket/index의 idempotency key는 동일하므로 즉시 재실행은
@@ -48,7 +50,9 @@ Kiwoom 동기/비동기 TR handler는 command metadata를 `BrokerTrResponse.meta
 보존한다. Core는 request ID의 index와 metadata index가 같고, TR code, source, contract,
 response success, 단일 row가 모두 맞는 경우에만 projection한다.
 
-현재 parser는 다음 alias를 허용한다.
+Gateway command는 KOA 단일 output block의 `현재가`, `전일대비`, `등락률`만 요청한다.
+같은 TR의 `업종현재가_시간별` 반복 block은 읽지 않는다. parser는 저장/replay 호환을 위해
+다음 alias를 허용한다.
 
 - 현재가: `현재가`, `업종현재가`, `price`, `current_price`
 - 전일대비: `전일대비`, `change_value`, `change`
@@ -116,11 +120,26 @@ python -m tools.ops_market_index_tr_bootstrap_check `
 Core mode, adapter/source contract, event/sample gap, Dashboard 일치와 점검 전후
 command/order-command delta 0을 확인한다.
 
+## 2026-07-10 비장중 실제 기능 evidence
+
+- 격리 Core `OBSERVE`, LIVE_SIM/LIVE_REAL false, Kiwoom 모의투자 로그인 성공
+- KOSPI `시장구분=0/업종코드=001`: `7475.94`, `+184.03`, `+2.52%`
+- KOSDAQ `시장구분=1/업종코드=101`: `837.43`, `+43.43`, `+5.47%`
+- 두 callback 간격 약 80초, 각 response row 1건, raw field 3개 일치
+- market-index worker `APPLIED=2`, reconcile `PASS`, parser verified/data usable `2/2`
+- projection error, outbox ERROR/DEAD_LETTER, candidate ingest, order command 모두 0
+- `quick_check=ok`, 운영 DB와 `.env` 변경 없음
+- Reports: `reports/market_index_tr_bootstrap_offhours/20260710T143434Z/bootstrap_summary.md`,
+  `reports/market_index_tr_bootstrap_offhours/20260710T143434Z/projection_summary.md`
+
+이 evidence는 TR transport/parser 기능 PASS다. realtime source가 아니므로 KRX 장중 freshness,
+regime continuity, effective cutover 또는 연속 10거래일 readiness anchor로 계산하지 않는다.
+
 ## PASS / WARN / FAIL
 
 - `PASS`: adapter IMPLEMENTED, parser VERIFIED, event/sample gap 0, API/Dashboard 일치,
   command/order-command delta 0.
-- `WARN`: 안전 기본값 disabled 또는 adapter는 준비됐지만 KOA Studio parser 확인 대기.
+- `WARN`: 안전 기본값 disabled, event/sample 없음 또는 realtime 운영 gate 대기.
 - `FAIL`: OBSERVE 이탈, adapter/source contract 누락, lineage mismatch, sample gap,
   plan-only command 생성 또는 주문 command 변화.
 

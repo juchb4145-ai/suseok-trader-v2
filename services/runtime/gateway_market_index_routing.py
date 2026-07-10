@@ -561,7 +561,7 @@ def get_latest_market_index_append_only_routing_status(
     warnings = [
         "PR-16 market_index limited cutover is feature-flagged",
         "rollback: enable global kill switch or disable market_index cutover",
-        "TR bootstrap adapter is not implemented",
+        "TR bootstrap adapter is implemented but is not realtime cutover evidence",
         "NXT is not accepted as KRX market index evidence",
     ]
     if not resolved_settings.gateway_market_index_append_only_dry_run_enabled:

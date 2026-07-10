@@ -24,9 +24,9 @@ MARKET_INDEX_TR_BOOTSTRAP_FIELDS: tuple[str, ...] = (
     "현재가",
     "전일대비",
     "등락률",
-    "등락율",
-    "체결시간",
 )
+MARKET_INDEX_TR_BOOTSTRAP_ROW_MODE = "single"
+MARKET_INDEX_TR_BOOTSTRAP_OUTPUT_RECORD_NAME = "업종현재가"
 _INDEX_NAMES = {"KOSPI": "KOSPI", "KOSDAQ": "KOSDAQ"}
 
 
@@ -364,6 +364,8 @@ def _build_command(
         "run_id": run_id,
         "request_bucket": request_bucket,
         "parser_status": settings.market_index_tr_bootstrap_parser_status,
+        "tr_row_mode": MARKET_INDEX_TR_BOOTSTRAP_ROW_MODE,
+        "tr_output_record_name": MARKET_INDEX_TR_BOOTSTRAP_OUTPUT_RECORD_NAME,
         "koa_studio_confirmation_required": (
             settings.market_index_tr_bootstrap_parser_status != "VERIFIED"
         ),
@@ -383,6 +385,8 @@ def _build_command(
         ),
         "screen_no": settings.market_index_tr_bootstrap_screen_no,
         "fields": list(MARKET_INDEX_TR_BOOTSTRAP_FIELDS),
+        "row_mode": MARKET_INDEX_TR_BOOTSTRAP_ROW_MODE,
+        "output_record_name": MARKET_INDEX_TR_BOOTSTRAP_OUTPUT_RECORD_NAME,
         "params": {
             "시장구분": settings.market_index_tr_bootstrap_market_types[index_code],
             "업종코드": settings.market_index_tr_bootstrap_industry_codes[index_code],

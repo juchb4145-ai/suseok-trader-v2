@@ -90,9 +90,10 @@ false, legacy PR-15 guard false, 양수 budget이 모두 필요하다.
 
 TR bootstrap adapter는 generic `request_tr`와 v1 source lineage contract로 구현되어 있다.
 유효한 parent `tr_response`는 `TR_BOOTSTRAP` source로 집계하며 source/contract/index/TR
-lineage가 없거나 다르면 FAIL한다. 기본 parser status는
-`PILOT_UNVERIFIED_KOA_STUDIO`이므로 실제 KOA Studio 확인 전에는 append-only readiness가
-false다. 상세 절차는 `docs/runbook_market_index_tr_bootstrap_ko.md`를 따른다.
+lineage가 없거나 다르면 FAIL한다. `OPT20001` parser는 2026-07-10 KOA Studio와 실제
+비장중 callback으로 `VERIFIED`됐지만 `TR_BOOTSTRAP` source는 realtime cutover 및 연속
+10거래일 KRX anchor에서 계속 제외한다. 상세 절차는
+`docs/runbook_market_index_tr_bootstrap_ko.md`를 따른다.
 
 ## API
 
@@ -268,4 +269,5 @@ reconcile/routing table은 evidence이므로 삭제하지 않는다. ERROR/DEAD_
 - command/order-command delta 0/0
 
 현재 운영 adapter가 `PILOT_UNVERIFIED_FID_MAP`인 동안 effective cutover 활성화는 금지한다.
-KOA Studio 확인과 current KRX session evidence를 확보한 뒤 1/min 한도로만 시작한다.
+TR bootstrap KOA/parser 확인은 완료됐지만 realtime FID mapping과 current KRX session
+evidence는 별도다. realtime path는 실제 장중 evidence를 확보한 뒤 1/min 한도로만 시작한다.

@@ -2338,6 +2338,68 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
     assert response.rows[0]["종목코드"] == "005930"
 
 
+def test_kiwoom_handler_request_tr_can_force_single_output_record() -> None:
+    class MixedOutputTrClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.repeat_count_calls: list[tuple[str, str]] = []
+            self.comm_data_calls: list[tuple[str, str, int, str]] = []
+
+        def get_repeat_count(self, tr_code: str, rq_name: str) -> int:
+            self.repeat_count_calls.append((tr_code, rq_name))
+            return 20
+
+        def get_comm_data(
+            self,
+            tr_code: str,
+            rq_name: str,
+            index: int,
+            item_name: str,
+        ) -> str:
+            self.comm_data_calls.append((tr_code, rq_name, index, item_name))
+            if rq_name != "업종현재가" or index != 0:
+                return ""
+            return {
+                "현재가": "+7475.94",
+                "전일대비": "+184.03",
+                "등락률": "+2.52",
+            }.get(item_name, "")
+
+    client = MixedOutputTrClient()
+    handler = KiwoomGatewayCommandHandler(client)
+    command = GatewayCommand(
+        command_id="cmd_index_tr",
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": "market_index_tr_bootstrap:KOSPI:test",
+            "tr_code": "OPT20001",
+            "request_name": "market_index_tr_bootstrap_kospi",
+            "params": {"시장구분": "0", "업종코드": "001"},
+            "fields": ["현재가", "전일대비", "등락률"],
+            "row_mode": "single",
+            "output_record_name": "업종현재가",
+        },
+    )
+
+    events = handler.handle(command)
+    response = BrokerTrResponse.from_dict(events[1].payload)
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "tr_response",
+        "command_ack",
+    ]
+    assert response.rows == [
+        {"현재가": "+7475.94", "전일대비": "+184.03", "등락률": "+2.52"}
+    ]
+    assert client.repeat_count_calls == []
+    assert {call[1] for call in client.comm_data_calls} == {"업종현재가"}
+    assert events[2].payload["details"]["warnings"] == [
+        "TR_SINGLE_ROW_EXPLICIT:OPT20001"
+    ]
+
+
 def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() -> None:
     class DeferredTrClient(MockKiwoomClient):
         def __init__(self) -> None:

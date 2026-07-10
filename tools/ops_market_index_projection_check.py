@@ -448,7 +448,7 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             "Worker evidence must close both market_index and event-linked market_regime.",
             (
                 "TR bootstrap is implemented behind a disabled-by-default v1 lineage "
-                "contract; KOA Studio confirmation is still required."
+                "contract; its verified parser evidence is not realtime cutover evidence."
             ),
             "NXT is not KRX market-index evidence.",
         ]

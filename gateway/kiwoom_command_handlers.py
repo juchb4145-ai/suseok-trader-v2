@@ -286,6 +286,10 @@ class KiwoomGatewayCommandHandler:
             "continuation_key": payload.get("continuation_key"),
             "fields": fields or None,
             "screen_no": _string_value(payload, "screen_no", "8700"),
+            "row_mode": _string_value(payload, "row_mode", "auto"),
+            "output_record_name": (
+                _string_value(payload, "output_record_name", "") or None
+            ),
         }
         if self.on_async_events is not None:
             completed_results: list[Any] = []
