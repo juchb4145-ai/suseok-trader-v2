@@ -17,6 +17,7 @@ param(
     [switch]$NoConditionRealtime,
     [switch]$DisableConditions,
     [switch]$DisableRealtimeCodes,
+    [switch]$ClearRealtimeOnLogin,
     [switch]$Detached,
     [switch]$Log,
     [switch]$DryRun,
@@ -346,7 +347,7 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedProfiles)) {
 if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $GatewayArgs += @("--realtime-codes", $RealtimeCodes)
 }
-if ($DisableRealtimeCodes) {
+if ($DisableRealtimeCodes -or $ClearRealtimeOnLogin) {
     $GatewayArgs += "--clear-realtime-on-login"
 }
 if ($MarketIndexEnabledValue) {

@@ -869,6 +869,9 @@ class KiwoomClient:
             audit_code = market_index_code or str(raw_code or "").strip()
         else:
             audit_code = normalize_code(raw_code)
+        callback_admitted = is_market_index_callback or self._is_registered_stock_callback(
+            raw_code
+        )
         self._record_thread_audit(
             "OnReceiveRealData",
             phase="CALLBACK",
@@ -877,7 +880,13 @@ class KiwoomClient:
             real_type=real_type_text,
             real_data_present=bool(str(real_data or "")),
             callback_asset_type="market_index" if is_market_index_callback else "stock",
+            callback_admitted=callback_admitted,
+            admission_reason=(
+                "" if callback_admitted else "UNREGISTERED_REALTIME_CODE"
+            ),
         )
+        if not callback_admitted:
+            return
         if is_market_index_callback:
             if not market_index_code:
                 self.realtime_data_received.emit(
@@ -1111,6 +1120,17 @@ class KiwoomClient:
             screen_map = {}
             self._realtime_screen_codes = screen_map
         return screen_map
+
+    def _is_registered_stock_callback(self, raw_code: str) -> bool:
+        screen_map = getattr(self, "_realtime_screen_codes", None)
+        # Lightweight object.__new__ test clients predate subscription tracking.
+        if not isinstance(screen_map, dict):
+            return True
+        try:
+            kiwoom_code = normalize_kiwoom_realtime_code(raw_code)
+        except ValueError:
+            return False
+        return any(kiwoom_code in codes for codes in screen_map.values())
 
     def _market_index_screen_code_map(self) -> dict[str, set[str]]:
         screen_map = getattr(self, "_market_index_realtime_screen_codes", None)

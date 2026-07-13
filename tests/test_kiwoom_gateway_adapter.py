@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -65,6 +66,7 @@ from gateway.kiwoom_runtime import (
     KiwoomGatewayRuntime,
     KiwoomGatewayRuntimeConfig,
     PendingOrderRegistry,
+    _core_io_data_plane_health,
     wire_kiwoom_signals,
 )
 from gateway.order_pre_ack_journal import OrderPreAckJournal
@@ -114,6 +116,20 @@ def test_kiwoom_gateway_realtime_exchange_option() -> None:
     assert parse_args([]).realtime_exchange == "krx"
     assert parse_args(["--realtime-exchange", "nxt"]).realtime_exchange == "nxt"
     assert parse_args(["--realtime-exchange", "all"]).realtime_exchange == "all"
+
+
+def test_kiwoom_gateway_realtime_max_total_uses_core_planner_env(monkeypatch) -> None:
+    monkeypatch.setenv("REALTIME_SUBSCRIPTION_MAX_TOTAL", "80")
+
+    assert parse_args([]).realtime_max_total == 80
+    assert parse_args(["--realtime-max-total", "60"]).realtime_max_total == 60
+
+
+def test_kiwoom_gateway_batch_timeout_uses_env(monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_EVENT_TIMEOUT_SEC", "20")
+
+    assert parse_args([]).event_timeout_sec == 20.0
+    assert parse_args(["--event-timeout-sec", "12"]).event_timeout_sec == 12.0
 
 
 def test_kiwoom_gateway_can_clear_realtime_on_login() -> None:
@@ -516,6 +532,57 @@ def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
     assert price_ticks[0]["code"] == "005930"
     assert price_ticks[0]["metadata"]["exchange"] == "NXT"
     assert price_ticks[0]["metadata"]["kiwoom_code"] == "005930_NX"
+
+
+def test_kiwoom_unregistered_stock_callback_is_dropped_before_fid_reads() -> None:
+    from gateway.kiwoom_client import KiwoomClient
+
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    client._realtime_screen_codes = {"5000": {"005930"}}
+    fid_reads: list[int] = []
+    client._real_raw = lambda code, fid: fid_reads.append(fid) or "70000"
+    ticks: list[dict[str, object]] = []
+    audits: list[dict[str, object]] = []
+    client.price_tick_received.connect(ticks.append)
+    client.active_x_thread_audit.connect(audits.append)
+
+    client._on_receive_real_data("000660", "주식체결", "")
+
+    assert fid_reads == []
+    assert ticks == []
+    assert audits[-1]["callback_admitted"] is False
+    assert audits[-1]["admission_reason"] == "UNREGISTERED_REALTIME_CODE"
+
+
+def test_runtime_reports_unregistered_realtime_callback_admission_drops() -> None:
+    runtime = KiwoomGatewayRuntime(client=MockKiwoomClient(), core_client=object())
+
+    runtime.on_active_x_thread_audit(
+        {
+            "method": "OnReceiveRealData",
+            "phase": "CALLBACK",
+            "code": "000660",
+            "kiwoom_code": "000660",
+            "real_type": "주식체결",
+            "callback_admitted": False,
+            "admission_reason": "UNREGISTERED_REALTIME_CODE",
+        }
+    )
+
+    payload = runtime.heartbeat_payload()
+    assert payload["unregistered_realtime_callback_count"] == 1
+    assert payload["latest_unregistered_realtime_callback"]["code"] == "000660"
+    assert payload["latest_unregistered_realtime_callback"]["reason"] == (
+        "UNREGISTERED_REALTIME_CODE"
+    )
 
 
 def test_kiwoom_thread_audit_pending_buffer_is_bounded() -> None:
@@ -1309,6 +1376,100 @@ def test_core_io_worker_coalesces_price_ticks_when_queue_is_backed_up() -> None:
     assert worker._core_client.events[0].event_id == "evt_price_latest"
 
 
+def test_core_io_worker_batches_fresh_market_events_with_durable_fifo() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.batches: list[list[GatewayEvent]] = []
+
+        def post_events(self, events: list[GatewayEvent]) -> dict[str, object]:
+            self.batches.append(list(events))
+            return {
+                "processed_count": len(events),
+                "accepted_count": len(events),
+                "failed_count": 0,
+                "results": [{"accepted": True} for _ in events],
+            }
+
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+        event_batch_size=6,
+        market_batch_share=3,
+    )
+    for index in range(10):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_condition_batch_{index}",
+                event_type="condition_event",
+                source="kiwoom_gateway",
+                payload={"code": f"{index:06d}", "action": "ENTER"},
+            )
+        )
+    for index, code in enumerate(("005930", "000660", "035420")):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_price_batch_{index}",
+                event_type="price_tick",
+                source="kiwoom_gateway",
+                payload={"code": code, "price": 70000 + index},
+            )
+        )
+
+    assert worker._post_next_event_batch(core.post_events) is True
+
+    event_types = [event.event_type for event in core.batches[0]]
+    assert event_types.count("price_tick") == 3
+    assert event_types.count("condition_event") == 3
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 7
+    assert snapshot.batch_post_count == 1
+    assert snapshot.latest_batch_size == 6
+    assert snapshot.market_event_queue_size == 0
+    assert snapshot.durable_event_queue_size == 7
+
+
+def test_core_io_data_plane_health_fails_closed_on_stale_market_backlog() -> None:
+    worker = CoreIoWorker(
+        core_client=object(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+    )
+    snapshot = worker.snapshot()
+
+    healthy = replace(
+        snapshot,
+        running=True,
+        oldest_event_age_sec=1.0,
+        oldest_market_event_age_sec=1.0,
+    )
+    stale = replace(
+        healthy,
+        oldest_event_age_sec=12.0,
+        oldest_market_event_age_sec=12.0,
+    )
+    coalesced_market_buffer = replace(
+        healthy,
+        event_queue_size=400,
+        market_event_queue_size=400,
+        durable_event_queue_size=0,
+    )
+    durable_backlog = replace(
+        healthy,
+        event_queue_size=250,
+        durable_event_queue_size=250,
+    )
+
+    assert _core_io_data_plane_health(healthy) == "HEALTHY"
+    assert _core_io_data_plane_health(stale) == "STALE_MARKET_BACKLOG"
+    assert _core_io_data_plane_health(coalesced_market_buffer) == "HEALTHY"
+    assert _core_io_data_plane_health(durable_backlog) == "BACKLOG_DEGRADED"
+
+
 def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -> None:
     class Core:
         def __init__(self) -> None:
@@ -1756,6 +1917,63 @@ def test_runtime_tracks_realtime_register_command_after_ack() -> None:
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
     assert [event.event_type for event in core.events] == ["command_started", "command_ack"]
+
+
+def test_runtime_enforces_global_realtime_registration_cap() -> None:
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_max_total=2),
+    )
+
+    runtime.register_realtime_codes(["005930", "000660", "035420"])
+
+    assert client.registered_codes == {"005930", "000660"}
+    assert runtime._registered_realtime_codes == {"005930", "000660"}
+    heartbeat = runtime.heartbeat_payload()
+    assert heartbeat["realtime_max_total"] == 2
+    assert heartbeat["realtime_registration_budget_skip_count"] == 1
+
+
+def test_runtime_rejects_register_command_that_exceeds_global_cap() -> None:
+    command = GatewayCommand(
+        command_id="cmd_register_over_budget",
+        command_type="register_realtime",
+        source="core",
+        payload={"codes": ["000660"]},
+    )
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            return [command]
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    client = MockKiwoomClient()
+    core = Core()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=core,
+        config=KiwoomGatewayRuntimeConfig(realtime_max_total=1),
+    )
+    runtime.register_realtime_codes(["005930"])
+
+    runtime.poll_and_handle_commands()
+
+    assert client.registered_codes == {"005930"}
+    assert [event.event_type for event in core.events] == [
+        "command_failed",
+        "gateway_error",
+    ]
+    assert (
+        "REALTIME_SUBSCRIPTION_MAX_TOTAL_EXCEEDED"
+        in core.events[0].payload["error_message"]
+    )
 
 
 def test_multi_condition_profiles_send_sequential_with_distinct_screens(monkeypatch) -> None:

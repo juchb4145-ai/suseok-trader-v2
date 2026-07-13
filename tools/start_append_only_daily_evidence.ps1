@@ -101,6 +101,7 @@ $Parameters = @{
     MarketDataGlobalSkipBudget = $GlobalBudget
     ThemeRefreshTradingSession = "KRX"
     ThemeRefreshQueueMarketScanCommands = "true"
+    ThemeRefreshQueueRealtimeCommands = "false"
     Token = $Token
 }
 

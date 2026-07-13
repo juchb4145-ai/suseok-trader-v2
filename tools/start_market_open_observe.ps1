@@ -363,6 +363,9 @@ function Start-KiwoomGatewayDetached {
         Log = $true
         WaitSeconds = $GatewayWaitSeconds
     }
+    if ($AppendOnlyEvidence) {
+        $GatewayScriptParams.ClearRealtimeOnLogin = $true
+    }
     if (-not [string]::IsNullOrWhiteSpace($ConditionProfilesFile)) {
         $GatewayScriptParams.ConditionProfilesFile = $ConditionProfilesFile
     } elseif (-not [string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
@@ -417,6 +420,9 @@ if ($MarketScanParserVerified -and -not $AppendOnlyEvidence) {
     throw "MarketScanParserVerified is only allowed with AppendOnlyEvidence."
 }
 $EvidenceModeRequested = $RealtimeFidValidation -or $AppendOnlyEvidence
+if ($AppendOnlyEvidence) {
+    $ThemeRefreshQueueRealtimeCommands = "false"
+}
 $OperatingDbPath = Resolve-WorkspacePath -Path $env:TRADING_DB_PATH
 if ($EvidenceModeRequested -and [string]::IsNullOrWhiteSpace($DbPath)) {
     throw "DbPath is required for realtime/evidence validation modes."

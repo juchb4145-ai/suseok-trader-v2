@@ -1915,6 +1915,8 @@ _GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
     "latest_realtime_callback_at",
     "raw_realtime_callback_count",
     "realtime_callback_count",
+    "unregistered_realtime_callback_count",
+    "latest_unregistered_realtime_callback",
     "parsed_price_tick_count",
     "realtime_parse_error_count",
     "latest_realtime_parse_error",
@@ -2063,6 +2065,13 @@ def _gateway_status_section(
         ),
         "raw_realtime_callback_count": heartbeat_payload.get("raw_realtime_callback_count"),
         "realtime_callback_count": heartbeat_payload.get("realtime_callback_count"),
+        "unregistered_realtime_callback_count": heartbeat_payload.get(
+            "unregistered_realtime_callback_count"
+        ),
+        "latest_unregistered_realtime_callback": heartbeat_payload.get(
+            "latest_unregistered_realtime_callback"
+        )
+        or {},
         "parsed_price_tick_count": heartbeat_payload.get("parsed_price_tick_count"),
         "realtime_parse_error_count": heartbeat_payload.get("realtime_parse_error_count"),
         "latest_realtime_parse_error": heartbeat_payload.get("latest_realtime_parse_error")

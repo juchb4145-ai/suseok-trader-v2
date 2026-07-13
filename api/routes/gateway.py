@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+from collections.abc import Mapping
 from typing import Any
 
 from domain.broker.events import GatewayEvent
@@ -45,10 +46,14 @@ from services.runtime.gateway_market_scan_routing import (
 )
 from services.runtime.gateway_projection_routing import (
     MarketDataAppendOnlyRoutingDecision,
+    build_market_data_projection_routing_batch_context,
     decide_market_data_projection_routing,
 )
 from services.runtime.live_sim_lifecycle_consumer import (
     is_live_sim_lifecycle_event,
+)
+from services.runtime.market_data_append_only_controller import (
+    MarketDataAppendOnlyControllerStatus,
 )
 from services.runtime.market_data_projection_side_effects import (
     enqueue_incremental_for_candidate_quote_refresh_tr_response,
@@ -70,7 +75,10 @@ from storage.gateway_command_store import (
     poll_commands,
 )
 from storage.gateway_order_broker_boundary import get_order_broker_boundary
-from storage.projection_outbox import enqueue_projection_jobs_for_gateway_event
+from storage.projection_outbox import (
+    enqueue_projection_jobs_for_gateway_event,
+    retire_inline_projection_outbox_job,
+)
 from storage.sqlite import open_connection
 
 from api.dependencies.auth import require_local_token
@@ -82,16 +90,39 @@ _gateway_event_write_lock = threading.RLock()
 
 @router.post("/events", dependencies=[Depends(require_local_token)])
 def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
+    event = _gateway_event_from_body(body)
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    return _process_gateway_event(
+        event,
+        settings=settings,
+        connection=connection,
+        commit=True,
+        close_connection=True,
+    )
+
+
+def _gateway_event_from_body(body: dict[str, Any]) -> GatewayEvent:
     try:
-        event = GatewayEvent.from_dict(body)
+        return GatewayEvent.from_dict(body)
     except (BrokerValidationError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         ) from exc
 
-    settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
+
+def _process_gateway_event(
+    event: GatewayEvent,
+    *,
+    settings: Any,
+    connection: Any,
+    commit: bool,
+    close_connection: bool,
+    market_data_controller_status: MarketDataAppendOnlyControllerStatus | None = None,
+    condition_event_backlog_status: dict[str, Any] | None = None,
+    retire_inline_outbox: bool = False,
+) -> dict[str, Any]:
     projection_status: str | None = None
     projection_statuses: dict[str, str] = {}
     market_data_routing: dict[str, Any] | None = None
@@ -103,10 +134,14 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     broker_boundary: dict[str, Any] | None = None
     try:
         with _gateway_event_write_lock:
-            result = append_gateway_event(connection, event)
+            result = append_gateway_event(connection, event, commit=commit)
             if result.status == "ACCEPTED" and not result.duplicate:
                 event_type = event.event_type.strip().lower()
-                outbox_status = _enqueue_projection_outbox_jobs(connection, event)
+                outbox_status = _enqueue_projection_outbox_jobs(
+                    connection,
+                    event,
+                    commit=commit,
+                )
                 if outbox_status is not None:
                     projection_statuses["projection_outbox"] = outbox_status
                 if event_type in MARKET_DATA_EVENT_TYPES:
@@ -115,6 +150,11 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         event,
                         settings=settings,
                         outbox_status=outbox_status,
+                        commit=commit,
+                        controller_status=market_data_controller_status,
+                        condition_event_backlog_status=(
+                            condition_event_backlog_status
+                        ),
                     )
                     if routing_decision is None:
                         projection_statuses["market_data_append_only_dry_run"] = "ERROR"
@@ -161,6 +201,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                             connection,
                             event,
                             settings=settings,
+                            commit=commit,
                         )
                         projection_status = projection_result.status
                         projection_statuses["market_data"] = projection_result.status
@@ -173,6 +214,7 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                     connection,
                                     event,
                                     settings=settings,
+                                    commit=commit,
                                 )
                             )
                         if (
@@ -200,8 +242,57 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                                     connection,
                                     event,
                                     settings=settings,
+                                    commit=commit,
                                 )
                             )
+                    if (
+                        retire_inline_outbox
+                        and routing_decision is not None
+                        and not routing_decision.effective_skip_inline
+                    ):
+                        market_data_terminal = _inline_outbox_terminal_status(
+                            projection_statuses.get("market_data")
+                        )
+                        if market_data_terminal is not None and (
+                            retire_inline_projection_outbox_job(
+                                connection,
+                                event_id=event.event_id,
+                                projection_name="market_data",
+                                terminal_status=market_data_terminal,
+                                evidence={
+                                    "event_type": event_type,
+                                    "inline_status": projection_statuses.get(
+                                        "market_data"
+                                    ),
+                                },
+                                commit=commit,
+                            )
+                        ):
+                            projection_statuses[
+                                "projection_outbox_inline_market_data"
+                            ] = market_data_terminal
+                        if event_type == "condition_event":
+                            fusion_terminal = _inline_outbox_terminal_status(
+                                projection_statuses.get("condition_fusion")
+                            )
+                            if fusion_terminal is not None and (
+                                retire_inline_projection_outbox_job(
+                                    connection,
+                                    event_id=event.event_id,
+                                    projection_name="condition_fusion",
+                                    terminal_status=fusion_terminal,
+                                    evidence={
+                                        "event_type": event_type,
+                                        "inline_status": projection_statuses.get(
+                                            "condition_fusion"
+                                        ),
+                                    },
+                                    commit=commit,
+                                )
+                            ):
+                                projection_statuses[
+                                    "projection_outbox_inline_condition_fusion"
+                                ] = fusion_terminal
                 if event_type in MARKET_SYMBOL_EVENT_TYPES:
                     reference_routing = _decide_market_reference_append_only_routing(
                         connection,
@@ -400,6 +491,17 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                         )
                         if scan_result.status != "IGNORED":
                             projection_statuses["market_scan"] = scan_result.status
+                if retire_inline_outbox:
+                    retired_inline_jobs = _retire_completed_inline_outbox_jobs(
+                        connection,
+                        event=event,
+                        projection_statuses=projection_statuses,
+                        commit=commit,
+                    )
+                    for projection_name, terminal_status in retired_inline_jobs.items():
+                        projection_statuses[
+                            f"projection_outbox_inline_{projection_name}"
+                        ] = terminal_status
             if result.status == "ACCEPTED" and is_live_sim_lifecycle_event(event.event_type):
                 live_sim_lifecycle = route_live_sim_lifecycle_gateway_event(
                     connection,
@@ -412,7 +514,8 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
                     event.command_id,
                 )
     finally:
-        connection.close()
+        if close_connection:
+            connection.close()
 
     if result.status == "CONFLICT":
         raise HTTPException(
@@ -458,9 +561,170 @@ def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def _enqueue_projection_outbox_jobs(connection, event: GatewayEvent) -> str | None:
+@router.post("/events/batch", dependencies=[Depends(require_local_token)])
+def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
+    raw_events = body.get("events")
+    if not isinstance(raw_events, list) or not raw_events:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="events must be a non-empty list",
+        )
+    if len(raw_events) > 200:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="events batch must contain at most 200 events",
+        )
+
+    results: list[dict[str, Any] | None] = [None] * len(raw_events)
+    parsed_events: list[tuple[int, GatewayEvent]] = []
+    for index, item in enumerate(raw_events):
+        if not isinstance(item, dict):
+            results[index] = _batch_rejection(
+                event_id=None,
+                error_message=f"events[{index}] must be an object",
+            )
+            continue
+        try:
+            parsed_events.append((index, _gateway_event_from_body(item)))
+        except HTTPException as exc:
+            results[index] = _batch_rejection(
+                event_id=item.get("event_id"),
+                error_message=str(exc.detail),
+                conflict=exc.status_code == 409,
+            )
+
+    settings = load_settings()
+    price_events = [
+        (index, event)
+        for index, event in parsed_events
+        if event.event_type.strip().lower() == "price_tick"
+    ]
+    condition_events = [
+        (index, event)
+        for index, event in parsed_events
+        if event.event_type.strip().lower() == "condition_event"
+    ]
+    fast_events = [*price_events, *condition_events]
+    if fast_events:
+        connection = open_connection(settings.trading_db_path)
+        try:
+            with _gateway_event_write_lock:
+                connection.execute("BEGIN IMMEDIATE")
+                routing_context = build_market_data_projection_routing_batch_context(
+                    connection,
+                    settings=settings,
+                    include_condition_event=bool(condition_events),
+                )
+                for index, event in fast_events:
+                    try:
+                        event_result = _process_gateway_event(
+                            event,
+                            settings=settings,
+                            connection=connection,
+                            commit=False,
+                            close_connection=False,
+                            market_data_controller_status=(
+                                routing_context.controller_status
+                            ),
+                            condition_event_backlog_status=dict(
+                                routing_context.condition_event_backlog
+                            ),
+                            retire_inline_outbox=True,
+                        )
+                        results[index] = event_result
+                        routing = event_result.get(
+                            "market_data_append_only_routing"
+                        )
+                        if isinstance(routing, dict) and bool(
+                            routing.get("effective_skip_inline")
+                        ):
+                            routing_context = (
+                                build_market_data_projection_routing_batch_context(
+                                    connection,
+                                    settings=settings,
+                                    include_condition_event=bool(condition_events),
+                                )
+                            )
+                    except HTTPException as exc:
+                        results[index] = _batch_rejection(
+                            event_id=event.event_id,
+                            error_message=str(exc.detail),
+                            conflict=exc.status_code == 409,
+                        )
+                connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    for index, event in parsed_events:
+        if event.event_type.strip().lower() in {"price_tick", "condition_event"}:
+            continue
+        try:
+            connection = open_connection(settings.trading_db_path)
+            results[index] = _process_gateway_event(
+                event,
+                settings=settings,
+                connection=connection,
+                commit=True,
+                close_connection=True,
+                retire_inline_outbox=True,
+            )
+        except HTTPException as exc:
+            results[index] = _batch_rejection(
+                event_id=event.event_id,
+                error_message=str(exc.detail),
+                conflict=exc.status_code == 409,
+            )
+
+    resolved_results = [
+        item
+        if item is not None
+        else _batch_rejection(
+            event_id=None,
+            error_message="batch event was not processed",
+        )
+        for item in results
+    ]
+    return {
+        "processed_count": len(resolved_results),
+        "accepted_count": sum(bool(item.get("accepted")) for item in resolved_results),
+        "duplicate_count": sum(bool(item.get("duplicate")) for item in resolved_results),
+        "failed_count": sum(
+            not bool(item.get("accepted")) for item in resolved_results
+        ),
+        "results": resolved_results,
+    }
+
+
+def _batch_rejection(
+    *,
+    event_id: object,
+    error_message: str,
+    conflict: bool = False,
+) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "event_id": event_id,
+        "duplicate": False,
+        "status": "CONFLICT" if conflict else "REJECTED",
+        "error_message": error_message,
+    }
+
+
+def _enqueue_projection_outbox_jobs(
+    connection,
+    event: GatewayEvent,
+    *,
+    commit: bool = True,
+) -> str | None:
     try:
-        result = enqueue_projection_jobs_for_gateway_event(connection, event)
+        result = enqueue_projection_jobs_for_gateway_event(
+            connection,
+            event,
+            commit=commit,
+        )
     except Exception:
         logger.exception("projection outbox enqueue failed")
         return "ERROR"
@@ -475,6 +739,9 @@ def _decide_market_data_projection_routing(
     *,
     settings,
     outbox_status: str | None,
+    commit: bool = True,
+    controller_status: MarketDataAppendOnlyControllerStatus | None = None,
+    condition_event_backlog_status: dict[str, Any] | None = None,
 ) -> MarketDataAppendOnlyRoutingDecision | None:
     try:
         return decide_market_data_projection_routing(
@@ -482,6 +749,9 @@ def _decide_market_data_projection_routing(
             event,
             settings=settings,
             outbox_status=outbox_status,
+            commit=commit,
+            controller_status=controller_status,
+            condition_event_backlog_status=condition_event_backlog_status,
         )
     except Exception:
         logger.exception("market_data append-only dry-run routing decision failed")
@@ -575,6 +845,67 @@ def _market_data_append_only_dry_run_status(
     return "BLOCKED"
 
 
+def _inline_outbox_terminal_status(value: object) -> str | None:
+    normalized = str(value or "").strip().upper()
+    if normalized in {"APPLIED", "DUPLICATE"}:
+        return "APPLIED"
+    if normalized == "SKIPPED" or normalized.startswith("IGNORED"):
+        return "SKIPPED"
+    return None
+
+
+def _retire_completed_inline_outbox_jobs(
+    connection,
+    *,
+    event: GatewayEvent,
+    projection_statuses: Mapping[str, str],
+    commit: bool,
+) -> dict[str, str]:
+    rows = connection.execute(
+        """
+        SELECT projection_name
+        FROM projection_outbox
+        WHERE event_id = ? AND status = 'PENDING'
+        ORDER BY projection_name
+        """,
+        (event.event_id,),
+    ).fetchall()
+    retired: dict[str, str] = {}
+    for row in rows:
+        projection_name = str(row["projection_name"] or "").strip().lower()
+        inline_status = str(projection_statuses.get(projection_name) or "").strip()
+        terminal_status = _completed_inline_projection_terminal_status(inline_status)
+        if terminal_status is None:
+            continue
+        if retire_inline_projection_outbox_job(
+            connection,
+            event_id=event.event_id,
+            projection_name=projection_name,
+            terminal_status=terminal_status,
+            evidence={
+                "event_type": event.event_type.strip().lower(),
+                "inline_status": inline_status,
+            },
+            commit=commit,
+        ):
+            retired[projection_name] = terminal_status
+    return retired
+
+
+def _completed_inline_projection_terminal_status(value: object) -> str | None:
+    normalized = str(value or "").strip().upper()
+    terminal_status = _inline_outbox_terminal_status(normalized)
+    if terminal_status is not None:
+        return terminal_status
+    if normalized == "SKIPPED_RECENT":
+        return "SKIPPED"
+    if not normalized or normalized.startswith(
+        ("BLOCKED", "DEFERRED", "ERROR", "PENDING", "SKIPPED_INLINE")
+    ):
+        return None
+    return "APPLIED"
+
+
 def _market_reference_append_only_dry_run_status(
     decision: MarketReferenceAppendOnlyRoutingDecision,
 ) -> str:
@@ -616,12 +947,14 @@ def _enqueue_incremental_evaluation_for_price_tick(
     event: GatewayEvent,
     *,
     settings,
+    commit: bool = True,
 ) -> str:
     result = enqueue_incremental_for_price_tick_projection(
         connection,
         event,
         settings=settings,
         source="gateway_inline_price_tick",
+        commit=commit,
     )
     return result.status
 
@@ -646,12 +979,14 @@ def _refresh_condition_fusion_for_condition_event(
     event: GatewayEvent,
     *,
     settings,
+    commit: bool = True,
 ) -> str:
     result = refresh_condition_fusion_for_condition_event_projection(
         connection,
         event,
         settings=settings,
         source="gateway_inline_condition_event",
+        commit=commit,
     )
     if result.status == "ERROR":
         return "ERROR"
@@ -724,6 +1059,39 @@ def get_gateway_status() -> dict[str, Any]:
         "core_io_worker_coalesce_after_size": _json_value(
             status_values.get("core_io_worker_coalesce_after_size")
         ),
+        "core_io_worker_dropped_event_count": _json_value(
+            status_values.get("core_io_worker_dropped_event_count")
+        ),
+        "core_io_worker_max_buffer_size": _json_value(
+            status_values.get("core_io_worker_max_buffer_size")
+        ),
+        "core_io_worker_batch_size": _json_value(
+            status_values.get("core_io_worker_batch_size")
+        ),
+        "core_io_worker_batch_post_count": _json_value(
+            status_values.get("core_io_worker_batch_post_count")
+        ),
+        "core_io_worker_latest_batch_size": _json_value(
+            status_values.get("core_io_worker_latest_batch_size")
+        ),
+        "core_io_worker_rejected_event_count": _json_value(
+            status_values.get("core_io_worker_rejected_event_count")
+        ),
+        "core_io_worker_market_event_queue_size": _json_value(
+            status_values.get("core_io_worker_market_event_queue_size")
+        ),
+        "core_io_worker_durable_event_queue_size": _json_value(
+            status_values.get("core_io_worker_durable_event_queue_size")
+        ),
+        "core_io_worker_oldest_event_age_sec": _json_value(
+            status_values.get("core_io_worker_oldest_event_age_sec")
+        ),
+        "core_io_worker_oldest_market_event_age_sec": _json_value(
+            status_values.get("core_io_worker_oldest_market_event_age_sec")
+        ),
+        "core_io_data_plane_health": status_values.get(
+            "core_io_data_plane_health"
+        ),
         "durable_pre_ack_posted_count": _json_value(
             status_values.get("durable_pre_ack_posted_count")
         ),
@@ -751,6 +1119,7 @@ def get_gateway_status() -> dict[str, Any]:
         "registered_realtime_code_count": _json_value(
             status_values.get("registered_realtime_code_count")
         ),
+        "realtime_max_total": _json_value(status_values.get("realtime_max_total")),
         "realtime_registered_codes": _json_value(
             status_values.get("realtime_registered_codes")
         ),
@@ -763,6 +1132,9 @@ def get_gateway_status() -> dict[str, Any]:
         ),
         "realtime_registration_success_count": _json_value(
             status_values.get("realtime_registration_success_count")
+        ),
+        "realtime_registration_budget_skip_count": _json_value(
+            status_values.get("realtime_registration_budget_skip_count")
         ),
         "market_index_enabled": _json_value(status_values.get("market_index_enabled")),
         "market_index_realtime_enabled": _json_value(
@@ -816,6 +1188,12 @@ def get_gateway_status() -> dict[str, Any]:
         "realtime_callback_count": _json_value(status_values.get("realtime_callback_count")),
         "raw_realtime_callback_count": _json_value(
             status_values.get("raw_realtime_callback_count")
+        ),
+        "unregistered_realtime_callback_count": _json_value(
+            status_values.get("unregistered_realtime_callback_count")
+        ),
+        "latest_unregistered_realtime_callback": _json_value(
+            status_values.get("latest_unregistered_realtime_callback")
         ),
         "latest_realtime_callback_at": status_values.get("latest_realtime_callback_at"),
         "parsed_price_tick_count": _json_value(status_values.get("parsed_price_tick_count")),

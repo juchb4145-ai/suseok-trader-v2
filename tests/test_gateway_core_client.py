@@ -59,6 +59,41 @@ def test_core_client_post_event_sends_json_to_gateway_event_endpoint() -> None:
     assert call["timeout"] == 3.0
 
 
+def test_core_client_post_events_sends_one_batch_request() -> None:
+    response = {
+        "processed_count": 2,
+        "accepted_count": 2,
+        "duplicate_count": 0,
+        "failed_count": 0,
+        "results": [{"accepted": True}, {"accepted": True}],
+    }
+    transport = RecordingTransport(response)
+    client = CoreClient(core_url="http://core.local", transport=transport)
+    events = [
+        make_heartbeat_event(source="test-gateway"),
+        make_heartbeat_event(source="test-gateway"),
+    ]
+
+    result = client.post_events(events)
+
+    assert result == response
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["method"] == "POST"
+    assert call["url"] == "http://core.local/api/gateway/events/batch"
+    assert len(call["body"]["events"]) == 2
+
+
+def test_core_client_post_events_rejects_malformed_batch_response() -> None:
+    client = CoreClient(
+        core_url="http://core.local",
+        transport=RecordingTransport({"results": []}),
+    )
+
+    with pytest.raises(GatewayTransportError, match="matching results list"):
+        client.post_events([make_heartbeat_event(source="test-gateway")])
+
+
 def test_core_client_poll_commands_converts_gateway_command_list() -> None:
     command = GatewayCommand(
         command_id="cmd_client_poll",

@@ -158,6 +158,41 @@ def test_realtime_leadership_source_difference_is_explicit_warn(tmp_path) -> Non
     )
 
 
+def test_theme_coherency_compares_matching_top_prefix_when_limits_differ(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-coherency-top-prefix.sqlite3")
+    calculated_at = datetime_to_wire(utc_now())
+    for index in range(6):
+        _insert_theme_snapshot(
+            connection,
+            theme_id=f"theme-{index}",
+            theme_name=f"Theme {index}",
+            state="LEADING",
+            calculated_at=calculated_at,
+            total_trade_value=600_000_000 - index * 10_000_000,
+        )
+    settings = Settings(
+        market_scan_enabled=True,
+        theme_leadership_top_theme_count=5,
+        theme_snapshot_stale_sec=999_999_999,
+    )
+
+    status = build_theme_coherency_status(
+        connection,
+        settings=settings,
+        limit=10,
+    )
+    connection.close()
+
+    assert status["status"] == "PASS"
+    assert status["db_top_count"] == 6
+    assert status["leadership_top_count"] == 5
+    assert status["top_comparison_count"] == 5
+    assert status["overlap_count"] == 5
+    assert status["top_set_mismatch_count"] == 0
+
+
 def test_theme_coherency_operator_and_fast_dashboard_are_read_only(
     tmp_path,
     monkeypatch,

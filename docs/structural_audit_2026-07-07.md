@@ -2,7 +2,7 @@
 
 대상: `suseok-trader-v2` main  
 범위: Gateway ingestion, runtime lock, incremental evaluation, market index/regime, LIVE_SIM order lifecycle, replay/retention/watermark, dashboard coherency  
-최종 업데이트: 2026-07-10 (PR-28 final append-only readiness gate 구현 및 안전 차단 검증 완료)
+최종 업데이트: 2026-07-13 (PR-32 Gateway/Core data-plane 및 theme freshness 근본 조치 검증 완료)
 안전 원칙: append-only 전환은 기본 disabled와 strict feature flag를 유지한다. `LIVE_REAL` 활성화, 주문 정책 완화, 매수 기준 완화는 하지 않는다.
 
 ## 이미 개선된 점
@@ -551,6 +551,17 @@ P0-4 durable order broker boundary 진행 상태:
 - 구현/판정 테스트는 `tests/test_ops_append_only_daily_evidence.py`, wrapper 정적 guard는 `tests/test_market_open_start_scripts.py`에 고정했다. 실제 qualified count는 당일 영속 session을 마감한 후에만 증가하며 보고서만으로 소급하지 않는다.
 - 2026-07-13 실제 영속 session은 scan TR `ACKED=4`, FAILED/order command `0/0`, session command/FAILED/order delta `4/0/0`이었다. 여섯 component가 모두 qualified되어 readiness `BLOCKED_EVIDENCE`, consecutive `1/10`을 기록했다. 마감 후 Core/Gateway/theme listener는 0이고 session sidecar는 제거했으며 영속 DB만 유지했다. Report: `reports/append_only_daily_evidence/2026-07-13/20260713T011907Z_summary.md`.
 - daily closer/readiness/wrapper focused `17`개와 full pytest `1075`개를 통과했다. scoped Ruff, 세 PowerShell AST parser, 영속 DB read-only `quick_check(1)=ok`, `git diff --check`도 통과했다.
+
+## PR-32 Gateway/Core data-plane 및 theme freshness 근본 조치 완료
+
+- 2026-07-13 영속 OBSERVE session에서 Gateway 내부 등록은 `57/80`이었지만 최근 3분 Core에는 price/quote 기준 `460/502`개 종목이 들어왔다. Kiwoom 조건검색 또는 잔존 server screen이 만든 비등록 `OnReceiveRealData` callback까지 FID parse와 Core 전송을 수행한 것이 freshness 저하의 직접 원인이었다. `KiwoomClient`는 stock callback code가 현재 `_realtime_screen_codes`에 없으면 FID를 읽기 전에 `UNREGISTERED_REALTIME_CODE`로 차단한다. raw callback audit, drop 누계와 latest evidence는 `/api/gateway/status`와 dashboard에 노출한다.
+- Gateway->Core는 최대 200건 batch API와 기본 100건 Core I/O batch를 사용한다. command-critical/priority/durable event와 coalesced market event를 분리해 32-bit Gateway main thread의 HTTP block을 제거했다. Core batch의 price/condition fast path는 단일 transaction과 routing context cache를 사용한다. 실제 100 price event 처리 시간은 약 `33.8s -> 1.09s`, mixed 100 event는 약 `1.53s`로 개선됐다.
+- `REALTIME_SUBSCRIPTION_MAX_TOTAL`은 Gateway admission과 condition adaptive budget 양쪽에서 강제한다. evidence launcher는 로그인 직후 `SetRealRemove(ALL, ALL)`을 수행하고 theme refresh의 `queue_realtime_commands=false`를 강제해 별도 planner가 구독을 반복 증감시키지 못하게 한다.
+- batch request에서 inline 완료된 `market_data`, `condition_fusion`, `market_reference`, `market_index`, `market_regime`, `market_scan` shadow outbox job은 즉시 `APPLIED/SKIPPED`로 종결한다. `effective_skip_inline`, `DEFERRED_TO_WORKER`, error/block 상태는 pending에 보존한다. 기존 shadow backlog는 live-safe bulk retire로 정리하며 주문/LIVE_SIM side effect는 없다.
+- 적용 전에는 Core I/O queue 약 `900`, oldest market age `50~59s`, freshness 통과 theme 0이 반복됐다. 적용 후 2분 표본 13회에서 data-plane `HEALTHY`, queue `51~75`, oldest market age `1.63~2.74s`, durable `1~11`, rejected `0`, registered `55~56/80`을 유지했다. 최근 2분 Core 저장 종목은 price/quote 각각 `54`개로 등록 집합 안에 제한됐고, 비등록 callback은 입구에서 누적 수십만 건 차단됐다.
+- theme refresh run-once는 `COMPLETED`, realtime subscription `PLAN_ONLY`, order command delta `0/0/0`이었다. coherency는 `PASS`, common top comparison `5`, overlap `5`, stale `0`이다. market-data reconcile은 checked event `500`, `PASS`, `append_only_ready=true`; candidate ingest는 `0`, outbox `ERROR/DEAD_LETTER=0/0`이다. 기존 적체 정리 후 신규 outbox pending은 60초 동안 `7 -> 7`로 고정됐다.
+- 안전 경계는 유지한다. Core는 `profile/mode=OBSERVE`, LIVE_SIM/LIVE_REAL false, Gateway `order_commands_allowed=false`이며 재기동 이후 주문 command는 0이다. guarded `1/min` effective skip job은 worker closure 전까지 pending으로 남아 controller를 fail-closed하고, 자동 rollback required는 false였다.
+- 주요 회귀는 `tests/test_gateway_api.py`, `tests/test_gateway_core_client.py`, `tests/test_kiwoom_gateway_adapter.py`, `tests/test_gateway_market_data_price_tick_cutover.py`, `tests/test_theme_coherency.py`, `tests/test_market_open_start_scripts.py`에 고정했다.
 
 ## Flag 정리 계획 (최종 순서 8)
 

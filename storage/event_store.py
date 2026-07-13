@@ -78,10 +78,14 @@ class AppendGatewayEventResult:
 def append_gateway_event(
     connection: sqlite3.Connection,
     event: GatewayEvent,
+    *,
+    commit: bool = True,
 ) -> AppendGatewayEventResult:
+    if not commit:
+        return _append_gateway_event_once(connection, event, commit=False)
     for delay_sec in (*_DATABASE_LOCK_RETRY_DELAYS_SEC, None):
         try:
-            return _append_gateway_event_once(connection, event)
+            return _append_gateway_event_once(connection, event, commit=True)
         except sqlite3.OperationalError as exc:
             connection.rollback()
             if not _is_database_locked_error(exc) or delay_sec is None:
@@ -93,6 +97,8 @@ def append_gateway_event(
 def _append_gateway_event_once(
     connection: sqlite3.Connection,
     event: GatewayEvent,
+    *,
+    commit: bool,
 ) -> AppendGatewayEventResult:
     event_type = event.event_type.strip().lower()
     payload_json = canonical_json(event.payload)
@@ -116,7 +122,8 @@ def _append_gateway_event_once(
                 """,
                 (event.event_id,),
             )
-            connection.commit()
+            if commit:
+                connection.commit()
             gateway_row = connection.execute(
                 "SELECT status, error_message FROM gateway_events WHERE event_id = ?",
                 (event.event_id,),
@@ -145,7 +152,8 @@ def _append_gateway_event_once(
     received_at = datetime_to_wire(utc_now())
 
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        if commit:
+            connection.execute("BEGIN IMMEDIATE")
         connection.execute(
             """
             INSERT INTO raw_events (
@@ -230,9 +238,11 @@ def _append_gateway_event_once(
                 occurred_at=received_at,
                 commit=False,
             )
-        connection.commit()
+        if commit:
+            connection.commit()
     except Exception:
-        connection.rollback()
+        if commit:
+            connection.rollback()
         raise
 
     return AppendGatewayEventResult(
@@ -363,6 +373,23 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "core_io_worker_last_error": "core_io_worker_last_error",
         "core_io_worker_coalesced_event_count": "core_io_worker_coalesced_event_count",
         "core_io_worker_coalesce_after_size": "core_io_worker_coalesce_after_size",
+        "core_io_worker_dropped_event_count": "core_io_worker_dropped_event_count",
+        "core_io_worker_max_buffer_size": "core_io_worker_max_buffer_size",
+        "core_io_worker_batch_size": "core_io_worker_batch_size",
+        "core_io_worker_batch_post_count": "core_io_worker_batch_post_count",
+        "core_io_worker_latest_batch_size": "core_io_worker_latest_batch_size",
+        "core_io_worker_rejected_event_count": "core_io_worker_rejected_event_count",
+        "core_io_worker_market_event_queue_size": (
+            "core_io_worker_market_event_queue_size"
+        ),
+        "core_io_worker_durable_event_queue_size": (
+            "core_io_worker_durable_event_queue_size"
+        ),
+        "core_io_worker_oldest_event_age_sec": "core_io_worker_oldest_event_age_sec",
+        "core_io_worker_oldest_market_event_age_sec": (
+            "core_io_worker_oldest_market_event_age_sec"
+        ),
+        "core_io_data_plane_health": "core_io_data_plane_health",
         "durable_pre_ack_posted_count": "durable_pre_ack_posted_count",
         "last_durable_pre_ack_at": "last_durable_pre_ack_at",
         "last_durable_pre_ack_error": "last_durable_pre_ack_error",
@@ -375,6 +402,7 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "latest_condition_ver_callback_at": "latest_condition_ver_callback_at",
         "latest_condition_ver_result": "latest_condition_ver_result",
         "registered_realtime_code_count": "registered_realtime_code_count",
+        "realtime_max_total": "realtime_max_total",
         "realtime_registered_codes": "realtime_registered_codes",
         "realtime_exchange": "realtime_exchange",
         "realtime_registered_kiwoom_codes": "realtime_registered_kiwoom_codes",
@@ -383,6 +411,12 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "latest_realtime_callback_at": "latest_realtime_callback_at",
         "raw_realtime_callback_count": "raw_realtime_callback_count",
         "realtime_callback_count": "realtime_callback_count",
+        "unregistered_realtime_callback_count": (
+            "unregistered_realtime_callback_count"
+        ),
+        "latest_unregistered_realtime_callback": (
+            "latest_unregistered_realtime_callback"
+        ),
         "parsed_price_tick_count": "parsed_price_tick_count",
         "realtime_parse_error_count": "realtime_parse_error_count",
         "latest_realtime_parse_error": "latest_realtime_parse_error",
@@ -390,6 +424,9 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "latest_realtime_registration_result": "latest_realtime_registration_result",
         "realtime_registration_requested_count": "realtime_registration_requested_count",
         "realtime_registration_success_count": "realtime_registration_success_count",
+        "realtime_registration_budget_skip_count": (
+            "realtime_registration_budget_skip_count"
+        ),
         "market_index_enabled": "market_index_enabled",
         "market_index_realtime_enabled": "market_index_realtime_enabled",
         "market_index_tr_bootstrap_enabled": "market_index_tr_bootstrap_enabled",

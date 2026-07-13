@@ -142,6 +142,7 @@ def enqueue_incremental_evaluation_for_event(
     event: GatewayEvent,
     *,
     settings: Settings | None = None,
+    commit: bool = True,
 ) -> IncrementalEvaluationEnqueueResult:
     resolved_settings = settings or load_settings()
     event_type = event.event_type.strip().lower()
@@ -168,6 +169,7 @@ def enqueue_incremental_evaluation_for_event(
         event_id=event.event_id,
         priority=100,
         settings=resolved_settings,
+        commit=commit,
     )
 
 
@@ -180,6 +182,7 @@ def enqueue_incremental_evaluation_for_code(
     event_id: str | None = None,
     priority: int = 90,
     settings: Settings | None = None,
+    commit: bool = True,
 ) -> IncrementalEvaluationEnqueueResult:
     resolved_settings = settings or load_settings()
     normalized_event_id = str(event_id or source_event_id or "")
@@ -257,7 +260,8 @@ def enqueue_incremental_evaluation_for_code(
             ),
         )
         enqueued_candidate_ids.append(candidate_id)
-    connection.commit()
+    if commit:
+        connection.commit()
     status = "ENQUEUED"
     if blocked_candidate_ids and not enqueued_candidate_ids:
         status = "BLOCKED_DEAD_LETTER"

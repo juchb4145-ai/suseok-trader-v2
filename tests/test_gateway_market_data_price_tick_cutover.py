@@ -99,6 +99,40 @@ def test_price_tick_cutover_skips_inline_when_all_guards_pass(
     assert status_response.json()["invalid_effective_skip_count"] == 0
 
 
+def test_price_tick_batch_keeps_effective_skip_outbox_pending(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "price-cutover-batch-skip.sqlite3"
+    _configure_cutover_env(monkeypatch, tmp_path, db_path)
+    _insert_reconcile_run(db_path, status="PASS", append_only_ready=True)
+    event_id = "evt_price_cutover_batch_skip"
+
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/gateway/events/batch",
+                json={"events": [_price_tick_payload(event_id)]},
+                headers={"X-Local-Token": "test-token"},
+            )
+    finally:
+        clear_settings_cache()
+
+    connection = open_connection(db_path)
+    try:
+        outbox = _outbox_row(connection, f"market_data:{event_id}")
+        sample_count = _sample_count(connection, event_id)
+    finally:
+        connection.close()
+
+    result = response.json()["results"][0]
+    assert result["projection_statuses"]["market_data"] == (
+        "SKIPPED_INLINE_APPEND_ONLY_PRICE_TICK"
+    )
+    assert outbox["status"] == "PENDING"
+    assert sample_count == 0
+
+
 def test_condition_and_tr_response_remain_inline_even_with_cutover_flags(
     tmp_path,
     monkeypatch,

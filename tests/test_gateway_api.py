@@ -5,7 +5,11 @@ from datetime import UTC, datetime
 from apps.core_api import app
 from domain.broker.commands import GatewayCommand
 from fastapi.testclient import TestClient
-from gateway.event_factory import make_price_tick_event, make_tr_response_event
+from gateway.event_factory import (
+    make_market_index_tick_event,
+    make_price_tick_event,
+    make_tr_response_event,
+)
 from storage.gateway_command_store import GatewayCommandStatus, enqueue_command
 from storage.sqlite import open_connection
 from tests.test_gateway_command_store import make_live_sim_order_command
@@ -51,6 +55,187 @@ def test_gateway_event_api_accepts_duplicates_and_lists_recent(tmp_path, monkeyp
     assert gateway_status.json()["last_heartbeat_at"] is not None
     assert gateway_status.json()["recent_event_count"] == 1
     assert gateway_status.json()["order_commands_allowed"] is False
+
+
+def test_gateway_event_batch_api_processes_each_event_once(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api-batch.sqlite3"))
+    events = [
+        heartbeat_event("evt_api_batch_1"),
+        heartbeat_event("evt_api_batch_2"),
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": events},
+            headers={"X-Local-Token": "test-token"},
+        )
+        duplicate = client.post(
+            "/api/gateway/events/batch",
+            json={"events": events},
+            headers={"X-Local-Token": "test-token"},
+        )
+        recent = client.get("/api/gateway/events/recent?limit=10")
+
+    assert response.status_code == 200
+    assert response.json()["processed_count"] == 2
+    assert response.json()["accepted_count"] == 2
+    assert response.json()["failed_count"] == 0
+    assert duplicate.json()["duplicate_count"] == 2
+    assert len(recent.json()["events"]) == 2
+
+
+def test_gateway_event_batch_retires_completed_market_index_shadow_jobs(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api-batch-index.sqlite3"))
+    monkeypatch.setenv("MARKET_INDEX_ENABLED", "true")
+    monkeypatch.setenv("MARKET_REGIME_ENABLED", "true")
+    event = make_market_index_tick_event(
+        source="test-gateway",
+        metadata={"parser_status": "VERIFIED", "projection_source": "REALTIME"},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": [event.to_dict()]},
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    connection = open_connection(tmp_path / "api-batch-index.sqlite3")
+    try:
+        statuses = dict(
+            connection.execute(
+                """
+                SELECT projection_name, status
+                FROM projection_outbox
+                WHERE event_id = ?
+                """,
+                (event.event_id,),
+            ).fetchall()
+        )
+    finally:
+        connection.close()
+
+    assert response.status_code == 200
+    assert response.json()["failed_count"] == 0
+    assert statuses["market_index"] == "APPLIED"
+    assert statuses["market_regime"] in {"APPLIED", "SKIPPED"}
+
+
+def test_gateway_event_batch_api_isolates_permanent_rejection(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api-batch-reject.sqlite3"))
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": [heartbeat_event("evt_api_batch_ok"), "invalid"]},
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["processed_count"] == 2
+    assert response.json()["accepted_count"] == 1
+    assert response.json()["failed_count"] == 1
+    assert response.json()["results"][1]["status"] == "REJECTED"
+
+
+def test_gateway_status_exposes_batch_and_data_plane_slo(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api-batch-slo.sqlite3"))
+    event = heartbeat_event("evt_api_batch_slo")
+    event["payload"].update(
+        {
+            "core_io_worker_batch_size": 100,
+            "core_io_worker_batch_post_count": 12,
+            "core_io_worker_latest_batch_size": 50,
+            "core_io_worker_market_event_queue_size": 20,
+            "core_io_worker_durable_event_queue_size": 4,
+            "core_io_worker_oldest_event_age_sec": 3.0,
+            "core_io_worker_oldest_market_event_age_sec": 1.5,
+            "core_io_data_plane_health": "HEALTHY",
+            "realtime_max_total": 80,
+            "realtime_registration_budget_skip_count": 2,
+        }
+    )
+
+    with TestClient(app) as client:
+        client.post(
+            "/api/gateway/events",
+            json=event,
+            headers={"X-Local-Token": "test-token"},
+        )
+        response = client.get("/api/gateway/status")
+
+    payload = response.json()
+    assert payload["core_io_data_plane_health"] == "HEALTHY"
+    assert payload["core_io_worker_batch_size"] == 100
+    assert payload["core_io_worker_oldest_market_event_age_sec"] == 1.5
+    assert payload["realtime_max_total"] == 80
+    assert payload["realtime_registration_budget_skip_count"] == 2
+
+
+def test_gateway_event_batch_price_tick_fast_path_preserves_projections(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "api-batch-price.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    events = [
+        make_price_tick_event(code="005930", price=70000).to_dict(),
+        make_price_tick_event(code="000660", price=120000).to_dict(),
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": events},
+            headers={"X-Local-Token": "test-token"},
+        )
+        duplicate = client.post(
+            "/api/gateway/events/batch",
+            json={"events": events},
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    connection = open_connection(db_path)
+    try:
+        counts = {
+            "raw": connection.execute(
+                "SELECT COUNT(*) AS count FROM raw_events"
+            ).fetchone()["count"],
+            "samples": connection.execute(
+                "SELECT COUNT(*) AS count FROM market_tick_samples"
+            ).fetchone()["count"],
+            "outbox": connection.execute(
+                "SELECT COUNT(*) AS count FROM projection_outbox"
+            ).fetchone()["count"],
+            "outbox_pending": connection.execute(
+                "SELECT COUNT(*) AS count FROM projection_outbox WHERE status = 'PENDING'"
+            ).fetchone()["count"],
+            "outbox_applied": connection.execute(
+                "SELECT COUNT(*) AS count FROM projection_outbox WHERE status = 'APPLIED'"
+            ).fetchone()["count"],
+            "routing": connection.execute(
+                "SELECT COUNT(*) AS count "
+                "FROM market_data_projection_routing_decisions"
+            ).fetchone()["count"],
+        }
+    finally:
+        connection.close()
+
+    assert response.status_code == 200
+    assert response.json()["accepted_count"] == 2
+    assert duplicate.json()["duplicate_count"] == 2
+    assert counts == {
+        "raw": 2,
+        "samples": 2,
+        "outbox": 2,
+        "outbox_pending": 0,
+        "outbox_applied": 2,
+        "routing": 2,
+    }
 
 
 def test_gateway_commands_api_dispatches_queued_commands(tmp_path, monkeypatch) -> None:
@@ -265,6 +450,36 @@ def test_gateway_status_exposes_market_index_adapter_separate_from_projection_er
         "INDEX_PARSE_ERROR"
     )
     assert market_index_status.json()["projection_error_count"] == 1
+
+
+def test_gateway_status_exposes_unregistered_realtime_callback_drops(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api_realtime_admission.sqlite3"))
+    heartbeat = heartbeat_event("evt_realtime_admission_heartbeat")
+    heartbeat["payload"] = {
+        "status": "ok",
+        "unregistered_realtime_callback_count": 17,
+        "latest_unregistered_realtime_callback": {
+            "code": "000660",
+            "reason": "UNREGISTERED_REALTIME_CODE",
+        },
+    }
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events",
+            json=heartbeat,
+            headers={"X-Local-Token": "test-token"},
+        )
+        gateway_status = client.get("/api/gateway/status")
+
+    assert response.status_code == 200
+    assert gateway_status.json()["unregistered_realtime_callback_count"] == 17
+    assert gateway_status.json()["latest_unregistered_realtime_callback"]["reason"] == (
+        "UNREGISTERED_REALTIME_CODE"
+    )
 
 
 def test_gateway_event_api_projects_market_scan_tr_response(tmp_path, monkeypatch) -> None:

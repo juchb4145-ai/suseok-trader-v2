@@ -56,6 +56,7 @@ class KiwoomGatewayRuntimeConfig:
     condition_send_interval_sec: float = 0.25
     realtime_codes: tuple[str, ...] = ()
     realtime_exchange: str = "KRX"
+    realtime_max_total: int = 100
     clear_realtime_on_login: bool = False
     observe_only: bool = True
     account: str = ""
@@ -329,6 +330,8 @@ class KiwoomGatewayRuntime:
         self._realtime_recover_error = ""
         self._quote_event_count = 0
         self._realtime_callback_count = 0
+        self._unregistered_realtime_callback_count = 0
+        self._latest_unregistered_realtime_callback: dict[str, Any] = {}
         self._parsed_price_tick_count = 0
         self._realtime_parse_error_count = 0
         self._latest_realtime_parse_error: dict[str, Any] = {}
@@ -338,6 +341,7 @@ class KiwoomGatewayRuntime:
         self._realtime_registration_requested_count = 0
         self._realtime_registration_success_count = 0
         self._realtime_registration_dedupe_count = 0
+        self._realtime_registration_budget_skip_count = 0
         self._market_index_registered_codes: set[str] = set()
         self._market_index_callback_count = 0
         self._parsed_market_index_tick_count = 0
@@ -528,6 +532,7 @@ class KiwoomGatewayRuntime:
             self._handled_command_count += 1
             self._claimed_not_started_commands[command.command_id] = command
             try:
+                self._validate_realtime_registration_command(command)
                 events = list(self.command_handler.handle(command))
                 self._clear_claimed_command_if_started_or_terminal(command, events)
                 self._track_realtime_command(command, events)
@@ -625,6 +630,31 @@ class KiwoomGatewayRuntime:
         worker_max_buffer_size = (
             worker_snapshot.max_buffer_size if worker_snapshot is not None else 0
         )
+        worker_batch_size = worker_snapshot.batch_size if worker_snapshot is not None else 0
+        worker_batch_post_count = (
+            worker_snapshot.batch_post_count if worker_snapshot is not None else 0
+        )
+        worker_latest_batch_size = (
+            worker_snapshot.latest_batch_size if worker_snapshot is not None else 0
+        )
+        worker_rejected_event_count = (
+            worker_snapshot.rejected_event_count if worker_snapshot is not None else 0
+        )
+        worker_market_event_queue_size = (
+            worker_snapshot.market_event_queue_size if worker_snapshot is not None else 0
+        )
+        worker_durable_event_queue_size = (
+            worker_snapshot.durable_event_queue_size if worker_snapshot is not None else 0
+        )
+        worker_oldest_event_age_sec = (
+            worker_snapshot.oldest_event_age_sec if worker_snapshot is not None else None
+        )
+        worker_oldest_market_event_age_sec = (
+            worker_snapshot.oldest_market_event_age_sec
+            if worker_snapshot is not None
+            else None
+        )
+        worker_data_plane_health = _core_io_data_plane_health(worker_snapshot)
         logged_in = self.kiwoom_logged_in()
         accounts = self._accounts() if logged_in else []
         account = self.config.account or os.getenv("TRADING_ACCOUNT", "").strip()
@@ -670,6 +700,17 @@ class KiwoomGatewayRuntime:
             "core_io_worker_coalesce_after_size": worker_coalesce_after_size,
             "core_io_worker_dropped_event_count": worker_dropped_count,
             "core_io_worker_max_buffer_size": worker_max_buffer_size,
+            "core_io_worker_batch_size": worker_batch_size,
+            "core_io_worker_batch_post_count": worker_batch_post_count,
+            "core_io_worker_latest_batch_size": worker_latest_batch_size,
+            "core_io_worker_rejected_event_count": worker_rejected_event_count,
+            "core_io_worker_market_event_queue_size": worker_market_event_queue_size,
+            "core_io_worker_durable_event_queue_size": worker_durable_event_queue_size,
+            "core_io_worker_oldest_event_age_sec": worker_oldest_event_age_sec,
+            "core_io_worker_oldest_market_event_age_sec": (
+                worker_oldest_market_event_age_sec
+            ),
+            "core_io_data_plane_health": worker_data_plane_health,
             "core_poll_error_count": self._core_poll_error_count,
             "dead_man_cancel_enabled": bool(self.config.dead_man_cancel_enabled),
             "dead_man_cancel_core_stale_sec": float(
@@ -718,6 +759,7 @@ class KiwoomGatewayRuntime:
             ),
             "latest_condition_ver_result": dict(self._latest_condition_ver_result),
             "registered_realtime_code_count": len(self._registered_realtime_codes),
+            "realtime_max_total": int(self.config.realtime_max_total),
             "realtime_registered_codes": sorted(self._registered_realtime_codes),
             "realtime_exchange": self._realtime_exchange(),
             "realtime_registered_kiwoom_codes": [
@@ -730,6 +772,12 @@ class KiwoomGatewayRuntime:
             "quote_event_count": self._quote_event_count,
             "raw_realtime_callback_count": self._realtime_callback_count,
             "realtime_callback_count": self._realtime_callback_count,
+            "unregistered_realtime_callback_count": (
+                self._unregistered_realtime_callback_count
+            ),
+            "latest_unregistered_realtime_callback": dict(
+                self._latest_unregistered_realtime_callback
+            ),
             "parsed_price_tick_count": self._parsed_price_tick_count,
             "realtime_parse_error_count": self._realtime_parse_error_count,
             "latest_realtime_parse_error": dict(self._latest_realtime_parse_error),
@@ -744,6 +792,9 @@ class KiwoomGatewayRuntime:
             "realtime_registration_requested_count": (self._realtime_registration_requested_count),
             "realtime_registration_success_count": self._realtime_registration_success_count,
             "realtime_registration_dedupe_count": self._realtime_registration_dedupe_count,
+            "realtime_registration_budget_skip_count": (
+                self._realtime_registration_budget_skip_count
+            ),
             "market_index_enabled": bool(self.config.market_index_enabled),
             "market_index_realtime_enabled": bool(self.config.market_index_realtime_enabled),
             "market_index_tr_bootstrap_enabled": bool(
@@ -979,6 +1030,7 @@ class KiwoomGatewayRuntime:
                 registered_realtime_count=len(self._registered_realtime_codes),
                 runtime_metrics=self._runtime_realtime_metrics(),
                 session_profile=self._condition_session_profile(),
+                max_total=self.config.realtime_max_total,
                 batch_allowed=batch_allowed,
                 planned_batch_count=planned_batch_count,
             )
@@ -1132,6 +1184,18 @@ class KiwoomGatewayRuntime:
             self._raw_callback_counts[method] = self._raw_callback_counts.get(method, 0) + 1
             timestamp = str(audit.get("timestamp") or datetime_to_wire(utc_now()))
             self._latest_callback_at_by_method[method] = timestamp
+            if (
+                method == "OnReceiveRealData"
+                and audit.get("callback_admitted") is False
+            ):
+                self._unregistered_realtime_callback_count += 1
+                self._latest_unregistered_realtime_callback = {
+                    "code": str(audit.get("code") or ""),
+                    "kiwoom_code": str(audit.get("kiwoom_code") or ""),
+                    "real_type": str(audit.get("real_type") or ""),
+                    "reason": str(audit.get("admission_reason") or ""),
+                    "timestamp": timestamp,
+                }
             if method == "OnReceiveConditionVer":
                 self._latest_condition_ver_callback_at = utc_now()
                 self._latest_condition_ver_result = {
@@ -1163,6 +1227,7 @@ class KiwoomGatewayRuntime:
         if not normalized_codes:
             return
         skipped_already_registered_count = 0
+        budget_skipped_count = 0
         if not force:
             fresh_codes: list[str] = []
             for code in normalized_codes:
@@ -1171,14 +1236,39 @@ class KiwoomGatewayRuntime:
                     continue
                 fresh_codes.append(code)
             normalized_codes = fresh_codes
+            capacity = max(
+                int(self.config.realtime_max_total)
+                - len(self._registered_realtime_codes),
+                0,
+            )
+            budget_skipped_count = max(len(normalized_codes) - capacity, 0)
+            if budget_skipped_count:
+                self._realtime_registration_budget_skip_count += budget_skipped_count
+                normalized_codes = normalized_codes[:capacity]
+                self.emit(
+                    "gateway_log",
+                    {
+                        "message": "realtime registration skipped global budget",
+                        "skipped_global_budget_count": budget_skipped_count,
+                        "realtime_max_total": int(self.config.realtime_max_total),
+                        "registered_realtime_code_count": len(
+                            self._registered_realtime_codes
+                        ),
+                    },
+                )
         if skipped_already_registered_count:
             self._realtime_registration_dedupe_count += skipped_already_registered_count
         if not normalized_codes:
             self.emit(
                 "gateway_log",
                 {
-                    "message": "realtime registration skipped already registered",
+                    "message": (
+                        "realtime registration skipped global budget"
+                        if budget_skipped_count
+                        else "realtime registration skipped already registered"
+                    ),
                     "skipped_already_registered_count": skipped_already_registered_count,
+                    "skipped_global_budget_count": budget_skipped_count,
                     "registered_realtime_code_count": len(self._registered_realtime_codes),
                 },
             )
@@ -1198,6 +1288,20 @@ class KiwoomGatewayRuntime:
                     "registered_realtime_code_count": len(self._registered_realtime_codes),
                 },
             )
+
+    def _validate_realtime_registration_command(self, command: GatewayCommand) -> None:
+        if command.command_type.strip().lower() != "register_realtime":
+            return
+        codes = set(_command_codes(command.payload))
+        new_codes = codes.difference(self._registered_realtime_codes)
+        projected_count = len(self._registered_realtime_codes) + len(new_codes)
+        if projected_count <= int(self.config.realtime_max_total):
+            return
+        self._realtime_registration_budget_skip_count += len(new_codes)
+        raise RuntimeError(
+            "REALTIME_SUBSCRIPTION_MAX_TOTAL_EXCEEDED: "
+            f"projected={projected_count} max_total={self.config.realtime_max_total}"
+        )
 
     def _track_realtime_command(
         self,
@@ -2281,6 +2385,29 @@ def _latest_datetime(*values: datetime | None) -> datetime | None:
     if not candidates:
         return None
     return max(candidates)
+
+
+def _core_io_data_plane_health(snapshot: Any | None) -> str:
+    if snapshot is None or not bool(snapshot.running):
+        return "DISABLED"
+    if snapshot.last_error:
+        return "ERROR"
+    if (
+        snapshot.oldest_market_event_age_sec is not None
+        and snapshot.oldest_market_event_age_sec > 10.0
+    ):
+        return "STALE_MARKET_BACKLOG"
+    if snapshot.durable_event_queue_size > max(snapshot.batch_size * 2, 200):
+        return "BACKLOG_DEGRADED"
+    if snapshot.event_queue_size > max(snapshot.batch_size * 5, 500):
+        return "BACKLOG_DEGRADED"
+    if (
+        snapshot.durable_event_queue_size > 0
+        and snapshot.oldest_event_age_sec is not None
+        and snapshot.oldest_event_age_sec > 30.0
+    ):
+        return "BACKLOG_DEGRADED"
+    return "HEALTHY"
 
 
 def _datetime_or_empty(value: datetime | None) -> str:

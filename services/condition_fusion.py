@@ -107,6 +107,7 @@ def rebuild_condition_fusion_for_code(
     trade_date: str | None = None,
     *,
     settings: Settings | None = None,
+    commit: bool = True,
 ) -> ConditionFusionRebuildResult:
     resolved_settings = settings or load_settings()
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
@@ -138,7 +139,8 @@ def rebuild_condition_fusion_for_code(
     updated_at = datetime_to_wire(now)
     fusion = _fuse_code_events(normalized_code, events, now=now, updated_at=updated_at)
     _upsert_fusion(connection, target_trade_date, fusion)
-    connection.commit()
+    if commit:
+        connection.commit()
     return ConditionFusionRebuildResult(
         processed_event_count=len(events),
         fused_code_count=1,

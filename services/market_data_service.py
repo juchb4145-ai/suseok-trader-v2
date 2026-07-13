@@ -139,6 +139,7 @@ def process_gateway_event(
     event: GatewayEvent,
     *,
     settings: Settings | None = None,
+    commit: bool = True,
 ) -> MarketDataProcessResult:
     resolved_settings = settings or load_settings()
     event_type = event.event_type.strip().lower()
@@ -166,10 +167,11 @@ def process_gateway_event(
                 status="DUPLICATE",
                 ignored_count=1,
             ),
-            commit=True,
+            commit=commit,
         )
     try:
-        connection.execute("BEGIN IMMEDIATE")
+        if commit:
+            connection.execute("BEGIN IMMEDIATE")
         if event_type == "price_tick":
             applied_count = _process_price_tick(connection, event, resolved_settings)
         elif event_type == "condition_event":
@@ -199,8 +201,11 @@ def process_gateway_event(
                 metadata={"event_type": event_type},
                 commit=False,
             )
-        connection.commit()
+        if commit:
+            connection.commit()
     except Exception as exc:
+        if not commit:
+            raise
         connection.rollback()
         _record_projection_error(connection, event, error_message=str(exc))
         record_projection_event_result(

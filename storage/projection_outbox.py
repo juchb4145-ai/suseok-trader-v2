@@ -94,6 +94,7 @@ def enqueue_projection_jobs_for_gateway_event(
     event: GatewayEvent,
     *,
     event_rowid: int | None = None,
+    commit: bool = True,
 ) -> ProjectionOutboxEnqueueResult:
     event_type = _normalize_event_type(event.event_type)
     specs = _projection_jobs_for_event(event)
@@ -166,7 +167,8 @@ def enqueue_projection_jobs_for_gateway_event(
                 "created": created,
             }
         )
-    connection.commit()
+    if commit:
+        connection.commit()
     status = "ENQUEUED" if created_count else "DUPLICATE"
     return ProjectionOutboxEnqueueResult(
         status=status,
@@ -177,6 +179,84 @@ def enqueue_projection_jobs_for_gateway_event(
         duplicate_count=duplicate_count,
         jobs=tuple(jobs),
     )
+
+
+def retire_inline_projection_outbox_job(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    projection_name: str,
+    terminal_status: str,
+    evidence: Mapping[str, Any] | None = None,
+    commit: bool = True,
+) -> bool:
+    normalized_event_id = _require_non_empty(event_id, "event_id")
+    normalized_projection_name = _require_non_empty(
+        projection_name,
+        "projection_name",
+    ).lower()
+    normalized_status = _require_non_empty(
+        terminal_status,
+        "terminal_status",
+    ).upper()
+    if normalized_status not in {"APPLIED", "SKIPPED"}:
+        raise ValueError("terminal_status must be APPLIED or SKIPPED")
+    row = connection.execute(
+        """
+        SELECT outbox_id, metadata_json
+        FROM projection_outbox
+        WHERE event_id = ? AND projection_name = ? AND status = 'PENDING'
+        LIMIT 1
+        """,
+        (normalized_event_id, normalized_projection_name),
+    ).fetchone()
+    if row is None:
+        return False
+    retired_at = datetime_to_wire(utc_now())
+    inline_evidence = {
+        "source": "gateway_batch_inline_projection",
+        "inline_projection_terminal": True,
+        "no_trading_side_effects": True,
+        **dict(evidence or {}),
+    }
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=normalized_status,
+        evidence=inline_evidence,
+        marked_at=retired_at,
+    )
+    cursor = connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            updated_at = ?,
+            processed_at = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            last_error = NULL,
+            metadata_json = ?
+        WHERE outbox_id = ?
+            AND status = 'PENDING'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM market_data_projection_routing_decisions AS decision
+                WHERE decision.event_id = ?
+                    AND decision.effective_skip_inline = 1
+            )
+        """,
+        (
+            normalized_status,
+            retired_at,
+            retired_at,
+            metadata_json,
+            row["outbox_id"],
+            normalized_event_id,
+        ),
+    )
+    if commit:
+        connection.commit()
+    return cursor.rowcount > 0
 
 
 def claim_projection_outbox_jobs(

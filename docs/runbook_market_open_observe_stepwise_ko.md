@@ -267,3 +267,16 @@ Invoke-RestMethod http://127.0.0.1:8000/api/live-sim/status
 - `queue_commands=false`
 - `order_command_count=0`
 - `send_order_delta=0`
+
+## Theme freshness data-plane 합격 기준
+
+테마가 모두 `DATA_WAIT`이거나 freshness 통과 종목이 0이면 threshold를 낮추기 전에 Gateway data-plane을 확인한다.
+
+1. `/api/gateway/status`에서 `registered_realtime_code_count <= realtime_max_total`이어야 한다.
+2. `core_io_data_plane_health=HEALTHY`, `core_io_worker_oldest_market_event_age_sec <= 10`, `core_io_worker_rejected_event_count=0`이어야 한다.
+3. `unregistered_realtime_callback_count` 증가는 허용한다. 이 값은 Kiwoom이 보내지만 현재 Gateway가 등록하지 않은 stock callback을 FID read 전에 차단한 수다. `latest_unregistered_realtime_callback.reason=UNREGISTERED_REALTIME_CODE`인지 확인한다.
+4. 최근 Core 저장 price/quote의 distinct code는 등록 집합을 초과하면 안 된다. 초과하면 Gateway가 새 admission 코드를 로드했는지와 `clear_realtime_on_login` 실행 여부를 확인한다.
+5. append-only evidence session의 theme loop는 `queue_realtime_commands=false`여야 한다. theme 계산은 수행하되 realtime planner command는 `PLAN_ONLY`로 유지한다.
+6. `/api/operator/theme-coherency/status?limit=10`은 `PASS`, common top overlap은 전부 일치하고 stale count는 0이어야 한다.
+7. `/api/operator/projection-outbox/status`는 `ERROR/DEAD_LETTER=0/0`이어야 한다. inline 완료 shadow pending이 지속 증가하면 batch inline terminal 처리가 로드되지 않은 상태로 본다.
+8. guarded effective skip은 worker run-once 또는 운영 worker가 닫는다. worker closure 전 pending은 controller를 WARN으로 막는 정상 fail-closed 상태다.

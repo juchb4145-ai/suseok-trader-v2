@@ -102,6 +102,7 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     ) in script
     assert "RunThemeRefreshLoop" in script
     assert "start_kiwoom_gateway_visible.ps1" in script
+    assert "$GatewayScriptParams.ClearRealtimeOnLogin = $true" in script
     assert "start_theme_refresh_loop.ps1" in script
     assert "Start-DetachedRuntimeProcess" in script
     assert 'WindowStyle = "Hidden"' in script
@@ -127,6 +128,7 @@ def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -
     assert "append-only-10day.sqlite3" in start_script
     assert 'MarketDataOperatingMode = "MARKET_DATA_FULL_GUARDED"' in start_script
     assert 'ThemeRefreshTradingSession = "KRX"' in start_script
+    assert 'ThemeRefreshQueueRealtimeCommands = "false"' in start_script
     assert "MarketScanParserVerified = $true" in start_script
     assert "$CoreParameters.RunCore = $true" in start_script
     assert "$GatewayParameters.RunGateway = $true" in start_script
@@ -136,6 +138,9 @@ def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -
     assert "Gateway did not stabilize; retrying after 5 seconds" in start_script
     assert "append-only-daily-session/v1" in start_script
     assert "failed_command_count" in start_script
+    assert '$ThemeRefreshQueueRealtimeCommands = "false"' in (
+        ROOT_DIR / "tools" / "start_market_open_observe.ps1"
+    ).read_text(encoding="utf-8")
 
     assert "apps\\.kiwoom_gateway" in close_script
     assert "start_theme_refresh_loop\\.ps1" in close_script
@@ -256,6 +261,7 @@ def test_start_kiwoom_gateway_visible_defaults_to_multi_profile_file() -> None:
     assert '"--no-market-index-tr-bootstrap-enabled"' in script
     assert "DisableConditions" in script
     assert "DisableRealtimeCodes" in script
+    assert "ClearRealtimeOnLogin" in script
     assert '$env:KIWOOM_CONDITION_NAME = ""' in script
     assert '$env:KIWOOM_CONDITION_PROFILES_FILE = ""' in script
     assert '$env:KIWOOM_CONDITION_PROFILES = ""' in script

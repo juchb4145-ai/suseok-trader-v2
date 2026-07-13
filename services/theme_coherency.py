@@ -81,8 +81,13 @@ def build_theme_coherency_status(
             snapshot_mismatch_count += 1
             failure_reasons.append("THEME_FLOW_SNAPSHOT_CALCULATED_AT_MISMATCH")
 
-    db_theme_ids = {str(item["theme_id"]) for item in db_items}
-    leadership_theme_ids = {str(item["theme_id"]) for item in leadership_items}
+    comparison_count = min(len(db_items), len(leadership_items))
+    db_theme_ids = {
+        str(item["theme_id"]) for item in db_items[:comparison_count]
+    }
+    leadership_theme_ids = {
+        str(item["theme_id"]) for item in leadership_items[:comparison_count]
+    }
     top_set_mismatch_count = len(db_theme_ids ^ leadership_theme_ids)
     overlap_count = len(db_theme_ids & leadership_theme_ids)
     if source_mismatch_count:
@@ -126,6 +131,7 @@ def build_theme_coherency_status(
         "latest_theme_count": latest_theme_count,
         "db_top_count": len(db_items),
         "leadership_top_count": len(leadership_items),
+        "top_comparison_count": comparison_count,
         "overlap_count": overlap_count,
         "top_set_mismatch_count": top_set_mismatch_count,
         "source_mismatch_count": source_mismatch_count,

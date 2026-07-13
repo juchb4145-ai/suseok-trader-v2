@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlencode
 
@@ -35,6 +35,24 @@ class CoreClient:
             path="/api/gateway/events",
             body=event.to_dict(),
         )
+
+    def post_events(self, events: Sequence[GatewayEvent]) -> dict[str, Any]:
+        payload = [event.to_dict() for event in events]
+        if not payload:
+            raise ValueError("events must not be empty")
+        if len(payload) > 200:
+            raise ValueError("events batch must contain at most 200 events")
+        response = self._request_json(
+            method="POST",
+            path="/api/gateway/events/batch",
+            body={"events": payload},
+        )
+        results = response.get("results")
+        if not isinstance(results, list) or len(results) != len(payload):
+            raise GatewayTransportError(
+                "Core batch event response missing matching results list"
+            )
+        return response
 
     def poll_commands(self, *, limit: int = 20, wait_sec: float = 1.0) -> list[GatewayCommand]:
         query = urlencode({"limit": int(limit), "wait_sec": float(wait_sec)})
