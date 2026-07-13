@@ -92,6 +92,10 @@ def test_gateway_event_batch_retires_completed_market_index_shadow_jobs(
     monkeypatch.setenv("TRADING_DB_PATH", str(tmp_path / "api-batch-index.sqlite3"))
     monkeypatch.setenv("MARKET_INDEX_ENABLED", "true")
     monkeypatch.setenv("MARKET_REGIME_ENABLED", "true")
+    monkeypatch.setattr(
+        "api.routes.gateway.should_rebuild_market_context_snapshots",
+        lambda *args, **kwargs: False,
+    )
     event = make_market_index_tick_event(
         source="test-gateway",
         metadata={"parser_status": "VERIFIED", "projection_source": "REALTIME"},
@@ -122,7 +126,7 @@ def test_gateway_event_batch_retires_completed_market_index_shadow_jobs(
     assert response.status_code == 200
     assert response.json()["failed_count"] == 0
     assert statuses["market_index"] == "APPLIED"
-    assert statuses["market_regime"] in {"APPLIED", "SKIPPED"}
+    assert statuses["market_regime"] == "APPLIED"
 
 
 def test_gateway_event_batch_api_isolates_permanent_rejection(tmp_path, monkeypatch) -> None:

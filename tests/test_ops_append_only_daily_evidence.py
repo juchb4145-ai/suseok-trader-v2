@@ -9,6 +9,7 @@ from tools.ops_append_only_daily_evidence import (
     evaluate_preflight,
     evaluate_report,
     render_markdown_summary,
+    run_daily_evidence_report,
     validate_persistent_db_path,
 )
 
@@ -91,6 +92,9 @@ def _report(tmp_path: Path) -> dict:
         "lifecycle_run": _wrapped(
             {"status": "IDLE", "error_count": 0, "dead_letter_count": 0}
         ),
+        "market_context_rebuild": _wrapped(
+            {"status": "APPLIED", "no_trading_side_effects": True}
+        ),
         "reconcile_runs": {
             component: _wrapped({"status": "PASS"})
             for component in REQUIRED_COMPONENTS
@@ -166,3 +170,87 @@ def test_persistent_evidence_db_rejects_temp_and_missing_paths(
         validate_persistent_db_path(temp_db)
     with pytest.raises(ValueError, match="does not exist"):
         validate_persistent_db_path(tmp_path / "missing.sqlite3")
+
+
+def test_daily_evidence_rebuilds_context_before_reconcile_and_extends_scan_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    baseline = _report(tmp_path)
+    calls: list[tuple[str, float, str]] = []
+
+    def fake_fetch(base_url, path, token, timeout_sec, *, method="GET"):
+        del base_url, token
+        calls.append((path, timeout_sec, method))
+        route = path.split("?", 1)[0]
+        if route == "/api/status":
+            return baseline["core_status"]
+        if route == "/api/operator/append-only-readiness/status":
+            return baseline["final_readiness"]
+        if route == "/api/gateway/commands/status":
+            return baseline["command_status_after"]
+        if route == "/api/gateway/status":
+            return baseline["gateway_status_final"]
+        if route == "/api/operator/projection-outbox/run-once":
+            return _wrapped(
+                {
+                    "status": "COMPLETED",
+                    "remaining_pending_count": 0,
+                    "error_count": 0,
+                    "dead_letter_count": 0,
+                }
+            )
+        if route == "/api/operator/live-sim/lifecycle-consumer/run-once":
+            return baseline["lifecycle_run"]
+        if route == "/api/operator/market-context/rebuild":
+            return baseline["market_context_rebuild"]
+        if route.endswith("projection-reconcile/run-once"):
+            return _wrapped({"status": "PASS"})
+        if route == "/api/dashboard/snapshot":
+            return baseline["dashboard"]
+        if route == "/api/operator/projection-outbox/status":
+            return baseline["projection_outbox"]
+        raise AssertionError(f"unexpected route: {route}")
+
+    monkeypatch.setattr(
+        "tools.ops_append_only_daily_evidence._fetch",
+        fake_fetch,
+    )
+
+    report = run_daily_evidence_report(
+        core_url=baseline["core_url"],
+        token="test-token",
+        expected_db_path=baseline["expected_db_path"],
+        session_state_path=str(tmp_path / ".session.json"),
+        session_state=baseline["session_state"],
+        trade_date=baseline["trade_date"],
+        settle_sec=0,
+        drain_limit=500,
+        drain_max_batches=1,
+        reconcile_limit=5000,
+        timeout_sec=30.0,
+        out_dir=tmp_path / "reports",
+    )
+
+    context_index = next(
+        index
+        for index, call in enumerate(calls)
+        if call[0].startswith("/api/operator/market-context/rebuild")
+    )
+    reconcile_indexes = [
+        index
+        for index, call in enumerate(calls)
+        if "projection-reconcile/run-once" in call[0]
+    ]
+    scan_call = next(
+        call
+        for call in calls
+        if call[0].startswith(
+            "/api/operator/market-scan-projection-reconcile/run-once"
+        )
+    )
+
+    assert report["verdict"]["status"] == "PASS"
+    assert context_index < min(reconcile_indexes)
+    assert scan_call[1] == 120.0
+    assert scan_call[2] == "POST"

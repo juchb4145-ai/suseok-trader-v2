@@ -898,7 +898,7 @@ def _completed_inline_projection_terminal_status(value: object) -> str | None:
     if terminal_status is not None:
         return terminal_status
     if normalized == "SKIPPED_RECENT":
-        return "SKIPPED"
+        return "APPLIED"
     if not normalized or normalized.startswith(
         ("BLOCKED", "DEFERRED", "ERROR", "PENDING", "SKIPPED_INLINE")
     ):

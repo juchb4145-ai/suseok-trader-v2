@@ -850,6 +850,7 @@ def operator_projection_outbox_bulk_retire(
     older_than_sec: int = Query(default=60, ge=0, le=86400),
     include_projection_names: str | None = Query(default=None),
     exclude_recent_condition_events: bool = Query(default=True),
+    protect_current_trade_date: bool = Query(default=True),
     live_safe: bool = Query(default=True),
 ) -> dict[str, Any]:
     settings = load_settings()
@@ -874,6 +875,7 @@ def operator_projection_outbox_bulk_retire(
                     older_than_sec=older_than_sec,
                     include_projection_names=_parse_csv_query(include_projection_names),
                     exclude_recent_condition_events=exclude_recent_condition_events,
+                    protect_current_trade_date=protect_current_trade_date,
                     live_safe=live_safe,
                 ),
                 attempts=settings.operator_sqlite_lock_retry_attempts,

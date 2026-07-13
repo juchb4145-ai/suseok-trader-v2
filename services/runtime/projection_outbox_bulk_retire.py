@@ -8,10 +8,15 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
-from domain.broker.utils import datetime_to_wire, new_message_id, parse_timestamp, utc_now
-
-from services.config import Settings, load_settings
+from domain.broker.utils import (
+    datetime_to_wire,
+    new_message_id,
+    parse_timestamp,
+    utc_now,
+)
 from storage.gateway_command_store import canonical_json
+
+from services.config import Settings, candidate_timezone, load_settings
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -53,6 +58,8 @@ class ProjectionOutboxBulkRetireResult:
     condition_event_pending_before: int
     condition_event_pending_after: int
     condition_event_pending_delta: int
+    protect_current_trade_date: bool
+    protected_trade_date: str | None
     created_at: str
     buckets: Sequence[ProjectionOutboxBulkRetireBucket] = field(default_factory=tuple)
     sample_retired_jobs: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
@@ -86,6 +93,8 @@ class ProjectionOutboxBulkRetireResult:
             "condition_event_pending_before": self.condition_event_pending_before,
             "condition_event_pending_after": self.condition_event_pending_after,
             "condition_event_pending_delta": self.condition_event_pending_delta,
+            "protect_current_trade_date": self.protect_current_trade_date,
+            "protected_trade_date": self.protected_trade_date,
             "no_trading_side_effects": self.no_trading_side_effects,
             "projection_side_effects_allowed": self.projection_side_effects_allowed,
             "created_at": self.created_at,
@@ -119,9 +128,9 @@ def bulk_retire_projection_outbox(
     older_than_sec: int = 60,
     include_projection_names: Iterable[str] | None = None,
     exclude_recent_condition_events: bool = True,
+    protect_current_trade_date: bool = False,
     live_safe: bool = True,
 ) -> ProjectionOutboxBulkRetireResult:
-    del settings
     run_id = new_message_id("projection_outbox_bulk_retire")
     created_at = datetime_to_wire(utc_now())
     requested_limit = int(limit)
@@ -129,6 +138,17 @@ def bulk_retire_projection_outbox(
     if live_safe:
         bounded_limit = min(bounded_limit, 5000)
     cutoff = datetime_to_wire(utc_now() - timedelta(seconds=max(int(older_than_sec), 0)))
+    protected_trade_date: str | None = None
+    protected_timezone_name = "Asia/Seoul"
+    if protect_current_trade_date:
+        resolved_settings = settings or load_settings()
+        protected_timezone_name = resolved_settings.candidate_trade_date_timezone
+        protected_trade_date = (
+            utc_now()
+            .astimezone(candidate_timezone(protected_timezone_name))
+            .date()
+            .isoformat()
+        )
     include_projection_set = _normalize_projection_filter(include_projection_names)
     pending_before = _count_pending(connection)
     condition_before = _count_pending_condition_events(connection)
@@ -144,6 +164,8 @@ def bulk_retire_projection_outbox(
             row,
             recent_cutoff=cutoff,
             exclude_recent_condition_events=exclude_recent_condition_events,
+            protected_trade_date=protected_trade_date,
+            protected_timezone_name=protected_timezone_name,
         )
         for row in rows
     ]
@@ -213,6 +235,8 @@ def bulk_retire_projection_outbox(
         condition_event_pending_before=condition_before,
         condition_event_pending_after=condition_after,
         condition_event_pending_delta=condition_after - condition_before,
+        protect_current_trade_date=bool(protect_current_trade_date),
+        protected_trade_date=protected_trade_date,
         created_at=created_at,
     )
 
@@ -223,6 +247,8 @@ def decide_bulk_retire_job(
     *,
     recent_cutoff: str,
     exclude_recent_condition_events: bool,
+    protected_trade_date: str | None = None,
+    protected_timezone_name: str = "Asia/Seoul",
 ) -> BulkRetireDecision:
     outbox_id = str(row["outbox_id"])
     event_id = str(row["event_id"])
@@ -257,6 +283,26 @@ def decide_bulk_retire_job(
             reason="SOURCE_GATEWAY_EVENT_NOT_ACCEPTED",
             source_gateway_event_status=source_status,
         )
+    if protected_trade_date is not None:
+        source_trade_date = _event_trade_date(
+            source["event_ts"],
+            timezone_name=protected_timezone_name,
+        )
+        if source_trade_date is None:
+            return BulkRetireDecision(
+                **base,
+                terminal_status=None,
+                reason="SOURCE_TRADE_DATE_UNRESOLVED_PROTECTED",
+                source_gateway_event_status=source_status,
+            )
+        if source_trade_date == protected_trade_date:
+            return BulkRetireDecision(
+                **base,
+                terminal_status=None,
+                reason="CURRENT_TRADE_DATE_EVIDENCE_PROTECTED",
+                source_gateway_event_status=source_status,
+                metadata={"protected_trade_date": protected_trade_date},
+            )
     effective_skip = _effective_skip_inline(connection, event_id, projection_name)
     if effective_skip:
         return BulkRetireDecision(
@@ -1010,12 +1056,24 @@ def _gateway_event_row(
 ) -> sqlite3.Row | None:
     return connection.execute(
         """
-        SELECT event_id, event_type, status, payload_json
+        SELECT event_id, event_type, event_ts, status, payload_json
         FROM gateway_events
         WHERE event_id = ?
         """,
         (event_id,),
     ).fetchone()
+
+
+def _event_trade_date(value: object, *, timezone_name: str) -> str | None:
+    try:
+        return (
+            parse_timestamp(str(value), "event_ts")
+            .astimezone(candidate_timezone(timezone_name))
+            .date()
+            .isoformat()
+        )
+    except (TypeError, ValueError):
+        return None
 
 
 def _effective_skip_inline(

@@ -30,6 +30,7 @@ _RECONCILE_ENDPOINTS = {
     "market_regime": "/api/operator/market-regime-projection-reconcile/run-once",
     "market_scan": "/api/operator/market-scan-projection-reconcile/run-once",
 }
+_RECONCILE_MIN_TIMEOUT_SEC = {"market_scan": 120.0}
 
 
 def main() -> int:
@@ -165,6 +166,13 @@ def run_daily_evidence_report(
             timeout_sec,
             method="POST",
         )
+        report["market_context_rebuild"] = _fetch(
+            base_url,
+            "/api/operator/market-context/rebuild?live_safe=true",
+            token,
+            timeout_sec,
+            method="POST",
+        )
         report["reconcile_runs"] = {
             component: _fetch(
                 base_url,
@@ -178,7 +186,10 @@ def run_daily_evidence_report(
                     }
                 ),
                 token,
-                timeout_sec,
+                max(
+                    timeout_sec,
+                    _RECONCILE_MIN_TIMEOUT_SEC.get(component, timeout_sec),
+                ),
                 method="POST",
             )
             for component, endpoint in _RECONCILE_ENDPOINTS.items()
@@ -189,6 +200,7 @@ def run_daily_evidence_report(
             "reason_codes": ["PREFLIGHT_FAILED"],
         }
         report["lifecycle_run"] = {"status": "NOT_RUN"}
+        report["market_context_rebuild"] = {"status": "NOT_RUN"}
         report["reconcile_runs"] = {}
 
     report["final_readiness"] = _fetch(
@@ -294,6 +306,14 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     for component, payload in _mapping(report.get("reconcile_runs")).items():
         if not _api_ok(payload):
             failures.append(f"{str(component).upper()}_RECONCILE_API_ERROR")
+
+    if not _api_ok(report.get("market_context_rebuild")):
+        failures.append("MARKET_CONTEXT_REBUILD_API_ERROR")
+    market_context_rebuild = _data(report, "market_context_rebuild")
+    if market_context_rebuild and str(
+        market_context_rebuild.get("status") or ""
+    ) not in {"APPLIED", "APPLIED_BY_VERIFY"}:
+        failures.append("MARKET_CONTEXT_REBUILD_NOT_HEALTHY")
 
     drain = _mapping(report.get("projection_outbox_drain"))
     if drain.get("status") not in {"COMPLETED", "NOT_RUN"}:
