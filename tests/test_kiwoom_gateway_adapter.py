@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
 from domain.broker.condition_profiles import (
@@ -43,6 +44,7 @@ from gateway.kiwoom_client import (
     KiwoomClient,
     KiwoomOrderRequest,
     KiwoomOrderResult,
+    MarketIndexRealtimeParseError,
     MockKiwoomClient,
     Signal,
     broker_env_from_server_gubun,
@@ -112,6 +114,11 @@ def test_kiwoom_gateway_realtime_exchange_option() -> None:
     assert parse_args([]).realtime_exchange == "krx"
     assert parse_args(["--realtime-exchange", "nxt"]).realtime_exchange == "nxt"
     assert parse_args(["--realtime-exchange", "all"]).realtime_exchange == "all"
+
+
+def test_kiwoom_gateway_can_clear_realtime_on_login() -> None:
+    assert parse_args([]).clear_realtime_on_login is False
+    assert parse_args(["--clear-realtime-on-login"]).clear_realtime_on_login is True
 
 
 def test_kiwoom_gateway_core_io_isolation_options() -> None:
@@ -274,15 +281,77 @@ def test_market_index_parser_maps_realtime_fids_with_pilot_evidence() -> None:
     assert tick.index_code == "KOSPI"
     assert tick.price == 2812.34
     assert tick.change_value == -12.30
-    assert payload["metadata"]["parser_status"] == "PILOT_UNVERIFIED_FID_MAP"
-    assert payload["metadata"]["parser_evidence"]["requires_koa_studio_confirmation"] is True
+    assert payload["metadata"]["parser_status"] == "VERIFIED"
+    assert payload["metadata"]["parser_evidence"]["mapping_status"] == (
+        "VERIFIED_KRX_REALTIME"
+    )
+    assert payload["metadata"]["parser_evidence"]["requires_koa_studio_confirmation"] is False
     assert FID_CURRENT_PRICE in payload["metadata"]["raw_fids_present"]
+    assert payload["metadata"]["raw_fids"] == {
+        "10": "2,812.34",
+        "11": "-12.30",
+        "12": "-0.44",
+        "20": "091502",
+    }
+
+
+@pytest.mark.parametrize(
+    ("missing_fid", "reason_code"),
+    (
+        (FID_CURRENT_PRICE, "INDEX_PRICE_MISSING"),
+        (FID_CHANGE_VALUE, "INDEX_CHANGE_VALUE_MISSING"),
+        (FID_CHANGE_RATE, "INDEX_CHANGE_RATE_MISSING"),
+        (FID_TRADE_TIME, "INDEX_TRADE_TIME_MISSING"),
+    ),
+)
+def test_market_index_parser_fails_closed_when_required_fid_is_missing(
+    missing_fid: int,
+    reason_code: str,
+) -> None:
+    raw_fids = {
+        FID_CURRENT_PRICE: "2812.34",
+        FID_CHANGE_VALUE: "+5.12",
+        FID_CHANGE_RATE: "+0.18",
+        FID_TRADE_TIME: "091501",
+    }
+    raw_fids.pop(missing_fid)
+
+    with pytest.raises(MarketIndexRealtimeParseError) as captured:
+        parse_market_index_tick_from_fids(
+            index_code="KOSPI",
+            kiwoom_code="001",
+            raw_fids=raw_fids,
+            real_type="업종지수",
+        )
+
+    assert reason_code in captured.value.reason_codes
+
+
+@pytest.mark.parametrize("trade_time", ("", "91501", "246001", "09A501"))
+def test_market_index_parser_rejects_invalid_trade_time(trade_time: str) -> None:
+    with pytest.raises(MarketIndexRealtimeParseError) as captured:
+        parse_market_index_tick_from_fids(
+            index_code="KOSPI",
+            kiwoom_code="001",
+            raw_fids={
+                FID_CURRENT_PRICE: "2812.34",
+                FID_CHANGE_VALUE: "+5.12",
+                FID_CHANGE_RATE: "+0.18",
+                FID_TRADE_TIME: trade_time,
+            },
+            real_type="업종지수",
+        )
+
+    expected = "INDEX_TRADE_TIME_MISSING" if not trade_time else "INDEX_TRADE_TIME_INVALID"
+    assert expected in captured.value.reason_codes
 
 
 def test_market_index_code_normalizer_does_not_require_stock_code() -> None:
     assert normalize_market_index_code("KOSPI") == "KOSPI"
     assert normalize_market_index_code("001") == "KOSPI"
     assert is_market_index_real_type("업종지수") is True
+    assert is_market_index_real_type("업종등락") is True
+    assert is_market_index_real_type("예상업종지수") is True
     assert market_index_realtime_fid_string()
 
 
@@ -379,6 +448,35 @@ def test_kiwoom_market_index_real_data_emits_index_tick_not_price_tick() -> None
     assert raw_callbacks == [("KOSPI", "업종지수", False)]
     assert index_ticks[0]["index_code"] == "KOSPI"
     assert index_ticks[0]["price"] == 2812.34
+
+
+def test_kiwoom_expected_market_index_callback_is_observed_without_parse_error() -> None:
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    raw_reads: list[int] = []
+    client._market_index_real_raw = lambda code, fid: raw_reads.append(fid) or ""
+    index_ticks: list[dict[str, object]] = []
+    parse_errors: list[dict[str, object]] = []
+    raw_callbacks: list[tuple[str, str, bool]] = []
+    client.market_index_tick_received.connect(index_ticks.append)
+    client.realtime_parse_error.connect(parse_errors.append)
+    client.realtime_data_received.connect(
+        lambda code, real_type, present: raw_callbacks.append((code, real_type, present))
+    )
+
+    client._on_receive_real_data("001", "예상업종지수", "")
+
+    assert raw_callbacks == [("KOSPI", "예상업종지수", False)]
+    assert raw_reads == []
+    assert index_ticks == []
+    assert parse_errors == []
 
 
 def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
@@ -628,6 +726,22 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def test_runtime_clears_stale_realtime_subscriptions_on_login() -> None:
+    client = MockKiwoomClient()
+    client.registered_codes.add("005930")
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(clear_realtime_on_login=True),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+
+    assert client.remove_all_realtime_count == 1
+    assert client.registered_codes == set()
+    assert runtime._registered_realtime_codes == set()
 
 
 def _disconnectable_mock_client() -> MockKiwoomClient:
@@ -2398,6 +2512,53 @@ def test_kiwoom_handler_request_tr_can_force_single_output_record() -> None:
     assert events[2].payload["details"]["warnings"] == [
         "TR_SINGLE_ROW_EXPLICIT:OPT20001"
     ]
+
+
+def test_kiwoom_handler_request_tr_can_force_multi_output_record() -> None:
+    class MultiOutputTrClient(MockKiwoomClient):
+        def get_repeat_count(self, tr_code: str, rq_name: str) -> int:
+            return 2 if rq_name == "거래대금상위" else 0
+
+        def get_comm_data(
+            self,
+            tr_code: str,
+            rq_name: str,
+            index: int,
+            item_name: str,
+        ) -> str:
+            if rq_name != "거래대금상위":
+                return ""
+            rows = (
+                {"종목코드": "005930", "현재순위": "1"},
+                {"종목코드": "000660", "현재순위": "2"},
+            )
+            return rows[index].get(item_name, "")
+
+    client = MultiOutputTrClient()
+    handler = KiwoomGatewayCommandHandler(client)
+    command = GatewayCommand(
+        command_id="cmd_scan_tr",
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": "market_scan:TRADE_VALUE:KOSPI:test",
+            "tr_code": "OPT10032",
+            "request_name": "market_scan_trade_value_kospi",
+            "params": {"시장구분": "001"},
+            "fields": ["종목코드", "현재순위"],
+            "row_mode": "multi",
+            "output_record_name": "거래대금상위",
+        },
+    )
+
+    events = handler.handle(command)
+    response = BrokerTrResponse.from_dict(events[1].payload)
+
+    assert response.rows == [
+        {"종목코드": "005930", "현재순위": "1"},
+        {"종목코드": "000660", "현재순위": "2"},
+    ]
+    assert events[2].payload["details"]["warnings"] == []
 
 
 def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() -> None:

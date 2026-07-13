@@ -56,6 +56,7 @@ class KiwoomGatewayRuntimeConfig:
     condition_send_interval_sec: float = 0.25
     realtime_codes: tuple[str, ...] = ()
     realtime_exchange: str = "KRX"
+    clear_realtime_on_login: bool = False
     observe_only: bool = True
     account: str = ""
     realtime_recover_stale_sec: float = 45.0
@@ -874,6 +875,26 @@ class KiwoomGatewayRuntime:
         )
         self.emit("orderability", self.heartbeat_payload())
         if ok:
+            if self.config.clear_realtime_on_login:
+                try:
+                    self.client.remove_all_realtime()
+                except Exception as exc:
+                    self._last_error = str(exc)
+                    self.emit(
+                        "gateway_error",
+                        {
+                            "message": "REALTIME_CLEAR_ON_LOGIN_FAILED",
+                            "error": str(exc),
+                        },
+                    )
+                    return
+                self.emit(
+                    "gateway_log",
+                    {
+                        "message": "realtime subscriptions cleared on login",
+                        "clear_realtime_on_login": True,
+                    },
+                )
             reconnecting = self._reconnect_pending
             self._reconnect_pending = False
             self._reconnect_attempt_count = 0

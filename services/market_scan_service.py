@@ -40,24 +40,40 @@ MARKET_SCAN_TR_FIELDS: dict[str, tuple[str, ...]] = {
         "종목코드",
         "종목명",
         "현재순위",
-        "순위",
         "현재가",
         "등락률",
         "거래대금",
         "현재거래량",
-        "거래량",
     ),
     SCAN_TYPE_CHANGE_RATE: (
         "종목코드",
         "종목명",
-        "순위",
         "현재가",
         "등락률",
-        "거래량",
-        "거래대금",
         "현재거래량",
     ),
 }
+MARKET_SCAN_TR_OUTPUT_RECORDS = {
+    SCAN_TYPE_TRADE_VALUE: "거래대금상위",
+    SCAN_TYPE_CHANGE_RATE: "전일대비등락률상위",
+}
+MARKET_SCAN_TR_DEFAULT_INPUTS: dict[str, Mapping[str, str]] = {
+    SCAN_TYPE_TRADE_VALUE: {
+        "관리종목포함": "0",
+        "거래소구분": "1",
+    },
+    SCAN_TYPE_CHANGE_RATE: {
+        "정렬구분": "1",
+        "거래량조건": "0",
+        "종목조건": "1",
+        "신용조건": "0",
+        "상하한포함": "0",
+        "가격조건": "0",
+        "거래대금조건": "0",
+        "거래소구분": "1",
+    },
+}
+MARKET_SCAN_TR_CONTRACT_VERSION = "market_scan_tr/v1"
 
 QueueCommand = Callable[[GatewayCommand], Any]
 
@@ -536,18 +552,20 @@ def _build_scan_command(
     normalized_market = require_non_empty_str(market, "market").upper()
     tr_code = settings.market_scan_tr_codes[normalized_scan_type]
     request_id = f"market_scan:{normalized_scan_type}:{normalized_market}:{run_id}"
+    output_record_name = MARKET_SCAN_TR_OUTPUT_RECORDS[normalized_scan_type]
+    broker_inputs = {
+        "시장구분": settings.market_scan_market_codes[normalized_market],
+        **MARKET_SCAN_TR_DEFAULT_INPUTS[normalized_scan_type],
+    }
     payload = {
         "request_id": request_id,
         "tr_code": tr_code,
         "request_name": f"market_scan_{normalized_scan_type.lower()}_{normalized_market.lower()}",
         "screen_no": settings.market_scan_screen_no,
         "fields": list(MARKET_SCAN_TR_FIELDS[normalized_scan_type]),
-        "params": {
-            "시장구분": settings.market_scan_market_codes[normalized_market],
-            "market": normalized_market,
-            "scan_type": normalized_scan_type,
-            "top_n": settings.market_scan_top_n,
-        },
+        "params": broker_inputs,
+        "row_mode": "multi",
+        "output_record_name": output_record_name,
         "metadata": {
             "observe_only": True,
             "no_order_side_effects": True,
@@ -555,6 +573,10 @@ def _build_scan_command(
             "market": normalized_market,
             "parser_status": settings.market_scan_parser_status,
             "source": MARKET_SCAN_SOURCE,
+            "tr_contract_version": MARKET_SCAN_TR_CONTRACT_VERSION,
+            "output_record_name": output_record_name,
+            "broker_inputs": dict(broker_inputs),
+            "top_n": settings.market_scan_top_n,
         },
     }
     return GatewayCommand(

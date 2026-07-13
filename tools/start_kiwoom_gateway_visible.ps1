@@ -15,6 +15,8 @@ param(
     [string]$MarketIndexPollSec = "",
     [switch]$NoAutoLogin,
     [switch]$NoConditionRealtime,
+    [switch]$DisableConditions,
+    [switch]$DisableRealtimeCodes,
     [switch]$Detached,
     [switch]$Log,
     [switch]$DryRun,
@@ -147,6 +149,16 @@ function Write-ObserveEnvOverrideFile {
         "AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS=$($env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS)",
         "GATEWAY_COMMAND_WAIT_SEC=$($env:GATEWAY_COMMAND_WAIT_SEC)"
     )
+    if ($DisableConditions) {
+        $OverrideLines += @(
+            "KIWOOM_CONDITION_NAME=",
+            "KIWOOM_CONDITION_PROFILES_FILE=",
+            "KIWOOM_CONDITION_PROFILES="
+        )
+    }
+    if ($DisableRealtimeCodes) {
+        $OverrideLines += "KIWOOM_REALTIME_CODES="
+    }
     if (-not [string]::IsNullOrWhiteSpace($env:TRADING_CORE_TOKEN)) {
         $OverrideLines += "TRADING_CORE_TOKEN=$($env:TRADING_CORE_TOKEN)"
     }
@@ -212,26 +224,38 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
 $env:GATEWAY_CORE_TOKEN = $Token
 $env:TRADING_CORE_TOKEN = $Token
 
-if ([string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
-    $ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES
-}
-$DefaultConditionProfilesFile = Join-Path $Root "configs\condition_profiles\market_open_profiles.json"
-if (
-    [string]::IsNullOrWhiteSpace($ConditionProfilesFile) -and
-    [string]::IsNullOrWhiteSpace($ConditionProfilesJson)
-) {
-    $ConditionProfilesFile = if ($env:KIWOOM_CONDITION_PROFILES_FILE) {
-        $env:KIWOOM_CONDITION_PROFILES_FILE
-    } elseif (Test-Path -LiteralPath $DefaultConditionProfilesFile) {
-        $DefaultConditionProfilesFile
-    } else {
-        ""
+if ($DisableConditions) {
+    $ConditionName = ""
+    $ConditionProfilesFile = ""
+    $ConditionProfilesJson = ""
+    $env:KIWOOM_CONDITION_NAME = ""
+    $env:KIWOOM_CONDITION_PROFILES_FILE = ""
+    $env:KIWOOM_CONDITION_PROFILES = ""
+} else {
+    if ([string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
+        $ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES
+    }
+    $DefaultConditionProfilesFile = Join-Path $Root "configs\condition_profiles\market_open_profiles.json"
+    if (
+        [string]::IsNullOrWhiteSpace($ConditionProfilesFile) -and
+        [string]::IsNullOrWhiteSpace($ConditionProfilesJson)
+    ) {
+        $ConditionProfilesFile = if ($env:KIWOOM_CONDITION_PROFILES_FILE) {
+            $env:KIWOOM_CONDITION_PROFILES_FILE
+        } elseif (Test-Path -LiteralPath $DefaultConditionProfilesFile) {
+            $DefaultConditionProfilesFile
+        } else {
+            ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ConditionName)) {
+        $ConditionName = $env:KIWOOM_CONDITION_NAME
     }
 }
-if ([string]::IsNullOrWhiteSpace($ConditionName)) {
-    $ConditionName = $env:KIWOOM_CONDITION_NAME
-}
-if ([string]::IsNullOrWhiteSpace($RealtimeCodes)) {
+if ($DisableRealtimeCodes) {
+    $RealtimeCodes = ""
+    $env:KIWOOM_REALTIME_CODES = ""
+} elseif ([string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $RealtimeCodes = $env:KIWOOM_REALTIME_CODES
 }
 if ([string]::IsNullOrWhiteSpace($RealtimeExchange)) {
@@ -321,6 +345,9 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedProfiles)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $GatewayArgs += @("--realtime-codes", $RealtimeCodes)
+}
+if ($DisableRealtimeCodes) {
+    $GatewayArgs += "--clear-realtime-on-login"
 }
 if ($MarketIndexEnabledValue) {
     $GatewayArgs += "--market-index-enabled"

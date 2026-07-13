@@ -34,8 +34,31 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "RunGateway" in script
     assert "MarketReferenceProjectionValidation" in script
     assert "MarketReferenceLimitedCutover" in script
-    assert '$env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"' in script
-    assert '$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"' in script
+    assert "RealtimeFidValidation" in script
+    assert "DisableStockRealtime" in script
+    assert "DisableMarketIndexRealtime" in script
+    assert "AppendOnlyEvidence" in script
+    assert "AllowOperatingDatabase" in script
+    assert "MarketDataOperatingMode" in script
+    assert "MarketDataGlobalSkipBudget" in script
+    assert "MarketScanParserVerified" in script
+    assert '"MARKET_SCAN_PARSER_STATUS=$($env:MARKET_SCAN_PARSER_STATUS)"' in script
+    assert '"KOA_STUDIO_VERIFIED"' in script
+    assert "$GatewayScriptParams.DisableConditions = $true" in script
+    assert "$RealtimeFidValidation -or $DisableStockRealtime" in script
+    assert 'throw "DbPath is required for realtime/evidence validation modes."' in script
+    assert "Assert-CoreObserveSafety" in script
+    assert '$MarketDataOperatingMode -eq "MARKET_DATA_FULL_GUARDED"' in script
+    assert '"TRADING_DB_PATH=$($env:TRADING_DB_PATH)"' in script
+    assert '"--reload"' not in script
+    assert (
+        '$env:PROJECTION_OUTBOX_WORKER_ENABLED = if '
+        '($AppendOnlyEvidence) { "true" } else { "false" }'
+    ) in script
+    assert (
+        '$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = if '
+        '($AppendOnlyEvidence) { "true" } else { "false" }'
+    ) in script
     assert (
         '$env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if '
         '($MarketReferenceValidationRequested) { "true" } else { "false" }'
@@ -50,21 +73,26 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     ) in script
     assert (
         '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = if '
-        '($MarketReferenceLimitedCutover) { "true" } else { "false" }'
+        '($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) '
+        '{ "true" } else { "false" }'
     ) in script
     assert (
         '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH = if '
-        '($MarketReferenceLimitedCutover) { "false" } else { "true" }'
+        '($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) '
+        '{ "false" } else { "true" }'
     ) in script
     assert (
         '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if '
-        '($MarketReferenceLimitedCutover) { "1" } else { "0" }'
+        '($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) '
+        '{ "1" } else { "0" }'
     ) in script
     assert (
         '$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = if '
-        '($MarketReferenceLimitedCutover) { "false" } else { "true" }'
+        '($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) '
+        '{ "false" } else { "true" }'
         in script
     )
+    _assert_append_only_evidence_flags_are_guarded(script)
     assert '$env:CONDITION_FUSION_SWEEP_ENABLED = "false"' in script
     assert '$env:INCREMENTAL_EVALUATION_WORKER_ENABLED = "false"' in script
     assert '$env:EVENT_STORE_RETENTION_ENABLED = "false"' in script
@@ -83,6 +111,89 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert '"NXT"' in script
     assert "-TradingSession" in script
     assert 'queue_commands = "true"' not in script.lower()
+
+
+def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -> None:
+    start_script = (
+        ROOT_DIR / "tools" / "start_append_only_daily_evidence.ps1"
+    ).read_text(encoding="utf-8")
+    close_script = (
+        ROOT_DIR / "tools" / "close_append_only_daily_evidence.ps1"
+    ).read_text(encoding="utf-8")
+
+    assert "KrxTradingDayConfirmed is required" in start_script
+    assert "Historical or future evidence start is forbidden" in start_script
+    assert "Persistent 10-day evidence DB cannot be stored under TEMP" in start_script
+    assert "append-only-10day.sqlite3" in start_script
+    assert 'MarketDataOperatingMode = "MARKET_DATA_FULL_GUARDED"' in start_script
+    assert 'ThemeRefreshTradingSession = "KRX"' in start_script
+    assert "MarketScanParserVerified = $true" in start_script
+    assert "$CoreParameters.RunCore = $true" in start_script
+    assert "$GatewayParameters.RunGateway = $true" in start_script
+    assert "$ThemeParameters.RunThemeRefreshLoop = $true" in start_script
+    assert "GatewayStabilizeSec" in start_script
+    assert "GatewayStartAttempts" in start_script
+    assert "Gateway did not stabilize; retrying after 5 seconds" in start_script
+    assert "append-only-daily-session/v1" in start_script
+    assert "failed_command_count" in start_script
+
+    assert "apps\\.kiwoom_gateway" in close_script
+    assert "start_theme_refresh_loop\\.ps1" in close_script
+    assert "ops_append_only_daily_evidence.py" in close_script
+    assert '"--session-state-path", $SessionStatePath' in close_script
+    assert "Daily evidence close failed. Core remains running" in close_script
+    assert "Refusing to stop unexpected listener" in close_script
+    assert "uvicorn apps\\.core_api:app" in close_script
+    assert "Remove-Item -LiteralPath $ResolvedDbPath" not in close_script
+
+
+def _assert_append_only_evidence_flags_are_guarded(script: str) -> None:
+    enabled_flags = (
+        "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED",
+        "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED",
+        "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED",
+        "LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED",
+        "LIVE_SIM_LIFECYCLE_WORKER_ENABLED",
+        "LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED",
+        "LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED",
+    )
+    for flag in enabled_flags:
+        expected = f'$env:{flag} = if ($AppendOnlyEvidence) {{ "true" }} else {{ "false" }}'
+        assert expected in script
+
+    budget_flags = (
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+    )
+    for flag in budget_flags:
+        expected = f'$env:{flag} = if ($AppendOnlyEvidence) {{ "1" }} else {{ "0" }}'
+        assert expected in script
+
+    assert (
+        '$env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE = if '
+        '($AppendOnlyEvidence) { [string]$MarketDataGlobalSkipBudget } else { "0" }'
+    ) in script
+    assert (
+        "$env:GATEWAY_MARKET_DATA_APPEND_ONLY_"
+        'CONDITION_EVENT_ALLOW_CANDIDATE_INGEST_IN_WORKER = "false"'
+    ) in script
 
 
 def test_start_theme_refresh_loop_uses_market_scan_interval_and_order_guard() -> None:
@@ -143,6 +254,17 @@ def test_start_kiwoom_gateway_visible_defaults_to_multi_profile_file() -> None:
     assert '"--market-index-realtime-enabled"' in script
     assert '"--market-index-codes"' in script
     assert '"--no-market-index-tr-bootstrap-enabled"' in script
+    assert "DisableConditions" in script
+    assert "DisableRealtimeCodes" in script
+    assert '$env:KIWOOM_CONDITION_NAME = ""' in script
+    assert '$env:KIWOOM_CONDITION_PROFILES_FILE = ""' in script
+    assert '$env:KIWOOM_CONDITION_PROFILES = ""' in script
+    assert '"KIWOOM_CONDITION_NAME="' in script
+    assert '"KIWOOM_CONDITION_PROFILES_FILE="' in script
+    assert '"KIWOOM_CONDITION_PROFILES="' in script
+    assert '"KIWOOM_REALTIME_CODES="' in script
+    assert '$env:KIWOOM_REALTIME_CODES = ""' in script
+    assert '"--clear-realtime-on-login"' in script
     _assert_observe_side_effect_flags_are_overridden(script)
 
 

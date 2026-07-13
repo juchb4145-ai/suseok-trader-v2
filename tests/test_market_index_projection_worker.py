@@ -77,12 +77,17 @@ def test_market_index_worker_does_not_rewind_newer_projection(tmp_path) -> None:
     latest = connection.execute(
         "SELECT event_id, price FROM market_index_ticks_latest WHERE index_code = 'KOSPI'"
     ).fetchone()
+    older_sample = connection.execute(
+        "SELECT event_id FROM market_index_tick_samples WHERE event_id = ?",
+        (older.event_id,),
+    ).fetchone()
     older_job = _outbox(connection, "market_index:evt_index_older")
     connection.close()
 
     assert first.applied_by_worker_count == 1
-    assert second.skipped_count == 1
-    assert older_job["status"] == "SKIPPED"
+    assert second.applied_by_worker_count == 1
+    assert older_job["status"] == "APPLIED"
+    assert older_sample is not None
     assert latest["event_id"] == "evt_index_newer"
     assert latest["price"] == 2810.0
 

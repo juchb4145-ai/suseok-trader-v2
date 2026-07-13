@@ -32,6 +32,7 @@ def test_status_returns_observe_and_default_live_flags(tmp_path, monkeypatch) ->
         response = client.get("/api/status")
 
     assert response.status_code == 200
+    assert response.json()["profile"] == "OBSERVE"
     assert response.json()["mode"] == "OBSERVE"
     assert response.json()["live_sim_allowed"] is False
     assert response.json()["live_real_allowed"] is False

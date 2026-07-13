@@ -159,7 +159,7 @@ class KiwoomTrRunner:
         )
         requested_fields = fields or DEFAULT_TR_FIELDS.get(normalized_tr_code, [])
         normalized_row_mode = str(row_mode or "auto").strip().lower()
-        if normalized_row_mode not in {"auto", "single"}:
+        if normalized_row_mode not in {"auto", "single", "multi"}:
             result.errors.append(f"TR_ROW_MODE_INVALID:{normalized_row_mode}")
             return TrRequestSubmission(
                 key="",
@@ -305,6 +305,9 @@ class KiwoomTrRunner:
             return []
         record_name, repeat_count = self._repeat_count(tr_code, record_candidates)
         if repeat_count <= 0:
+            if row_mode == "multi":
+                result.warnings.append(f"TR_MULTI_ROW_EMPTY:{result.tr_code}")
+                return []
             row = self._extract_single_row(tr_code, record_candidates, fields)
             if row:
                 result.warnings.append(f"TR_SINGLE_ROW_FALLBACK:{result.tr_code}")

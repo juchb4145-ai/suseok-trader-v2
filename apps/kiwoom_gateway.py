@@ -92,6 +92,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--condition-realtime", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--realtime-codes", default=os.environ.get("KIWOOM_REALTIME_CODES", ""))
     parser.add_argument(
+        "--clear-realtime-on-login",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Call SetRealRemove(ALL, ALL) after login before configured registration.",
+    )
+    parser.add_argument(
         "--realtime-exchange",
         choices=("krx", "nxt", "all"),
         default=os.environ.get("KIWOOM_REALTIME_EXCHANGE", "krx").strip().lower(),
@@ -269,6 +275,7 @@ def run_gateway(args: argparse.Namespace) -> int:
             condition_profiles=parse_condition_profiles(args.condition_profiles),
             realtime_codes=tuple(_parse_codes(args.realtime_codes)),
             realtime_exchange=str(args.realtime_exchange or "krx").upper(),
+            clear_realtime_on_login=bool(args.clear_realtime_on_login),
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
             realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
             market_index_enabled=bool(args.market_index_enabled),

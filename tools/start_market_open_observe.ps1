@@ -20,6 +20,17 @@ param(
     [int]$ThemeRefreshRequestTimeoutSec = 120,
     [int]$CoreWaitSeconds = 30,
     [int]$GatewayWaitSeconds = 30,
+    [string]$DbPath = "",
+    [ValidateSet("DRY_RUN", "PRICE_TICK_ONLY", "TR_RESPONSE_ONLY", "CONDITION_EVENT_ONLY", "MARKET_DATA_LIMITED", "MARKET_DATA_FULL_GUARDED")]
+    [string]$MarketDataOperatingMode = "MARKET_DATA_FULL_GUARDED",
+    [ValidateRange(1, 3)]
+    [int]$MarketDataGlobalSkipBudget = 3,
+    [switch]$RealtimeFidValidation,
+    [switch]$DisableStockRealtime,
+    [switch]$DisableMarketIndexRealtime,
+    [switch]$AppendOnlyEvidence,
+    [switch]$MarketScanParserVerified,
+    [switch]$AllowOperatingDatabase,
     [switch]$MarketReferenceProjectionValidation,
     [switch]$MarketReferenceLimitedCutover,
     [switch]$RunObserveCycle,
@@ -120,6 +131,7 @@ function Write-ObserveEnvOverrideFile {
         "TRADING_MODE=$($env:TRADING_MODE)",
         "TRADING_ALLOW_LIVE_SIM=$($env:TRADING_ALLOW_LIVE_SIM)",
         "TRADING_ALLOW_LIVE_REAL=$($env:TRADING_ALLOW_LIVE_REAL)",
+        "TRADING_DB_PATH=$($env:TRADING_DB_PATH)",
         "DRY_RUN_ORDER_ROUTING_ENABLED=$($env:DRY_RUN_ORDER_ROUTING_ENABLED)",
         "DRY_RUN_GATEWAY_COMMAND_ENABLED=$($env:DRY_RUN_GATEWAY_COMMAND_ENABLED)",
         "DRY_RUN_EXIT_ENGINE_ENABLED=$($env:DRY_RUN_EXIT_ENGINE_ENABLED)",
@@ -154,12 +166,59 @@ function Write-ObserveEnvOverrideFile {
         "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=$($env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED)",
         "PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED)",
         "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED)",
+        "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED)",
+        "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED)",
+        "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED=$($env:PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_ALLOW_CANDIDATE_INGEST_IN_WORKER=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_ALLOW_CANDIDATE_INGEST_IN_WORKER)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA)",
         "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13=$($env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13)",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15=$($env:GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15)",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_REGIME_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18=$($env:GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18)",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED=$($env:GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED)",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED=$($env:GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED)",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH=$($env:GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH)",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE=$($env:GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE)",
+        "GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20=$($env:GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20)",
+        "LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED=$($env:LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED)",
+        "LIVE_SIM_LIFECYCLE_WORKER_ENABLED=$($env:LIVE_SIM_LIFECYCLE_WORKER_ENABLED)",
+        "LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED=$($env:LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED)",
+        "LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED=$($env:LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED)",
+        "LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH=$($env:LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH)",
+        "LIVE_SIM_LIFECYCLE_INLINE_FALLBACK_ENABLED=$($env:LIVE_SIM_LIFECYCLE_INLINE_FALLBACK_ENABLED)",
+        "MARKET_SCAN_ENABLED=$($env:MARKET_SCAN_ENABLED)",
+        "MARKET_SCAN_PARSER_STATUS=$($env:MARKET_SCAN_PARSER_STATUS)",
+        "KIWOOM_MARKET_INDEX_ENABLED=$($env:KIWOOM_MARKET_INDEX_ENABLED)",
+        "KIWOOM_MARKET_INDEX_REALTIME_ENABLED=$($env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED)",
+        "KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED=$($env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED)",
+        "KIWOOM_MARKET_INDEX_CODES=$($env:KIWOOM_MARKET_INDEX_CODES)",
+        "KIWOOM_MARKET_INDEX_SCREEN_NO=$($env:KIWOOM_MARKET_INDEX_SCREEN_NO)",
+        "KIWOOM_MARKET_INDEX_POLL_SEC=$($env:KIWOOM_MARKET_INDEX_POLL_SEC)",
         "AI_EXTERNAL_LLM_ALLOW_NETWORK=$($env:AI_EXTERNAL_LLM_ALLOW_NETWORK)",
         "AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS=$($env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS)"
     )
@@ -230,13 +289,62 @@ function Wait-CoreHealth {
         try {
             Invoke-RestMethod -Uri "$($Url.TrimEnd('/'))/health" -TimeoutSec 3 | Out-Null
             Write-Host "Core health check passed."
-            return
+            return $true
         } catch {
             Start-Sleep -Seconds 2
         }
     }
 
-    Write-Warning "Core health check did not pass within $WaitSeconds seconds."
+    throw "Core health check did not pass within $WaitSeconds seconds."
+}
+
+function Resolve-WorkspacePath {
+    param([string]$Path)
+
+    if ([System.IO.Path]::IsPathRooted($Path)) {
+        return [System.IO.Path]::GetFullPath($Path)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $Root $Path))
+}
+
+function Assert-CoreObserveSafety {
+    param(
+        [string]$Url,
+        [string]$ExpectedDbPath,
+        [bool]$RequireRealtimeOnly,
+        [bool]$RequireAppendOnlyConfiguration
+    )
+
+    $BaseUrl = $Url.TrimEnd('/')
+    $Status = Invoke-RestMethod -Uri "$BaseUrl/api/status" -TimeoutSec 5
+    if ($Status.profile -ne "OBSERVE" -or $Status.mode -ne "OBSERVE") {
+        throw "Core is not OBSERVE-safe: profile=$($Status.profile) mode=$($Status.mode)"
+    }
+    if ($Status.live_sim_allowed -or $Status.live_real_allowed) {
+        throw "Core live permission is enabled: live_sim=$($Status.live_sim_allowed) live_real=$($Status.live_real_allowed)"
+    }
+    $ActualDbPath = Resolve-WorkspacePath -Path ([string]$Status.database_path)
+    if ($ActualDbPath -ne $ExpectedDbPath) {
+        throw "Core DB path mismatch: expected=$ExpectedDbPath actual=$ActualDbPath"
+    }
+
+    if ($RequireRealtimeOnly) {
+        $Bootstrap = Invoke-RestMethod -Uri "$BaseUrl/api/operator/market-index/tr-bootstrap/status" -TimeoutSec 5
+        if ($Bootstrap.enabled) {
+            throw "TR bootstrap must remain disabled in realtime evidence modes."
+        }
+    }
+
+    if ($RequireAppendOnlyConfiguration) {
+        $Readiness = Invoke-RestMethod -Uri "$BaseUrl/api/operator/append-only-readiness/status" -TimeoutSec 10
+        if (-not $Readiness.configuration.ready) {
+            $Blocked = @($Readiness.configuration.blocked_gates) -join ","
+            throw "Append-only evidence configuration is not armed: $Blocked"
+        }
+        Write-Host "Append-only configuration gate passed. readiness=$($Readiness.status)"
+    }
+
+    Write-Host "Core OBSERVE preflight passed. DB=$ActualDbPath"
 }
 
 function Start-KiwoomGatewayDetached {
@@ -261,9 +369,14 @@ function Start-KiwoomGatewayDetached {
         $GatewayScriptParams.ConditionProfilesJson = $ConditionProfilesJson
     } elseif (-not [string]::IsNullOrWhiteSpace($ConditionName)) {
         $GatewayScriptParams.ConditionName = $ConditionName
+    } else {
+        $GatewayScriptParams.DisableConditions = $true
     }
     if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
         $GatewayScriptParams.RealtimeCodes = $RealtimeCodes
+    }
+    if ($RealtimeFidValidation -or $DisableStockRealtime) {
+        $GatewayScriptParams.DisableRealtimeCodes = $true
     }
 
     & $GatewayScript @GatewayScriptParams
@@ -297,16 +410,49 @@ function Start-ThemeRefreshLoopDetached {
 
 Import-DotEnv -Path (Join-Path $Root ".env")
 
+if ($RealtimeFidValidation -and $AppendOnlyEvidence) {
+    throw "RealtimeFidValidation and AppendOnlyEvidence are mutually exclusive."
+}
+if ($MarketScanParserVerified -and -not $AppendOnlyEvidence) {
+    throw "MarketScanParserVerified is only allowed with AppendOnlyEvidence."
+}
+$EvidenceModeRequested = $RealtimeFidValidation -or $AppendOnlyEvidence
+$OperatingDbPath = Resolve-WorkspacePath -Path $env:TRADING_DB_PATH
+if ($EvidenceModeRequested -and [string]::IsNullOrWhiteSpace($DbPath)) {
+    throw "DbPath is required for realtime/evidence validation modes."
+}
+$ResolvedDbPath = if ([string]::IsNullOrWhiteSpace($DbPath)) {
+    $OperatingDbPath
+} else {
+    Resolve-WorkspacePath -Path $DbPath
+}
+if (
+    $EvidenceModeRequested -and
+    -not $AllowOperatingDatabase -and
+    $ResolvedDbPath -eq $OperatingDbPath
+) {
+    throw "Evidence mode refuses the operating DB without -AllowOperatingDatabase. DB=$ResolvedDbPath"
+}
+$env:TRADING_DB_PATH = $ResolvedDbPath
+
 if ([string]::IsNullOrWhiteSpace($Token)) {
     $Token = if ($env:TRADING_CORE_TOKEN) { $env:TRADING_CORE_TOKEN } else { $env:GATEWAY_CORE_TOKEN }
 }
 
 $RunCoreRequested = $RunAll -or $RunCore
 $RunGatewayRequested = $RunAll -or $RunGateway
-$RunThemeRefreshLoopRequested = $RunAll -or $RunThemeRefreshLoop
+$RunThemeRefreshLoopRequested = ($RunAll -or $RunThemeRefreshLoop) -and -not $RealtimeFidValidation
 $MarketReferenceValidationRequested = (
-    $MarketReferenceProjectionValidation -or $MarketReferenceLimitedCutover
+    $MarketReferenceProjectionValidation -or
+    $MarketReferenceLimitedCutover -or
+    $AppendOnlyEvidence
 )
+if ($RealtimeFidValidation) {
+    $ConditionName = ""
+    $ConditionProfilesFile = ""
+    $ConditionProfilesJson = ""
+    $RealtimeCodes = ""
+}
 
 $env:TRADING_PROFILE = "OBSERVE"
 $env:TRADING_MODE = "OBSERVE"
@@ -342,16 +488,55 @@ $env:LIVE_SIM_OPERATING_CYCLE_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
-$env:PROJECTION_OUTBOX_WORKER_ENABLED = "false"
+$env:PROJECTION_OUTBOX_WORKER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
 $env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
-$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = "false"
+$env:PROJECTION_OUTBOX_MARKET_DATA_APPLY_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
 $env:PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
+$env:PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE = if ($AppendOnlyEvidence) { $MarketDataOperatingMode } else { "OFF" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { [string]$MarketDataGlobalSkipBudget } else { "0" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_AUTO_ROLLBACK_ENABLED = "true"
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_PRICE_TICK_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_TR_RESPONSE_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_DATA_APPEND_ONLY_CONDITION_EVENT_ALLOW_CANDIDATE_INGEST_IN_WORKER = "false"
 $env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_DRY_RUN_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = if ($MarketReferenceLimitedCutover) { "true" } else { "false" }
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($MarketReferenceLimitedCutover) { "false" } else { "true" }
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($MarketReferenceLimitedCutover) { "1" } else { "0" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED = if ($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) { "1" } else { "0" }
 $env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA = "1"
-$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = if ($MarketReferenceLimitedCutover) { "false" } else { "true" }
+$env:GATEWAY_MARKET_REFERENCE_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR13 = if ($MarketReferenceLimitedCutover -or $AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15 = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_REGIME_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18 = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE = if ($AppendOnlyEvidence) { "1" } else { "0" }
+$env:GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20 = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:LIVE_SIM_LIFECYCLE_WORKER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
+$env:LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH = if ($AppendOnlyEvidence) { "false" } else { "true" }
+$env:LIVE_SIM_LIFECYCLE_INLINE_FALLBACK_ENABLED = "true"
 if ($MarketReferenceValidationRequested) {
     $env:CONDITION_FUSION_SWEEP_ENABLED = "false"
     $env:INCREMENTAL_EVALUATION_WORKER_ENABLED = "false"
@@ -366,6 +551,14 @@ if ($RunThemeRefreshLoopRequested) {
         $env:MARKET_SCAN_INTERVAL_SEC = "120"
     }
 }
+if ($AppendOnlyEvidence) {
+    $env:MARKET_SCAN_ENABLED = "true"
+    if ($MarketScanParserVerified) {
+        $env:MARKET_SCAN_PARSER_STATUS = "KOA_STUDIO_VERIFIED"
+    }
+} elseif ($RealtimeFidValidation) {
+    $env:MARKET_SCAN_ENABLED = "false"
+}
 
 if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $env:TRADING_CORE_TOKEN = $Token
@@ -379,6 +572,11 @@ if (($RunGatewayRequested -or $RunThemeRefreshLoopRequested) -and [string]::IsNu
 $MarketIndexEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_ENABLED" -Value $MarketIndexEnabled -Default $true
 $MarketIndexRealtimeEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_REALTIME_ENABLED" -Value $MarketIndexRealtimeEnabled -Default $true
 $MarketIndexTrBootstrapEnabledValue = Resolve-BoolSetting -Name "KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED" -Value $MarketIndexTrBootstrapEnabled -Default $false
+if ($EvidenceModeRequested) {
+    $MarketIndexEnabledValue = -not $DisableMarketIndexRealtime
+    $MarketIndexRealtimeEnabledValue = -not $DisableMarketIndexRealtime
+    $MarketIndexTrBootstrapEnabledValue = $false
+}
 $env:KIWOOM_MARKET_INDEX_ENABLED = if ($MarketIndexEnabledValue) { "true" } else { "false" }
 $env:KIWOOM_MARKET_INDEX_REALTIME_ENABLED = if ($MarketIndexRealtimeEnabledValue) { "true" } else { "false" }
 $env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED = if ($MarketIndexTrBootstrapEnabledValue) { "true" } else { "false" }
@@ -429,6 +627,9 @@ $ConditionMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfile
 
 Write-Host "Market-open OBSERVE profile is prepared."
 Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
+Write-Host "Evidence mode: realtime_fid=$($RealtimeFidValidation.IsPresent) append_only=$($AppendOnlyEvidence.IsPresent)"
+Write-Host "Market-data operating mode: $($env:GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE) global_budget=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE)/min"
+Write-Host "Database path: $ResolvedDbPath"
 Write-Host "Market reference projection validation: $($MarketReferenceProjectionValidation.IsPresent)"
 Write-Host "Market reference limited cutover: $($MarketReferenceLimitedCutover.IsPresent)"
 Write-Host "Core URL: $CoreUrl"
@@ -443,7 +644,7 @@ if ($ConditionMode -eq "MULTI_PROFILE") {
 Write-Host "Market index adapter: enabled=$MarketIndexEnabledValue realtime=$MarketIndexRealtimeEnabledValue tr_bootstrap=$MarketIndexTrBootstrapEnabledValue codes=$MarketIndexCodes"
 Write-Host ""
 Write-Host "64-bit Core command:"
-Write-Host "  $Python64 -m uvicorn apps.core_api:app --host 127.0.0.1 --port $CorePort --reload"
+Write-Host "  $Python64 -m uvicorn apps.core_api:app --host 127.0.0.1 --port $CorePort"
 Write-Host ""
 Write-Host "32-bit Kiwoom Gateway command:"
 $GatewayCommand = @(
@@ -518,16 +719,28 @@ if ($RunCoreRequested) {
         "-m", "uvicorn",
         "apps.core_api:app",
         "--host", "127.0.0.1",
-        "--port", [string]$CorePort,
-        "--reload"
+        "--port", [string]$CorePort
     )
-    if ($RunAll -or $RunGatewayRequested -or $RunThemeRefreshLoopRequested) {
+    if (
+        $RunAll -or
+        $RunGatewayRequested -or
+        $RunThemeRefreshLoopRequested -or
+        $EvidenceModeRequested
+    ) {
         Start-DetachedRuntimeProcess `
             -Label "core" `
             -FilePath $Python64 `
             -Arguments $CoreArgs `
             -Hidden $true | Out-Null
         Wait-CoreHealth -Url $CoreUrl -WaitSeconds $CoreWaitSeconds
+        Assert-CoreObserveSafety `
+            -Url $CoreUrl `
+            -ExpectedDbPath $ResolvedDbPath `
+            -RequireRealtimeOnly $EvidenceModeRequested `
+            -RequireAppendOnlyConfiguration (
+                $AppendOnlyEvidence.IsPresent -and
+                $MarketDataOperatingMode -eq "MARKET_DATA_FULL_GUARDED"
+            )
     } else {
         & $Python64 @CoreArgs
     }

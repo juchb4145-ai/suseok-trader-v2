@@ -94,17 +94,6 @@ def process_market_index_event(
             tick = bootstrap.tick
         else:
             tick = BrokerMarketIndexTick.from_dict(event.payload)
-        if _is_older_than_latest_index_tick(
-            connection,
-            event,
-            index_code=tick.index_code,
-        ):
-            return MarketIndexProcessResult(
-                event_id=event.event_id,
-                event_type=event_type,
-                status="IGNORED",
-                ignored_count=1,
-            )
         implausible_reason = _index_implausible_reason(tick)
         if implausible_reason is not None:
             _record_projection_error(
@@ -122,11 +111,24 @@ def process_market_index_event(
                 error_message=implausible_reason,
             )
         event_ts, received_at = _event_store_times(connection, event)
+        sample_only = _is_older_than_latest_index_tick(
+            connection,
+            event,
+            index_code=tick.index_code,
+        )
         connection.execute("BEGIN IMMEDIATE")
-        _upsert_latest_tick(connection, tick, event, event_ts=event_ts, received_at=received_at)
+        if not sample_only:
+            _upsert_latest_tick(
+                connection,
+                tick,
+                event,
+                event_ts=event_ts,
+                received_at=received_at,
+            )
         _insert_sample(connection, tick, event, event_ts=event_ts, received_at=received_at)
-        for interval_sec in resolved_settings.market_data_bar_intervals_sec:
-            _upsert_index_bar(connection, tick=tick, interval_sec=interval_sec)
+        if not sample_only:
+            for interval_sec in resolved_settings.market_data_bar_intervals_sec:
+                _upsert_index_bar(connection, tick=tick, interval_sec=interval_sec)
         connection.commit()
     except Exception as exc:
         connection.rollback()
@@ -144,7 +146,11 @@ def process_market_index_event(
         event_id=event.event_id,
         event_type=event_type,
         status="APPLIED",
-        applied_count=2 + len(resolved_settings.market_data_bar_intervals_sec),
+        applied_count=(
+            1
+            if sample_only
+            else 2 + len(resolved_settings.market_data_bar_intervals_sec)
+        ),
     )
 
 

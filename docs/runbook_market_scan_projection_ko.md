@@ -39,6 +39,28 @@ evidence, effective-skip index와 `market_scan_append_only_budget_state`를 addi
 scan id는 Python process hash 대신 SHA-256 기반 결정적 id를 사용한다. 늦게 처리된 과거
 이벤트는 snapshot에는 보존되지만 `market_scan_latest.scanned_at`을 과거로 되돌리지 않는다.
 
+## 실제 Kiwoom TR 계약
+
+2026-07-11 로컬 OpenAPI contract와 모의투자 callback을 대조한 계약은 다음과 같다.
+
+| scan | TR | input | output | first-page fields |
+|---|---|---|---|---|
+| TRADE_VALUE | `OPT10032` | `시장구분`, `관리종목포함=0`, `거래소구분=1` | `거래대금상위` multi | `종목코드`, `종목명`, `현재순위`, `현재가`, `등락률`, `거래대금`, `현재거래량` |
+| CHANGE_RATE | `OPT10027` | `시장구분`, `정렬구분=1`, `거래량조건=0`, `종목조건=1`, `신용조건=0`, `상하한포함=0`, `가격조건=0`, `거래대금조건=0`, `거래소구분=1` | `전일대비등락률상위` multi | `종목코드`, `종목명`, `현재가`, `등락률`, `현재거래량` |
+
+KOSPI/KOSDAQ 모두 `OPT10032=100행`, `OPT10027=200행`, success true였고 네 command는
+ACKED, failed 0이었다. 첫 페이지의 `continuation_key=2`는 다음 페이지 존재를 뜻하지만 현재
+market-scan은 자동 pagination을 수행하지 않는다. 이 실증은 첫 페이지 parser/projection
+계약이며 전체 연속조회 완료 근거가 아니다.
+
+저장소 기본 parser status는 안전하게 `PILOT_UNVERIFIED`를 유지한다. 이 설치본처럼 KOA
+contract와 실제 callback을 확인한 격리 runtime에서만 Core/Gateway 시작 전에 다음 값을
+process env로 명시한다. 운영 `.env`를 자동 변경하지 않는다.
+
+```powershell
+$env:MARKET_SCAN_PARSER_STATUS = 'KOA_STUDIO_VERIFIED'
+```
+
 ## Worker 선행 조건
 
 scan 관련 `tr_response`에는 `market_data`와 `market_scan` outbox job이 함께 생성된다.
@@ -157,20 +179,25 @@ python tools/ops_market_scan_projection_check.py `
   --expect-dry-run-ready
 ```
 
-PR-21 effective skip 소량 검증은 worker가 market_data sibling을 먼저 닫을 수 있도록 unfiltered
-batch 2 이상으로 실행한다.
+PR-21 effective skip 소량 검증은 worker가 market_data sibling을 먼저 닫을 수 있도록
+unfiltered batch를 사용한다. 실제 4-command scan cycle에는 `worker-limit 20`을 사용했다.
 
 ```powershell
 python tools/ops_market_scan_projection_check.py `
   --core-url http://127.0.0.1:8000 `
   --token $env:TRADING_CORE_TOKEN `
   --run-worker `
-  --worker-limit 2 `
+  --worker-limit 20 `
   --expect-dry-run-ready `
   --expect-effective-skip
 ```
 
 결과는 `reports/market_scan_projection/<UTC>/raw.json`과 `summary.md`에 저장된다.
+
+2026-07-11 실제 off-hours evidence는 controller/reconcile `PASS`, checked event `9`,
+source/projected row `1300/1300`, effective skip `2`, worker closure gap `0`, outbox
+ERROR/DEAD_LETTER `0/0`, command/order-command delta `0/0`, candidate ingest `0`이었다.
+Report: `reports/market_scan_projection/20260710T231634Z/summary.md`.
 
 ## NXT 사용 원칙
 

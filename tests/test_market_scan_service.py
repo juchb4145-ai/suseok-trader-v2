@@ -48,6 +48,26 @@ def test_market_scan_queues_request_tr_and_projects_mock_gateway_response(tmp_pa
     assert {row["command_type"] for row in command_rows} == {"request_tr"}
     assert all(payload["fields"] for payload in command_payloads)
     assert {"종목코드", "종목명", "현재가"}.issubset(set(command_payloads[0]["fields"]))
+    by_tr_code = {str(payload["tr_code"]): payload for payload in command_payloads}
+    assert by_tr_code["OPT10032"]["row_mode"] == "multi"
+    assert by_tr_code["OPT10032"]["output_record_name"] == "거래대금상위"
+    assert by_tr_code["OPT10032"]["params"] == {
+        "시장구분": "101",
+        "관리종목포함": "0",
+        "거래소구분": "1",
+    }
+    assert by_tr_code["OPT10027"]["output_record_name"] == "전일대비등락률상위"
+    assert by_tr_code["OPT10027"]["params"] == {
+        "시장구분": "101",
+        "정렬구분": "1",
+        "거래량조건": "0",
+        "종목조건": "1",
+        "신용조건": "0",
+        "상하한포함": "0",
+        "가격조건": "0",
+        "거래대금조건": "0",
+        "거래소구분": "1",
+    }
     assert order_count == 0
     assert projection.status == "APPLIED"
     assert latest is not None
