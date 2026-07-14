@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from services.dashboard_service import build_dashboard_snapshot
 from services.live_sim.live_sim_service import create_live_sim_intent
 from services.oms.dry_run_service import create_dry_run_intent
+from tests.support_fastapi_routes import iter_app_routes
 from tests.test_live_sim import _live_sim_settings, _mark_gateway_ready
 from tests.test_oms_dry_run import _prepared_connection
 from tests.test_oms_dry_run import _settings as _dry_run_settings
@@ -94,7 +95,7 @@ def test_dashboard_snapshot_includes_live_sim_read_only(tmp_path) -> None:
 
 
 def test_live_sim_routes_do_not_add_generic_order_surface() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in iter_app_routes(app)}
 
     assert "/api/live-sim/status" in paths
     assert "/api/live-sim/orders/from-intent/{live_sim_intent_id}" in paths

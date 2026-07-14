@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from apps.core_api import app
+from tests.support_fastapi_routes import iter_app_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_dry_run_oms_surface_has_no_live_order_endpoint() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in iter_app_routes(app)}
 
     assert "/api/dry-run/status" in paths
     assert "/api/orders/enqueue" not in paths

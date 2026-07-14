@@ -15,8 +15,10 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tools.ops_market_data_tr_response_side_effect_check import (
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     fetch_json as _fetch_json_with_locked_retry,
+)
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     is_locked_retryable_payload,
 )
 

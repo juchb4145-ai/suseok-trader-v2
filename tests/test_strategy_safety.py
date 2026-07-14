@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from apps.core_api import app
+from tests.support_fastapi_routes import iter_app_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_strategy_surface_exposes_observation_routes_only() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in iter_app_routes(app)}
 
     assert "/api/strategy/status" in paths
     assert "/api/strategy/evaluate" in paths

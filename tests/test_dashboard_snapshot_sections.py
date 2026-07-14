@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from fastapi.testclient import TestClient
-
 from api.routes import dashboard as dashboard_route
 from apps.core_api import app
+from fastapi.testclient import TestClient
 
 
 def test_dashboard_snapshot_sections_api_returns_only_requested_fast_sections(

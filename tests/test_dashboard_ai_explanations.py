@@ -20,6 +20,7 @@ from services.dashboard_ai_labels import (
 )
 from services.dashboard_service import build_dashboard_snapshot
 from storage.sqlite import initialize_database, open_connection
+from tests.support_fastapi_routes import iter_app_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -164,7 +165,11 @@ def test_dashboard_ai_explanation_api_endpoints_are_get_only(tmp_path, monkeypat
     assert no_trade.status_code == 200
     assert no_trade.json()["cards"]
 
-    dashboard_routes = [route for route in app.routes if route.path.startswith("/api/dashboard")]
+    dashboard_routes = [
+        route
+        for route in iter_app_routes(app)
+        if route.path.startswith("/api/dashboard")
+    ]
     assert all("POST" not in route.methods for route in dashboard_routes)
 
 

@@ -837,7 +837,6 @@ def test_live_sim_broker_snapshot_mismatch_blocks_and_clears_buy(tmp_path) -> No
                     "avg_entry_price": 97000,
                 }
             ],
-            "open_orders": [],
         },
     )
     connection.close()
