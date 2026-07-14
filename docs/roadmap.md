@@ -4,6 +4,10 @@
 
 이 로드맵은 `suseok-trader-v2`가 어떤 순서로 안전한 관찰 파이프라인을 쌓아 왔는지 보여준다. PR13까지 진행되었지만, 이것이 `LIVE_REAL` 준비 완료를 뜻하지 않는다. `LIVE_REAL`은 현재 구현되어 있지 않으며 별도 future safety project다.
 
+`codex/structural-audit-completion` 병합 이후의 실제 실행 순서, 승급 기준과 중단 조건은
+[FAST Track LIVE_SIM 수익모델 로드맵](fast_track_live_sim_roadmap_2026-07_ko.md)을 source of truth로 사용한다.
+Master tracking issue는 GitHub Issue `#7`이다.
+
 ## 공통 안전 문구
 
 - 기본은 `OBSERVE`다.
@@ -13,6 +17,22 @@
 - `DRY_RUN`은 내부 모의 회계이며 브로커 주문이 아니다.
 - `LIVE_SIM`은 모의투자 전용이며 실계좌 주문이 아니다.
 - AI/RCA/Codex 결과는 Strategy/Risk/OMS 자동 입력이 아니다.
+
+## 현재 실행형 로드맵
+
+| 순서 | 단계 | 현재 상태 | 목적 |
+| ---: | --- | --- | --- |
+| 0 | FAST-0 Post-Merge Qualification | NEXT | 현재 main CI, schema 59, OBSERVE baseline 고정 |
+| 1 | FAST-1 Pure Preview | BLOCKED_BY_FAST_0 | 통합 LIVE_SIM 자격을 무기록으로 확인 |
+| 2 | Operational Gate C1 | BLOCKED_BY_FAST_1 | Kiwoom 모의투자 수동 1건 lifecycle 검증 |
+| 3 | FAST-2A/2B Alpha Replay + Profit Lab | BLOCKED | 미래 데이터 누수 없는 비용 후 수익성 검증 |
+| 4 | FAST-3 Parallel Shadow | BLOCKED | shadow와 모의체결 괴리 측정 |
+| 5 | FAST-4 Broker Snapshot Reconcile | BLOCKED | 키움 모의계좌와 Core local truth 대사 |
+| 6 | FAST-5 Automatic Canary | BLOCKED | 일 1~2건 제한 자동 LIVE_SIM |
+| 7 | FAST-6 Champion/Challenger | BLOCKED | 검증된 전략 1개와 challenger 운영 |
+
+Append-only 연속 10거래일 evidence는 inline 제거를 위한 장기 병렬 트랙이며,
+수동 LIVE_SIM 1건과 Alpha Replay 개발을 자동으로 차단하지 않는다.
 
 ## 완료된 PR
 
@@ -40,16 +60,18 @@
 | PR AI-6 LIVE_SIM Review Sidecar | Done | LIVE_SIM session/order/reconcile/incident review report 추가 | 장후 복기용 review-only artifact |
 | PR 13 Kiwoom Gateway Real Adapter | Done | suseok_ai의 Kiwoom OpenAPI+ client/gateway 자산을 v2 Gateway 계약으로 이식 | 32-bit Gateway에서 실제 조건검색/실시간/TR/LIVE_SIM command를 처리하되 LIVE_REAL 금지 |
 
-## 현재 다음 후보
+## 이전 다음 후보 — 역사적 참고
+
+아래 목록은 FAST Track 문서 도입 이전 후보이며, 신규 작업 순서는 FAST Track 문서가 우선한다.
 
 | 후보 | 설명 | 주의 |
 | --- | --- | --- |
-| PR14 Market Open OBSERVE Stabilization | 실제 장중 Kiwoom Gateway heartbeat, condition, tick, projection 안정화 | 주문 기능은 OFF 상태로 확인 |
-| PR15 LIVE_SIM Pilot Day Runbook | 모의투자 전용 하루 pilot 절차와 evidence/reconcile 강화 | simulation server 확인 없이는 주문 금지 |
-| Broker Reconcile Pilot | simulation-account snapshot 정합성 확인 | 실계좌 reconcile과 혼동 금지 |
-| Operator Kill Switch Drill | kill switch 절차와 운영 훈련 정리 | 버튼/자동 실행보다 확인 절차가 먼저 |
-| No-Buy Recovery Roadmap | 무매수 funnel 계측, LIVE_SIM/DRY_RUN 데드락 해소, profile/admission 정리 | [No-Buy Recovery Roadmap](no_buy_recovery_roadmap_ko.md)를 기준으로 작은 PR로 진행 |
-| Redesign Roadmap 2026-07 | 파일럿 실가동 기준 재설계 점검: 브로커 reconcile, dead-man cancel, god 모듈 분해, 백테스터 | [재설계 로드맵(2026-07)](redesign_roadmap_2026-07_ko.md)의 Phase 1부터 진행 |
+| PR14 Market Open OBSERVE Stabilization | 실제 장중 Kiwoom Gateway heartbeat, condition, tick, projection 안정화 | 구조 감사 completion에서 상당 부분 완료됨 |
+| PR15 LIVE_SIM Pilot Day Runbook | 모의투자 전용 하루 pilot 절차와 evidence/reconcile 강화 | FAST-1 및 Gate C1로 재정의 |
+| Broker Reconcile Pilot | simulation-account snapshot 정합성 확인 | FAST-4로 재정의 |
+| Operator Kill Switch Drill | kill switch 절차와 운영 훈련 정리 | 자동 canary 전 필수 운영 항목 |
+| No-Buy Recovery Roadmap | 무매수 funnel 계측, LIVE_SIM/DRY_RUN 데드락 해소, profile/admission 정리 | [No-Buy Recovery Roadmap](no_buy_recovery_roadmap_ko.md)를 참고하되 FAST Track gate를 우선 |
+| Redesign Roadmap 2026-07 | 파일럿 실가동 기준 재설계 점검: 브로커 reconcile, dead-man cancel, god 모듈 분해, 백테스터 | [재설계 로드맵(2026-07)](redesign_roadmap_2026-07_ko.md)의 구조 부채 항목은 FAST Track과 병행 여부를 별도 판단 |
 
 ## Future: LIVE_REAL Safety Project
 
@@ -72,3 +94,4 @@ PR12 이후에도 바로 실계좌로 가면 안 된다.
 - PR7/PR8 결과는 `MATCHED_OBSERVATION`, `OBSERVE_PASS`라는 관측 상태다.
 - PR10 `DRY_RUN`과 PR12 `LIVE_SIM`은 서로 다른 안전 경계다.
 - `LIVE_REAL`은 현재 미구현이며 별도 future safety project로만 다룬다.
+- 신규 FAST 작업은 한 단계의 evidence와 acceptance criteria를 닫은 뒤 다음 단계로 이동한다.
