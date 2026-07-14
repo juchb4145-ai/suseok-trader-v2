@@ -8,10 +8,13 @@
 
 ## 안전 계약
 
-- source는 SQLite URI `mode=ro`와 `PRAGMA query_only=ON`으로만 연다.
+- source는 SQLite URI `mode=ro&immutable=1`와 `PRAGMA query_only=ON`으로만 연다.
+- source에 WAL/SHM sidecar가 하나라도 있으면 완전한 quiescence를 증명할 수 없으므로 DB를 열기 전에 fail-closed한다. sidecar를 도구가 삭제하거나 checkpoint하지 않는다.
 - source와 clone 경로가 같거나 clone/WAL/SHM이 이미 있으면 fail-closed한다.
-- migration, 재실행, `quick_check(1)`은 clone에서만 수행한다.
-- source main DB와 기존 WAL의 size/mtime 지문을 전후 대조한다.
+- migration과 재실행은 clone에서만 수행한다. `quick_check(1)`은 immutable source와 clone에서 각각 수행한다.
+- source main/WAL/SHM의 size/mtime/SHA-256 지문을 전후 대조한다.
+- 모든 기존 table의 row count, typed content hash와 rowid lineage, `sqlite_sequence`, `projection_outbox`를 source→backup→migration 후 대조한다. `app_metadata`는 `schema_version` row만 정규화에서 제외하고 나머지 metadata를 보존한다.
+- clone volume의 free space가 source 크기와 migration 여유 예산보다 큰지 실행 전에 확인한다.
 - `projection_outbox` 상태별 수량이 backup 전, migration 전, migration 후 모두 같아야 한다.
 - 도구는 clone을 자동 삭제하지 않는다. report 확인 뒤 경로를 다시 검증하고 삭제한다.
 
@@ -22,23 +25,28 @@ workspace 하위 새 경로를 사용한다.
 
 ```powershell
 $source = (Resolve-Path .\storage\suseok-trader-v2.sqlite3).Path
+$actualSchema = $actualSchemaFromStrictReadOnlyEvidence
 $clone = Join-Path (Get-Location) `
-  'storage\migration-preflight\suseok-trader-v2-schema59-preflight.sqlite3'
+  'storage\migration-preflight\suseok-trader-v2-schema60-preflight.sqlite3'
 
-python .\tools\ops_database_migration_preflight.py `
+& $python -B -m tools.ops_database_migration_preflight `
   --source-db $source `
   --clone-db $clone `
-  --require-source-schema 52
+  --require-source-schema $actualSchema `
+  --out-dir reports/database_migration_preflight
 ```
+
+`$actualSchemaFromStrictReadOnlyEvidence`는 이 실행 직전에 별도 strict read-only 점검으로 확인한 실제 source schema다. `52` 같은 과거 값을 복사해 넣거나 `--require-source-schema`를 생략하지 않는다. source schema가 현재 코드 target보다 높으면 downgrade 위험으로 FAIL한다. 현재 코드 target은 `60`이다.
 
 PASS 조건은 다음과 같다.
 
-- source/backup schema 일치, clone target schema `59`
-- required schema 54~58 table 존재
+- source/backup schema 일치, clone target schema `60`
+- resolution ledger를 포함한 target required table/column/index/append-only trigger 및 동작 probe 통과
 - source/clone outbox status count 일치
-- source data file 지문 불변
+- source main/WAL/SHM 지문 불변, source와 clone `quick_check(1)=ok`
+- 전체 기존 table content, rowid와 `sqlite_sequence` 보존
+- source schema가 60 미만이면 선행 resolution table/row가 없어야 함
 - migration 재실행 성공
-- clone `quick_check(1)=ok`
 
 결과는 `reports/database_migration_preflight/<UTC>/raw.json`과 `summary.md`에 저장된다.
 
@@ -64,7 +72,9 @@ python .\tools\ops_projection_outbox_backlog_drain.py `
 `blocking=0`, ERROR/DEAD_LETTER 0이면 다음 PR을 막지 않을 수 있지만, 운영 적용 전 별도
 승인 없이 retire하지 않는다.
 
-## 2026-07-11 evidence
+## 2026-07-11 과거 evidence
+
+아래는 schema 52→59 당시의 보존 기록이며 현재 실행 명령이나 source schema 기대값으로 재사용하지 않는다.
 
 - source `25.17GiB`, schema `52`, clone target `59`
 - backup `138.947s`, migration `1.455s`, idempotent rerun `0.058s`

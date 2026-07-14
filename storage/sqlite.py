@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 59
+SCHEMA_VERSION = 60
 APP_NAME = "suseok-trader-v2"
 
 

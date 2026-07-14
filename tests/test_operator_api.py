@@ -20,10 +20,12 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
             "/api/operator/live-sim/order-plan-uniqueness/status"
         )
         boundary_status = client.get(
-            "/api/operator/gateway/order-broker-boundaries/status"
+            "/api/operator/gateway/order-broker-boundaries/status",
+            headers={"X-Local-Token": "secret-token"},
         )
         boundary_list = client.get(
-            "/api/operator/gateway/order-broker-boundaries?limit=10"
+            "/api/operator/gateway/order-broker-boundaries?limit=10",
+            headers={"X-Local-Token": "secret-token"},
         )
         no_buy = client.get("/api/operator/no-buy?trade_date=2026-06-27")
         latest_before = client.get("/api/operator/no-buy/latest?trade_date=2026-06-27")
