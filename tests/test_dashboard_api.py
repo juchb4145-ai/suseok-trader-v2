@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from apps.core_api import app
 from fastapi.testclient import TestClient
+from tests.support_fastapi_routes import iter_app_routes
 
 
 def test_dashboard_api_endpoints_are_get_read_only_without_token(tmp_path, monkeypatch) -> None:
@@ -43,7 +44,11 @@ def test_dashboard_api_endpoints_are_get_read_only_without_token(tmp_path, monke
 
 
 def test_dashboard_router_exposes_no_post_routes() -> None:
-    dashboard_routes = [route for route in app.routes if route.path.startswith("/api/dashboard")]
+    dashboard_routes = [
+        route
+        for route in iter_app_routes(app)
+        if route.path.startswith("/api/dashboard")
+    ]
 
     assert dashboard_routes
     assert all("POST" not in route.methods for route in dashboard_routes)

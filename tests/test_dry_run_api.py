@@ -6,6 +6,7 @@ from services.config import Settings
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 from storage.sqlite import initialize_database
+from tests.support_fastapi_routes import iter_app_routes
 from tests.test_oms_dry_run import _settings
 from tests.test_strategy_service import _insert_strategy_fixture
 
@@ -98,8 +99,11 @@ def test_dry_run_order_and_fill_api_are_token_protected_and_simulation_only(
 
 
 def test_dry_run_routes_do_not_add_order_enqueue_surface() -> None:
-    paths = {route.path for route in app.routes}
-    dry_run_routes = [route for route in app.routes if route.path.startswith("/api/dry-run")]
+    routes = list(iter_app_routes(app))
+    paths = {route.path for route in routes}
+    dry_run_routes = [
+        route for route in routes if route.path.startswith("/api/dry-run")
+    ]
 
     assert "/api/dry-run/status" in paths
     assert "/api/dry-run/intents/from-candidate/{candidate_instance_id}" in paths

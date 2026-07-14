@@ -20,6 +20,7 @@ from services.ai_sidecar.context_store import (
 from services.ai_sidecar.redaction import redact_context
 from services.config import Settings
 from storage.sqlite import initialize_database
+from tests.support_fastapi_routes import iter_app_routes
 
 
 def test_context_packet_model_round_trip_and_hash_are_deterministic() -> None:
@@ -243,7 +244,7 @@ def test_ai_context_api_endpoints_are_get_read_only_without_api_key(tmp_path, mo
 def test_safety_regression_ai_execution_is_manual_run_only_and_no_order_routes() -> None:
     route_methods = {
         route.path: route.methods
-        for route in app.routes
+        for route in iter_app_routes(app)
         if route.path.startswith("/api/ai-sidecar")
     }
 
@@ -257,4 +258,6 @@ def test_safety_regression_ai_execution_is_manual_run_only_and_no_order_routes()
         or path.startswith("/api/ai-sidecar/live-sim-review")
         for path, methods in route_methods.items()
     )
-    assert "/api/orders/enqueue" not in {route.path for route in app.routes}
+    assert "/api/orders/enqueue" not in {
+        route.path for route in iter_app_routes(app)
+    }

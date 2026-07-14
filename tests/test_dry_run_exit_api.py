@@ -3,6 +3,7 @@ from __future__ import annotations
 from apps.core_api import app
 from fastapi.testclient import TestClient
 from storage.sqlite import initialize_database
+from tests.support_fastapi_routes import iter_app_routes
 from tests.test_exit_engine import _insert_position
 from tests.test_oms_dry_run import _prepared_connection
 
@@ -103,8 +104,11 @@ def test_dry_run_exit_api_manual_lifecycle_is_token_protected_and_simulation_onl
 
 
 def test_dry_run_exit_routes_do_not_add_order_enqueue_surface() -> None:
-    paths = {route.path for route in app.routes}
-    exit_routes = [route for route in app.routes if route.path.startswith("/api/dry-run/exits")]
+    routes = list(iter_app_routes(app))
+    paths = {route.path for route in routes}
+    exit_routes = [
+        route for route in routes if route.path.startswith("/api/dry-run/exits")
+    ]
 
     assert "/api/dry-run/exits/status" in paths
     assert "/api/dry-run/exits/evaluate" in paths

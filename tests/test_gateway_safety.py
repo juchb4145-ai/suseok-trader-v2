@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from apps.core_api import app
+from tests.support_fastapi_routes import iter_app_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 CODE_DIRS = ("api", "apps", "domain", "gateway", "infrastructure", "services", "storage", "tools")
@@ -48,7 +49,7 @@ def test_core_has_no_openai_api_call_path() -> None:
 
 
 def test_order_execution_apis_and_order_intent_are_not_exposed() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in iter_app_routes(app)}
     combined_source = project_python_source()
 
     assert "/api/orders/enqueue" not in paths
@@ -71,7 +72,7 @@ def test_order_execution_functions_strategy_risk_and_oms_are_not_implemented() -
 
 
 def test_pr6_candidate_surface_is_observe_only_and_no_ai_execution_surfaces() -> None:
-    paths = {route.path for route in app.routes}
+    paths = {route.path for route in iter_app_routes(app)}
     combined_source = project_python_source()
 
     assert "/api/candidates" in paths

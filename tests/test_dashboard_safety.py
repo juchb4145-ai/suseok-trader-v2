@@ -3,13 +3,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from apps.core_api import app
+from tests.support_fastapi_routes import iter_app_routes
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_dashboard_surface_has_no_write_or_execution_routes() -> None:
-    paths = {route.path for route in app.routes}
-    dashboard_routes = [route for route in app.routes if route.path.startswith("/api/dashboard")]
+    routes = list(iter_app_routes(app))
+    paths = {route.path for route in routes}
+    dashboard_routes = [
+        route for route in routes if route.path.startswith("/api/dashboard")
+    ]
 
     assert "/api/dashboard/status" in paths
     assert "/api/dashboard/snapshot" in paths
