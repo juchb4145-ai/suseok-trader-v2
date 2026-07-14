@@ -13,7 +13,7 @@ from services.candidate_quote_refresh import run_candidate_quote_refresh_once
 from services.config import Settings, load_settings
 from services.market_scan_service import run_market_scan_once
 from services.realtime_subscription import run_realtime_subscription_once
-from services.runtime.evaluation_run_guard import runtime_execution_lock
+from services.runtime.evaluation_run_guard import immediate_transaction, runtime_execution_lock
 from services.runtime.incremental_evaluation import (
     enqueue_incremental_evaluation_for_fresh_candidates,
 )
@@ -107,10 +107,7 @@ def store_theme_refresh_cycle_run(
     result: ThemeRefreshCycleRunResult,
 ) -> None:
     payload = result.to_dict()
-    started = not connection.in_transaction
-    if started:
-        connection.execute("BEGIN IMMEDIATE")
-    try:
+    with immediate_transaction(connection):
         connection.execute(
             """
             INSERT INTO theme_refresh_cycle_runs (
@@ -144,12 +141,6 @@ def store_theme_refresh_cycle_run(
                 canonical_json(payload),
             ),
         )
-        if started:
-            connection.commit()
-    except Exception:
-        if started:
-            connection.rollback()
-        raise
 
 
 def get_latest_theme_refresh_cycle_run(

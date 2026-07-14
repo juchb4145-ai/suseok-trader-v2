@@ -320,6 +320,9 @@ def _with_rank(snapshot: ThemeLeadershipSnapshot, *, rank: int) -> ThemeLeadersh
         full_fresh_member_count=snapshot.full_fresh_member_count,
         full_fresh_coverage_ratio=snapshot.full_fresh_coverage_ratio,
         score_components=snapshot.score_components,
+        source=snapshot.source,
+        snapshot_id=snapshot.snapshot_id,
+        calculated_at=snapshot.calculated_at,
     )
 
 

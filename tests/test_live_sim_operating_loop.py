@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import timedelta
 from typing import Any
 
@@ -34,8 +35,23 @@ def test_core_startup_clears_residual_runtime_execution_locks(
     caplog,
 ) -> None:
     connection = initialize_database(tmp_path / "startup-lock-cleanup.sqlite3")
-    _insert_runtime_lock(connection, lock_name="evaluation_pipeline", owner_id="dead-eval")
-    _insert_runtime_lock(connection, lock_name="theme_refresh", owner_id="dead-theme")
+    _insert_runtime_lock(
+        connection,
+        lock_name="evaluation_pipeline",
+        owner_id="dead-eval",
+        expires_in_sec=-1,
+    )
+    _insert_runtime_lock(
+        connection,
+        lock_name="theme_refresh",
+        owner_id="self-owned",
+        process_id=os.getpid(),
+    )
+    _insert_runtime_lock(
+        connection,
+        lock_name="other-active",
+        owner_id="other-owner",
+    )
     caplog.set_level(logging.INFO, logger=core_api.logger.name)
 
     deleted_count = core_api._clear_startup_runtime_execution_locks(connection)
@@ -45,8 +61,11 @@ def test_core_startup_clears_residual_runtime_execution_locks(
     connection.close()
 
     assert deleted_count == 2
-    assert remaining_count == 0
-    assert "cleared runtime execution locks on startup: count=2" in caplog.text
+    assert remaining_count == 1
+    assert (
+        "cleared expired/self-owned runtime execution locks on startup: count=2"
+        in caplog.text
+    )
 
 
 def test_live_sim_operating_cycle_skips_outside_market_time(tmp_path, monkeypatch) -> None:
@@ -254,6 +273,8 @@ def _insert_runtime_lock(
     *,
     lock_name: str,
     owner_id: str,
+    process_id: int = 0,
+    expires_in_sec: int = 300,
 ) -> None:
     now = utc_now()
     connection.execute(
@@ -263,15 +284,17 @@ def _insert_runtime_lock(
             owner_id,
             acquired_at,
             expires_at,
+            process_id,
             detail_json
         )
-        VALUES (?, ?, ?, ?, '{}')
+        VALUES (?, ?, ?, ?, ?, '{}')
         """,
         (
             lock_name,
             owner_id,
             datetime_to_wire(now),
-            datetime_to_wire(now + timedelta(seconds=300)),
+            datetime_to_wire(now + timedelta(seconds=expires_in_sec)),
+            process_id,
         ),
     )
     connection.commit()

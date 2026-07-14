@@ -7,9 +7,11 @@ import sys
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
 from apps.kiwoom_gateway import parse_args, request_kiwoom_login
 from domain.broker.commands import GatewayCommand
 from domain.broker.condition_profiles import (
@@ -43,6 +45,7 @@ from gateway.kiwoom_client import (
     KiwoomClient,
     KiwoomOrderRequest,
     KiwoomOrderResult,
+    MarketIndexRealtimeParseError,
     MockKiwoomClient,
     Signal,
     broker_env_from_server_gubun,
@@ -63,6 +66,7 @@ from gateway.kiwoom_runtime import (
     KiwoomGatewayRuntime,
     KiwoomGatewayRuntimeConfig,
     PendingOrderRegistry,
+    _core_io_data_plane_health,
     wire_kiwoom_signals,
 )
 from gateway.order_pre_ack_journal import OrderPreAckJournal
@@ -112,6 +116,25 @@ def test_kiwoom_gateway_realtime_exchange_option() -> None:
     assert parse_args([]).realtime_exchange == "krx"
     assert parse_args(["--realtime-exchange", "nxt"]).realtime_exchange == "nxt"
     assert parse_args(["--realtime-exchange", "all"]).realtime_exchange == "all"
+
+
+def test_kiwoom_gateway_realtime_max_total_uses_core_planner_env(monkeypatch) -> None:
+    monkeypatch.setenv("REALTIME_SUBSCRIPTION_MAX_TOTAL", "80")
+
+    assert parse_args([]).realtime_max_total == 80
+    assert parse_args(["--realtime-max-total", "60"]).realtime_max_total == 60
+
+
+def test_kiwoom_gateway_batch_timeout_uses_env(monkeypatch) -> None:
+    monkeypatch.setenv("GATEWAY_EVENT_TIMEOUT_SEC", "20")
+
+    assert parse_args([]).event_timeout_sec == 20.0
+    assert parse_args(["--event-timeout-sec", "12"]).event_timeout_sec == 12.0
+
+
+def test_kiwoom_gateway_can_clear_realtime_on_login() -> None:
+    assert parse_args([]).clear_realtime_on_login is False
+    assert parse_args(["--clear-realtime-on-login"]).clear_realtime_on_login is True
 
 
 def test_kiwoom_gateway_core_io_isolation_options() -> None:
@@ -274,15 +297,77 @@ def test_market_index_parser_maps_realtime_fids_with_pilot_evidence() -> None:
     assert tick.index_code == "KOSPI"
     assert tick.price == 2812.34
     assert tick.change_value == -12.30
-    assert payload["metadata"]["parser_status"] == "PILOT_UNVERIFIED_FID_MAP"
-    assert payload["metadata"]["parser_evidence"]["requires_koa_studio_confirmation"] is True
+    assert payload["metadata"]["parser_status"] == "VERIFIED"
+    assert payload["metadata"]["parser_evidence"]["mapping_status"] == (
+        "VERIFIED_KRX_REALTIME"
+    )
+    assert payload["metadata"]["parser_evidence"]["requires_koa_studio_confirmation"] is False
     assert FID_CURRENT_PRICE in payload["metadata"]["raw_fids_present"]
+    assert payload["metadata"]["raw_fids"] == {
+        "10": "2,812.34",
+        "11": "-12.30",
+        "12": "-0.44",
+        "20": "091502",
+    }
+
+
+@pytest.mark.parametrize(
+    ("missing_fid", "reason_code"),
+    (
+        (FID_CURRENT_PRICE, "INDEX_PRICE_MISSING"),
+        (FID_CHANGE_VALUE, "INDEX_CHANGE_VALUE_MISSING"),
+        (FID_CHANGE_RATE, "INDEX_CHANGE_RATE_MISSING"),
+        (FID_TRADE_TIME, "INDEX_TRADE_TIME_MISSING"),
+    ),
+)
+def test_market_index_parser_fails_closed_when_required_fid_is_missing(
+    missing_fid: int,
+    reason_code: str,
+) -> None:
+    raw_fids = {
+        FID_CURRENT_PRICE: "2812.34",
+        FID_CHANGE_VALUE: "+5.12",
+        FID_CHANGE_RATE: "+0.18",
+        FID_TRADE_TIME: "091501",
+    }
+    raw_fids.pop(missing_fid)
+
+    with pytest.raises(MarketIndexRealtimeParseError) as captured:
+        parse_market_index_tick_from_fids(
+            index_code="KOSPI",
+            kiwoom_code="001",
+            raw_fids=raw_fids,
+            real_type="업종지수",
+        )
+
+    assert reason_code in captured.value.reason_codes
+
+
+@pytest.mark.parametrize("trade_time", ("", "91501", "246001", "09A501"))
+def test_market_index_parser_rejects_invalid_trade_time(trade_time: str) -> None:
+    with pytest.raises(MarketIndexRealtimeParseError) as captured:
+        parse_market_index_tick_from_fids(
+            index_code="KOSPI",
+            kiwoom_code="001",
+            raw_fids={
+                FID_CURRENT_PRICE: "2812.34",
+                FID_CHANGE_VALUE: "+5.12",
+                FID_CHANGE_RATE: "+0.18",
+                FID_TRADE_TIME: trade_time,
+            },
+            real_type="업종지수",
+        )
+
+    expected = "INDEX_TRADE_TIME_MISSING" if not trade_time else "INDEX_TRADE_TIME_INVALID"
+    assert expected in captured.value.reason_codes
 
 
 def test_market_index_code_normalizer_does_not_require_stock_code() -> None:
     assert normalize_market_index_code("KOSPI") == "KOSPI"
     assert normalize_market_index_code("001") == "KOSPI"
     assert is_market_index_real_type("업종지수") is True
+    assert is_market_index_real_type("업종등락") is True
+    assert is_market_index_real_type("예상업종지수") is True
     assert market_index_realtime_fid_string()
 
 
@@ -381,6 +466,35 @@ def test_kiwoom_market_index_real_data_emits_index_tick_not_price_tick() -> None
     assert index_ticks[0]["price"] == 2812.34
 
 
+def test_kiwoom_expected_market_index_callback_is_observed_without_parse_error() -> None:
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    raw_reads: list[int] = []
+    client._market_index_real_raw = lambda code, fid: raw_reads.append(fid) or ""
+    index_ticks: list[dict[str, object]] = []
+    parse_errors: list[dict[str, object]] = []
+    raw_callbacks: list[tuple[str, str, bool]] = []
+    client.market_index_tick_received.connect(index_ticks.append)
+    client.realtime_parse_error.connect(parse_errors.append)
+    client.realtime_data_received.connect(
+        lambda code, real_type, present: raw_callbacks.append((code, real_type, present))
+    )
+
+    client._on_receive_real_data("001", "예상업종지수", "")
+
+    assert raw_callbacks == [("KOSPI", "예상업종지수", False)]
+    assert raw_reads == []
+    assert index_ticks == []
+    assert parse_errors == []
+
+
 def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
     client = object.__new__(KiwoomClient)
     client.price_received = Signal()
@@ -418,6 +532,57 @@ def test_kiwoom_nxt_real_data_emits_base_code_with_exchange_metadata() -> None:
     assert price_ticks[0]["code"] == "005930"
     assert price_ticks[0]["metadata"]["exchange"] == "NXT"
     assert price_ticks[0]["metadata"]["kiwoom_code"] == "005930_NX"
+
+
+def test_kiwoom_unregistered_stock_callback_is_dropped_before_fid_reads() -> None:
+    from gateway.kiwoom_client import KiwoomClient
+
+    client = object.__new__(KiwoomClient)
+    client.price_received = Signal()
+    client.price_tick_received = Signal()
+    client.quote_received = Signal()
+    client.market_index_tick_received = Signal()
+    client.realtime_data_received = Signal()
+    client.realtime_parse_error = Signal()
+    client.active_x_thread_audit = Signal()
+    client._pending_thread_audit_events = []
+    client._realtime_screen_codes = {"5000": {"005930"}}
+    fid_reads: list[int] = []
+    client._real_raw = lambda code, fid: fid_reads.append(fid) or "70000"
+    ticks: list[dict[str, object]] = []
+    audits: list[dict[str, object]] = []
+    client.price_tick_received.connect(ticks.append)
+    client.active_x_thread_audit.connect(audits.append)
+
+    client._on_receive_real_data("000660", "주식체결", "")
+
+    assert fid_reads == []
+    assert ticks == []
+    assert audits[-1]["callback_admitted"] is False
+    assert audits[-1]["admission_reason"] == "UNREGISTERED_REALTIME_CODE"
+
+
+def test_runtime_reports_unregistered_realtime_callback_admission_drops() -> None:
+    runtime = KiwoomGatewayRuntime(client=MockKiwoomClient(), core_client=object())
+
+    runtime.on_active_x_thread_audit(
+        {
+            "method": "OnReceiveRealData",
+            "phase": "CALLBACK",
+            "code": "000660",
+            "kiwoom_code": "000660",
+            "real_type": "주식체결",
+            "callback_admitted": False,
+            "admission_reason": "UNREGISTERED_REALTIME_CODE",
+        }
+    )
+
+    payload = runtime.heartbeat_payload()
+    assert payload["unregistered_realtime_callback_count"] == 1
+    assert payload["latest_unregistered_realtime_callback"]["code"] == "000660"
+    assert payload["latest_unregistered_realtime_callback"]["reason"] == (
+        "UNREGISTERED_REALTIME_CODE"
+    )
 
 
 def test_kiwoom_thread_audit_pending_buffer_is_bounded() -> None:
@@ -628,6 +793,22 @@ def test_runtime_heartbeat_finishes_pending_login_when_connection_appears() -> N
     assert runtime._login_result_code == 0
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
+
+
+def test_runtime_clears_stale_realtime_subscriptions_on_login() -> None:
+    client = MockKiwoomClient()
+    client.registered_codes.add("005930")
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(clear_realtime_on_login=True),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+
+    assert client.remove_all_realtime_count == 1
+    assert client.registered_codes == set()
+    assert runtime._registered_realtime_codes == set()
 
 
 def _disconnectable_mock_client() -> MockKiwoomClient:
@@ -856,6 +1037,51 @@ def test_runtime_recovers_market_index_when_stock_callbacks_are_active(monkeypat
         and event.payload["message"] == "market index realtime reset after waiting callback"
         for event in runtime._event_queue
     )
+
+
+def test_runtime_recovers_after_expected_market_index_callbacks_go_stale(
+    monkeypatch,
+) -> None:
+    clock = {"now": datetime(2026, 7, 14, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            market_index_enabled=True,
+            market_index_realtime_enabled=True,
+            market_index_codes=("KOSPI", "KOSDAQ"),
+            market_index_screen_no="5700",
+            market_index_poll_sec=30.0,
+            realtime_callback_timeout_sec=120.0,
+        ),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+    clock["now"] += timedelta(seconds=10)
+    runtime.on_realtime_data(
+        code="KOSPI",
+        real_type="예상업종지수",
+        real_data_present=False,
+    )
+    clock["now"] += timedelta(seconds=20)
+    runtime.emit_heartbeat()
+    assert client.removed_market_index_codes == []
+
+    clock["now"] += timedelta(seconds=11)
+    runtime.on_realtime_data(
+        code="005930",
+        real_type="주식체결",
+        real_data_present=True,
+    )
+    runtime.emit_heartbeat()
+    payload = runtime.heartbeat_payload()
+
+    assert set(client.removed_market_index_codes) == {"KOSPI", "KOSDAQ"}
+    assert payload["market_index_recover_count"] == 1
+    assert payload["latest_market_index_callback_at"] == "2026-07-14T00:00:10Z"
 
 
 def test_mock_kiwoom_market_index_tick_flows_to_core_projection(tmp_path) -> None:
@@ -1193,6 +1419,100 @@ def test_core_io_worker_coalesces_price_ticks_when_queue_is_backed_up() -> None:
     assert snapshot.coalesced_count == 1
     assert worker._post_next_event() is True
     assert worker._core_client.events[0].event_id == "evt_price_latest"
+
+
+def test_core_io_worker_batches_fresh_market_events_with_durable_fifo() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.batches: list[list[GatewayEvent]] = []
+
+        def post_events(self, events: list[GatewayEvent]) -> dict[str, object]:
+            self.batches.append(list(events))
+            return {
+                "processed_count": len(events),
+                "accepted_count": len(events),
+                "failed_count": 0,
+                "results": [{"accepted": True} for _ in events],
+            }
+
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        coalesce_after_size=2,
+        event_batch_size=6,
+        market_batch_share=3,
+    )
+    for index in range(10):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_condition_batch_{index}",
+                event_type="condition_event",
+                source="kiwoom_gateway",
+                payload={"code": f"{index:06d}", "action": "ENTER"},
+            )
+        )
+    for index, code in enumerate(("005930", "000660", "035420")):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_price_batch_{index}",
+                event_type="price_tick",
+                source="kiwoom_gateway",
+                payload={"code": code, "price": 70000 + index},
+            )
+        )
+
+    assert worker._post_next_event_batch(core.post_events) is True
+
+    event_types = [event.event_type for event in core.batches[0]]
+    assert event_types.count("price_tick") == 3
+    assert event_types.count("condition_event") == 3
+    snapshot = worker.snapshot()
+    assert snapshot.event_queue_size == 7
+    assert snapshot.batch_post_count == 1
+    assert snapshot.latest_batch_size == 6
+    assert snapshot.market_event_queue_size == 0
+    assert snapshot.durable_event_queue_size == 7
+
+
+def test_core_io_data_plane_health_fails_closed_on_stale_market_backlog() -> None:
+    worker = CoreIoWorker(
+        core_client=object(),
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+    )
+    snapshot = worker.snapshot()
+
+    healthy = replace(
+        snapshot,
+        running=True,
+        oldest_event_age_sec=1.0,
+        oldest_market_event_age_sec=1.0,
+    )
+    stale = replace(
+        healthy,
+        oldest_event_age_sec=12.0,
+        oldest_market_event_age_sec=12.0,
+    )
+    coalesced_market_buffer = replace(
+        healthy,
+        event_queue_size=400,
+        market_event_queue_size=400,
+        durable_event_queue_size=0,
+    )
+    durable_backlog = replace(
+        healthy,
+        event_queue_size=250,
+        durable_event_queue_size=250,
+    )
+
+    assert _core_io_data_plane_health(healthy) == "HEALTHY"
+    assert _core_io_data_plane_health(stale) == "STALE_MARKET_BACKLOG"
+    assert _core_io_data_plane_health(coalesced_market_buffer) == "HEALTHY"
+    assert _core_io_data_plane_health(durable_backlog) == "BACKLOG_DEGRADED"
 
 
 def test_core_io_worker_prioritizes_latest_heartbeat_when_queue_is_backed_up() -> None:
@@ -1642,6 +1962,63 @@ def test_runtime_tracks_realtime_register_command_after_ack() -> None:
     assert client.registered_codes == {"005930", "000660"}
     assert runtime._registered_realtime_codes == {"005930", "000660"}
     assert [event.event_type for event in core.events] == ["command_started", "command_ack"]
+
+
+def test_runtime_enforces_global_realtime_registration_cap() -> None:
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(realtime_max_total=2),
+    )
+
+    runtime.register_realtime_codes(["005930", "000660", "035420"])
+
+    assert client.registered_codes == {"005930", "000660"}
+    assert runtime._registered_realtime_codes == {"005930", "000660"}
+    heartbeat = runtime.heartbeat_payload()
+    assert heartbeat["realtime_max_total"] == 2
+    assert heartbeat["realtime_registration_budget_skip_count"] == 1
+
+
+def test_runtime_rejects_register_command_that_exceeds_global_cap() -> None:
+    command = GatewayCommand(
+        command_id="cmd_register_over_budget",
+        command_type="register_realtime",
+        source="core",
+        payload={"codes": ["000660"]},
+    )
+
+    class Core:
+        def __init__(self) -> None:
+            self.events: list[GatewayEvent] = []
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list[GatewayCommand]:
+            return [command]
+
+        def post_event(self, event: GatewayEvent) -> None:
+            self.events.append(event)
+
+    client = MockKiwoomClient()
+    core = Core()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=core,
+        config=KiwoomGatewayRuntimeConfig(realtime_max_total=1),
+    )
+    runtime.register_realtime_codes(["005930"])
+
+    runtime.poll_and_handle_commands()
+
+    assert client.registered_codes == {"005930"}
+    assert [event.event_type for event in core.events] == [
+        "command_failed",
+        "gateway_error",
+    ]
+    assert (
+        "REALTIME_SUBSCRIPTION_MAX_TOTAL_EXCEEDED"
+        in core.events[0].payload["error_message"]
+    )
 
 
 def test_multi_condition_profiles_send_sequential_with_distinct_screens(monkeypatch) -> None:
@@ -2320,6 +2697,7 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
             "request_id": "tr1",
             "tr_code": "OPT10001",
             "request_name": "stock_basic",
+            "metadata": {"projection_source": "test_kiwoom_tr_metadata"},
             "params": {"종목코드": "005930"},
             "fields": ["종목코드", "종목명", "현재가"],
         },
@@ -2333,7 +2711,117 @@ def test_kiwoom_handler_request_tr_emits_tr_response() -> None:
         "command_ack",
     ]
     response = BrokerTrResponse.from_dict(events[1].payload)
+    assert response.metadata["projection_source"] == "test_kiwoom_tr_metadata"
     assert response.rows[0]["종목코드"] == "005930"
+
+
+def test_kiwoom_handler_request_tr_can_force_single_output_record() -> None:
+    class MixedOutputTrClient(MockKiwoomClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.repeat_count_calls: list[tuple[str, str]] = []
+            self.comm_data_calls: list[tuple[str, str, int, str]] = []
+
+        def get_repeat_count(self, tr_code: str, rq_name: str) -> int:
+            self.repeat_count_calls.append((tr_code, rq_name))
+            return 20
+
+        def get_comm_data(
+            self,
+            tr_code: str,
+            rq_name: str,
+            index: int,
+            item_name: str,
+        ) -> str:
+            self.comm_data_calls.append((tr_code, rq_name, index, item_name))
+            if rq_name != "업종현재가" or index != 0:
+                return ""
+            return {
+                "현재가": "+7475.94",
+                "전일대비": "+184.03",
+                "등락률": "+2.52",
+            }.get(item_name, "")
+
+    client = MixedOutputTrClient()
+    handler = KiwoomGatewayCommandHandler(client)
+    command = GatewayCommand(
+        command_id="cmd_index_tr",
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": "market_index_tr_bootstrap:KOSPI:test",
+            "tr_code": "OPT20001",
+            "request_name": "market_index_tr_bootstrap_kospi",
+            "params": {"시장구분": "0", "업종코드": "001"},
+            "fields": ["현재가", "전일대비", "등락률"],
+            "row_mode": "single",
+            "output_record_name": "업종현재가",
+        },
+    )
+
+    events = handler.handle(command)
+    response = BrokerTrResponse.from_dict(events[1].payload)
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "tr_response",
+        "command_ack",
+    ]
+    assert response.rows == [
+        {"현재가": "+7475.94", "전일대비": "+184.03", "등락률": "+2.52"}
+    ]
+    assert client.repeat_count_calls == []
+    assert {call[1] for call in client.comm_data_calls} == {"업종현재가"}
+    assert events[2].payload["details"]["warnings"] == [
+        "TR_SINGLE_ROW_EXPLICIT:OPT20001"
+    ]
+
+
+def test_kiwoom_handler_request_tr_can_force_multi_output_record() -> None:
+    class MultiOutputTrClient(MockKiwoomClient):
+        def get_repeat_count(self, tr_code: str, rq_name: str) -> int:
+            return 2 if rq_name == "거래대금상위" else 0
+
+        def get_comm_data(
+            self,
+            tr_code: str,
+            rq_name: str,
+            index: int,
+            item_name: str,
+        ) -> str:
+            if rq_name != "거래대금상위":
+                return ""
+            rows = (
+                {"종목코드": "005930", "현재순위": "1"},
+                {"종목코드": "000660", "현재순위": "2"},
+            )
+            return rows[index].get(item_name, "")
+
+    client = MultiOutputTrClient()
+    handler = KiwoomGatewayCommandHandler(client)
+    command = GatewayCommand(
+        command_id="cmd_scan_tr",
+        command_type="request_tr",
+        source="core",
+        payload={
+            "request_id": "market_scan:TRADE_VALUE:KOSPI:test",
+            "tr_code": "OPT10032",
+            "request_name": "market_scan_trade_value_kospi",
+            "params": {"시장구분": "001"},
+            "fields": ["종목코드", "현재순위"],
+            "row_mode": "multi",
+            "output_record_name": "거래대금상위",
+        },
+    )
+
+    events = handler.handle(command)
+    response = BrokerTrResponse.from_dict(events[1].payload)
+
+    assert response.rows == [
+        {"종목코드": "005930", "현재순위": "1"},
+        {"종목코드": "000660", "현재순위": "2"},
+    ]
+    assert events[2].payload["details"]["warnings"] == []
 
 
 def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() -> None:
@@ -2379,6 +2867,7 @@ def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() 
             "request_id": "tr_async",
             "tr_code": "OPT10001",
             "request_name": "stock_basic",
+            "metadata": {"projection_source": "test_kiwoom_tr_metadata"},
             "params": {"종목코드": "005930"},
             "fields": ["종목코드", "종목명", "현재가"],
         },
@@ -2392,6 +2881,9 @@ def test_runtime_request_tr_completes_from_deferred_callback_without_blocking() 
 
     assert event_types_before_callback == ["command_started"]
     assert event_types_after_callback == ["command_started", "tr_response", "command_ack"]
+    assert BrokerTrResponse.from_dict(response.payload).metadata[
+        "projection_source"
+    ] == "test_kiwoom_tr_metadata"
     assert BrokerTrResponse.from_dict(response.payload).rows[0]["종목코드"] == "005930"
 
 
@@ -2424,7 +2916,10 @@ def test_kiwoom_handler_register_realtime_and_send_condition_call_client() -> No
 
 def test_kiwoom_handler_live_sim_send_order_requires_safety_metadata() -> None:
     client = MockKiwoomClient()
-    handler = KiwoomGatewayCommandHandler(client)
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+    )
 
     rejected = handler.handle(
         GatewayCommand(
@@ -2469,7 +2964,10 @@ def test_kiwoom_handler_expired_live_sim_send_order_emits_command_failed() -> No
 
 def test_kiwoom_handler_live_sim_send_order_forwards_nxt_exchange() -> None:
     client = MockKiwoomClient()
-    handler = KiwoomGatewayCommandHandler(client)
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+    )
 
     accepted = handler.handle(
         _live_sim_order_command(command_id="cmd_live_sim_nxt", order_exchange="NXT")
@@ -2512,8 +3010,10 @@ def test_kiwoom_handler_rate_limit_delays_without_failure_event() -> None:
 def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> None:
     journal_path = tmp_path / "orders.jsonl"
     client = MockKiwoomClient()
+    durable_events: list[GatewayEvent] = []
     handler = KiwoomGatewayCommandHandler(
         client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(durable_events),
         order_journal=OrderPreAckJournal(journal_path),
     )
 
@@ -2522,14 +3022,11 @@ def test_kiwoom_handler_writes_order_pre_ack_journal_before_ack(tmp_path) -> Non
     journal_rows = [
         json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
     ]
-    assert [event.event_type for event in events] == [
-        "command_started",
-        "order_pre_ack",
-        "command_ack",
-    ]
+    assert [event.event_type for event in events] == ["command_started", "command_ack"]
+    assert [event.event_type for event in durable_events] == ["order_pre_ack"]
     assert [row["status"] for row in journal_rows] == ["PRE_ACK", "BROKER_ACCEPTED"]
     assert journal_rows[0]["command_id"] == "cmd_journaled"
-    assert events[1].command_id == "cmd_journaled"
+    assert durable_events[0].command_id == "cmd_journaled"
     recovery_events = OrderPreAckJournal(journal_path).recovery_events(source="kiwoom_gateway")
     assert [event.event_type for event in recovery_events] == ["order_pre_ack"]
     assert recovery_events[0].payload["status"] == "RECOVERED_BROKER_ACCEPTED"
@@ -2550,6 +3047,7 @@ def test_kiwoom_handler_emits_order_start_before_send_order_call(tmp_path) -> No
     handler = KiwoomGatewayCommandHandler(
         client,
         on_async_events=lambda events: async_events.extend(events),
+        on_durable_order_pre_ack=_durable_pre_ack_callback(async_events),
         order_journal=OrderPreAckJournal(tmp_path / "orders.jsonl"),
     )
 
@@ -2563,6 +3061,132 @@ def test_kiwoom_handler_emits_order_start_before_send_order_call(tmp_path) -> No
     ]
     assert [event.event_type for event in returned_events] == ["command_ack"]
     assert async_events[0].command_id == "cmd_started_before_send"
+
+
+def test_kiwoom_handler_blocks_broker_call_without_durable_core_pre_ack() -> None:
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(client)
+
+    events = handler.handle(
+        _live_sim_order_command(command_id="cmd_missing_durable_pre_ack")
+    )
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "command_failed",
+    ]
+    assert events[-1].payload["error_message"].startswith(
+        "DURABLE_DB_PRE_ACK_FAILED"
+    )
+    assert client.orders == []
+
+
+def test_kiwoom_handler_marks_broker_call_exception_unconfirmed(tmp_path) -> None:
+    class RaisingClient(MockKiwoomClient):
+        def send_order(self, request: KiwoomOrderRequest) -> KiwoomOrderResult:
+            del request
+            raise RuntimeError("COM transport outcome unknown")
+
+    journal_path = tmp_path / "orders-unconfirmed.jsonl"
+    client = RaisingClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(),
+        order_journal=OrderPreAckJournal(journal_path),
+    )
+
+    events = handler.handle(
+        _live_sim_order_command(command_id="cmd_broker_call_unconfirmed")
+    )
+    journal_rows = [
+        json.loads(line) for line in journal_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "order_broker_unconfirmed",
+    ]
+    assert events[-1].payload["broker_call_attempted"] is True
+    assert events[-1].payload["broker_acceptance_unknown"] is True
+    assert [row["status"] for row in journal_rows] == ["PRE_ACK", "UNCONFIRMED"]
+    assert OrderPreAckJournal(journal_path).recovery_events(
+        source="kiwoom_gateway"
+    ) == []
+    assert client.orders == []
+
+
+def test_runtime_posts_durable_pre_ack_synchronously_before_broker_call() -> None:
+    posted_events: list[GatewayEvent] = []
+
+    class Core:
+        def post_event(self, event: GatewayEvent) -> dict[str, object]:
+            assert client.orders == []
+            posted_events.append(event)
+            return {
+                "accepted": True,
+                "broker_boundary_state": "PRE_ACK_RECORDED",
+                "durable_pre_ack_recorded": True,
+            }
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(client=client, core_client=Core())
+
+    returned_events = runtime.command_handler.handle(
+        _live_sim_order_command(command_id="cmd_runtime_durable_pre_ack")
+    )
+    heartbeat = runtime.heartbeat_payload()
+
+    assert [event.event_type for event in posted_events] == ["order_pre_ack"]
+    assert [event.event_type for event in returned_events] == ["command_ack"]
+    assert len(client.orders) == 1
+    assert heartbeat["durable_pre_ack_posted_count"] == 1
+    assert heartbeat["last_durable_pre_ack_at"]
+    assert heartbeat["last_durable_pre_ack_error"] == ""
+
+
+def test_runtime_blocks_order_when_core_event_posting_is_disabled() -> None:
+    class Core:
+        def post_event(self, event: GatewayEvent) -> dict[str, object]:
+            del event
+            raise AssertionError("disabled event posting must not call Core")
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=Core(),
+        config=KiwoomGatewayRuntimeConfig(event_posting_enabled=False),
+    )
+
+    returned_events = runtime.command_handler.handle(
+        _live_sim_order_command(command_id="cmd_event_posting_disabled")
+    )
+
+    assert [event.event_type for event in returned_events] == ["command_failed"]
+    assert returned_events[0].payload["error_message"].startswith(
+        "DURABLE_DB_PRE_ACK_FAILED"
+    )
+    assert "disabled" in runtime.heartbeat_payload()["last_durable_pre_ack_error"]
+    assert client.orders == []
+
+
+def test_kiwoom_handler_cancel_uses_same_durable_pre_ack_boundary() -> None:
+    durable_events: list[GatewayEvent] = []
+    client = MockKiwoomClient()
+    handler = KiwoomGatewayCommandHandler(
+        client,
+        on_durable_order_pre_ack=_durable_pre_ack_callback(durable_events),
+    )
+
+    events = handler.handle(_live_sim_cancel_command("cmd_cancel_durable"))
+
+    assert [event.event_type for event in durable_events] == ["order_pre_ack"]
+    assert durable_events[0].payload["original_order_no"] == "SIM-ORIGINAL-1"
+    assert [event.event_type for event in events] == [
+        "command_started",
+        "command_ack",
+    ]
+    assert len(client.orders) == 1
+    assert client.orders[0].side == "BUY_CANCEL"
 
 
 def test_pending_order_registry_uses_command_id_before_ambiguous_signature() -> None:
@@ -2768,6 +3392,21 @@ def _drain_worker_once(runtime: KiwoomGatewayRuntime) -> bool:
     return False
 
 
+def _durable_pre_ack_callback(
+    captured: list[GatewayEvent] | None = None,
+) -> Callable[[GatewayEvent], dict[str, object]]:
+    def callback(event: GatewayEvent) -> dict[str, object]:
+        if captured is not None:
+            captured.append(event)
+        return {
+            "accepted": True,
+            "broker_boundary_state": "PRE_ACK_RECORDED",
+            "durable_pre_ack_recorded": True,
+        }
+
+    return callback
+
+
 def _live_sim_order_command(
     command_id: str = "cmd_live_sim",
     *,
@@ -2804,6 +3443,40 @@ def _live_sim_order_command(
                 "live_sim_intent_id": "live_sim_intent_1",
                 "idempotency_key": idempotency_key,
                 "order_exchange": order_exchange,
+            },
+        },
+    )
+
+
+def _live_sim_cancel_command(command_id: str) -> GatewayCommand:
+    idempotency_key = f"idem-{command_id}"
+    return GatewayCommand(
+        command_id=command_id,
+        command_type="cancel_order",
+        source="live_sim",
+        idempotency_key=idempotency_key,
+        payload={
+            "account_id": "1234567890",
+            "account_mode": "SIMULATION",
+            "broker_env": "SIMULATION",
+            "server_mode": "SIMULATION",
+            "code": "005930",
+            "side": "BUY_CANCEL",
+            "quantity": 1,
+            "original_order_no": "SIM-ORIGINAL-1",
+            "mode": "LIVE_SIM",
+            "live_mode": "LIVE_SIM",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+            "idempotency_key": idempotency_key,
+            "metadata": {
+                "source": "live_sim",
+                "live_sim_only": True,
+                "live_real_allowed": False,
+                "idempotency_key": idempotency_key,
+                "cancel_intent_id": "cancel-intent-1",
+                "original_live_sim_order_id": "live-sim-order-1",
             },
         },
     )

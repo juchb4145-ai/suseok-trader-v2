@@ -94,6 +94,7 @@ class GatewayConditionAdmissionController:
         registered_realtime_count: int,
         runtime_metrics: Mapping[str, Any],
         session_profile: ConditionSessionProfile,
+        max_total: int = 100,
         batch_allowed: bool = False,
         planned_batch_count: int = 0,
         now: datetime | None = None,
@@ -110,6 +111,7 @@ class GatewayConditionAdmissionController:
             registered_realtime_count=effective_registered_count,
             runtime_metrics=runtime_metrics,
             session_profile=session_profile,
+            max_total=max_total,
         )
         reasons: list[str] = ["CONDITION_SENSOR_EVIDENCE", "MARKET_SENSOR_NOT_BUY_SIGNAL"]
         register_immediate = False
@@ -241,6 +243,7 @@ class GatewayConditionAdmissionController:
         registered_realtime_count: int,
         runtime_metrics: Mapping[str, Any],
         session_profile: ConditionSessionProfile,
+        max_total: int,
     ) -> dict[str, Any]:
         quality, quality_reasons = _quality(runtime_metrics)
         if profile.role in _STRONG_ROLES:
@@ -255,6 +258,7 @@ class GatewayConditionAdmissionController:
             cap = min(cap, 10 if profile.role in _STRONG_ROLES else 0)
         elif quality == "WARMUP":
             cap = min(cap, 20 if profile.role in _STRONG_ROLES else 8)
+        cap = min(cap, max(int(max_total), 0))
         return {
             "quality_status": quality,
             "reason_codes": quality_reasons,

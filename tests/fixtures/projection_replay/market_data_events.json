@@ -1,0 +1,104 @@
+[
+  {
+    "received_at": "2026-06-25T23:10:00.100000Z",
+    "event": {
+      "event_id": "fixture-nxt-price-1",
+      "event_type": "price_tick",
+      "source": "fixture-gateway",
+      "ts": "2026-06-25T23:10:00Z",
+      "payload": {
+        "code": "005930",
+        "name": "Samsung Electronics",
+        "price": 70000,
+        "change_rate": 0.1,
+        "volume": 1000,
+        "trade_value": 70000000,
+        "execution_strength": 101.5,
+        "best_bid": 69900,
+        "best_ask": 70000,
+        "spread_ticks": 1,
+        "day_high": 70500,
+        "day_low": 69500,
+        "trade_time": "2026-06-25T23:10:00Z",
+        "ts": "2026-06-25T23:10:00Z",
+        "metadata": {
+          "exchange": "NXT"
+        }
+      }
+    }
+  },
+  {
+    "received_at": "2026-06-26T00:01:00.100000Z",
+    "event": {
+      "event_id": "fixture-krx-price-1",
+      "event_type": "price_tick",
+      "source": "fixture-gateway",
+      "ts": "2026-06-26T00:01:00Z",
+      "payload": {
+        "code": "005930",
+        "name": "Samsung Electronics",
+        "price": 70100,
+        "change_rate": 0.2,
+        "volume": 1100,
+        "trade_value": 77110000,
+        "execution_strength": 102.0,
+        "best_bid": 70000,
+        "best_ask": 70100,
+        "spread_ticks": 1,
+        "day_high": 70600,
+        "day_low": 69500,
+        "trade_time": "2026-06-26T00:01:00Z",
+        "ts": "2026-06-26T00:01:00Z"
+      }
+    }
+  },
+  {
+    "received_at": "2026-06-26T00:02:00.100000Z",
+    "event": {
+      "event_id": "fixture-condition-1",
+      "event_type": "condition_event",
+      "source": "fixture-gateway",
+      "ts": "2026-06-26T00:02:00Z",
+      "payload": {
+        "condition_id": "fixture-leader",
+        "condition_name": "Fixture Leader",
+        "code": "005930",
+        "name": "Samsung Electronics",
+        "action": "ENTER",
+        "price": 70100,
+        "metadata": {
+          "condition_profile_id": "fixture-leader-profile"
+        },
+        "ts": "2026-06-26T00:02:00Z"
+      }
+    }
+  },
+  {
+    "received_at": "2026-06-26T00:03:00.100000Z",
+    "event": {
+      "event_id": "fixture-tr-response-1",
+      "event_type": "tr_response",
+      "source": "fixture-gateway",
+      "ts": "2026-06-26T00:03:00Z",
+      "payload": {
+        "request_id": "candidate_quote_refresh:2026-06-26:fixture",
+        "tr_code": "OPT10001",
+        "request_name": "candidate_quote_refresh_opt10001",
+        "success": true,
+        "rows": [
+          {
+            "stock_code": "A005930",
+            "name": "Samsung Electronics",
+            "current_price": "+70200",
+            "change_rate": "+0.30",
+            "volume": "1200",
+            "trade_value": "84240000",
+            "high": "+70700",
+            "low": "-69500"
+          }
+        ],
+        "ts": "2026-06-26T00:03:00Z"
+      }
+    }
+  }
+]

@@ -15,6 +15,9 @@ param(
     [string]$MarketIndexPollSec = "",
     [switch]$NoAutoLogin,
     [switch]$NoConditionRealtime,
+    [switch]$DisableConditions,
+    [switch]$DisableRealtimeCodes,
+    [switch]$ClearRealtimeOnLogin,
     [switch]$Detached,
     [switch]$Log,
     [switch]$DryRun,
@@ -114,16 +117,49 @@ function Write-ObserveEnvOverrideFile {
         "TRADING_MODE=$($env:TRADING_MODE)",
         "TRADING_ALLOW_LIVE_SIM=$($env:TRADING_ALLOW_LIVE_SIM)",
         "TRADING_ALLOW_LIVE_REAL=$($env:TRADING_ALLOW_LIVE_REAL)",
+        "DRY_RUN_ORDER_ROUTING_ENABLED=$($env:DRY_RUN_ORDER_ROUTING_ENABLED)",
+        "DRY_RUN_GATEWAY_COMMAND_ENABLED=$($env:DRY_RUN_GATEWAY_COMMAND_ENABLED)",
+        "DRY_RUN_EXIT_ENGINE_ENABLED=$($env:DRY_RUN_EXIT_ENGINE_ENABLED)",
+        "DRY_RUN_EXIT_INTENT_CREATION_ENABLED=$($env:DRY_RUN_EXIT_INTENT_CREATION_ENABLED)",
+        "DRY_RUN_EXIT_ORDER_CREATION_ENABLED=$($env:DRY_RUN_EXIT_ORDER_CREATION_ENABLED)",
+        "DRY_RUN_EXIT_SIMULATED_FILL_ENABLED=$($env:DRY_RUN_EXIT_SIMULATED_FILL_ENABLED)",
+        "DRY_RUN_EXIT_ORDER_ROUTING_ENABLED=$($env:DRY_RUN_EXIT_ORDER_ROUTING_ENABLED)",
+        "DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED=$($env:DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED)",
         "LIVE_SIM_ENABLED=$($env:LIVE_SIM_ENABLED)",
         "LIVE_SIM_ORDER_ROUTING_ENABLED=$($env:LIVE_SIM_ORDER_ROUTING_ENABLED)",
         "LIVE_SIM_GATEWAY_COMMAND_ENABLED=$($env:LIVE_SIM_GATEWAY_COMMAND_ENABLED)",
+        "LIVE_SIM_ALLOW_BUY=$($env:LIVE_SIM_ALLOW_BUY)",
+        "LIVE_SIM_ALLOW_SELL=$($env:LIVE_SIM_ALLOW_SELL)",
+        "LIVE_SIM_ALLOW_EXIT_SELL=$($env:LIVE_SIM_ALLOW_EXIT_SELL)",
+        "LIVE_SIM_REPRICE_ENABLED=$($env:LIVE_SIM_REPRICE_ENABLED)",
         "LIVE_SIM_PILOT_PIPELINE_ENABLED=$($env:LIVE_SIM_PILOT_PIPELINE_ENABLED)",
         "LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=$($env:LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND)",
         "LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED=$($env:LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED)",
+        "LIVE_SIM_CANCEL_ENABLED=$($env:LIVE_SIM_CANCEL_ENABLED)",
+        "LIVE_SIM_CANCEL_UNFILLED_ENABLED=$($env:LIVE_SIM_CANCEL_UNFILLED_ENABLED)",
+        "LIVE_SIM_CANCEL_KILL_SWITCH=$($env:LIVE_SIM_CANCEL_KILL_SWITCH)",
+        "LIVE_SIM_EXIT_ENGINE_ENABLED=$($env:LIVE_SIM_EXIT_ENGINE_ENABLED)",
+        "LIVE_SIM_EXIT_ORDER_CREATION_ENABLED=$($env:LIVE_SIM_EXIT_ORDER_CREATION_ENABLED)",
+        "LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED=$($env:LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED)",
+        "LIVE_SIM_EXIT_EOD_FLATTEN_ENABLED=$($env:LIVE_SIM_EXIT_EOD_FLATTEN_ENABLED)",
+        "LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED=$($env:LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED)",
+        "LIVE_SIM_OPERATING_CYCLE_ENABLED=$($env:LIVE_SIM_OPERATING_CYCLE_ENABLED)",
+        "LIVE_SIM_OPERATING_LOOP_ENABLED=$($env:LIVE_SIM_OPERATING_LOOP_ENABLED)",
+        "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS=$($env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS)",
         "LIVE_SIM_KILL_SWITCH=$($env:LIVE_SIM_KILL_SWITCH)",
         "AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS=$($env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS)",
         "GATEWAY_COMMAND_WAIT_SEC=$($env:GATEWAY_COMMAND_WAIT_SEC)"
     )
+    if ($DisableConditions) {
+        $OverrideLines += @(
+            "KIWOOM_CONDITION_NAME=",
+            "KIWOOM_CONDITION_PROFILES_FILE=",
+            "KIWOOM_CONDITION_PROFILES="
+        )
+    }
+    if ($DisableRealtimeCodes) {
+        $OverrideLines += "KIWOOM_REALTIME_CODES="
+    }
     if (-not [string]::IsNullOrWhiteSpace($env:TRADING_CORE_TOKEN)) {
         $OverrideLines += "TRADING_CORE_TOKEN=$($env:TRADING_CORE_TOKEN)"
     }
@@ -144,12 +180,35 @@ $env:TRADING_PROFILE = "OBSERVE"
 $env:TRADING_MODE = "OBSERVE"
 $env:TRADING_ALLOW_LIVE_SIM = "false"
 $env:TRADING_ALLOW_LIVE_REAL = "false"
+$env:DRY_RUN_ORDER_ROUTING_ENABLED = "false"
+$env:DRY_RUN_GATEWAY_COMMAND_ENABLED = "false"
+$env:DRY_RUN_EXIT_ENGINE_ENABLED = "false"
+$env:DRY_RUN_EXIT_INTENT_CREATION_ENABLED = "false"
+$env:DRY_RUN_EXIT_ORDER_CREATION_ENABLED = "false"
+$env:DRY_RUN_EXIT_SIMULATED_FILL_ENABLED = "false"
+$env:DRY_RUN_EXIT_ORDER_ROUTING_ENABLED = "false"
+$env:DRY_RUN_EXIT_GATEWAY_COMMAND_ENABLED = "false"
 $env:LIVE_SIM_ENABLED = "false"
 $env:LIVE_SIM_ORDER_ROUTING_ENABLED = "false"
 $env:LIVE_SIM_GATEWAY_COMMAND_ENABLED = "false"
+$env:LIVE_SIM_ALLOW_BUY = "false"
+$env:LIVE_SIM_ALLOW_SELL = "false"
+$env:LIVE_SIM_ALLOW_EXIT_SELL = "false"
+$env:LIVE_SIM_REPRICE_ENABLED = "false"
 $env:LIVE_SIM_PILOT_PIPELINE_ENABLED = "false"
 $env:LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND = "false"
 $env:LIVE_SIM_ORDER_PLAN_ROUTING_ENABLED = "false"
+$env:LIVE_SIM_CANCEL_ENABLED = "false"
+$env:LIVE_SIM_CANCEL_UNFILLED_ENABLED = "false"
+$env:LIVE_SIM_CANCEL_KILL_SWITCH = "true"
+$env:LIVE_SIM_EXIT_ENGINE_ENABLED = "false"
+$env:LIVE_SIM_EXIT_ORDER_CREATION_ENABLED = "false"
+$env:LIVE_SIM_EXIT_GATEWAY_COMMAND_ENABLED = "false"
+$env:LIVE_SIM_EXIT_EOD_FLATTEN_ENABLED = "false"
+$env:LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED = "false"
+$env:LIVE_SIM_OPERATING_CYCLE_ENABLED = "false"
+$env:LIVE_SIM_OPERATING_LOOP_ENABLED = "false"
+$env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
 $env:AI_CANDIDATE_SCORER_ALLOW_ORDER_ACTIONS = "false"
 $env:GATEWAY_COMMAND_WAIT_SEC = "0.0"
@@ -166,26 +225,38 @@ if ([string]::IsNullOrWhiteSpace($Token)) {
 $env:GATEWAY_CORE_TOKEN = $Token
 $env:TRADING_CORE_TOKEN = $Token
 
-if ([string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
-    $ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES
-}
-$DefaultConditionProfilesFile = Join-Path $Root "configs\condition_profiles\market_open_profiles.json"
-if (
-    [string]::IsNullOrWhiteSpace($ConditionProfilesFile) -and
-    [string]::IsNullOrWhiteSpace($ConditionProfilesJson)
-) {
-    $ConditionProfilesFile = if ($env:KIWOOM_CONDITION_PROFILES_FILE) {
-        $env:KIWOOM_CONDITION_PROFILES_FILE
-    } elseif (Test-Path -LiteralPath $DefaultConditionProfilesFile) {
-        $DefaultConditionProfilesFile
-    } else {
-        ""
+if ($DisableConditions) {
+    $ConditionName = ""
+    $ConditionProfilesFile = ""
+    $ConditionProfilesJson = ""
+    $env:KIWOOM_CONDITION_NAME = ""
+    $env:KIWOOM_CONDITION_PROFILES_FILE = ""
+    $env:KIWOOM_CONDITION_PROFILES = ""
+} else {
+    if ([string]::IsNullOrWhiteSpace($ConditionProfilesJson)) {
+        $ConditionProfilesJson = $env:KIWOOM_CONDITION_PROFILES
+    }
+    $DefaultConditionProfilesFile = Join-Path $Root "configs\condition_profiles\market_open_profiles.json"
+    if (
+        [string]::IsNullOrWhiteSpace($ConditionProfilesFile) -and
+        [string]::IsNullOrWhiteSpace($ConditionProfilesJson)
+    ) {
+        $ConditionProfilesFile = if ($env:KIWOOM_CONDITION_PROFILES_FILE) {
+            $env:KIWOOM_CONDITION_PROFILES_FILE
+        } elseif (Test-Path -LiteralPath $DefaultConditionProfilesFile) {
+            $DefaultConditionProfilesFile
+        } else {
+            ""
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ConditionName)) {
+        $ConditionName = $env:KIWOOM_CONDITION_NAME
     }
 }
-if ([string]::IsNullOrWhiteSpace($ConditionName)) {
-    $ConditionName = $env:KIWOOM_CONDITION_NAME
-}
-if ([string]::IsNullOrWhiteSpace($RealtimeCodes)) {
+if ($DisableRealtimeCodes) {
+    $RealtimeCodes = ""
+    $env:KIWOOM_REALTIME_CODES = ""
+} elseif ([string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $RealtimeCodes = $env:KIWOOM_REALTIME_CODES
 }
 if ([string]::IsNullOrWhiteSpace($RealtimeExchange)) {
@@ -275,6 +346,9 @@ if (-not [string]::IsNullOrWhiteSpace($ResolvedProfiles)) {
 }
 if (-not [string]::IsNullOrWhiteSpace($RealtimeCodes)) {
     $GatewayArgs += @("--realtime-codes", $RealtimeCodes)
+}
+if ($DisableRealtimeCodes -or $ClearRealtimeOnLogin) {
+    $GatewayArgs += "--clear-realtime-on-login"
 }
 if ($MarketIndexEnabledValue) {
     $GatewayArgs += "--market-index-enabled"

@@ -9,6 +9,7 @@ from typing import Any
 
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
+from domain.broker.utils import utc_now
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,14 @@ class CoreIoWorkerSnapshot:
     coalesce_after_size: int
     max_buffer_size: int
     consecutive_poll_error_count: int
+    batch_size: int
+    batch_post_count: int
+    latest_batch_size: int
+    rejected_event_count: int
+    market_event_queue_size: int
+    durable_event_queue_size: int
+    oldest_event_age_sec: float | None
+    oldest_market_event_age_sec: float | None
 
 
 class CoreIoWorker:
@@ -45,6 +54,8 @@ class CoreIoWorker:
         coalesce_after_size: int = 50,
         command_poll_interval_sec: float = 0.2,
         max_buffer_size: int = 10_000,
+        event_batch_size: int = 100,
+        market_batch_share: int = 50,
     ) -> None:
         self._core_client = core_client
         self._command_limit = max(int(command_limit), 1)
@@ -55,6 +66,11 @@ class CoreIoWorker:
         self._coalesce_after_size = max(int(coalesce_after_size), 1)
         self._command_poll_interval_sec = max(float(command_poll_interval_sec), 0.05)
         self._max_buffer_size = max(int(max_buffer_size), 1)
+        self._event_batch_size = min(max(int(event_batch_size), 1), 200)
+        self._market_batch_share = min(
+            max(int(market_batch_share), 1),
+            self._event_batch_size,
+        )
         self._events: deque[GatewayEvent] = deque()
         self._commands: Queue[GatewayCommand] = Queue()
         self._condition = threading.Condition()
@@ -72,6 +88,9 @@ class CoreIoWorker:
         self._next_post_retry_at = 0.0
         self._next_command_poll_at = 0.0
         self._consecutive_poll_error_count = 0
+        self._batch_post_count = 0
+        self._latest_batch_size = 0
+        self._rejected_event_count = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -155,6 +174,17 @@ class CoreIoWorker:
             latest_post_at = self._latest_post_at
             thread_id = self._thread_id
             consecutive_poll_error_count = self._consecutive_poll_error_count
+            batch_post_count = self._batch_post_count
+            latest_batch_size = self._latest_batch_size
+            rejected_event_count = self._rejected_event_count
+            market_events = [
+                event for event in self._events if _is_market_refresh_event(event)
+            ]
+            durable_event_queue_size = sum(
+                not _is_droppable_event(event) for event in self._events
+            )
+            oldest_event_age_sec = _oldest_event_age_sec(self._events)
+            oldest_market_event_age_sec = _oldest_event_age_sec(market_events)
         return CoreIoWorkerSnapshot(
             running=self._thread is not None and self._thread.is_alive(),
             event_queue_size=event_queue_size,
@@ -171,6 +201,14 @@ class CoreIoWorker:
             coalesce_after_size=self._coalesce_after_size,
             max_buffer_size=self._max_buffer_size,
             consecutive_poll_error_count=consecutive_poll_error_count,
+            batch_size=self._event_batch_size,
+            batch_post_count=batch_post_count,
+            latest_batch_size=latest_batch_size,
+            rejected_event_count=rejected_event_count,
+            market_event_queue_size=len(market_events),
+            durable_event_queue_size=durable_event_queue_size,
+            oldest_event_age_sec=oldest_event_age_sec,
+            oldest_market_event_age_sec=oldest_market_event_age_sec,
         )
 
     def _coalesce_event_locked(self, event: GatewayEvent) -> bool:
@@ -192,10 +230,88 @@ class CoreIoWorker:
                 self._poll_commands()
                 self._next_command_poll_at = time.monotonic() + self._command_poll_interval_sec
                 continue
-            posted = self._post_next_event()
+            post_events = getattr(self._core_client, "post_events", None)
+            posted = (
+                self._post_next_event_batch(post_events)
+                if callable(post_events)
+                else self._post_next_event()
+            )
             if posted:
                 continue
             self._wait_for_work(timeout_sec=0.1)
+
+    def _post_next_event_batch(self, post_events: Any) -> bool:
+        now = time.monotonic()
+        if now < self._next_post_retry_at:
+            return False
+        with self._condition:
+            events = self._select_event_batch_locked()
+        if not events:
+            return False
+        try:
+            response = post_events(events)
+        except Exception as exc:
+            with self._condition:
+                self._last_error = str(exc)
+            self._next_post_retry_at = time.monotonic() + self._retry_sleep_sec
+            return False
+        rejected_count = (
+            int(response.get("failed_count") or 0)
+            if isinstance(response, dict)
+            else 0
+        )
+        with self._condition:
+            for event in events:
+                self._remove_event_by_identity_locked(event)
+            self._posted_count += len(events)
+            self._batch_post_count += 1
+            self._latest_batch_size = len(events)
+            self._rejected_event_count += rejected_count
+            self._latest_post_at = time.monotonic()
+            self._last_error = (
+                f"Core rejected {rejected_count} event(s) from latest batch"
+                if rejected_count
+                else ""
+            )
+        return True
+
+    def _select_event_batch_locked(self) -> list[GatewayEvent]:
+        limit = min(self._event_batch_size, len(self._events))
+        if limit <= 0:
+            return []
+        selected: list[GatewayEvent] = []
+        selected_ids: set[int] = set()
+
+        def add_matching(predicate: Any, *, item_limit: int) -> None:
+            if item_limit <= 0:
+                return
+            for event in self._events:
+                if len(selected) >= limit or item_limit <= 0:
+                    break
+                if id(event) in selected_ids or not predicate(event):
+                    continue
+                selected.append(event)
+                selected_ids.add(id(event))
+                item_limit -= 1
+
+        add_matching(_is_command_critical_event, item_limit=limit)
+        add_matching(
+            lambda event: _is_priority_event(event)
+            and not _is_command_critical_event(event),
+            item_limit=min(16, limit - len(selected)),
+        )
+        add_matching(
+            _is_market_refresh_event,
+            item_limit=min(self._market_batch_share, limit - len(selected)),
+        )
+        add_matching(lambda _: True, item_limit=limit - len(selected))
+        return selected
+
+    def _remove_event_by_identity_locked(self, event: GatewayEvent) -> None:
+        for index, queued_event in enumerate(self._events):
+            if queued_event is event:
+                del self._events[index]
+                return
 
     def _post_next_event(self) -> bool:
         if not self._event_posting_enabled:
@@ -297,6 +413,25 @@ def _is_priority_event(event: GatewayEvent) -> bool:
     }
 
 
+def _is_market_refresh_event(event: GatewayEvent) -> bool:
+    return str(event.event_type or "").strip().lower() in {
+        "price_tick",
+        "quote_tick",
+        "market_index_tick",
+    }
+
+
+def _oldest_event_age_sec(events: Any) -> float | None:
+    event_list = list(events)
+    if not event_list:
+        return None
+    now = utc_now()
+    return max(
+        max((now - event.ts).total_seconds(), 0.0)
+        for event in event_list
+    )
+
+
 _COMMAND_CRITICAL_EVENT_TYPES = {
     "command_started",
     "command_ack",
@@ -304,6 +439,7 @@ _COMMAND_CRITICAL_EVENT_TYPES = {
     "rate_limited",
     "execution_event",
     "order_pre_ack",
+    "order_broker_unconfirmed",
     "kiwoom_order_chejan",
     "kiwoom_balance_chejan",
     "kiwoom_special_chejan",
@@ -326,6 +462,7 @@ _DROP_PROTECTED_EVENT_TYPES = {
     "tr_response",
     "execution_event",
     "order_pre_ack",
+    "order_broker_unconfirmed",
     "kiwoom_order_chejan",
     "kiwoom_balance_chejan",
     "kiwoom_special_chejan",

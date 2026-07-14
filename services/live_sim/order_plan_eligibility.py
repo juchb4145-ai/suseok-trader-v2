@@ -35,6 +35,7 @@ from services.live_sim.live_sim_service import (
     _unresolved_lifecycle_error_count,
 )
 from services.live_sim.safety_gate import check_live_sim_safety_gate
+from services.pipeline_coherency import assess_order_plan_lineage
 
 READY_ENTRY_TIMING_STATES = {
     EntryTimingState.GOOD_PULLBACK.value,
@@ -307,6 +308,15 @@ def evaluate_live_sim_order_plan_eligibility(
         ):
             reason_codes.append(LiveSimReasonCode.ORDER_PLAN_BLOCKED_REASON.value)
 
+    lineage_guard = assess_order_plan_lineage(
+        connection,
+        order_plan,
+        evaluation,
+        max_age_sec=resolved_settings.live_sim_order_plan_stale_sec,
+    )
+    if lineage_guard["status"] != "PASS":
+        reason_codes.append(LiveSimReasonCode.ORDER_PLAN_LINEAGE_INVALID.value)
+
     existing_intent = find_live_sim_intent_by_order_plan(connection, normalized_id)
     if existing_intent is not None:
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_DUPLICATE_INTENT.value)
@@ -373,6 +383,7 @@ def evaluate_live_sim_order_plan_eligibility(
             reason: _reason_category(reason) for reason in reason_codes
         },
         "admission_trace": admission_evidence["admission_trace"],
+        "pipeline_lineage_guard": lineage_guard,
         "live_sim_only": True,
         "live_real_allowed": False,
         "broker_order_path": "LIVE_SIM_ONLY",
@@ -481,19 +492,16 @@ def find_live_sim_intent_by_order_plan(
     order_plan_id: str,
 ) -> dict[str, Any] | None:
     normalized_id = require_non_empty_str(order_plan_id, "order_plan_id")
-    rows = connection.execute(
+    row = connection.execute(
         """
         SELECT *
         FROM live_sim_intents
-        ORDER BY created_at DESC, live_sim_intent_id DESC
-        LIMIT 500
-        """
-    ).fetchall()
-    for row in rows:
-        item = _intent_row_to_dict(row)
-        if _json_object(item.get("evidence_json")).get("order_plan_id") == normalized_id:
-            return item
-    return None
+        WHERE order_plan_id = ?
+        LIMIT 1
+        """,
+        (normalized_id,),
+    ).fetchone()
+    return None if row is None else _intent_row_to_dict(row)
 
 
 def find_live_sim_order_by_intent(

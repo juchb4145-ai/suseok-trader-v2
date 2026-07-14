@@ -97,6 +97,7 @@ class LiveSimIntent:
     account_id: str
     code: str
     name: str
+    order_plan_id: str | None = None
     side: LiveSimSide | str = LiveSimSide.BUY
     order_type: LiveSimOrderType | str = LiveSimOrderType.LIMIT
     quantity: int = 0
@@ -156,7 +157,12 @@ class LiveSimIntent:
         object.__setattr__(
             self, "idempotency_key", require_non_empty_str(self.idempotency_key, "idempotency_key")
         )
-        for field_name in ("dry_run_intent_id", "dry_run_order_id", "gateway_command_id"):
+        for field_name in (
+            "order_plan_id",
+            "dry_run_intent_id",
+            "dry_run_order_id",
+            "gateway_command_id",
+        ):
             object.__setattr__(
                 self, field_name, optional_non_empty_str(getattr(self, field_name), field_name)
             )
@@ -176,6 +182,7 @@ class LiveSimIntent:
             "candidate_instance_id": self.candidate_instance_id,
             "strategy_observation_id": self.strategy_observation_id,
             "risk_observation_id": self.risk_observation_id,
+            "order_plan_id": self.order_plan_id,
             "dry_run_intent_id": self.dry_run_intent_id,
             "dry_run_order_id": self.dry_run_order_id,
             "trade_date": self.trade_date,
@@ -207,6 +214,7 @@ class LiveSimIntent:
             candidate_instance_id=mapping["candidate_instance_id"],
             strategy_observation_id=mapping.get("strategy_observation_id"),
             risk_observation_id=mapping.get("risk_observation_id"),
+            order_plan_id=mapping.get("order_plan_id"),
             dry_run_intent_id=mapping.get("dry_run_intent_id"),
             dry_run_order_id=mapping.get("dry_run_order_id"),
             trade_date=mapping["trade_date"],

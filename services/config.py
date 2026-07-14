@@ -231,16 +231,75 @@ class Settings:
     gateway_market_data_append_only_min_outbox_status: str = "ENQUEUED"
     gateway_market_reference_append_only_dry_run_enabled: bool = False
     gateway_market_reference_append_only_cutover_enabled: bool = False
+    gateway_market_reference_append_only_global_kill_switch: bool = True
+    gateway_market_reference_append_only_max_skip_per_minute: int = 0
+    gateway_market_reference_append_only_max_pending_within_sla: int = 1
     gateway_market_reference_append_only_require_reconcile_pass: bool = True
-    gateway_market_reference_append_only_reconcile_max_age_sec: int = 1800
+    gateway_market_reference_append_only_reconcile_max_age_sec: int = 300
     gateway_market_reference_append_only_min_membership_count: int = 100
     gateway_market_reference_append_only_effective_skip_disabled_in_pr13: bool = True
+    gateway_market_index_append_only_dry_run_enabled: bool = False
+    gateway_market_index_append_only_cutover_enabled: bool = False
+    gateway_market_index_append_only_global_kill_switch: bool = True
+    gateway_market_index_append_only_max_skip_per_minute: int = 0
+    gateway_market_index_append_only_max_pending_within_sla: int = 1
+    gateway_market_index_append_only_require_reconcile_pass: bool = True
+    gateway_market_index_append_only_require_data_usable: bool = True
+    gateway_market_index_append_only_require_parser_verified: bool = True
+    gateway_market_index_append_only_require_worker_regime_refresh: bool = True
+    gateway_market_index_append_only_fail_closed_on_regime_refresh_error: bool = True
+    gateway_market_index_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_index_append_only_max_event_age_sec: int = 30
+    gateway_market_index_append_only_max_future_skew_sec: int = 5
+    gateway_market_index_append_only_require_fresh_gateway_health: bool = True
+    gateway_market_index_append_only_gateway_health_max_age_sec: int = 30
+    gateway_market_index_append_only_effective_skip_disabled_in_pr15: bool = True
+    gateway_market_regime_append_only_dry_run_enabled: bool = False
+    gateway_market_regime_append_only_cutover_enabled: bool = False
+    gateway_market_regime_append_only_global_kill_switch: bool = True
+    gateway_market_regime_append_only_max_skip_per_minute: int = 0
+    gateway_market_regime_append_only_max_pending_within_sla: int = 1
+    gateway_market_regime_append_only_require_reconcile_pass: bool = True
+    gateway_market_regime_append_only_require_prior_event_reconcile: bool = True
+    gateway_market_regime_append_only_require_index_routing_guard: bool = True
+    gateway_market_regime_append_only_require_worker_context_refresh: bool = True
+    gateway_market_regime_append_only_fail_closed_on_context_refresh_error: bool = True
+    gateway_market_regime_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_regime_append_only_effective_skip_disabled_in_pr18: bool = True
+    gateway_market_scan_append_only_dry_run_enabled: bool = False
+    gateway_market_scan_append_only_cutover_enabled: bool = False
+    gateway_market_scan_append_only_global_kill_switch: bool = True
+    gateway_market_scan_append_only_max_skip_per_minute: int = 0
+    gateway_market_scan_append_only_require_reconcile_pass: bool = True
+    gateway_market_scan_append_only_require_prior_event_reconcile: bool = True
+    gateway_market_scan_append_only_require_parser_verified: bool = True
+    gateway_market_scan_append_only_require_market_data_dependency: bool = True
+    gateway_market_scan_append_only_require_worker_closure: bool = True
+    gateway_market_scan_append_only_fail_closed_on_worker_error: bool = True
+    gateway_market_scan_append_only_max_pending_within_sla: int = 4
+    gateway_market_scan_append_only_reconcile_max_age_sec: int = 300
+    gateway_market_scan_append_only_max_event_age_sec: int = 120
+    gateway_market_scan_append_only_max_future_skew_sec: int = 5
+    gateway_market_scan_append_only_effective_skip_disabled_in_pr20: bool = True
+    projection_event_result_backfill_enabled: bool = False
     event_store_retention_enabled: bool = False
     event_store_retention_days: int = 30
     event_store_retention_batch_size: int = 5000
     event_store_retention_interval_sec: int = 86400
     market_regime_enabled: bool = True
+    market_context_snapshot_stale_sec: int = 30
     market_index_stale_sec: int = 30
+    market_index_tr_bootstrap_enabled: bool = False
+    market_index_tr_bootstrap_tr_code: str = "OPT20001"
+    market_index_tr_bootstrap_screen_no: str = "5701"
+    market_index_tr_bootstrap_parser_status: str = "VERIFIED"
+    market_index_tr_bootstrap_index_codes: tuple[str, ...] = ("KOSPI", "KOSDAQ")
+    market_index_tr_bootstrap_market_types: Mapping[str, str] = field(
+        default_factory=lambda: {"KOSPI": "0", "KOSDAQ": "1"}
+    )
+    market_index_tr_bootstrap_industry_codes: Mapping[str, str] = field(
+        default_factory=lambda: {"KOSPI": "001", "KOSDAQ": "101"}
+    )
     market_scan_enabled: bool = False
     market_scan_interval_sec: int = 120
     market_scan_top_n: int = 200
@@ -312,6 +371,10 @@ class Settings:
     incremental_evaluation_worker_interval_sec: float = 1.0
     incremental_evaluation_batch_size: int = 20
     incremental_evaluation_retry_limit: int = 3
+    incremental_evaluation_backlog_warn_count: int = 100
+    incremental_evaluation_backlog_fail_count: int = 1000
+    incremental_evaluation_stale_warn_sec: int = 30
+    incremental_evaluation_stale_fail_sec: int = 300
     projection_outbox_worker_enabled: bool = False
     projection_outbox_worker_interval_sec: float = 1.0
     projection_outbox_batch_size: int = 100
@@ -321,12 +384,21 @@ class Settings:
     projection_outbox_apply_projection_enabled: bool = False
     projection_outbox_market_data_apply_enabled: bool = False
     projection_outbox_market_reference_apply_enabled: bool = False
+    projection_outbox_market_index_apply_enabled: bool = False
+    projection_outbox_market_regime_apply_enabled: bool = False
+    projection_outbox_market_scan_apply_enabled: bool = False
     projection_outbox_apply_batch_size: int = 50
     projection_outbox_market_reference_apply_batch_size: int = 20
+    projection_outbox_market_index_apply_batch_size: int = 20
+    projection_outbox_market_regime_apply_batch_size: int = 20
+    projection_outbox_market_scan_apply_batch_size: int = 20
     projection_outbox_live_run_once_batch_size: int = 50
     projection_outbox_run_once_max_wall_ms: int = 5000
     projection_outbox_apply_min_age_sec: float = 1.0
     projection_outbox_market_reference_apply_min_age_sec: float = 1.0
+    projection_outbox_market_index_apply_min_age_sec: float = 1.0
+    projection_outbox_market_regime_apply_min_age_sec: float = 1.0
+    projection_outbox_market_scan_apply_min_age_sec: float = 1.0
     projection_outbox_shadow_min_age_sec: float = 0.5
     projection_outbox_backlog_warn_pending_count: int = 1000
     projection_outbox_backlog_fail_pending_count: int = 10000
@@ -336,6 +408,20 @@ class Settings:
     projection_outbox_backlog_condition_event_ready_max_pending: int = 100
     projection_outbox_backlog_condition_event_ready_recent_max_pending: int = 10
     projection_outbox_backlog_required_for_condition_event_cutover: bool = True
+    live_sim_lifecycle_consumer_enabled: bool = False
+    live_sim_lifecycle_worker_enabled: bool = False
+    live_sim_lifecycle_worker_interval_sec: float = 1.0
+    live_sim_lifecycle_batch_size: int = 20
+    live_sim_lifecycle_retry_limit: int = 3
+    live_sim_lifecycle_processing_ttl_sec: int = 60
+    live_sim_lifecycle_retry_delay_sec: float = 1.0
+    live_sim_lifecycle_cutover_dry_run_enabled: bool = False
+    live_sim_lifecycle_cutover_enabled: bool = False
+    live_sim_lifecycle_global_kill_switch: bool = True
+    live_sim_lifecycle_inline_fallback_enabled: bool = True
+    live_sim_lifecycle_require_worker_health: bool = True
+    live_sim_lifecycle_worker_health_max_age_sec: int = 10
+    live_sim_lifecycle_max_unresolved_count: int = 100
     candidate_fsm_enabled: bool = True
     candidate_trade_date_timezone: str = "Asia/Seoul"
     candidate_source_stale_sec: int = 300
@@ -719,13 +805,121 @@ class Settings:
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC "
                 "must be >= 1"
             )
+        if self.gateway_market_reference_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE "
+                "must be >= 0"
+            )
+        if self.gateway_market_reference_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA "
+                "must be >= 1"
+            )
         if self.gateway_market_reference_append_only_min_membership_count < 0:
             raise ValueError(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MIN_MEMBERSHIP_COUNT "
                 "must be >= 0"
             )
+        if self.gateway_market_index_append_only_reconcile_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_index_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE must be >= 0"
+            )
+        if self.gateway_market_index_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA must be >= 1"
+            )
+        if self.gateway_market_index_append_only_max_event_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_index_append_only_max_future_skew_sec < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC must be >= 0"
+            )
+        if self.gateway_market_index_append_only_gateway_health_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_regime_append_only_reconcile_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_regime_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE must be >= 0"
+            )
+        if self.gateway_market_regime_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_reconcile_max_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_RECONCILE_MAX_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_max_pending_within_sla < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_PENDING_WITHIN_SLA must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_max_skip_per_minute < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE must be >= 0"
+            )
+        if self.gateway_market_scan_append_only_max_event_age_sec < 1:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC must be >= 1"
+            )
+        if self.gateway_market_scan_append_only_max_future_skew_sec < 0:
+            raise ValueError(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC must be >= 0"
+            )
         if self.market_index_stale_sec < 1:
             raise ValueError("MARKET_INDEX_STALE_SEC must be >= 1")
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_tr_code",
+            _normalize_non_empty(self.market_index_tr_bootstrap_tr_code).upper(),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_screen_no",
+            _require_non_empty_config(self.market_index_tr_bootstrap_screen_no),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_parser_status",
+            _normalize_non_empty(self.market_index_tr_bootstrap_parser_status),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_index_codes",
+            _normalize_market_scan_markets(
+                self.market_index_tr_bootstrap_index_codes
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_market_types",
+            _normalize_required_mapping(
+                self.market_index_tr_bootstrap_market_types,
+                "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+                required_keys=self.market_index_tr_bootstrap_index_codes,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "market_index_tr_bootstrap_industry_codes",
+            _normalize_required_mapping(
+                self.market_index_tr_bootstrap_industry_codes,
+                "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
+                required_keys=self.market_index_tr_bootstrap_index_codes,
+            ),
+        )
+        if self.market_context_snapshot_stale_sec < 1:
+            raise ValueError("MARKET_CONTEXT_SNAPSHOT_STALE_SEC must be >= 1")
         if self.market_scan_interval_sec < 1:
             raise ValueError("MARKET_SCAN_INTERVAL_SEC must be >= 1")
         if self.market_scan_top_n < 1:
@@ -848,15 +1042,38 @@ class Settings:
         for field_name in (
             "incremental_evaluation_batch_size",
             "incremental_evaluation_retry_limit",
+            "incremental_evaluation_backlog_warn_count",
+            "incremental_evaluation_backlog_fail_count",
+            "incremental_evaluation_stale_warn_sec",
+            "incremental_evaluation_stale_fail_sec",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
+        if (
+            self.incremental_evaluation_backlog_fail_count
+            < self.incremental_evaluation_backlog_warn_count
+        ):
+            raise ValueError(
+                "INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT must be >= "
+                "INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT"
+            )
+        if (
+            self.incremental_evaluation_stale_fail_sec
+            < self.incremental_evaluation_stale_warn_sec
+        ):
+            raise ValueError(
+                "INCREMENTAL_EVALUATION_STALE_FAIL_SEC must be >= "
+                "INCREMENTAL_EVALUATION_STALE_WARN_SEC"
+            )
         if self.projection_outbox_worker_interval_sec <= 0:
             raise ValueError("PROJECTION_OUTBOX_WORKER_INTERVAL_SEC must be > 0")
         for field_name in (
             "projection_outbox_batch_size",
             "projection_outbox_apply_batch_size",
             "projection_outbox_market_reference_apply_batch_size",
+            "projection_outbox_market_index_apply_batch_size",
+            "projection_outbox_market_regime_apply_batch_size",
+            "projection_outbox_market_scan_apply_batch_size",
             "projection_outbox_live_run_once_batch_size",
             "projection_outbox_run_once_max_wall_ms",
             "projection_outbox_retry_limit",
@@ -879,6 +1096,35 @@ class Settings:
             raise ValueError(
                 "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC must be >= 0"
             )
+        if self.projection_outbox_market_index_apply_min_age_sec < 0:
+            raise ValueError(
+                "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC must be >= 0"
+            )
+        if self.projection_outbox_market_regime_apply_min_age_sec < 0:
+            raise ValueError(
+                "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC must be >= 0"
+            )
+        if self.projection_outbox_market_scan_apply_min_age_sec < 0:
+            raise ValueError(
+                "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_MIN_AGE_SEC must be >= 0"
+            )
+        if self.live_sim_lifecycle_worker_interval_sec <= 0:
+            raise ValueError("LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC must be > 0")
+        for field_name in (
+            "live_sim_lifecycle_batch_size",
+            "live_sim_lifecycle_retry_limit",
+            "live_sim_lifecycle_processing_ttl_sec",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
+        if self.live_sim_lifecycle_retry_delay_sec < 0:
+            raise ValueError("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC must be >= 0")
+        for field_name in (
+            "live_sim_lifecycle_worker_health_max_age_sec",
+            "live_sim_lifecycle_max_unresolved_count",
+        ):
+            if getattr(self, field_name) < 1:
+                raise ValueError(f"{field_name.upper()} must be >= 1")
         if not self.projection_outbox_shadow_mode:
             raise ValueError("PROJECTION_OUTBOX_SHADOW_MODE must remain true")
         _validate_timezone(self.candidate_trade_date_timezone)
@@ -2167,6 +2413,28 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_reference_append_only_cutover_enabled=_parse_bool(
             env.get("GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED", "false")
         ),
+        gateway_market_reference_append_only_global_kill_switch=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH",
+                "true",
+            )
+        ),
+        gateway_market_reference_append_only_max_skip_per_minute=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+                "0",
+            ),
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_reference_append_only_max_pending_within_sla=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+                "1",
+            ),
+            "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
         gateway_market_reference_append_only_require_reconcile_pass=_parse_bool(
             env.get(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
@@ -2176,7 +2444,7 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         gateway_market_reference_append_only_reconcile_max_age_sec=_parse_int(
             env.get(
                 "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
-                "1800",
+                "300",
             ),
             "GATEWAY_MARKET_REFERENCE_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
             min_value=1,
@@ -2197,6 +2465,272 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
                 )
             )
         ),
+        gateway_market_index_append_only_dry_run_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_INDEX_APPEND_ONLY_DRY_RUN_ENABLED", "false")
+        ),
+        gateway_market_index_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_INDEX_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_index_append_only_global_kill_switch=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_GLOBAL_KILL_SWITCH",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_max_skip_per_minute=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+                "0",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_index_append_only_max_pending_within_sla=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+                "1",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
+        gateway_market_index_append_only_require_reconcile_pass=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_require_data_usable=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_DATA_USABLE",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_require_parser_verified=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_PARSER_VERIFIED",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_require_worker_regime_refresh=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_WORKER_REGIME_REFRESH",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_fail_closed_on_regime_refresh_error=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_INDEX_APPEND_ONLY_FAIL_CLOSED_ON_REGIME_REFRESH_ERROR",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_index_append_only_reconcile_max_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+                "300",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_index_append_only_max_event_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+                "30",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_index_append_only_max_future_skew_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+                "5",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+            min_value=0,
+        ),
+        gateway_market_index_append_only_require_fresh_gateway_health=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_REQUIRE_FRESH_GATEWAY_HEALTH",
+                "true",
+            )
+        ),
+        gateway_market_index_append_only_gateway_health_max_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC",
+                "30",
+            ),
+            "GATEWAY_MARKET_INDEX_APPEND_ONLY_GATEWAY_HEALTH_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_index_append_only_effective_skip_disabled_in_pr15=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_INDEX_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR15",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_regime_append_only_dry_run_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_DRY_RUN_ENABLED", "false")
+        ),
+        gateway_market_regime_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_regime_append_only_global_kill_switch=_parse_bool(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_GLOBAL_KILL_SWITCH", "true")
+        ),
+        gateway_market_regime_append_only_max_skip_per_minute=_parse_int(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE", "0"),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_regime_append_only_max_pending_within_sla=_parse_int(
+            env.get("GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA", "1"),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
+        gateway_market_regime_append_only_require_reconcile_pass=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_prior_event_reconcile=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_PRIOR_EVENT_RECONCILE",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_index_routing_guard=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_INDEX_ROUTING_GUARD",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_require_worker_context_refresh=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_REQUIRE_WORKER_CONTEXT_REFRESH",
+                "true",
+            )
+        ),
+        gateway_market_regime_append_only_fail_closed_on_context_refresh_error=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_REGIME_APPEND_ONLY_FAIL_CLOSED_ON_CONTEXT_REFRESH_ERROR",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_regime_append_only_reconcile_max_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+                "300",
+            ),
+            "GATEWAY_MARKET_REGIME_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_regime_append_only_effective_skip_disabled_in_pr18=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_REGIME_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR18",
+                    "true",
+                )
+            )
+        ),
+        gateway_market_scan_append_only_dry_run_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_DRY_RUN_ENABLED", "false")
+        ),
+        gateway_market_scan_append_only_cutover_enabled=_parse_bool(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_CUTOVER_ENABLED", "false")
+        ),
+        gateway_market_scan_append_only_global_kill_switch=_parse_bool(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_GLOBAL_KILL_SWITCH", "true")
+        ),
+        gateway_market_scan_append_only_max_skip_per_minute=_parse_int(
+            env.get("GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE", "0"),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_SKIP_PER_MINUTE",
+            min_value=0,
+        ),
+        gateway_market_scan_append_only_require_reconcile_pass=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_RECONCILE_PASS",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_prior_event_reconcile=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_PRIOR_EVENT_RECONCILE",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_parser_verified=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_PARSER_VERIFIED",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_market_data_dependency=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_MARKET_DATA_DEPENDENCY",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_require_worker_closure=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_REQUIRE_WORKER_CLOSURE",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_fail_closed_on_worker_error=_parse_bool(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_FAIL_CLOSED_ON_WORKER_ERROR",
+                "true",
+            )
+        ),
+        gateway_market_scan_append_only_max_pending_within_sla=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+                "4",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_PENDING_WITHIN_SLA",
+            min_value=1,
+        ),
+        gateway_market_scan_append_only_reconcile_max_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+                "300",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_RECONCILE_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_scan_append_only_max_event_age_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+                "120",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_EVENT_AGE_SEC",
+            min_value=1,
+        ),
+        gateway_market_scan_append_only_max_future_skew_sec=_parse_int(
+            env.get(
+                "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+                "5",
+            ),
+            "GATEWAY_MARKET_SCAN_APPEND_ONLY_MAX_FUTURE_SKEW_SEC",
+            min_value=0,
+        ),
+        gateway_market_scan_append_only_effective_skip_disabled_in_pr20=(
+            _parse_bool(
+                env.get(
+                    "GATEWAY_MARKET_SCAN_APPEND_ONLY_EFFECTIVE_SKIP_DISABLED_IN_PR20",
+                    "true",
+                )
+            )
+        ),
+        projection_event_result_backfill_enabled=_parse_bool(
+            env.get("PROJECTION_EVENT_RESULT_BACKFILL_ENABLED", "false")
+        ),
         event_store_retention_enabled=_parse_bool(
             env.get("EVENT_STORE_RETENTION_ENABLED", "false")
         ),
@@ -2216,10 +2750,48 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             min_value=60,
         ),
         market_regime_enabled=_parse_bool(env.get("MARKET_REGIME_ENABLED", "true")),
+        market_context_snapshot_stale_sec=_parse_int(
+            env.get("MARKET_CONTEXT_SNAPSHOT_STALE_SEC", "30"),
+            "MARKET_CONTEXT_SNAPSHOT_STALE_SEC",
+            min_value=1,
+        ),
         market_index_stale_sec=_parse_int(
             env.get("MARKET_INDEX_STALE_SEC", "30"),
             "MARKET_INDEX_STALE_SEC",
             min_value=1,
+        ),
+        market_index_tr_bootstrap_enabled=_parse_bool(
+            env.get("KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED", "false")
+        ),
+        market_index_tr_bootstrap_tr_code=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_TR_CODE",
+            "OPT20001",
+        ),
+        market_index_tr_bootstrap_screen_no=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_SCREEN_NO",
+            "5701",
+        ),
+        market_index_tr_bootstrap_parser_status=env.get(
+            "MARKET_INDEX_TR_BOOTSTRAP_PARSER_STATUS",
+            "VERIFIED",
+        ),
+        market_index_tr_bootstrap_index_codes=_parse_csv_list(
+            env.get("KIWOOM_MARKET_INDEX_CODES", "KOSPI,KOSDAQ"),
+            "KIWOOM_MARKET_INDEX_CODES",
+        ),
+        market_index_tr_bootstrap_market_types=_parse_key_value_mapping(
+            env.get(
+                "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+                "KOSPI=0,KOSDAQ=1",
+            ),
+            "MARKET_INDEX_TR_BOOTSTRAP_MARKET_TYPES",
+        ),
+        market_index_tr_bootstrap_industry_codes=_parse_key_value_mapping(
+            env.get(
+                "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
+                "KOSPI=001,KOSDAQ=101",
+            ),
+            "MARKET_INDEX_TR_BOOTSTRAP_INDUSTRY_CODES",
         ),
         market_scan_enabled=_parse_bool(env.get("MARKET_SCAN_ENABLED", "false")),
         market_scan_interval_sec=_parse_int(
@@ -2463,6 +3035,26 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "INCREMENTAL_EVALUATION_RETRY_LIMIT",
             min_value=1,
         ),
+        incremental_evaluation_backlog_warn_count=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT", "100"),
+            "INCREMENTAL_EVALUATION_BACKLOG_WARN_COUNT",
+            min_value=1,
+        ),
+        incremental_evaluation_backlog_fail_count=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT", "1000"),
+            "INCREMENTAL_EVALUATION_BACKLOG_FAIL_COUNT",
+            min_value=1,
+        ),
+        incremental_evaluation_stale_warn_sec=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_STALE_WARN_SEC", "30"),
+            "INCREMENTAL_EVALUATION_STALE_WARN_SEC",
+            min_value=1,
+        ),
+        incremental_evaluation_stale_fail_sec=_parse_int(
+            env.get("INCREMENTAL_EVALUATION_STALE_FAIL_SEC", "300"),
+            "INCREMENTAL_EVALUATION_STALE_FAIL_SEC",
+            min_value=1,
+        ),
         projection_outbox_worker_enabled=_parse_bool(
             env.get("PROJECTION_OUTBOX_WORKER_ENABLED", "false")
         ),
@@ -2498,6 +3090,15 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_reference_apply_enabled=_parse_bool(
             env.get("PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_ENABLED", "false")
         ),
+        projection_outbox_market_index_apply_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_ENABLED", "false")
+        ),
+        projection_outbox_market_regime_apply_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_ENABLED", "false")
+        ),
+        projection_outbox_market_scan_apply_enabled=_parse_bool(
+            env.get("PROJECTION_OUTBOX_MARKET_SCAN_APPLY_ENABLED", "false")
+        ),
         projection_outbox_apply_batch_size=_parse_int(
             env.get("PROJECTION_OUTBOX_APPLY_BATCH_SIZE", "50"),
             "PROJECTION_OUTBOX_APPLY_BATCH_SIZE",
@@ -2506,6 +3107,21 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_reference_apply_batch_size=_parse_int(
             env.get("PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE", "20"),
             "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_market_index_apply_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE", "20"),
+            "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_market_regime_apply_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE", "20"),
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_BATCH_SIZE",
+            min_value=1,
+        ),
+        projection_outbox_market_scan_apply_batch_size=_parse_int(
+            env.get("PROJECTION_OUTBOX_MARKET_SCAN_APPLY_BATCH_SIZE", "20"),
+            "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_BATCH_SIZE",
             min_value=1,
         ),
         projection_outbox_live_run_once_batch_size=_parse_int(
@@ -2526,6 +3142,21 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         projection_outbox_market_reference_apply_min_age_sec=_parse_float(
             env.get("PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC", "1.0"),
             "PROJECTION_OUTBOX_MARKET_REFERENCE_APPLY_MIN_AGE_SEC",
+            min_value=0.0,
+        ),
+        projection_outbox_market_index_apply_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC", "1.0"),
+            "PROJECTION_OUTBOX_MARKET_INDEX_APPLY_MIN_AGE_SEC",
+            min_value=0.0,
+        ),
+        projection_outbox_market_regime_apply_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC", "1.0"),
+            "PROJECTION_OUTBOX_MARKET_REGIME_APPLY_MIN_AGE_SEC",
+            min_value=0.0,
+        ),
+        projection_outbox_market_scan_apply_min_age_sec=_parse_float(
+            env.get("PROJECTION_OUTBOX_MARKET_SCAN_APPLY_MIN_AGE_SEC", "1.0"),
+            "PROJECTION_OUTBOX_MARKET_SCAN_APPLY_MIN_AGE_SEC",
             min_value=0.0,
         ),
         projection_outbox_shadow_min_age_sec=_parse_float(
@@ -2579,6 +3210,62 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
                 "PROJECTION_OUTBOX_BACKLOG_REQUIRED_FOR_CONDITION_EVENT_CUTOVER",
                 "true",
             )
+        ),
+        live_sim_lifecycle_consumer_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CONSUMER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_worker_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_worker_interval_sec=_parse_float(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC", "1.0"),
+            "LIVE_SIM_LIFECYCLE_WORKER_INTERVAL_SEC",
+            min_value=0.1,
+        ),
+        live_sim_lifecycle_batch_size=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_BATCH_SIZE", "20"),
+            "LIVE_SIM_LIFECYCLE_BATCH_SIZE",
+            min_value=1,
+        ),
+        live_sim_lifecycle_retry_limit=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_RETRY_LIMIT", "3"),
+            "LIVE_SIM_LIFECYCLE_RETRY_LIMIT",
+            min_value=1,
+        ),
+        live_sim_lifecycle_processing_ttl_sec=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_PROCESSING_TTL_SEC", "60"),
+            "LIVE_SIM_LIFECYCLE_PROCESSING_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_lifecycle_retry_delay_sec=_parse_float(
+            env.get("LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC", "1.0"),
+            "LIVE_SIM_LIFECYCLE_RETRY_DELAY_SEC",
+            min_value=0.0,
+        ),
+        live_sim_lifecycle_cutover_dry_run_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CUTOVER_DRY_RUN_ENABLED", "false")
+        ),
+        live_sim_lifecycle_cutover_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_CUTOVER_ENABLED", "false")
+        ),
+        live_sim_lifecycle_global_kill_switch=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_GLOBAL_KILL_SWITCH", "true")
+        ),
+        live_sim_lifecycle_inline_fallback_enabled=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_INLINE_FALLBACK_ENABLED", "true")
+        ),
+        live_sim_lifecycle_require_worker_health=_parse_bool(
+            env.get("LIVE_SIM_LIFECYCLE_REQUIRE_WORKER_HEALTH", "true")
+        ),
+        live_sim_lifecycle_worker_health_max_age_sec=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_WORKER_HEALTH_MAX_AGE_SEC", "10"),
+            "LIVE_SIM_LIFECYCLE_WORKER_HEALTH_MAX_AGE_SEC",
+            min_value=1,
+        ),
+        live_sim_lifecycle_max_unresolved_count=_parse_int(
+            env.get("LIVE_SIM_LIFECYCLE_MAX_UNRESOLVED_COUNT", "100"),
+            "LIVE_SIM_LIFECYCLE_MAX_UNRESOLVED_COUNT",
+            min_value=1,
         ),
         candidate_fsm_enabled=_parse_bool(env.get("CANDIDATE_FSM_ENABLED", "true")),
         candidate_trade_date_timezone=env.get("CANDIDATE_TRADE_DATE_TIMEZONE", "Asia/Seoul"),

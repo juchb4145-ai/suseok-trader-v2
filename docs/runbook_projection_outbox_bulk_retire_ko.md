@@ -65,6 +65,11 @@ Invoke-RestMethod `
   -Headers @{ "X-Local-Token" = $env:TRADING_CORE_TOKEN }
 ```
 
+API의 `protect_current_trade_date=true`가 기본값이므로 현재 KST 거래일 source event는 apply
+대상에서 제외되고 `CURRENT_TRADE_DATE_EVIDENCE_PROTECTED`로 집계된다. 특히 영속 10거래일
+evidence DB에서는 이 보호를 해제하지 않는다. 당일 row를 `SKIPPED` 처리하면 reconcile의
+zero-skipped 계약을 깨뜨려 해당 날짜가 무효가 될 수 있다.
+
 ## 판정
 
 PASS:

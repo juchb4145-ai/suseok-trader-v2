@@ -43,30 +43,14 @@ class OrderPreAckJournal:
         broker_env: str,
         source: str = "kiwoom_gateway",
     ) -> GatewayEvent:
-        payload = {
-            "command_id": command.command_id,
-            "command_type": command.command_type,
-            "idempotency_key": command.idempotency_key,
-            "status": "PRE_ACK",
-            "broker_env": broker_env,
-            "account_id": request.account,
-            "code": request.code,
-            "side": request.side,
-            "quantity": request.quantity,
-            "price": request.price,
-            "order_type": request.order_type,
-            "hoga": request.hoga,
-            "original_order_no": request.original_order_no,
-            "metadata": normalize_payload(request.metadata),
-        }
-        self._append(command, status="PRE_ACK", payload=payload)
-        return GatewayEvent(
-            event_type="order_pre_ack",
+        event = make_order_pre_ack_event(
+            command,
+            request,
+            broker_env=broker_env,
             source=source,
-            command_id=command.command_id,
-            idempotency_key=command.idempotency_key,
-            payload=payload,
         )
+        self._append(command, status="PRE_ACK", payload=event.payload)
+        return event
 
     def mark_broker_result(
         self,
@@ -93,6 +77,18 @@ class OrderPreAckJournal:
             "error_message": error_message,
         }
         self._append(command, status="SEND_FAILED", payload=payload)
+
+    def mark_unconfirmed(self, command: GatewayCommand, error_message: str) -> None:
+        payload = {
+            "command_id": command.command_id,
+            "command_type": command.command_type,
+            "idempotency_key": command.idempotency_key,
+            "status": "UNCONFIRMED",
+            "broker_call_attempted": True,
+            "broker_acceptance_unknown": True,
+            "error_message": error_message,
+        }
+        self._append(command, status="UNCONFIRMED", payload=payload)
 
     def pending_records(self) -> list[OrderPreAckRecord]:
         latest: dict[str, OrderPreAckRecord] = {}
@@ -166,3 +162,35 @@ class OrderPreAckJournal:
                     )
                 )
         return records
+
+
+def make_order_pre_ack_event(
+    command: GatewayCommand,
+    request: KiwoomOrderRequest,
+    *,
+    broker_env: str,
+    source: str = "kiwoom_gateway",
+) -> GatewayEvent:
+    payload = {
+        "command_id": command.command_id,
+        "command_type": command.command_type,
+        "idempotency_key": command.idempotency_key,
+        "status": "PRE_ACK",
+        "broker_env": broker_env,
+        "account_id": request.account,
+        "code": request.code,
+        "side": request.side,
+        "quantity": request.quantity,
+        "price": request.price,
+        "order_type": request.order_type,
+        "hoga": request.hoga,
+        "original_order_no": request.original_order_no,
+        "metadata": normalize_payload(request.metadata),
+    }
+    return GatewayEvent(
+        event_type="order_pre_ack",
+        source=source,
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        payload=payload,
+    )

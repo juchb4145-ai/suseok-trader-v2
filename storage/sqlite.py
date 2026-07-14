@@ -3,7 +3,14 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 42
+from storage.gateway_order_broker_boundary import (
+    ensure_gateway_order_broker_boundary_schema,
+)
+from storage.live_sim_order_plan_uniqueness import (
+    ensure_live_sim_order_plan_uniqueness_schema,
+)
+
+SCHEMA_VERSION = 59
 APP_NAME = "suseok-trader-v2"
 
 
@@ -46,8 +53,14 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_market_reference_projection_reconcile_tables(connection)
     _create_market_reference_projection_routing_tables(connection)
     _create_market_index_tables(connection)
+    _create_market_index_projection_reconcile_tables(connection)
+    _create_market_index_projection_routing_tables(connection)
     _create_market_scan_tables(connection)
+    _create_market_scan_projection_reconcile_tables(connection)
+    _create_market_scan_projection_routing_tables(connection)
     _create_market_regime_tables(connection)
+    _create_market_regime_projection_reconcile_tables(connection)
+    _create_market_regime_projection_routing_tables(connection)
     _create_theme_projection_tables(connection)
     _create_candidate_projection_tables(connection)
     _create_strategy_projection_tables(connection)
@@ -56,6 +69,8 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_dry_run_oms_tables(connection)
     _create_dry_run_exit_tables(connection)
     _create_live_sim_tables(connection)
+    _create_live_sim_lifecycle_consumer_tables(connection)
+    _create_live_sim_lifecycle_cutover_tables(connection)
     _create_operator_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
@@ -763,7 +778,31 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
             owner_id TEXT NOT NULL,
             acquired_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
+            process_id INTEGER NOT NULL DEFAULT 0,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            heartbeat_at TEXT,
+            fencing_token INTEGER NOT NULL DEFAULT 0,
             detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "runtime_execution_locks",
+        {
+            "process_id": "INTEGER NOT NULL DEFAULT 0",
+            "thread_id": "INTEGER NOT NULL DEFAULT 0",
+            "heartbeat_at": "TEXT",
+            "fencing_token": "INTEGER NOT NULL DEFAULT 0",
+        },
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runtime_execution_lock_fences (
+            lock_name TEXT PRIMARY KEY,
+            last_fencing_token INTEGER NOT NULL DEFAULT 0
+                CHECK (last_fencing_token >= 0),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
     )
@@ -771,6 +810,18 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_expires
         ON runtime_execution_locks (expires_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_heartbeat
+        ON runtime_execution_locks (heartbeat_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_runtime_execution_locks_process
+        ON runtime_execution_locks (process_id, thread_id)
         """
     )
     connection.execute(
@@ -819,6 +870,42 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_queue_trade_code
         ON incremental_evaluation_queue (trade_date, code)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incremental_evaluation_dead_letters (
+            dead_letter_id TEXT PRIMARY KEY,
+            candidate_instance_id TEXT NOT NULL,
+            trade_date TEXT NOT NULL,
+            code TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            source_event_id TEXT,
+            priority INTEGER NOT NULL DEFAULT 0,
+            original_enqueued_at TEXT NOT NULL,
+            last_queue_updated_at TEXT NOT NULL,
+            attempts INTEGER NOT NULL CHECK (attempts > 0),
+            last_error TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'DEAD_LETTER'
+                CHECK (status IN ('DEAD_LETTER', 'RESET')),
+            dead_lettered_at TEXT NOT NULL,
+            reset_at TEXT,
+            reset_by TEXT,
+            reset_evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_incremental_evaluation_dead_letter_active
+        ON incremental_evaluation_dead_letters (candidate_instance_id)
+        WHERE status = 'DEAD_LETTER'
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_dead_letter_status_time
+        ON incremental_evaluation_dead_letters (status, dead_lettered_at DESC)
         """
     )
     connection.execute(
@@ -956,7 +1043,9 @@ def _ensure_columns(
     }
     for column_name, definition in columns.items():
         if column_name not in existing:
-            connection.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}")
+            connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {definition}"
+            )
 
 
 def _ensure_market_data_exchange_schema(connection: sqlite3.Connection) -> None:
@@ -1278,6 +1367,20 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         ON gateway_events (received_at)
         """
     )
+    ensure_gateway_order_broker_boundary_schema(connection)
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_events_type_status
+        ON gateway_events (event_type, status)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_gateway_events_retention_received_type_status
+        ON gateway_events (received_at, event_type, status)
+        WHERE command_id IS NULL
+        """
+    )
 
 
 def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
@@ -1294,10 +1397,82 @@ def _create_projection_watermark_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        connection,
+        "projection_watermarks",
+        {
+            "last_success_event_rowid": "INTEGER NOT NULL DEFAULT 0",
+            "last_success_event_id": "TEXT",
+            "last_success_event_received_at": "TEXT",
+            "last_success_processed_at": "TEXT",
+            "last_error_event_rowid": "INTEGER NOT NULL DEFAULT 0",
+            "last_error_event_id": "TEXT",
+            "last_error_event_received_at": "TEXT",
+            "last_error_processed_at": "TEXT",
+            "last_error_message": "TEXT",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_projection_watermarks_updated_at
         ON projection_watermarks (updated_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS projection_event_results (
+            projection_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            event_rowid INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('SUCCESS', 'ERROR')),
+            outcome TEXT NOT NULL,
+            error_message TEXT,
+            first_processed_at TEXT NOT NULL,
+            processed_at TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL DEFAULT 1,
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (projection_name, event_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_event_results_event
+        ON projection_event_results (event_rowid, event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_projection_event_results_status
+        ON projection_event_results (projection_name, status, processed_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE VIEW IF NOT EXISTS projection_retention_event_rca AS
+        SELECT
+            ge.rowid AS event_rowid,
+            ge.event_id,
+            ge.event_type,
+            ge.status AS gateway_event_status,
+            ge.received_at,
+            po.projection_name,
+            po.status AS outbox_status,
+            po.last_error AS outbox_error,
+            per.status AS projection_result_status,
+            per.outcome AS projection_outcome,
+            per.error_message AS projection_error,
+            per.processed_at AS projection_processed_at,
+            CASE
+                WHEN po.status = 'APPLIED' AND per.status = 'SUCCESS' THEN 1
+                ELSE 0
+            END AS projection_retention_ready
+        FROM gateway_events AS ge
+        LEFT JOIN projection_outbox AS po ON po.event_id = ge.event_id
+        LEFT JOIN projection_event_results AS per
+            ON per.event_id = ge.event_id
+            AND per.projection_name = po.projection_name
         """
     )
 
@@ -1356,6 +1531,12 @@ def _create_projection_outbox_tables(connection: sqlite3.Connection) -> None:
     )
     connection.execute(
         """
+        CREATE INDEX IF NOT EXISTS idx_projection_outbox_event_status_projection
+        ON projection_outbox (event_id, status, projection_name)
+        """
+    )
+    connection.execute(
+        """
         CREATE INDEX IF NOT EXISTS idx_projection_outbox_updated_at
         ON projection_outbox (updated_at)
         """
@@ -1376,9 +1557,25 @@ def _create_event_retention_tables(connection: sqlite3.Connection) -> None:
             deleted_raw_event_count INTEGER NOT NULL,
             market_data_watermark_rowid INTEGER NOT NULL,
             prunable_event_types_json TEXT NOT NULL,
+            age_eligible_event_count INTEGER NOT NULL DEFAULT 0,
+            projection_blocked_event_count INTEGER NOT NULL DEFAULT 0,
+            projection_watermarks_json TEXT NOT NULL DEFAULT '{}',
+            blocked_reason_counts_json TEXT NOT NULL DEFAULT '{}',
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
         """
+    )
+    _ensure_columns(
+        connection,
+        "event_retention_runs",
+        {
+            "age_eligible_event_count": "INTEGER NOT NULL DEFAULT 0",
+            "projection_blocked_event_count": "INTEGER NOT NULL DEFAULT 0",
+            "projection_watermarks_json": "TEXT NOT NULL DEFAULT '{}'",
+            "blocked_reason_counts_json": "TEXT NOT NULL DEFAULT '{}'",
+            "no_trading_side_effects": "INTEGER NOT NULL DEFAULT 1",
+        },
     )
     connection.execute(
         """
@@ -2046,6 +2243,17 @@ def _create_market_reference_projection_routing_tables(
         )
         """
     )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_reference_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
 
 
 def _create_market_index_tables(connection: sqlite3.Connection) -> None:
@@ -2143,6 +2351,154 @@ def _create_market_index_tables(connection: sqlite3.Connection) -> None:
     )
 
 
+def _create_market_index_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            sample_count INTEGER NOT NULL,
+            missing_sample_count INTEGER NOT NULL,
+            projection_error_count INTEGER NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            parser_verified_count INTEGER NOT NULL,
+            parser_unverified_count INTEGER NOT NULL,
+            data_usable_count INTEGER NOT NULL,
+            data_unusable_count INTEGER NOT NULL,
+            realtime_source_count INTEGER NOT NULL,
+            tr_bootstrap_source_count INTEGER NOT NULL,
+            unknown_source_count INTEGER NOT NULL,
+            latest_event_id TEXT,
+            latest_event_ts TEXT,
+            data_usability_ready INTEGER NOT NULL DEFAULT 0,
+            parser_confidence_ready INTEGER NOT NULL DEFAULT 0,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            index_code TEXT,
+            parser_status TEXT,
+            data_source TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_reconcile_runs_created
+        ON market_index_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_reconcile_issues_run
+        ON market_index_projection_reconcile_issues (run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_reconcile_issues_reason
+        ON market_index_projection_reconcile_issues (reason_code)
+        """
+    )
+
+
+def _create_market_index_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_index',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            data_usable_required INTEGER NOT NULL DEFAULT 1,
+            parser_verified_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            parser_status TEXT,
+            parser_verified INTEGER NOT NULL DEFAULT 0,
+            data_source TEXT NOT NULL DEFAULT 'UNKNOWN',
+            data_usable INTEGER NOT NULL DEFAULT 0,
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_routing_event
+        ON market_index_projection_routing_decisions (event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_routing_decided
+        ON market_index_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_routing_would_skip
+        ON market_index_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_index_routing_effective_skip
+        ON market_index_projection_routing_decisions (effective_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_index_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
 def _create_market_scan_tables(connection: sqlite3.Connection) -> None:
     connection.execute(
         """
@@ -2224,6 +2580,194 @@ def _create_market_scan_tables(connection: sqlite3.Connection) -> None:
         ON market_scan_errors (created_at)
         """
     )
+    _ensure_columns(
+        connection,
+        "market_scan_snapshots",
+        {
+            "source_event_id": "TEXT",
+            "request_id": "TEXT",
+            "parser_status": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
+    _ensure_columns(
+        connection,
+        "market_scan_latest",
+        {
+            "source_event_id": "TEXT",
+            "request_id": "TEXT",
+            "parser_status": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_source_event
+        ON market_scan_snapshots (source_event_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_snapshots_request
+        ON market_scan_snapshots (request_id)
+        """
+    )
+
+
+def _create_market_scan_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            source_row_count INTEGER NOT NULL,
+            projected_row_count INTEGER NOT NULL,
+            projection_error_row_count INTEGER NOT NULL,
+            event_covered_count INTEGER NOT NULL,
+            parser_verified_event_count INTEGER NOT NULL,
+            data_usable_event_count INTEGER NOT NULL,
+            market_data_dependency_ready_count INTEGER NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            latest_event_id TEXT,
+            latest_event_ts TEXT,
+            latest_event_covered INTEGER NOT NULL DEFAULT 0,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            scan_type TEXT,
+            market TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_reconcile_runs_created
+        ON market_scan_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_reconcile_issues_run
+        ON market_scan_projection_reconcile_issues (run_id)
+        """
+    )
+
+
+def _create_market_scan_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_scan',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            parser_verified INTEGER NOT NULL DEFAULT 0,
+            data_usable INTEGER NOT NULL DEFAULT 0,
+            market_data_dependency_ready INTEGER NOT NULL DEFAULT 0,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            observe_safe INTEGER NOT NULL DEFAULT 1,
+            event_age_sec REAL,
+            event_future_skew_sec REAL,
+            skip_budget_limit INTEGER NOT NULL DEFAULT 0,
+            skip_budget_used INTEGER NOT NULL DEFAULT 0,
+            skip_budget_remaining INTEGER NOT NULL DEFAULT 0,
+            rollback_required INTEGER NOT NULL DEFAULT 0,
+            controller_status TEXT NOT NULL DEFAULT 'WARN',
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_disabled_in_pr20 INTEGER NOT NULL DEFAULT 1,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "market_scan_projection_routing_decisions",
+        {
+            "cutover_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "global_kill_switch": "INTEGER NOT NULL DEFAULT 1",
+            "event_age_sec": "REAL",
+            "event_future_skew_sec": "REAL",
+            "skip_budget_limit": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_used": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_remaining": "INTEGER NOT NULL DEFAULT 0",
+            "rollback_required": "INTEGER NOT NULL DEFAULT 0",
+            "controller_status": "TEXT NOT NULL DEFAULT 'WARN'",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_decided
+        ON market_scan_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_would_skip
+        ON market_scan_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_scan_routing_effective_skip
+        ON market_scan_projection_routing_decisions (
+            effective_skip_inline,
+            decided_at
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_scan_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
 
 
 def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
@@ -2231,6 +2775,9 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS market_regime_snapshots (
             snapshot_id TEXT PRIMARY KEY,
+            source_event_id TEXT,
+            source_projection TEXT,
+            generated_by TEXT,
             target_code TEXT NOT NULL,
             market TEXT,
             primary_index_code TEXT NOT NULL,
@@ -2248,6 +2795,15 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    _ensure_columns(
+        connection,
+        "market_regime_snapshots",
+        {
+            "source_event_id": "TEXT",
+            "source_projection": "TEXT",
+            "generated_by": "TEXT",
+        },
+    )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_target_time
@@ -2258,6 +2814,226 @@ def _create_market_regime_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_status_time
         ON market_regime_snapshots (regime_status, snapshot_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_snapshots_source_event
+        ON market_regime_snapshots (source_event_id)
+        WHERE source_event_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_context_snapshots (
+            snapshot_id TEXT PRIMARY KEY,
+            trade_date TEXT NOT NULL,
+            market TEXT NOT NULL CHECK (market IN ('KOSPI', 'KOSDAQ')),
+            source_watermark_hash TEXT NOT NULL,
+            source_watermark_json TEXT NOT NULL,
+            source_regime_snapshot_id TEXT,
+            source_event_id TEXT,
+            regime_status TEXT NOT NULL,
+            quality_status TEXT NOT NULL,
+            parser_confidence_status TEXT NOT NULL,
+            data_quality_status TEXT NOT NULL,
+            trading_data_usable INTEGER NOT NULL DEFAULT 0,
+            market_regime_json TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            snapshot_at TEXT NOT NULL,
+            generated_by TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(market, source_watermark_hash)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_context_snapshots_market_time
+        ON market_context_snapshots (market, snapshot_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_context_snapshots_source_event
+        ON market_context_snapshots (source_event_id)
+        WHERE source_event_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_context_latest (
+            market TEXT PRIMARY KEY CHECK (market IN ('KOSPI', 'KOSDAQ')),
+            snapshot_id TEXT NOT NULL UNIQUE,
+            trade_date TEXT NOT NULL,
+            source_watermark_hash TEXT NOT NULL,
+            snapshot_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+
+
+def _create_market_regime_projection_reconcile_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_regime_projection_reconcile_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            checked_event_count INTEGER NOT NULL,
+            observed_index_count INTEGER NOT NULL,
+            outbox_job_count INTEGER NOT NULL,
+            outbox_pending_count INTEGER NOT NULL,
+            outbox_processing_count INTEGER NOT NULL,
+            outbox_applied_count INTEGER NOT NULL,
+            outbox_skipped_count INTEGER NOT NULL,
+            outbox_error_count INTEGER NOT NULL,
+            outbox_dead_letter_count INTEGER NOT NULL,
+            event_linked_regime_count INTEGER NOT NULL,
+            context_snapshot_count INTEGER NOT NULL,
+            latest_event_id TEXT,
+            latest_event_ts TEXT,
+            latest_context_watermark_hash TEXT,
+            latest_context_regime_snapshot_id TEXT,
+            latest_event_covered INTEGER NOT NULL DEFAULT 0,
+            context_ready INTEGER NOT NULL DEFAULT 0,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            summary_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            no_trading_side_effects INTEGER NOT NULL DEFAULT 1
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_regime_projection_reconcile_issues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            reason_code TEXT NOT NULL,
+            event_id TEXT,
+            index_code TEXT,
+            message TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_reconcile_runs_created
+        ON market_regime_projection_reconcile_runs (created_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_reconcile_issues_run
+        ON market_regime_projection_reconcile_issues (run_id)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_reconcile_issues_reason
+        ON market_regime_projection_reconcile_issues (reason_code)
+        """
+    )
+
+
+def _create_market_regime_projection_routing_tables(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_regime_projection_routing_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            projection_name TEXT NOT NULL DEFAULT 'market_regime',
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
+            reconcile_required INTEGER NOT NULL DEFAULT 1,
+            latest_reconcile_run_id TEXT,
+            latest_reconcile_status TEXT,
+            latest_reconcile_created_at TEXT,
+            latest_reconcile_age_sec REAL,
+            append_only_ready INTEGER NOT NULL DEFAULT 0,
+            outbox_status TEXT,
+            outbox_job_present INTEGER NOT NULL DEFAULT 0,
+            index_artifact_present INTEGER NOT NULL DEFAULT 0,
+            context_ready INTEGER NOT NULL DEFAULT 0,
+            worker_apply_enabled INTEGER NOT NULL DEFAULT 0,
+            skip_budget_limit INTEGER NOT NULL DEFAULT 0,
+            skip_budget_used INTEGER NOT NULL DEFAULT 0,
+            skip_budget_remaining INTEGER NOT NULL DEFAULT 0,
+            observe_safe INTEGER NOT NULL DEFAULT 1,
+            index_routing_ready INTEGER NOT NULL DEFAULT 0,
+            rollback_required INTEGER NOT NULL DEFAULT 0,
+            controller_status TEXT NOT NULL DEFAULT 'WARN',
+            would_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_inline INTEGER NOT NULL DEFAULT 0,
+            effective_skip_disabled_in_pr18 INTEGER NOT NULL DEFAULT 1,
+            blocked_reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(event_id, projection_name)
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "market_regime_projection_routing_decisions",
+        {
+            "cutover_enabled": "INTEGER NOT NULL DEFAULT 0",
+            "global_kill_switch": "INTEGER NOT NULL DEFAULT 1",
+            "skip_budget_limit": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_used": "INTEGER NOT NULL DEFAULT 0",
+            "skip_budget_remaining": "INTEGER NOT NULL DEFAULT 0",
+            "observe_safe": "INTEGER NOT NULL DEFAULT 1",
+            "index_routing_ready": "INTEGER NOT NULL DEFAULT 0",
+            "rollback_required": "INTEGER NOT NULL DEFAULT 0",
+            "controller_status": "TEXT NOT NULL DEFAULT 'WARN'",
+        },
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_routing_event
+        ON market_regime_projection_routing_decisions (event_id, projection_name)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_routing_decided
+        ON market_regime_projection_routing_decisions (decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_routing_would_skip
+        ON market_regime_projection_routing_decisions (would_skip_inline, decided_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_market_regime_routing_effective_skip
+        ON market_regime_projection_routing_decisions (
+            effective_skip_inline,
+            decided_at
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_regime_append_only_budget_state (
+            budget_name TEXT PRIMARY KEY,
+            minute_bucket TEXT NOT NULL,
+            used_count INTEGER NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+            last_event_id TEXT,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
         """
     )
 
@@ -2604,6 +3380,7 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS candidate_context_latest (
             candidate_instance_id TEXT PRIMARY KEY,
+            market_context_snapshot_id TEXT,
             trade_date TEXT NOT NULL,
             code TEXT NOT NULL,
             name TEXT NOT NULL,
@@ -2613,6 +3390,18 @@ def _create_candidate_projection_tables(connection: sqlite3.Connection) -> None:
             readiness_json TEXT NOT NULL DEFAULT '{}',
             refreshed_at TEXT NOT NULL
         )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "candidate_context_latest",
+        {"market_context_snapshot_id": "TEXT"},
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_candidate_context_market_snapshot
+        ON candidate_context_latest (market_context_snapshot_id)
+        WHERE market_context_snapshot_id IS NOT NULL
         """
     )
     connection.execute(
@@ -2719,7 +3508,14 @@ def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -2739,8 +3535,36 @@ def _create_strategy_projection_tables(connection: sqlite3.Connection) -> None:
             confidence REAL NOT NULL DEFAULT 0,
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
+        """
+    )
+    for table_name in ("strategy_observations", "strategy_observations_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_latest_source_watermark
+        ON strategy_observations_latest (source_watermark_hash)
+        WHERE source_watermark_hash IS NOT NULL
         """
     )
     connection.execute(
@@ -2853,7 +3677,14 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -2874,8 +3705,36 @@ def _create_risk_projection_tables(connection: sqlite3.Connection) -> None:
             pass_count INTEGER NOT NULL DEFAULT 0,
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             config_version TEXT NOT NULL,
-            observe_only INTEGER NOT NULL DEFAULT 1
+            observe_only INTEGER NOT NULL DEFAULT 1,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
+        """
+    )
+    for table_name in ("risk_observations", "risk_observations_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_risk_latest_source_watermark
+        ON risk_observations_latest (source_watermark_hash)
+        WHERE source_watermark_hash IS NOT NULL
         """
     )
     connection.execute(
@@ -2990,7 +3849,16 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             reason_codes_json TEXT NOT NULL DEFAULT '[]',
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
-            not_order_intent INTEGER NOT NULL DEFAULT 1
+            not_order_intent INTEGER NOT NULL DEFAULT 1,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3027,7 +3895,17 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
             not_order_intent INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            entry_timing_evaluation_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
         )
         """
     )
@@ -3064,7 +3942,69 @@ def _create_entry_timing_tables(connection: sqlite3.Connection) -> None:
             evidence_json TEXT NOT NULL DEFAULT '{}',
             observe_only INTEGER NOT NULL DEFAULT 1,
             not_order_intent INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            entry_timing_evaluation_id TEXT,
+            strategy_observation_id TEXT,
+            risk_observation_id TEXT,
+            source_run_id TEXT,
+            source_watermark TEXT,
+            source_watermark_hash TEXT,
+            source_event_id TEXT,
+            source_observed_at TEXT,
+            data_age_sec REAL,
+            generated_by TEXT
+        )
+        """
+    )
+    _ensure_columns(
+        connection,
+        "entry_timing_evaluations",
+        {
+            "strategy_observation_id": "TEXT",
+            "risk_observation_id": "TEXT",
+            "source_run_id": "TEXT",
+            "source_watermark": "TEXT",
+            "source_watermark_hash": "TEXT",
+            "source_event_id": "TEXT",
+            "source_observed_at": "TEXT",
+            "data_age_sec": "REAL",
+            "generated_by": "TEXT",
+        },
+    )
+    for table_name in ("order_plan_drafts", "order_plan_drafts_latest"):
+        _ensure_columns(
+            connection,
+            table_name,
+            {
+                "entry_timing_evaluation_id": "TEXT",
+                "strategy_observation_id": "TEXT",
+                "risk_observation_id": "TEXT",
+                "source_run_id": "TEXT",
+                "source_watermark": "TEXT",
+                "source_watermark_hash": "TEXT",
+                "source_event_id": "TEXT",
+                "source_observed_at": "TEXT",
+                "data_age_sec": "REAL",
+                "generated_by": "TEXT",
+            },
+        )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_entry_timing_candidate_lineage
+        ON entry_timing_evaluations (
+            candidate_instance_id,
+            evaluated_at DESC,
+            source_watermark_hash
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_plan_latest_candidate_lineage
+        ON order_plan_drafts_latest (
+            candidate_instance_id,
+            created_at DESC,
+            source_watermark_hash
         )
         """
     )
@@ -3583,6 +4523,7 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
             candidate_instance_id TEXT NOT NULL,
             strategy_observation_id TEXT NOT NULL,
             risk_observation_id TEXT NOT NULL,
+            order_plan_id TEXT,
             dry_run_intent_id TEXT,
             dry_run_order_id TEXT,
             trade_date TEXT NOT NULL,
@@ -3607,6 +4548,7 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    ensure_live_sim_order_plan_uniqueness_schema(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS live_sim_orders (
@@ -3978,5 +4920,115 @@ def _create_live_sim_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_live_sim_errors_created
         ON live_sim_errors (created_at)
+        """
+    )
+
+
+def _create_live_sim_lifecycle_consumer_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_inbox (
+            event_id TEXT PRIMARY KEY,
+            event_rowid INTEGER NOT NULL UNIQUE,
+            event_type TEXT NOT NULL,
+            source TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'PENDING'
+                CHECK (status IN ('PENDING', 'PROCESSING', 'APPLIED', 'DEAD_LETTER')),
+            attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+            available_at TEXT NOT NULL,
+            locked_by TEXT,
+            locked_at TEXT,
+            consumer_source TEXT,
+            result_json TEXT NOT NULL DEFAULT '{}',
+            last_error TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+            processed_at TEXT
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_inbox_status_sequence
+        ON live_sim_lifecycle_inbox (status, event_rowid, available_at)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_inbox_locked
+        ON live_sim_lifecycle_inbox (status, locked_at)
+        WHERE status = 'PROCESSING'
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO app_metadata (key, value)
+        VALUES ('live_sim_lifecycle_inbox_started_at', datetime('now'))
+        ON CONFLICT(key) DO NOTHING
+        """
+    )
+
+
+def _create_live_sim_lifecycle_cutover_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_consumer_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            claimed_count INTEGER NOT NULL DEFAULT 0,
+            applied_count INTEGER NOT NULL DEFAULT 0,
+            duplicate_count INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
+            dead_letter_count INTEGER NOT NULL DEFAULT 0,
+            stale_reset_count INTEGER NOT NULL DEFAULT 0,
+            started_at TEXT NOT NULL,
+            completed_at TEXT NOT NULL,
+            evidence_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_consumer_runs_completed
+        ON live_sim_lifecycle_consumer_runs (completed_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_sim_lifecycle_routing_decisions (
+            decision_id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL UNIQUE,
+            event_rowid INTEGER NOT NULL,
+            event_type TEXT NOT NULL,
+            would_defer_inline INTEGER NOT NULL DEFAULT 0,
+            effective_defer_inline INTEGER NOT NULL DEFAULT 0,
+            inline_fallback INTEGER NOT NULL DEFAULT 1,
+            ordered_backlog_blocked INTEGER NOT NULL DEFAULT 0,
+            cutover_enabled INTEGER NOT NULL DEFAULT 0,
+            dry_run_enabled INTEGER NOT NULL DEFAULT 0,
+            global_kill_switch INTEGER NOT NULL DEFAULT 1,
+            consumer_enabled INTEGER NOT NULL DEFAULT 0,
+            worker_enabled INTEGER NOT NULL DEFAULT 0,
+            worker_healthy INTEGER NOT NULL DEFAULT 0,
+            pending_count INTEGER NOT NULL DEFAULT 0,
+            processing_count INTEGER NOT NULL DEFAULT 0,
+            dead_letter_count INTEGER NOT NULL DEFAULT 0,
+            reason_codes_json TEXT NOT NULL DEFAULT '[]',
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_routing_created
+        ON live_sim_lifecycle_routing_decisions (created_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_live_sim_lifecycle_routing_effective
+        ON live_sim_lifecycle_routing_decisions (effective_defer_inline, created_at DESC)
+        WHERE effective_defer_inline = 1
         """
     )

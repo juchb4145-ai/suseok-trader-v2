@@ -4,6 +4,7 @@ import json
 from datetime import timedelta
 from typing import Any
 
+import pytest
 from domain.broker.commands import GatewayCommand
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
@@ -20,6 +21,7 @@ from services.market_data_service import (
 )
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
+    EvaluationRunLockError,
     runtime_execution_lock,
 )
 from services.runtime.incremental_evaluation import get_incremental_evaluation_status
@@ -282,7 +284,7 @@ def test_projection_outbox_excludes_non_projection_gateway_events(tmp_path) -> N
     assert jobs == []
 
 
-def test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_running(
+def test_runtime_execution_lock_blocks_reacquire_after_ttl_while_owner_still_running(
     tmp_path,
 ) -> None:
     db_path = tmp_path / "ttl-overlap.sqlite3"
@@ -310,22 +312,26 @@ def test_runtime_execution_lock_can_be_reacquired_after_ttl_while_owner_still_ru
             )
             first.commit()
 
-            with runtime_execution_lock(
-                second,
-                EVALUATION_PIPELINE_LOCK,
-                owner_id="owner-two",
-                ttl_sec=60,
-            ):
-                row = second.execute(
-                    """
-                    SELECT owner_id
-                    FROM runtime_execution_locks
-                    WHERE lock_name = ?
-                    """,
-                    (EVALUATION_PIPELINE_LOCK,),
-                ).fetchone()
+            with pytest.raises(EvaluationRunLockError) as exc_info:
+                with runtime_execution_lock(
+                    second,
+                    EVALUATION_PIPELINE_LOCK,
+                    owner_id="owner-two",
+                    ttl_sec=60,
+                ):
+                    raise AssertionError("live owner lock must not be replaced")
 
-        assert row["owner_id"] == "owner-two"
+            row = second.execute(
+                """
+                SELECT owner_id
+                FROM runtime_execution_locks
+                WHERE lock_name = ?
+                """,
+                (EVALUATION_PIPELINE_LOCK,),
+            ).fetchone()
+
+        assert exc_info.value.reason == "OWNER_ALIVE_AFTER_TTL"
+        assert row["owner_id"] == "owner-one"
     finally:
         first.close()
         second.close()
@@ -344,7 +350,9 @@ def test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query(
     assert snapshot["pipeline_summary"]["strategy"]["latest_observation_count"] == 1
     assert snapshot["pipeline_summary"]["risk"]["latest_observation_count"] == 1
     assert snapshot["pipeline_summary"]["entry_timing"]["latest_plan_count"] == 1
-    assert "coherency" not in snapshot["pipeline_summary"]
+    assert snapshot["pipeline_summary"]["coherency"]["status"] == "FAIL"
+    assert snapshot["pipeline_coherency"]["status"] == "FAIL"
+    assert snapshot["pipeline_coherency"]["mismatch_count"] == 1
     assert mismatches == [
         {
             "candidate_instance_id": "candidate-mixed",
@@ -355,7 +363,7 @@ def test_dashboard_snapshot_mixed_latest_rows_are_detectable_by_guard_query(
     ]
 
 
-def test_order_command_lifecycle_detects_dispatched_without_pre_ack(tmp_path) -> None:
+def test_order_command_lifecycle_detects_claimed_without_pre_ack(tmp_path) -> None:
     connection = initialize_database(tmp_path / "dispatched-no-preack.sqlite3")
     command = _live_sim_order_command("cmd-dispatched-no-preack")
 
@@ -369,7 +377,7 @@ def test_order_command_lifecycle_detects_dispatched_without_pre_ack(tmp_path) ->
     assert stuck == [
         {
             "command_id": command.command_id,
-            "status": GatewayCommandStatus.DISPATCHED.value,
+            "status": GatewayCommandStatus.CLAIMED.value,
             "event_count": 0,
         }
     ]
@@ -812,7 +820,7 @@ def _dispatched_order_commands_without_pre_ack(connection) -> list[dict[str, Any
                 WHERE e.command_id = c.command_id
             ) AS event_count
         FROM gateway_commands AS c
-        WHERE c.status = ?
+        WHERE c.status IN (?, ?, ?)
             AND c.command_type IN ('send_order', 'cancel_order')
             AND NOT EXISTS (
                 SELECT 1
@@ -822,7 +830,11 @@ def _dispatched_order_commands_without_pre_ack(connection) -> list[dict[str, Any
             )
         ORDER BY c.command_id
         """,
-        (GatewayCommandStatus.DISPATCHED.value,),
+        (
+            GatewayCommandStatus.DISPATCHED.value,
+            GatewayCommandStatus.CLAIMED.value,
+            GatewayCommandStatus.GATEWAY_STARTED.value,
+        ),
     ).fetchall()
     return [
         {

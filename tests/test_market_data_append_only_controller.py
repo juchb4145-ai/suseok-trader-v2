@@ -103,6 +103,76 @@ def test_controller_market_data_limited_allows_all_three_when_healthy(tmp_path) 
     assert status.condition_event_gate.effective_skip_allowed is True
 
 
+def test_controller_full_guarded_accepts_pending_within_sla(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "controller-full-guarded-pending.sqlite3")
+    _insert_reconcile_run(connection, status="PASS", append_only_ready=True)
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO projection_outbox (
+            outbox_id, projection_name, event_id, event_type, source, status,
+            priority, attempts, available_at, created_at, updated_at, metadata_json
+        )
+        VALUES (
+            'market_data:evt_pending', 'market_data', 'evt_pending', 'price_tick',
+            'test', 'PENDING', 0, 0, ?, ?, ?, '{}'
+        )
+        """,
+        (now, now, now),
+    )
+    connection.commit()
+
+    status = build_market_data_append_only_controller_status(
+        connection,
+        settings=_healthy_settings(
+            gateway_market_data_append_only_operating_mode="MARKET_DATA_FULL_GUARDED",
+            gateway_market_data_append_only_max_pending_within_sla=1,
+        ),
+    )
+
+    connection.close()
+    assert status.backlog_readiness_status == "WARN"
+    assert status.status == "PASS"
+    assert status.price_tick_gate.backlog_ready is True
+    assert status.price_tick_gate.effective_skip_allowed is True
+
+
+def test_controller_full_guarded_blocks_pending_above_sla(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "controller-full-guarded-overflow.sqlite3")
+    _insert_reconcile_run(connection, status="PASS", append_only_ready=True)
+    now = datetime_to_wire(utc_now())
+    connection.execute(
+        """
+        INSERT INTO projection_outbox (
+            outbox_id, projection_name, event_id, event_type, source, status,
+            priority, attempts, available_at, created_at, updated_at, metadata_json
+        )
+        VALUES (
+            'market_data:evt_overflow', 'market_data', 'evt_overflow', 'price_tick',
+            'test', 'PENDING', 0, 0, ?, ?, ?, '{}'
+        )
+        """,
+        (now, now, now),
+    )
+    connection.commit()
+
+    status = build_market_data_append_only_controller_status(
+        connection,
+        settings=_healthy_settings(
+            gateway_market_data_append_only_operating_mode="MARKET_DATA_FULL_GUARDED",
+            gateway_market_data_append_only_max_pending_within_sla=0,
+        ),
+    )
+
+    connection.close()
+    assert status.backlog_readiness_status == "FAIL"
+    assert status.price_tick_gate.backlog_ready is False
+    assert status.price_tick_gate.effective_skip_allowed is False
+    assert "MARKET_DATA_APPEND_ONLY_CONTROLLER_BACKLOG_NOT_READY" in (
+        status.price_tick_gate.blocked_reason_codes
+    )
+
+
 def test_controller_global_budget_exhaustion_blocks_all(tmp_path) -> None:
     connection = initialize_database(tmp_path / "controller-budget.sqlite3")
     _insert_reconcile_run(connection, status="PASS", append_only_ready=True)

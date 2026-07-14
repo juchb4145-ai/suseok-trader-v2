@@ -46,7 +46,8 @@ REALTIME_STOCK_FIDS = [
 
 PRICE_TICK_REAL_TYPES = frozenset({"주식체결", "주식시세"})
 QUOTE_REAL_TYPES = frozenset({"주식우선호가"})
-MARKET_INDEX_REAL_TYPES = frozenset({"업종지수"})
+MARKET_INDEX_REAL_TYPES = frozenset({"업종지수", "업종등락"})
+MARKET_INDEX_NON_TICK_REAL_TYPES = frozenset({"예상업종지수"})
 MARKET_INDEX_KIWOOM_CODE_BY_INDEX = {
     "KOSPI": "001",
     "KOSDAQ": "101",
@@ -61,7 +62,7 @@ MARKET_INDEX_REALTIME_FIDS = (
     FID_CHANGE_RATE,
     FID_TRADE_TIME,
 )
-MARKET_INDEX_PARSER_STATUS = "PILOT_UNVERIFIED_FID_MAP"
+MARKET_INDEX_PARSER_STATUS = "VERIFIED"
 REALTIME_EXCHANGE_SUFFIXES = {
     "KRX": "",
     "NXT": "_NX",
@@ -105,6 +106,15 @@ ERROR_MESSAGES = {
     -340: "계좌정보없음",
     -500: "종목코드없음",
 }
+
+
+class MarketIndexRealtimeParseError(ValueError):
+    def __init__(self, reason_codes: Iterable[str]) -> None:
+        normalized = tuple(dict.fromkeys(str(code).strip() for code in reason_codes if code))
+        self.reason_codes = normalized or ("INDEX_REAL_PARSE_INVALID",)
+        super().__init__(",".join(self.reason_codes))
+
+
 LOGIN_EVENT_TIMEOUT_CODE = -1000
 DEFAULT_LOGIN_EVENT_LOOP_TIMEOUT_MS = int(
     os.environ.get("KIWOOM_LOGIN_EVENT_LOOP_TIMEOUT_MS", "60000")
@@ -859,6 +869,9 @@ class KiwoomClient:
             audit_code = market_index_code or str(raw_code or "").strip()
         else:
             audit_code = normalize_code(raw_code)
+        callback_admitted = is_market_index_callback or self._is_registered_stock_callback(
+            raw_code
+        )
         self._record_thread_audit(
             "OnReceiveRealData",
             phase="CALLBACK",
@@ -867,7 +880,13 @@ class KiwoomClient:
             real_type=real_type_text,
             real_data_present=bool(str(real_data or "")),
             callback_asset_type="market_index" if is_market_index_callback else "stock",
+            callback_admitted=callback_admitted,
+            admission_reason=(
+                "" if callback_admitted else "UNREGISTERED_REALTIME_CODE"
+            ),
         )
+        if not callback_admitted:
+            return
         if is_market_index_callback:
             if not market_index_code:
                 self.realtime_data_received.emit(
@@ -897,6 +916,30 @@ class KiwoomClient:
                 real_type_text,
                 bool(str(real_data or "")),
             )
+            if real_type_text in MARKET_INDEX_NON_TICK_REAL_TYPES:
+                return
+            if real_type_text and real_type_text not in MARKET_INDEX_REAL_TYPES:
+                self.realtime_parse_error.emit(
+                    {
+                        "reason": "INDEX_PARSE_ERROR",
+                        "reason_codes": [
+                            "INDEX_PARSE_ERROR",
+                            "INDEX_REAL_TYPE_UNSUPPORTED",
+                        ],
+                        "asset_type": "market_index",
+                        "market_index": True,
+                        "index_code": market_index_code,
+                        "code": market_index_code,
+                        "kiwoom_code": raw_code,
+                        "real_type": real_type_text,
+                        "error": "INDEX_REAL_TYPE_UNSUPPORTED",
+                        "parser_status": "ERROR",
+                        "parser_evidence": market_index_parser_evidence(),
+                        "raw_fids_present": [],
+                        "raw_fids": {},
+                    }
+                )
+                return
             raw_values = {
                 fid: self._market_index_real_raw(raw_code, fid)
                 for fid in MARKET_INDEX_REALTIME_FIDS
@@ -911,10 +954,15 @@ class KiwoomClient:
                     real_data=str(real_data or ""),
                 )
             except Exception as exc:
+                specific_reason_codes = (
+                    list(exc.reason_codes)
+                    if isinstance(exc, MarketIndexRealtimeParseError)
+                    else []
+                )
                 self.realtime_parse_error.emit(
                     {
                         "reason": "INDEX_PARSE_ERROR",
-                        "reason_codes": ["INDEX_PARSE_ERROR"],
+                        "reason_codes": ["INDEX_PARSE_ERROR", *specific_reason_codes],
                         "asset_type": "market_index",
                         "market_index": True,
                         "index_code": market_index_code,
@@ -929,6 +977,7 @@ class KiwoomClient:
                             for fid, value in raw_values.items()
                             if str(value or "").strip()
                         ),
+                        "raw_fids": _market_index_raw_fid_evidence(raw_values),
                     }
                 )
                 return
@@ -1072,6 +1121,17 @@ class KiwoomClient:
             self._realtime_screen_codes = screen_map
         return screen_map
 
+    def _is_registered_stock_callback(self, raw_code: str) -> bool:
+        screen_map = getattr(self, "_realtime_screen_codes", None)
+        # Lightweight object.__new__ test clients predate subscription tracking.
+        if not isinstance(screen_map, dict):
+            return True
+        try:
+            kiwoom_code = normalize_kiwoom_realtime_code(raw_code)
+        except ValueError:
+            return False
+        return any(kiwoom_code in codes for codes in screen_map.values())
+
     def _market_index_screen_code_map(self) -> dict[str, set[str]]:
         screen_map = getattr(self, "_market_index_realtime_screen_codes", None)
         if not isinstance(screen_map, dict):
@@ -1160,6 +1220,7 @@ class MockKiwoomClient:
         self.registered_market_index_kiwoom_codes: set[str] = set()
         self.removed_codes: list[str] = []
         self.removed_market_index_codes: list[str] = []
+        self.remove_all_realtime_count = 0
         self.orders: list[KiwoomOrderRequest] = []
         self.send_condition_calls: list[dict[str, Any]] = []
         self.stop_condition_calls: list[dict[str, Any]] = []
@@ -1279,6 +1340,7 @@ class MockKiwoomClient:
             self.removed_codes.append(normalized)
 
     def remove_all_realtime(self) -> None:
+        self.remove_all_realtime_count += 1
         self.registered_codes.clear()
         self.registered_market_index_codes.clear()
         self.registered_market_index_kiwoom_codes.clear()
@@ -1561,9 +1623,10 @@ def market_index_realtime_fid_string() -> str:
 
 def market_index_parser_evidence() -> dict[str, Any]:
     return {
-        "mapping_status": "UNVERIFIED_PILOT",
-        "requires_koa_studio_confirmation": True,
-        "source": "adapter_pilot_candidate_fids",
+        "mapping_status": "VERIFIED_KRX_REALTIME",
+        "requires_koa_studio_confirmation": False,
+        "source": "kiwoom_krx_realtime_20260713",
+        "verified_at": "2026-07-13T00:02:08Z",
         "index_code_map": dict(MARKET_INDEX_KIWOOM_CODE_BY_INDEX),
         "field_fids": {
             "price": FID_CURRENT_PRICE,
@@ -1572,6 +1635,7 @@ def market_index_parser_evidence() -> dict[str, Any]:
             "trade_time": FID_TRADE_TIME,
         },
         "real_types": sorted(MARKET_INDEX_REAL_TYPES),
+        "non_tick_real_types": sorted(MARKET_INDEX_NON_TICK_REAL_TYPES),
     }
 
 
@@ -1584,7 +1648,8 @@ def is_quote_real_type(real_type: str) -> bool:
 
 
 def is_market_index_real_type(real_type: str) -> bool:
-    return str(real_type or "").strip() in MARKET_INDEX_REAL_TYPES
+    normalized = str(real_type or "").strip()
+    return normalized in MARKET_INDEX_REAL_TYPES or normalized in MARKET_INDEX_NON_TICK_REAL_TYPES
 
 
 def parse_quote_from_fids(
@@ -1649,27 +1714,43 @@ def parse_market_index_tick_from_fids(
     normalized_index_code = normalize_market_index_code(index_code)
     raw_values = {int(fid): str(value or "").strip() for fid, value in dict(raw_fids).items()}
     reason_codes: list[str] = []
-    parse_fallback = False
 
-    price, ok = _parse_real_float(raw_values.get(FID_CURRENT_PRICE), abs_value=True)
-    parse_fallback = parse_fallback or not ok
-    change_value, ok = _parse_real_float(raw_values.get(FID_CHANGE_VALUE), abs_value=False)
-    parse_fallback = parse_fallback or not ok
-    change_rate, ok = _parse_real_float(raw_values.get(FID_CHANGE_RATE), abs_value=False)
-    parse_fallback = parse_fallback or not ok
+    price, price_ok = _parse_real_float(raw_values.get(FID_CURRENT_PRICE), abs_value=True)
+    change_value, change_value_ok = _parse_real_float(
+        raw_values.get(FID_CHANGE_VALUE),
+        abs_value=False,
+    )
+    change_rate, change_rate_ok = _parse_real_float(
+        raw_values.get(FID_CHANGE_RATE),
+        abs_value=False,
+    )
 
-    if price <= 0:
+    if not _has_real_value(raw_values.get(FID_CURRENT_PRICE)):
         reason_codes.append("INDEX_PRICE_MISSING")
-    if FID_CHANGE_VALUE not in raw_values or not _has_real_value(raw_values.get(FID_CHANGE_VALUE)):
+    elif not price_ok or price <= 0:
+        reason_codes.append("INDEX_PRICE_INVALID")
+    if not _has_real_value(raw_values.get(FID_CHANGE_VALUE)):
         reason_codes.append("INDEX_CHANGE_VALUE_MISSING")
-    if FID_CHANGE_RATE not in raw_values or not _has_real_value(raw_values.get(FID_CHANGE_RATE)):
+    elif not change_value_ok:
+        reason_codes.append("INDEX_CHANGE_VALUE_INVALID")
+    if not _has_real_value(raw_values.get(FID_CHANGE_RATE)):
         reason_codes.append("INDEX_CHANGE_RATE_MISSING")
-    if parse_fallback:
-        reason_codes.append("INDEX_REAL_PARSE_FALLBACK")
+    elif not change_rate_ok:
+        reason_codes.append("INDEX_CHANGE_RATE_INVALID")
 
     trade_time_raw = raw_values.get(FID_TRADE_TIME, "")
     if not _has_real_value(trade_time_raw):
         reason_codes.append("INDEX_TRADE_TIME_MISSING")
+        trade_time = None
+    else:
+        try:
+            trade_time = parse_market_index_trade_time(trade_time_raw)
+        except ValueError:
+            reason_codes.append("INDEX_TRADE_TIME_INVALID")
+            trade_time = None
+
+    if reason_codes:
+        raise MarketIndexRealtimeParseError(reason_codes)
 
     metadata: dict[str, Any] = {
         "source": "KIWOOM_REALTIME_MARKET_INDEX",
@@ -1679,15 +1760,13 @@ def parse_market_index_tick_from_fids(
         "raw_fids_present": [
             fid for fid, value in sorted(raw_values.items()) if _has_real_value(value)
         ],
-        "reason_codes": sorted(set(reason_codes)),
+        "raw_fids": _market_index_raw_fid_evidence(raw_values),
+        "reason_codes": [],
         "parser_status": MARKET_INDEX_PARSER_STATUS,
         "parser_evidence": market_index_parser_evidence(),
     }
     if real_data:
         metadata["real_data_present"] = True
-
-    if price <= 0:
-        raise ValueError("INDEX_PRICE_MISSING")
 
     tick = BrokerMarketIndexTick(
         index_code=normalized_index_code,
@@ -1695,7 +1774,7 @@ def parse_market_index_tick_from_fids(
         price=price,
         change_rate=change_rate,
         change_value=change_value,
-        trade_time=parse_kiwoom_trade_time(trade_time_raw),
+        trade_time=trade_time,
         metadata=metadata,
     )
     return tick.to_dict()
@@ -1892,6 +1971,25 @@ def parse_kiwoom_trade_time(value: object) -> datetime:
     return utc_now()
 
 
+def parse_market_index_trade_time(value: object) -> datetime:
+    text = str(value or "").strip()
+    if len(text) != 6 or not text.isdigit():
+        raise ValueError("market index trade_time must be HHMMSS")
+    hour = int(text[:2])
+    minute = int(text[2:4])
+    second = int(text[4:6])
+    if hour > 23 or minute > 59 or second > 59:
+        raise ValueError("market index trade_time is outside HHMMSS range")
+    kst = timezone(timedelta(hours=9))
+    now = datetime.now(kst)
+    return now.replace(
+        hour=hour,
+        minute=minute,
+        second=second,
+        microsecond=0,
+    ).astimezone(UTC)
+
+
 def broker_env_from_server_gubun(value: object) -> str:
     text = str(value or "").strip().upper()
     if text in {"1", "SIM", "SIMULATION", "MOCK", "PAPER", "PAPER_TRADING", "LIVE_SIM", "TEST"}:
@@ -2037,6 +2135,13 @@ def _parse_real_float(value: Any, *, abs_value: bool) -> tuple[float, bool]:
 
 def _has_real_value(value: Any) -> bool:
     return str(value or "").strip() != ""
+
+
+def _market_index_raw_fid_evidence(raw_values: Mapping[int | str, Any]) -> dict[str, str]:
+    return {
+        str(fid): str(raw_values.get(fid, raw_values.get(str(fid), "")) or "").strip()
+        for fid in MARKET_INDEX_REALTIME_FIDS
+    }
 
 
 def _spread_ticks(best_bid: int, best_ask: int) -> int:

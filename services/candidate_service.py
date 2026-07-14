@@ -30,8 +30,8 @@ from services.condition_fusion import (
     rebuild_condition_fusion,
 )
 from services.config import Settings, candidate_timezone, load_settings
+from services.market_context_service import get_market_context_for_code
 from services.market_data_service import get_latest_tick, get_market_data_readiness
-from services.market_regime_service import get_market_regime_for_code
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -356,11 +356,12 @@ def refresh_candidate_context(
         all_sources = _list_latest_source_rows(connection, normalized_id, active_only=False)
         readiness = get_market_data_readiness(connection, row["code"], settings=resolved_settings)
         latest_tick = get_latest_tick(connection, row["code"])
-        market_regime = get_market_regime_for_code(
+        common_market_context = get_market_context_for_code(
             connection,
             row["code"],
             settings=resolved_settings,
         )
+        market_regime = common_market_context["market_regime"]
         theme_context = _build_theme_context(connection, row, active_sources)
         source_context = _build_source_context(
             connection,
@@ -369,6 +370,22 @@ def refresh_candidate_context(
             all_sources=all_sources,
         )
         market_context = {
+            "snapshot_id": common_market_context.get("snapshot_id"),
+            "trade_date": common_market_context.get("trade_date"),
+            "market": common_market_context.get("market"),
+            "source_watermark_hash": common_market_context.get(
+                "source_watermark_hash"
+            ),
+            "source_watermark": common_market_context.get("source_watermark", {}),
+            "parser_confidence_status": common_market_context.get(
+                "parser_confidence_status"
+            ),
+            "data_quality_status": common_market_context.get("data_quality_status"),
+            "trading_data_usable": common_market_context.get("trading_data_usable"),
+            "trading_eligible": common_market_context.get("trading_eligible"),
+            "data_age_sec": common_market_context.get("data_age_sec"),
+            "generated_by": common_market_context.get("generated_by"),
+            "snapshot_at": common_market_context.get("snapshot_at"),
             "latest_tick": latest_tick,
             "readiness": readiness,
             "market_regime": market_regime,
@@ -393,6 +410,7 @@ def refresh_candidate_context(
         _upsert_candidate_context(
             connection,
             candidate=row,
+            market_context_snapshot_id=common_market_context.get("snapshot_id"),
             theme_context=theme_context,
             market_context=market_context,
             source_context=source_context,
@@ -1212,6 +1230,7 @@ def _upsert_candidate_context(
     connection: sqlite3.Connection,
     *,
     candidate: sqlite3.Row,
+    market_context_snapshot_id: object,
     theme_context: Mapping[str, Any],
     market_context: Mapping[str, Any],
     source_context: Mapping[str, Any],
@@ -1222,6 +1241,7 @@ def _upsert_candidate_context(
         """
         INSERT INTO candidate_context_latest (
             candidate_instance_id,
+            market_context_snapshot_id,
             trade_date,
             code,
             name,
@@ -1231,8 +1251,9 @@ def _upsert_candidate_context(
             readiness_json,
             refreshed_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_instance_id) DO UPDATE SET
+            market_context_snapshot_id = excluded.market_context_snapshot_id,
             trade_date = excluded.trade_date,
             code = excluded.code,
             name = excluded.name,
@@ -1244,6 +1265,11 @@ def _upsert_candidate_context(
         """,
         (
             candidate["candidate_instance_id"],
+            (
+                None
+                if market_context_snapshot_id in (None, "")
+                else str(market_context_snapshot_id)
+            ),
             candidate["trade_date"],
             candidate["code"],
             candidate["name"],
@@ -1665,6 +1691,7 @@ def _get_candidate_context(
         return None
     return {
         "candidate_instance_id": row["candidate_instance_id"],
+        "market_context_snapshot_id": row["market_context_snapshot_id"],
         "trade_date": row["trade_date"],
         "code": row["code"],
         "name": row["name"],

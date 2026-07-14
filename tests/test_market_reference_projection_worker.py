@@ -152,6 +152,44 @@ def test_market_reference_worker_supports_dict_and_list_payload_shapes(tmp_path)
     ]
 
 
+def test_market_reference_worker_filter_leaves_market_data_pending(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-reference-worker-filter.sqlite3")
+    price_event = GatewayEvent(
+        event_id="evt_ref_filter_price",
+        event_type="price_tick",
+        source="test-gateway",
+        payload={"code": "005930"},
+        ts=TS,
+    )
+    reference_event = _market_symbols_event("evt_ref_filter_reference", "005930")
+    for event in (price_event, reference_event):
+        append_gateway_event(connection, event)
+        enqueue_projection_jobs_for_gateway_event(connection, event)
+
+    result = projection_outbox_worker.process_projection_outbox_batch(
+        connection,
+        settings=_settings(
+            projection_outbox_apply_projection_enabled=True,
+            projection_outbox_market_reference_apply_enabled=True,
+        ),
+        limit=1,
+        apply_projection=True,
+        projection_name="market_reference",
+    )
+    price_row = _outbox_row(connection, "market_data:evt_ref_filter_price")
+    reference_row = _outbox_row(
+        connection,
+        "market_reference:evt_ref_filter_reference",
+    )
+    connection.close()
+
+    assert result.projection_name_filter == "market_reference"
+    assert result.claimed_count == 1
+    assert result.applied_by_worker_count == 1
+    assert price_row["status"] == "PENDING"
+    assert reference_row["status"] == "APPLIED"
+
+
 def _settings(**overrides) -> Settings:
     values = {
         "projection_outbox_shadow_min_age_sec": 0,

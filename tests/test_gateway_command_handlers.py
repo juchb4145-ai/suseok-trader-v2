@@ -28,6 +28,7 @@ def test_request_tr_emits_started_tr_response_and_ack() -> None:
                 "tr_code": "OPT10001",
                 "request_name": "stock_basic",
                 "code": "005930",
+                "metadata": {"projection_source": "test_tr_metadata"},
             },
         )
     )
@@ -38,6 +39,7 @@ def test_request_tr_emits_started_tr_response_and_ack() -> None:
         "command_ack",
     ]
     assert events[1].payload["request_id"] == "tr_cmd"
+    assert events[1].payload["metadata"]["projection_source"] == "test_tr_metadata"
 
 
 def test_register_realtime_adds_code_to_subscription_set() -> None:

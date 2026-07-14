@@ -14,13 +14,22 @@ from domain.candidate.state import CandidateState
 from domain.risk.status import RiskObservationStatus
 from domain.strategy.status import StrategyObservationStatus
 from domain.theme.state import ThemeState
+from storage.event_retention import get_event_retention_status
 from storage.event_store import (
     count_recent_gateway_events,
     get_gateway_status_values,
     list_recent_gateway_events,
 )
 from storage.gateway_command_store import FORBIDDEN_ORDER_COMMAND_TYPES
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+)
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
 from storage.projection_outbox import get_projection_outbox_status
+from storage.projection_retention import build_projection_retention_rca
+from storage.projection_watermarks import get_projection_watermark_status
 
 from services.ai_advisory.storage import (
     build_status as build_ai_advisory_status,
@@ -90,6 +99,7 @@ from services.live_sim.live_sim_service import (
     list_live_sim_reconcile_snapshots,
     list_live_sim_rejections,
 )
+from services.market_context_service import get_market_context_status
 from services.market_data_service import (
     get_market_data_status,
     list_latest_ticks,
@@ -100,7 +110,9 @@ from services.market_index_service import (
     get_market_index_status,
     list_latest_market_index_ticks,
 )
+from services.market_index_tr_bootstrap import get_market_index_tr_bootstrap_status
 from services.market_regime_service import get_market_regime_status
+from services.market_scan_service import get_market_scan_status
 from services.oms.dry_run_service import (
     get_dry_run_status,
     list_dry_run_errors,
@@ -109,6 +121,7 @@ from services.oms.dry_run_service import (
     list_dry_run_positions,
 )
 from services.operator.no_buy_sentinel import build_no_buy_sentinel_snapshot
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import build_realtime_subscription_plan
 from services.risk_gate import (
     get_risk_status,
@@ -116,13 +129,30 @@ from services.risk_gate import (
     list_risk_check_observations,
     list_risk_errors,
 )
-from services.runtime.gateway_projection_routing import (
-    get_latest_market_data_append_only_routing_status,
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
+from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    build_live_sim_lifecycle_cutover_status,
+)
+from services.runtime.gateway_market_index_routing import (
+    get_latest_market_index_append_only_routing_status,
 )
 from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
 )
+from services.runtime.gateway_market_regime_routing import (
+    get_latest_market_regime_append_only_routing_status,
+)
+from services.runtime.gateway_market_scan_routing import (
+    get_latest_market_scan_append_only_routing_status,
+)
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+)
+from services.runtime.incremental_evaluation import get_incremental_evaluation_status
 from services.runtime.live_sim_operating_orchestrator import build_live_sim_operator_status
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -130,21 +160,35 @@ from services.runtime.market_data_append_only_controller import (
 from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
 )
-from services.runtime.market_reference_projection_reconcile import (
-    get_latest_market_reference_projection_reconcile,
+from services.runtime.market_index_projection_reconcile import (
+    get_latest_market_index_projection_reconcile,
 )
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
+)
+from services.runtime.market_reference_projection_reconcile import (
+    get_latest_market_reference_projection_reconcile,
+)
+from services.runtime.market_regime_projection_reconcile import (
+    get_latest_market_regime_projection_reconcile,
+)
+from services.runtime.market_scan_projection_reconcile import (
+    get_latest_market_scan_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
     projection_outbox_backlog_summary_fields,
 )
+from services.runtime.projection_replay import get_projection_replay_status
 from services.strategy_engine import (
     get_strategy_status,
     list_latest_strategy_observations,
     list_strategy_errors,
     list_strategy_setup_observations,
+)
+from services.theme_coherency import (
+    build_theme_coherency_status,
+    standardize_leadership_rows,
 )
 from services.theme_leadership import rebuild_theme_leadership
 from services.theme_service import (
@@ -159,12 +203,23 @@ DashboardDetail = Literal["summary", "full"]
 DASHBOARD_SECTIONS = [
     "safety",
     "system",
+    "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
+    "append_only_readiness",
+    "live_sim_lifecycle_consumer",
+    "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "condition_fusion",
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_index_tr_bootstrap",
+    "market_context",
     "market_regime",
+    "market_scan",
     "realtime_subscription",
     "themes",
     "candidates",
@@ -180,26 +235,50 @@ DASHBOARD_SECTIONS = [
     "errors",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
+    "pipeline_coherency",
+    "theme_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
 ]
 
 FAST_DASHBOARD_DEFAULT_SECTIONS = (
     "system",
+    "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
+    "live_sim_lifecycle_consumer",
+    "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "market_data",
     "market_reference",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
+    "pipeline_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
     "errors",
 )
@@ -207,22 +286,42 @@ FAST_DASHBOARD_DEFAULT_SECTIONS = (
 FAST_DASHBOARD_SUPPORTED_SECTIONS = {
     "safety",
     "system",
+    "runtime_execution_locks",
+    "live_sim_order_plan_uniqueness",
+    "order_broker_boundaries",
+    "append_only_readiness",
+    "live_sim_lifecycle_consumer",
+    "projection_replay",
+    "projection_watermarks",
+    "projection_retention",
     "gateway",
     "condition_fusion",
     "market_data",
     "market_reference",
     "market_indexes",
+    "market_index_tr_bootstrap",
+    "market_context",
     "market_regime",
+    "market_scan",
     "realtime_subscription",
     "recent_events",
     "errors",
     "projection_outbox",
     "projection_outbox_backlog",
+    "incremental_evaluation",
+    "pipeline_coherency",
+    "theme_coherency",
     "market_data_projection_reconcile",
     "market_data_append_only_routing",
     "market_data_append_only_controller",
     "market_reference_projection_reconcile",
     "market_reference_append_only_routing",
+    "market_index_projection_reconcile",
+    "market_index_append_only_routing",
+    "market_regime_projection_reconcile",
+    "market_regime_append_only_routing",
+    "market_scan_projection_reconcile",
+    "market_scan_append_only_routing",
     "pipeline_summary",
 }
 
@@ -238,6 +337,12 @@ GATEWAY_HEARTBEAT_STALE_SEC = 120.0
 COMMAND_STATUSES = (
     "QUEUED",
     "DISPATCHED",
+    "CLAIMED",
+    "GATEWAY_STARTED",
+    "PRE_ACK_RECORDED",
+    "BROKER_ACCEPTED",
+    "CHEJAN_CONFIRMED",
+    "UNCONFIRMED",
     "ACKED",
     "REJECTED",
     "FAILED",
@@ -290,6 +395,11 @@ def build_dashboard_snapshot(
 
     market_data_status = get_market_data_status(connection, settings=settings)
     market_index_status = get_market_index_status(connection, settings=settings)
+    market_index_tr_bootstrap = get_market_index_tr_bootstrap_status(
+        connection,
+        settings=settings,
+    )
+    market_context_status = get_market_context_status(connection, settings=settings)
     market_regime_status = get_market_regime_status(connection, settings=settings)
     realtime_subscription = build_realtime_subscription_plan(
         connection,
@@ -322,7 +432,35 @@ def build_dashboard_snapshot(
     exit_status = get_exit_status(connection, settings)
     live_sim_status = get_live_sim_status(connection, settings)
     live_sim_operator_status = build_live_sim_operator_status(connection, settings=settings)
+    runtime_execution_locks = get_runtime_execution_lock_status(connection)
+    live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
+        connection
+    )
+    order_broker_boundaries = get_order_broker_boundary_status(connection)
+    append_only_readiness = build_append_only_readiness_status(
+        connection,
+        settings=settings,
+    )
+    live_sim_lifecycle_consumer = build_live_sim_lifecycle_cutover_status(
+        connection,
+        settings=settings,
+    )
+    projection_replay = get_projection_replay_status()
+    projection_watermarks = get_projection_watermark_status(connection)
+    projection_retention = get_event_retention_status(
+        connection,
+        settings=settings,
+    )
     projection_outbox_status = get_projection_outbox_status(connection, settings=settings)
+    incremental_evaluation = get_incremental_evaluation_status(
+        connection,
+        settings=settings,
+    )
+    pipeline_coherency = build_pipeline_coherency_status(
+        connection,
+        max_age_sec=settings.entry_timing_stale_max_seconds,
+        limit=bounded_limit,
+    )
     market_data_reconcile = get_latest_market_data_projection_reconcile(connection)
     market_data_append_only_routing = get_latest_market_data_append_only_routing_status(
         connection,
@@ -343,6 +481,30 @@ def build_dashboard_snapshot(
     )
     market_reference_append_only_routing = (
         get_latest_market_reference_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_index_reconcile = get_latest_market_index_projection_reconcile(connection)
+    market_index_append_only_routing = (
+        get_latest_market_index_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_regime_reconcile = get_latest_market_regime_projection_reconcile(
+        connection
+    )
+    market_regime_append_only_routing = (
+        get_latest_market_regime_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    )
+    market_scan_status = get_market_scan_status(connection, settings=settings)
+    market_scan_reconcile = get_latest_market_scan_projection_reconcile(connection)
+    market_scan_append_only_routing = (
+        get_latest_market_scan_append_only_routing_status(
             connection,
             settings=settings,
         )
@@ -500,8 +662,24 @@ def build_dashboard_snapshot(
         write_candidate_sources=False,
         settings=settings,
     )
+    theme_leadership_rows = standardize_leadership_rows(theme_leadership)
+    theme_coherency = build_theme_coherency_status(
+        connection,
+        settings=settings,
+        leadership_result=theme_leadership,
+        db_top_rows=top_tradable_themes,
+        limit=10,
+    )
+    theme_dashboard_warnings = list(
+        dict.fromkeys([*theme_dashboard_warnings, *theme_coherency["reason_codes"]])
+    )
 
-    errors = build_dashboard_errors(connection, settings=settings, limit=bounded_limit)
+    errors = build_dashboard_errors(
+        connection,
+        settings=settings,
+        limit=bounded_limit,
+        projection_retention_status=projection_retention,
+    )
     pipeline_summary = _pipeline_summary(
         gateway_status=gateway_status,
         market_data_status=market_data_status,
@@ -535,6 +713,12 @@ def build_dashboard_snapshot(
         market_reference_status=market_reference_status,
         market_reference_reconcile=market_reference_reconcile,
         market_reference_append_only_routing=market_reference_append_only_routing,
+        runtime_execution_locks=runtime_execution_locks,
+        live_sim_order_plan_uniqueness=live_sim_order_plan_uniqueness,
+        order_broker_boundaries=order_broker_boundaries,
+        pipeline_coherency=pipeline_coherency,
+        theme_coherency=theme_coherency,
+        market_index_tr_bootstrap=market_index_tr_bootstrap,
         settings=settings,
     )
 
@@ -567,19 +751,42 @@ def build_dashboard_snapshot(
         "market_reference": market_reference_status,
         "market_indexes": {
             "status": market_index_status,
+            "tr_bootstrap": market_index_tr_bootstrap,
             "latest_ticks": latest_market_index_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_market_index_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status),
+            "projection_reconcile": market_index_reconcile,
+            "append_only_routing": market_index_append_only_routing,
         },
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
+        "market_context": market_context_status,
         "market_regime": market_regime_status,
+        "market_scan": market_scan_status,
         "realtime_subscription": realtime_subscription,
+        "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
+        "append_only_readiness": append_only_readiness,
+        "live_sim_lifecycle_consumer": live_sim_lifecycle_consumer,
+        "projection_replay": projection_replay,
+        "projection_watermarks": projection_watermarks,
+        "projection_retention": projection_retention,
         "projection_outbox": projection_outbox_status,
         "projection_outbox_backlog": projection_outbox_backlog,
+        "incremental_evaluation": incremental_evaluation,
+        "pipeline_coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
         "market_data_projection_reconcile": market_data_reconcile,
         "market_data_append_only_routing": market_data_append_only_routing,
         "market_data_append_only_controller": market_data_append_only_controller,
         "market_reference_projection_reconcile": market_reference_reconcile,
         "market_reference_append_only_routing": market_reference_append_only_routing,
+        "market_index_projection_reconcile": market_index_reconcile,
+        "market_index_append_only_routing": market_index_append_only_routing,
+        "market_regime_projection_reconcile": market_regime_reconcile,
+        "market_regime_append_only_routing": market_regime_append_only_routing,
+        "market_scan_projection_reconcile": market_scan_reconcile,
+        "market_scan_append_only_routing": market_scan_append_only_routing,
         "themes": {
             "status": {
                 **theme_status,
@@ -593,12 +800,10 @@ def build_dashboard_snapshot(
             "latest_sample_state_counts": latest_sample_state_counts,
             "dashboard_warnings": theme_dashboard_warnings,
             "top_list_source": "state_filtered_strength_query",
+            "coherency": theme_coherency,
             "leadership": {
                 "status": theme_leadership.status,
-                "top_themes": [
-                    snapshot.to_dict(include_members=False)
-                    for snapshot in theme_leadership.snapshots
-                ],
+                "top_themes": theme_leadership_rows,
                 "watchset": theme_leadership.watchset.to_dict(),
                 "eligible_theme_count": theme_leadership.eligible_theme_count,
                 "watchset_selection_source": theme_leadership.watchset_selection_source,
@@ -898,9 +1103,17 @@ def build_dashboard_pipeline_summary_fast(
     market_reference_status: dict[str, Any],
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
+    pipeline_coherency: dict[str, Any],
+    theme_coherency: dict[str, Any] | None,
+    market_index_tr_bootstrap: dict[str, Any] | None,
 ) -> dict[str, Any]:
     command_type_counts = _command_type_counts(connection)
     order_command_count = _order_command_count(command_type_counts)
+    runtime_execution_locks = get_runtime_execution_lock_status(connection)
+    live_sim_order_plan_uniqueness = get_live_sim_order_plan_uniqueness_status(
+        connection
+    )
+    order_broker_boundaries = get_order_broker_boundary_status(connection)
     return {
         "fast_path": True,
         "read_only": True,
@@ -911,6 +1124,12 @@ def build_dashboard_pipeline_summary_fast(
             "queued_command_count": int(gateway_status.get("queued_command_count") or 0),
             "failed_command_count": int(gateway_status.get("failed_command_count") or 0),
         },
+        "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
+        "coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
         "market_data": {
             "latest_tick_count": int(market_data_status.get("latest_tick_count") or 0),
             "bar_count": int(market_data_status.get("bar_count") or 0),
@@ -1151,6 +1370,57 @@ def _build_dashboard_fast_section(
             )
         return context["market_reference_append_only_routing"]
 
+    def market_index_reconcile() -> dict[str, Any]:
+        if "market_index_reconcile" not in context:
+            context["market_index_reconcile"] = (
+                get_latest_market_index_projection_reconcile(connection)
+            )
+        return context["market_index_reconcile"]
+
+    def market_index_append_only_routing() -> dict[str, Any]:
+        if "market_index_append_only_routing" not in context:
+            context["market_index_append_only_routing"] = (
+                get_latest_market_index_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_index_append_only_routing"]
+
+    def market_regime_reconcile() -> dict[str, Any]:
+        if "market_regime_reconcile" not in context:
+            context["market_regime_reconcile"] = (
+                get_latest_market_regime_projection_reconcile(connection)
+            )
+        return context["market_regime_reconcile"]
+
+    def market_regime_append_only_routing() -> dict[str, Any]:
+        if "market_regime_append_only_routing" not in context:
+            context["market_regime_append_only_routing"] = (
+                get_latest_market_regime_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_regime_append_only_routing"]
+
+    def market_scan_reconcile() -> dict[str, Any]:
+        if "market_scan_reconcile" not in context:
+            context["market_scan_reconcile"] = (
+                get_latest_market_scan_projection_reconcile(connection)
+            )
+        return context["market_scan_reconcile"]
+
+    def market_scan_append_only_routing() -> dict[str, Any]:
+        if "market_scan_append_only_routing" not in context:
+            context["market_scan_append_only_routing"] = (
+                get_latest_market_scan_append_only_routing_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_scan_append_only_routing"]
+
     def projection_outbox_backlog() -> dict[str, Any]:
         if "projection_outbox_backlog" not in context:
             context["projection_outbox_backlog"] = (
@@ -1168,6 +1438,42 @@ def _build_dashboard_fast_section(
                 )
             )
         return context["projection_outbox_backlog"]
+
+    def projection_retention_status() -> dict[str, Any]:
+        if "projection_retention_status" not in context:
+            context["projection_retention_status"] = get_event_retention_status(
+                connection,
+                settings=settings,
+            )
+        return context["projection_retention_status"]
+
+    def pipeline_coherency() -> dict[str, Any]:
+        if "pipeline_coherency" not in context:
+            context["pipeline_coherency"] = build_pipeline_coherency_status(
+                connection,
+                max_age_sec=settings.entry_timing_stale_max_seconds,
+                limit=bounded_limit,
+            )
+        return context["pipeline_coherency"]
+
+    def theme_coherency() -> dict[str, Any]:
+        if "theme_coherency" not in context:
+            context["theme_coherency"] = build_theme_coherency_status(
+                connection,
+                settings=settings,
+                limit=min(bounded_limit, 100),
+            )
+        return context["theme_coherency"]
+
+    def market_index_tr_bootstrap() -> dict[str, Any]:
+        if "market_index_tr_bootstrap" not in context:
+            context["market_index_tr_bootstrap"] = (
+                get_market_index_tr_bootstrap_status(
+                    connection,
+                    settings=settings,
+                )
+            )
+        return context["market_index_tr_bootstrap"]
 
     if section == "safety":
         return build_safety_section(settings)
@@ -1193,6 +1499,25 @@ def _build_dashboard_fast_section(
             profiles,
             fallback_profiles=status.get("condition_profile_metrics", []),
         )
+    if section == "runtime_execution_locks":
+        return get_runtime_execution_lock_status(connection)
+    if section == "live_sim_order_plan_uniqueness":
+        return get_live_sim_order_plan_uniqueness_status(connection)
+    if section == "order_broker_boundaries":
+        return get_order_broker_boundary_status(connection)
+    if section == "append_only_readiness":
+        return build_append_only_readiness_status(
+            connection,
+            settings=settings,
+        )
+    if section == "live_sim_lifecycle_consumer":
+        return build_live_sim_lifecycle_cutover_status(connection, settings=settings)
+    if section == "projection_replay":
+        return get_projection_replay_status()
+    if section == "projection_watermarks":
+        return get_projection_watermark_status(connection)
+    if section == "projection_retention":
+        return projection_retention_status()
     if section == "market_data":
         return {
             "status": market_data_status(),
@@ -1216,12 +1541,21 @@ def _build_dashboard_fast_section(
         )
         return {
             "status": get_market_index_status(connection, settings=settings),
+            "tr_bootstrap": market_index_tr_bootstrap(),
             "latest_ticks": latest_ticks,
             "latest_by_code": _market_index_latest_by_code(latest_ticks),
             "gateway_adapter": _market_index_gateway_adapter_section(gateway_status()),
+            "projection_reconcile": market_index_reconcile(),
+            "append_only_routing": market_index_append_only_routing(),
         }
+    if section == "market_index_tr_bootstrap":
+        return market_index_tr_bootstrap()
     if section == "market_regime":
         return get_market_regime_status(connection, settings=settings)
+    if section == "market_scan":
+        return get_market_scan_status(connection, settings=settings)
+    if section == "market_context":
+        return get_market_context_status(connection, settings=settings)
     if section == "realtime_subscription":
         return build_realtime_subscription_plan(
             connection,
@@ -1236,12 +1570,19 @@ def _build_dashboard_fast_section(
             connection,
             settings=settings,
             limit=min(bounded_limit, 20),
+            projection_retention_status=projection_retention_status(),
         )
     if section == "projection_outbox":
         projection_outbox_backlog()
         return projection_outbox_status()
     if section == "projection_outbox_backlog":
         return projection_outbox_backlog()
+    if section == "incremental_evaluation":
+        return get_incremental_evaluation_status(connection, settings=settings)
+    if section == "pipeline_coherency":
+        return pipeline_coherency()
+    if section == "theme_coherency":
+        return theme_coherency()
     if section == "market_data_projection_reconcile":
         return market_data_reconcile()
     if section == "market_data_append_only_routing":
@@ -1252,6 +1593,18 @@ def _build_dashboard_fast_section(
         return market_reference_reconcile()
     if section == "market_reference_append_only_routing":
         return market_reference_append_only_routing()
+    if section == "market_index_projection_reconcile":
+        return market_index_reconcile()
+    if section == "market_index_append_only_routing":
+        return market_index_append_only_routing()
+    if section == "market_regime_projection_reconcile":
+        return market_regime_reconcile()
+    if section == "market_regime_append_only_routing":
+        return market_regime_append_only_routing()
+    if section == "market_scan_projection_reconcile":
+        return market_scan_reconcile()
+    if section == "market_scan_append_only_routing":
+        return market_scan_append_only_routing()
     if section == "pipeline_summary":
         return build_dashboard_pipeline_summary_fast(
             connection,
@@ -1267,6 +1620,11 @@ def _build_dashboard_fast_section(
             market_reference_reconcile=market_reference_reconcile(),
             market_reference_append_only_routing=(
                 market_reference_append_only_routing()
+            ),
+            pipeline_coherency=pipeline_coherency(),
+            theme_coherency=context.get("theme_coherency"),
+            market_index_tr_bootstrap=context.get(
+                "market_index_tr_bootstrap"
             ),
         )
 
@@ -1377,6 +1735,7 @@ def build_dashboard_errors(
     *,
     settings: Settings,
     limit: int | None = None,
+    projection_retention_status: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     bounded_limit = _bounded_limit(limit, settings)
     recent_gateway_events = list_recent_gateway_events(connection, limit=bounded_limit)
@@ -1385,8 +1744,18 @@ def build_dashboard_errors(
         for event in recent_gateway_events
         if event.get("status") not in {"ACCEPTED", None} or event.get("error_message")
     ]
+    retention = dict(projection_retention_status or {})
+    if not retention:
+        retention = get_event_retention_status(connection, settings=settings)
+    projection_retention_rca = build_projection_retention_rca(
+        connection,
+        cutoff_at=str(retention["cutoff_at"]),
+        limit=min(bounded_limit, 20),
+        blocked_only=True,
+    )
     return {
         "market_projection_errors": list_projection_errors(connection, limit=bounded_limit),
+        "projection_retention_rca": projection_retention_rca,
         "theme_projection_errors": list_theme_projection_errors(
             connection,
             limit=bounded_limit,
@@ -1459,12 +1828,22 @@ def _market_index_latest_by_code(latest_ticks: list[dict[str, Any]]) -> dict[str
 
 
 def _market_index_gateway_adapter_section(gateway_status: dict[str, Any]) -> dict[str, Any]:
+    realtime_enabled = bool(gateway_status.get("market_index_realtime_enabled"))
+    tr_bootstrap_enabled = bool(
+        gateway_status.get("market_index_tr_bootstrap_enabled")
+    )
     return {
         "enabled": bool(gateway_status.get("market_index_enabled")),
-        "realtime_enabled": bool(gateway_status.get("market_index_realtime_enabled")),
-        "tr_bootstrap_enabled": bool(
-            gateway_status.get("market_index_tr_bootstrap_enabled")
+        "realtime_enabled": realtime_enabled,
+        "tr_bootstrap_enabled": tr_bootstrap_enabled,
+        "realtime_source_status": "ENABLED" if realtime_enabled else "DISABLED",
+        "tr_bootstrap_source_status": (
+            gateway_status.get("market_index_tr_bootstrap_adapter_status")
+            or ("IMPLEMENTED_REQUEST_TR_READY" if tr_bootstrap_enabled else "DISABLED")
         ),
+        "source_contract_explicit": True,
+        "parser_confidence_separate_from_data_usability": True,
+        "nxt_is_not_valid_market_index_evidence": True,
         "configured_codes": gateway_status.get("market_index_codes") or [],
         "registered_codes": gateway_status.get("market_index_registered_codes") or [],
         "screen_no": gateway_status.get("market_index_screen_no") or "",
@@ -1515,6 +1894,7 @@ _GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
     "market_index_enabled",
     "market_index_realtime_enabled",
     "market_index_tr_bootstrap_enabled",
+    "market_index_tr_bootstrap_adapter_status",
     "market_index_codes",
     "market_index_screen_no",
     "market_index_poll_sec",
@@ -1535,6 +1915,8 @@ _GATEWAY_HEARTBEAT_STATUS_KEYS: tuple[str, ...] = (
     "latest_realtime_callback_at",
     "raw_realtime_callback_count",
     "realtime_callback_count",
+    "unregistered_realtime_callback_count",
+    "latest_unregistered_realtime_callback",
     "parsed_price_tick_count",
     "realtime_parse_error_count",
     "latest_realtime_parse_error",
@@ -1631,6 +2013,9 @@ def _gateway_status_section(
         "market_index_tr_bootstrap_enabled": heartbeat_payload.get(
             "market_index_tr_bootstrap_enabled"
         ),
+        "market_index_tr_bootstrap_adapter_status": heartbeat_payload.get(
+            "market_index_tr_bootstrap_adapter_status"
+        ),
         "market_index_codes": heartbeat_payload.get("market_index_codes") or [],
         "market_index_screen_no": heartbeat_payload.get("market_index_screen_no") or "",
         "market_index_poll_sec": heartbeat_payload.get("market_index_poll_sec"),
@@ -1680,6 +2065,13 @@ def _gateway_status_section(
         ),
         "raw_realtime_callback_count": heartbeat_payload.get("raw_realtime_callback_count"),
         "realtime_callback_count": heartbeat_payload.get("realtime_callback_count"),
+        "unregistered_realtime_callback_count": heartbeat_payload.get(
+            "unregistered_realtime_callback_count"
+        ),
+        "latest_unregistered_realtime_callback": heartbeat_payload.get(
+            "latest_unregistered_realtime_callback"
+        )
+        or {},
         "parsed_price_tick_count": heartbeat_payload.get("parsed_price_tick_count"),
         "realtime_parse_error_count": heartbeat_payload.get("realtime_parse_error_count"),
         "latest_realtime_parse_error": heartbeat_payload.get("latest_realtime_parse_error")
@@ -1736,6 +2128,12 @@ def _pipeline_summary(
     market_reference_status: dict[str, Any],
     market_reference_reconcile: dict[str, Any],
     market_reference_append_only_routing: dict[str, Any],
+    runtime_execution_locks: dict[str, Any],
+    live_sim_order_plan_uniqueness: dict[str, Any],
+    order_broker_boundaries: dict[str, Any],
+    pipeline_coherency: dict[str, Any],
+    theme_coherency: dict[str, Any],
+    market_index_tr_bootstrap: dict[str, Any],
     settings: Settings,
 ) -> dict[str, Any]:
     return {
@@ -1754,6 +2152,12 @@ def _pipeline_summary(
             latest_observe_cycle=latest_observe_cycle,
         ),
         "latest_observe_cycle": latest_observe_cycle,
+        "runtime_execution_locks": runtime_execution_locks,
+        "live_sim_order_plan_uniqueness": live_sim_order_plan_uniqueness,
+        "order_broker_boundaries": order_broker_boundaries,
+        "coherency": pipeline_coherency,
+        "theme_coherency": theme_coherency,
+        "market_index_tr_bootstrap": market_index_tr_bootstrap,
         "gateway": {
             "recent_event_count": gateway_status["recent_event_count"],
             "queued_command_count": gateway_status["queued_command_count"],
@@ -2105,7 +2509,8 @@ def _market_reference_summary(
     if not isinstance(outbox, Mapping):
         outbox = {}
     return {
-        "pr": "PR-13",
+        "pr": "PR-14",
+        "controller_status": routing_payload.get("status"),
         "health": status_payload.get("latest_reconcile_status")
         or (latest_run.get("status") if isinstance(latest_run, Mapping) else None),
         "append_only_ready": bool(status_payload.get("append_only_ready")),
@@ -2127,6 +2532,24 @@ def _market_reference_summary(
         "effective_skip_inline_count": int(
             routing_payload.get("effective_skip_inline_count") or 0
         ),
+        "global_kill_switch": bool(routing_payload.get("global_kill_switch")),
+        "cutover_enabled": bool(routing_payload.get("cutover_enabled")),
+        "worker_apply_enabled": bool(routing_payload.get("worker_apply_enabled")),
+        "skip_budget_limit": int(routing_payload.get("skip_budget_limit") or 0),
+        "skip_budget_used_current_minute": int(
+            routing_payload.get("skip_budget_used_current_minute") or 0
+        ),
+        "skip_budget_remaining_current_minute": int(
+            routing_payload.get("skip_budget_remaining_current_minute") or 0
+        ),
+        "rollback_required": bool(routing_payload.get("rollback_required")),
+        "rollback_reason_codes": list(
+            routing_payload.get("rollback_reason_codes") or []
+        ),
+        "effective_skip_health": dict(
+            routing_payload.get("effective_skip_health") or {}
+        ),
+        "rollback_hint": routing_payload.get("rollback_hint"),
         "warnings": list(status_payload.get("warnings") or []),
         "read_only": True,
         "no_trading_side_effects": True,
@@ -2913,6 +3336,9 @@ def _with_theme_snapshot_freshness(
         item = dict(row)
         age_sec = _age_seconds(item.get("calculated_at"))
         item["age_sec"] = age_sec
+        item["data_age_sec"] = age_sec
+        item["source"] = "THEME_LATEST_SNAPSHOT"
+        item["watchset_selection_source"] = None
         item["stale"] = age_sec is None or age_sec > settings.theme_snapshot_stale_sec
         item["stale_sec"] = settings.theme_snapshot_stale_sec
         resolved.append(item)

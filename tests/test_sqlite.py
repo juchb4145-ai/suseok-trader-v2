@@ -105,6 +105,95 @@ def test_sqlite_initialization_creates_gateway_transport_tables(tmp_path) -> Non
     }
 
 
+def test_sqlite_reinitialization_adds_market_reference_budget_state(tmp_path) -> None:
+    db_path = tmp_path / "legacy-market-reference.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('schema_version', '43')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    connection = initialize_database(db_path)
+    table = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+            AND name = 'market_reference_append_only_budget_state'
+        """
+    ).fetchone()
+    metadata = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    connection.close()
+
+    assert table["name"] == "market_reference_append_only_budget_state"
+    assert metadata["value"] == str(SCHEMA_VERSION)
+
+
+def test_sqlite_reinitialization_upgrades_runtime_execution_lock_fencing(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "legacy-runtime-lock.sqlite3"
+    legacy = sqlite3.connect(db_path)
+    legacy.execute(
+        """
+        CREATE TABLE app_metadata (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        )
+        """
+    )
+    legacy.execute(
+        """
+        CREATE TABLE runtime_execution_locks (
+            lock_name TEXT PRIMARY KEY,
+            owner_id TEXT NOT NULL,
+            acquired_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            detail_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """
+    )
+    legacy.execute(
+        "INSERT INTO app_metadata (key, value) VALUES ('schema_version', '44')"
+    )
+    legacy.commit()
+    legacy.close()
+
+    connection = initialize_database(db_path)
+    columns = {
+        row["name"]
+        for row in connection.execute(
+            "PRAGMA table_info(runtime_execution_locks)"
+        ).fetchall()
+    }
+    fence_table = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'runtime_execution_lock_fences'
+        """
+    ).fetchone()
+    connection.close()
+
+    assert {"process_id", "thread_id", "heartbeat_at", "fencing_token"}.issubset(
+        columns
+    )
+    assert fence_table["name"] == "runtime_execution_lock_fences"
+
+
 def test_sqlite_initialization_creates_projection_watermark_and_retention_tables(
     tmp_path,
 ) -> None:

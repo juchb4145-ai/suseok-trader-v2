@@ -11,6 +11,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 
 from storage.gateway_command_store import canonical_json
+from storage.projection_watermarks import record_projection_event_result
 
 PROJECTION_OUTBOX_STATUSES: tuple[str, ...] = (
     "PENDING",
@@ -93,6 +94,7 @@ def enqueue_projection_jobs_for_gateway_event(
     event: GatewayEvent,
     *,
     event_rowid: int | None = None,
+    commit: bool = True,
 ) -> ProjectionOutboxEnqueueResult:
     event_type = _normalize_event_type(event.event_type)
     specs = _projection_jobs_for_event(event)
@@ -165,7 +167,8 @@ def enqueue_projection_jobs_for_gateway_event(
                 "created": created,
             }
         )
-    connection.commit()
+    if commit:
+        connection.commit()
     status = "ENQUEUED" if created_count else "DUPLICATE"
     return ProjectionOutboxEnqueueResult(
         status=status,
@@ -178,6 +181,84 @@ def enqueue_projection_jobs_for_gateway_event(
     )
 
 
+def retire_inline_projection_outbox_job(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    projection_name: str,
+    terminal_status: str,
+    evidence: Mapping[str, Any] | None = None,
+    commit: bool = True,
+) -> bool:
+    normalized_event_id = _require_non_empty(event_id, "event_id")
+    normalized_projection_name = _require_non_empty(
+        projection_name,
+        "projection_name",
+    ).lower()
+    normalized_status = _require_non_empty(
+        terminal_status,
+        "terminal_status",
+    ).upper()
+    if normalized_status not in {"APPLIED", "SKIPPED"}:
+        raise ValueError("terminal_status must be APPLIED or SKIPPED")
+    row = connection.execute(
+        """
+        SELECT outbox_id, metadata_json
+        FROM projection_outbox
+        WHERE event_id = ? AND projection_name = ? AND status = 'PENDING'
+        LIMIT 1
+        """,
+        (normalized_event_id, normalized_projection_name),
+    ).fetchone()
+    if row is None:
+        return False
+    retired_at = datetime_to_wire(utc_now())
+    inline_evidence = {
+        "source": "gateway_batch_inline_projection",
+        "inline_projection_terminal": True,
+        "no_trading_side_effects": True,
+        **dict(evidence or {}),
+    }
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=normalized_status,
+        evidence=inline_evidence,
+        marked_at=retired_at,
+    )
+    cursor = connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            updated_at = ?,
+            processed_at = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            last_error = NULL,
+            metadata_json = ?
+        WHERE outbox_id = ?
+            AND status = 'PENDING'
+            AND NOT EXISTS (
+                SELECT 1
+                FROM market_data_projection_routing_decisions AS decision
+                WHERE decision.event_id = ?
+                    AND decision.effective_skip_inline = 1
+            )
+        """,
+        (
+            normalized_status,
+            retired_at,
+            retired_at,
+            metadata_json,
+            row["outbox_id"],
+            normalized_event_id,
+        ),
+    )
+    if commit:
+        connection.commit()
+    return cursor.rowcount > 0
+
+
 def claim_projection_outbox_jobs(
     connection: sqlite3.Connection,
     *,
@@ -185,6 +266,7 @@ def claim_projection_outbox_jobs(
     limit: int,
     processing_ttl_sec: int,
     min_age_sec: float = 0.0,
+    projection_name: str | None = None,
 ) -> list[dict[str, Any]]:
     del processing_ttl_sec
     normalized_owner_id = _require_non_empty(owner_id, "owner_id")
@@ -192,20 +274,45 @@ def claim_projection_outbox_jobs(
     now = utc_now()
     now_wire = datetime_to_wire(now)
     min_created_at = datetime_to_wire(now - timedelta(seconds=max(float(min_age_sec), 0.0)))
+    normalized_projection_name = (
+        None
+        if projection_name is None
+        else _require_non_empty(projection_name, "projection_name").lower()
+    )
+    projection_clause = ""
+    candidate_params: list[Any] = [now_wire, min_created_at]
+    if normalized_projection_name is not None:
+        projection_clause = "AND projection_name = ?"
+        candidate_params.append(normalized_projection_name)
+    candidate_params.append(bounded_limit)
     claimed: list[dict[str, Any]] = []
     try:
         connection.execute("BEGIN IMMEDIATE")
         candidates = connection.execute(
-            """
+            f"""
             SELECT outbox_id
             FROM projection_outbox
             WHERE status = 'PENDING'
                 AND (available_at IS NULL OR julianday(available_at) <= julianday(?))
                 AND julianday(created_at) <= julianday(?)
-            ORDER BY priority DESC, event_rowid ASC, created_at ASC
+                {projection_clause}
+            ORDER BY
+                priority DESC,
+                event_rowid ASC,
+                CASE
+                    WHEN projection_name IN (
+                        'condition_fusion',
+                        'market_regime',
+                        'market_scan'
+                    )
+                    THEN 1
+                    ELSE 0
+                END ASC,
+                created_at ASC,
+                outbox_id ASC
             LIMIT ?
             """,
-            (now_wire, min_created_at, bounded_limit),
+            tuple(candidate_params),
         ).fetchall()
         for candidate in candidates:
             cursor = connection.execute(
@@ -295,7 +402,13 @@ def mark_projection_outbox_error(
     now = datetime_to_wire(utc_now())
     row = connection.execute(
         """
-        SELECT attempts, metadata_json
+        SELECT
+            attempts,
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
         FROM projection_outbox
         WHERE outbox_id = ? AND locked_by = ?
         """,
@@ -313,6 +426,18 @@ def mark_projection_outbox_error(
         marked_at=now,
     )
     processed_at = now if next_status == "DEAD_LETTER" else None
+    record_projection_event_result(
+        connection,
+        projection_name=row["projection_name"],
+        event_id=row["event_id"],
+        event_rowid=row["event_rowid"],
+        event_type=row["event_type"],
+        status="ERROR",
+        outcome=next_status,
+        error_message=normalized_error,
+        metadata={"source": "projection_outbox", "evidence": dict(evidence or {})},
+        commit=False,
+    )
     connection.execute(
         """
         UPDATE projection_outbox
@@ -333,6 +458,87 @@ def mark_projection_outbox_error(
             normalized_error,
             now,
             processed_at,
+            metadata_json,
+            normalized_outbox_id,
+            normalized_owner_id,
+        ),
+    )
+    connection.commit()
+
+
+def mark_projection_outbox_retryable_error(
+    connection: sqlite3.Connection,
+    outbox_id: str,
+    *,
+    owner_id: str,
+    error_message: str,
+    retry_limit: int,
+    evidence: Mapping[str, Any] | None = None,
+) -> None:
+    normalized_outbox_id = _require_non_empty(outbox_id, "outbox_id")
+    normalized_owner_id = _require_non_empty(owner_id, "owner_id")
+    normalized_error = _require_non_empty(error_message, "error_message")
+    now = datetime_to_wire(utc_now())
+    row = connection.execute(
+        """
+        SELECT
+            attempts,
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
+        FROM projection_outbox
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (normalized_outbox_id, normalized_owner_id),
+    ).fetchone()
+    if row is None:
+        return
+    next_attempts = int(row["attempts"]) + 1
+    next_status = "DEAD_LETTER" if next_attempts >= int(retry_limit) else "PENDING"
+    metadata_json = _merge_metadata_json(
+        row["metadata_json"],
+        status=next_status,
+        evidence=evidence,
+        error_message=normalized_error,
+        marked_at=now,
+    )
+    record_projection_event_result(
+        connection,
+        projection_name=row["projection_name"],
+        event_id=row["event_id"],
+        event_rowid=row["event_rowid"],
+        event_type=row["event_type"],
+        status="ERROR",
+        outcome=("DEAD_LETTER" if next_status == "DEAD_LETTER" else "RETRY_PENDING"),
+        error_message=normalized_error,
+        metadata={"source": "projection_outbox", "evidence": dict(evidence or {})},
+        commit=False,
+    )
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET
+            status = ?,
+            attempts = ?,
+            last_error = ?,
+            available_at = ?,
+            locked_by = NULL,
+            locked_at = NULL,
+            updated_at = ?,
+            processed_at = CASE WHEN ? = 'DEAD_LETTER' THEN ? ELSE NULL END,
+            metadata_json = ?
+        WHERE outbox_id = ? AND locked_by = ?
+        """,
+        (
+            next_status,
+            next_attempts,
+            normalized_error,
+            now,
+            now,
+            next_status,
+            now,
             metadata_json,
             normalized_outbox_id,
             normalized_owner_id,
@@ -417,6 +623,15 @@ def get_projection_outbox_status(
     market_reference_apply_enabled = bool(
         getattr(settings, "projection_outbox_market_reference_apply_enabled", False)
     )
+    market_index_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_index_apply_enabled", False)
+    )
+    market_regime_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_regime_apply_enabled", False)
+    )
+    market_scan_apply_enabled = bool(
+        getattr(settings, "projection_outbox_market_scan_apply_enabled", False)
+    )
     processing_ttl_sec = int(getattr(settings, "projection_outbox_processing_ttl_sec", 60))
     stale_cutoff = datetime_to_wire(
         utc_now() - timedelta(seconds=max(processing_ttl_sec, 0))
@@ -444,6 +659,9 @@ def get_projection_outbox_status(
         ),
         "market_data_apply_enabled": market_data_apply_enabled,
         "market_reference_apply_enabled": market_reference_apply_enabled,
+        "market_index_apply_enabled": market_index_apply_enabled,
+        "market_regime_apply_enabled": market_regime_apply_enabled,
+        "market_scan_apply_enabled": market_scan_apply_enabled,
         "batch_size": int(getattr(settings, "projection_outbox_batch_size", 100)),
         "apply_batch_size": int(
             getattr(settings, "projection_outbox_apply_batch_size", 50)
@@ -466,9 +684,33 @@ def get_projection_outbox_status(
                 1.0,
             )
         ),
+        "market_index_apply_batch_size": int(
+            getattr(settings, "projection_outbox_market_index_apply_batch_size", 20)
+        ),
+        "market_index_apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_market_index_apply_min_age_sec", 1.0)
+        ),
+        "market_regime_apply_batch_size": int(
+            getattr(settings, "projection_outbox_market_regime_apply_batch_size", 20)
+        ),
+        "market_regime_apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_market_regime_apply_min_age_sec", 1.0)
+        ),
+        "market_scan_apply_batch_size": int(
+            getattr(settings, "projection_outbox_market_scan_apply_batch_size", 20)
+        ),
+        "market_scan_apply_min_age_sec": float(
+            getattr(settings, "projection_outbox_market_scan_apply_min_age_sec", 1.0)
+        ),
         "read_only": True,
         "projection_side_effects_allowed": apply_enabled
-        and (market_data_apply_enabled or market_reference_apply_enabled),
+        and (
+            market_data_apply_enabled
+            or market_reference_apply_enabled
+            or market_index_apply_enabled
+            or market_regime_apply_enabled
+            or market_scan_apply_enabled
+        ),
         "last_apply_mode": None if last_apply_mode is None else last_apply_mode["apply_mode"],
         "warnings": [
             "market_data apply worker is disabled by default",
@@ -535,7 +777,12 @@ def _mark_projection_outbox_terminal(
     now = datetime_to_wire(utc_now())
     row = connection.execute(
         """
-        SELECT metadata_json
+        SELECT
+            metadata_json,
+            projection_name,
+            event_id,
+            event_type,
+            event_rowid
         FROM projection_outbox
         WHERE outbox_id = ? AND locked_by = ?
         """,
@@ -549,6 +796,21 @@ def _mark_projection_outbox_terminal(
         evidence=evidence,
         marked_at=now,
     )
+    if status == "APPLIED":
+        record_projection_event_result(
+            connection,
+            projection_name=row["projection_name"],
+            event_id=row["event_id"],
+            event_rowid=row["event_rowid"],
+            event_type=row["event_type"],
+            status="SUCCESS",
+            outcome="OUTBOX_APPLIED",
+            metadata={
+                "source": "projection_outbox",
+                "evidence": dict(evidence or {}),
+            },
+            commit=False,
+        )
     connection.execute(
         """
         UPDATE projection_outbox
@@ -612,6 +874,9 @@ def _projection_jobs_for_event(event: GatewayEvent) -> list[ProjectionJobSpec]:
     specs = projection_jobs_for_gateway_event(event.event_type)
     if _is_scan_related_tr_response(event):
         specs = _append_projection_job(specs, "market_scan")
+    if _is_market_index_bootstrap_tr_response(event):
+        specs = _append_projection_job(specs, "market_index")
+        specs = _append_projection_job(specs, "market_regime")
     return specs
 
 
@@ -634,6 +899,23 @@ def _is_scan_related_tr_response(event: GatewayEvent) -> bool:
         return True
     metadata = payload.get("metadata")
     return isinstance(metadata, Mapping) and str(metadata.get("source") or "") == "market_scan"
+
+
+def _is_market_index_bootstrap_tr_response(event: GatewayEvent) -> bool:
+    if _normalize_event_type(event.event_type) != "tr_response":
+        return False
+    payload = event.payload
+    request_id = str(payload.get("request_id") or "").strip().lower()
+    metadata = payload.get("metadata")
+    if not request_id.startswith("market_index_tr_bootstrap:"):
+        return False
+    if not isinstance(metadata, Mapping):
+        return False
+    source = str(
+        metadata.get("projection_source") or metadata.get("source") or ""
+    ).strip().upper()
+    contract = str(metadata.get("tr_bootstrap_contract_version") or "").strip().lower()
+    return source == "KIWOOM_TR_BOOTSTRAP_MARKET_INDEX" and contract == "v1"
 
 
 def _lookup_gateway_event_rowid(

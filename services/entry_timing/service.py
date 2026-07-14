@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from domain.broker.utils import (
@@ -26,6 +26,12 @@ from services.entry_timing.models import (
 )
 from services.entry_timing.order_plan import OrderPlanDraftBuilder
 from services.market_data_service import get_premarket_snapshot
+from services.pipeline_coherency import (
+    assess_candidate_pipeline_lineage,
+    lineage_db_values,
+    lineage_for_entry_input,
+    resolve_candidate_source_lineage,
+)
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -77,6 +83,7 @@ def evaluate_entry_timing(
     write_order_plan_drafts: bool | None = None,
     settings: Settings | None = None,
     manage_run_lock: bool = True,
+    source_run_id: str | None = None,
 ) -> EntryTimingEvaluationRunResult:
     with runtime_execution_lock(
         connection,
@@ -92,6 +99,7 @@ def evaluate_entry_timing(
                 limit=limit,
                 write_order_plan_drafts=write_order_plan_drafts,
                 settings=settings,
+                source_run_id=source_run_id,
             )
 
 
@@ -103,6 +111,7 @@ def _evaluate_entry_timing(
     limit: int | None = None,
     write_order_plan_drafts: bool | None = None,
     settings: Settings | None = None,
+    source_run_id: str | None = None,
 ) -> EntryTimingEvaluationRunResult:
     resolved_settings = settings or load_settings()
     if not resolved_settings.entry_timing_enabled:
@@ -129,6 +138,7 @@ def _evaluate_entry_timing(
                     connection,
                     row["candidate_instance_id"],
                     settings=resolved_settings,
+                    expected_source_run_id=source_run_id,
                 )
             )
     elif candidate_instance_id is None:
@@ -149,6 +159,16 @@ def _evaluate_entry_timing(
     for item in inputs:
         try:
             evaluation = engine.evaluate(item)
+            pipeline_coherency = _json_object(
+                item.raw_context.get("pipeline_coherency")
+            )
+            evaluation = replace(
+                evaluation,
+                evidence_json={
+                    **dict(evaluation.evidence_json),
+                    "pipeline_coherency": pipeline_coherency,
+                },
+            )
             final_status, status_reasons = builder.resolve_status(item, evaluation)
             draft = builder.build(item, evaluation)
             if draft is not None:
@@ -163,9 +183,36 @@ def _evaluate_entry_timing(
                     reason_codes=_dedupe([*evaluation.reason_codes, *status_reasons]),
                 )
             if should_write:
-                save_entry_timing_evaluation(connection, evaluation)
+                lineage = lineage_for_entry_input(
+                    item.raw_context,
+                    generated_by="entry_timing_engine",
+                )
+                save_entry_timing_evaluation(
+                    connection,
+                    evaluation,
+                    source_lineage=lineage,
+                    strategy_observation_id=pipeline_coherency.get(
+                        "strategy_observation_id"
+                    ),
+                    risk_observation_id=pipeline_coherency.get(
+                        "risk_observation_id"
+                    ),
+                )
                 if draft is not None:
-                    save_order_plan_draft(connection, draft)
+                    save_order_plan_draft(
+                        connection,
+                        draft,
+                        source_lineage=lineage,
+                        entry_timing_evaluation_id=(
+                            evaluation.entry_timing_evaluation_id
+                        ),
+                        strategy_observation_id=pipeline_coherency.get(
+                            "strategy_observation_id"
+                        ),
+                        risk_observation_id=pipeline_coherency.get(
+                            "risk_observation_id"
+                        ),
+                    )
             evaluations.append(evaluation)
             if draft is not None:
                 drafts.append(draft)
@@ -218,6 +265,7 @@ def load_entry_timing_input(
     candidate_instance_id: str,
     *,
     settings: Settings | None = None,
+    expected_source_run_id: str | None = None,
 ) -> EntryTimingInput:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
@@ -237,6 +285,14 @@ def load_entry_timing_input(
     latest_5m = _latest_bar(connection, code, 300)
     strategy = _latest_strategy(connection, normalized_id)
     risk = _latest_risk(connection, normalized_id)
+    pipeline_coherency = assess_candidate_pipeline_lineage(
+        connection,
+        normalized_id,
+        strategy,
+        risk,
+        max_age_sec=resolved_settings.entry_timing_stale_max_seconds,
+        expected_source_run_id=expected_source_run_id,
+    )
     theme = _theme_context(connection, candidate["theme_id"], code)
     fallback_watchset = _watchset_match(
         connection,
@@ -352,6 +408,7 @@ def load_entry_timing_input(
             },
             "strategy_observation": _row_to_dict(strategy) if strategy is not None else {},
             "risk_observation": _row_to_dict(risk) if risk is not None else {},
+            "pipeline_coherency": pipeline_coherency,
             "watchset_fallback_used": bool(fallback_watchset),
         },
     )
@@ -360,8 +417,20 @@ def load_entry_timing_input(
 def save_entry_timing_evaluation(
     connection: sqlite3.Connection,
     evaluation: EntryTimingEvaluation,
+    *,
+    source_lineage: Mapping[str, Any] | None = None,
+    strategy_observation_id: str | None = None,
+    risk_observation_id: str | None = None,
 ) -> None:
     data = evaluation.to_dict()
+    lineage = dict(source_lineage or {}) or resolve_candidate_source_lineage(
+        connection,
+        evaluation.candidate_instance_id,
+        generated_by="entry_timing_engine",
+        fallback_trade_date=evaluation.trade_date,
+        fallback_observed_at=data["evaluated_at"],
+    )
+    lineage["generated_by"] = "entry_timing_engine"
     connection.execute(
         """
         INSERT INTO entry_timing_evaluations (
@@ -379,9 +448,18 @@ def save_entry_timing_evaluation(
             reason_codes_json,
             evidence_json,
             observe_only,
-            not_order_intent
+            not_order_intent,
+            strategy_observation_id,
+            risk_observation_id,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             data["entry_timing_evaluation_id"],
@@ -399,13 +477,40 @@ def save_entry_timing_evaluation(
             canonical_json(data["evidence_json"]),
             1,
             1,
+            strategy_observation_id,
+            risk_observation_id,
+            *lineage_db_values(lineage),
         ),
     )
 
 
-def save_order_plan_draft(connection: sqlite3.Connection, draft: OrderPlanDraft) -> None:
+def save_order_plan_draft(
+    connection: sqlite3.Connection,
+    draft: OrderPlanDraft,
+    *,
+    source_lineage: Mapping[str, Any] | None = None,
+    entry_timing_evaluation_id: str | None = None,
+    strategy_observation_id: str | None = None,
+    risk_observation_id: str | None = None,
+) -> None:
     data = draft.to_dict()
-    values = _draft_values(data)
+    base_values = _draft_values(data)
+    lineage = dict(source_lineage or {}) or resolve_candidate_source_lineage(
+        connection,
+        draft.candidate_instance_id,
+        generated_by="order_plan_builder",
+        fallback_trade_date=draft.trade_date,
+        fallback_observed_at=data["created_at"],
+    )
+    lineage["generated_by"] = "order_plan_builder"
+    lineage_values = lineage_db_values(lineage)
+    values = (
+        *base_values,
+        entry_timing_evaluation_id,
+        strategy_observation_id,
+        risk_observation_id,
+        *lineage_values,
+    )
     connection.execute(
         """
         INSERT INTO order_plan_drafts (
@@ -439,11 +544,21 @@ def save_order_plan_draft(connection: sqlite3.Connection, draft: OrderPlanDraft)
             evidence_json,
             observe_only,
             not_order_intent,
-            created_at
+            created_at,
+            entry_timing_evaluation_id,
+            strategy_observation_id,
+            risk_observation_id,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
         VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT(order_plan_id) DO UPDATE SET
             status = excluded.status,
@@ -456,6 +571,16 @@ def save_order_plan_draft(connection: sqlite3.Connection, draft: OrderPlanDraft)
             reason_codes_json = excluded.reason_codes_json,
             evidence_json = excluded.evidence_json,
             created_at = excluded.created_at,
+            entry_timing_evaluation_id = excluded.entry_timing_evaluation_id,
+            strategy_observation_id = excluded.strategy_observation_id,
+            risk_observation_id = excluded.risk_observation_id,
+            source_run_id = excluded.source_run_id,
+            source_watermark = excluded.source_watermark,
+            source_watermark_hash = excluded.source_watermark_hash,
+            source_event_id = excluded.source_event_id,
+            source_observed_at = excluded.source_observed_at,
+            data_age_sec = excluded.data_age_sec,
+            generated_by = excluded.generated_by,
             observe_only = 1,
             not_order_intent = 1
         """,
@@ -494,11 +619,21 @@ def save_order_plan_draft(connection: sqlite3.Connection, draft: OrderPlanDraft)
             evidence_json,
             observe_only,
             not_order_intent,
-            created_at
+            created_at,
+            entry_timing_evaluation_id,
+            strategy_observation_id,
+            risk_observation_id,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
         VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT(idempotency_key) DO UPDATE SET
             order_plan_id = excluded.order_plan_id,
@@ -528,11 +663,29 @@ def save_order_plan_draft(connection: sqlite3.Connection, draft: OrderPlanDraft)
             expires_at = excluded.expires_at,
             reason_codes_json = excluded.reason_codes_json,
             evidence_json = excluded.evidence_json,
+            entry_timing_evaluation_id = excluded.entry_timing_evaluation_id,
+            strategy_observation_id = excluded.strategy_observation_id,
+            risk_observation_id = excluded.risk_observation_id,
+            source_run_id = excluded.source_run_id,
+            source_watermark = excluded.source_watermark,
+            source_watermark_hash = excluded.source_watermark_hash,
+            source_event_id = excluded.source_event_id,
+            source_observed_at = excluded.source_observed_at,
+            data_age_sec = excluded.data_age_sec,
+            generated_by = excluded.generated_by,
             observe_only = 1,
             not_order_intent = 1,
             created_at = excluded.created_at
         """,
-        (data["idempotency_key"], *values[:-6], *values[-5:]),
+        (
+            data["idempotency_key"],
+            *base_values[:25],
+            *base_values[26:],
+            entry_timing_evaluation_id,
+            strategy_observation_id,
+            risk_observation_id,
+            *lineage_values,
+        ),
     )
 
 
@@ -791,7 +944,22 @@ def _watchset_inputs(
                 best_ask=_first_number(tick["best_ask"] if tick is not None else None),
                 tick_age_sec=_first_number(market.get("tick_age_sec")),
                 source="watchset",
-                raw_context={"watchset_item": item.to_dict()},
+                raw_context={
+                    "watchset_item": item.to_dict(),
+                    "pipeline_coherency": {
+                        "status": "FAIL",
+                        "reason_codes": [
+                            "STRATEGY_OBSERVATION_MISSING",
+                            "RISK_OBSERVATION_MISSING",
+                            "WATCHSET_NOT_CANDIDATE_PIPELINE",
+                        ],
+                        "strategy_observation_id": None,
+                        "risk_observation_id": None,
+                        "lineage": {},
+                        "read_only": True,
+                        "no_order_side_effects": True,
+                    },
+                },
             )
         )
     return inputs
@@ -1239,6 +1407,7 @@ def _draft_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["not_order_intent"] = bool(data["not_order_intent"])
     data["reason_codes"] = _json_array(data.pop("reason_codes_json"))
     data["evidence_json"] = _json_object(data.pop("evidence_json"))
+    data["source_watermark"] = _json_object(data.get("source_watermark"))
     return data
 
 
@@ -1248,6 +1417,7 @@ def _evaluation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["not_order_intent"] = bool(data["not_order_intent"])
     data["reason_codes"] = _json_array(data.pop("reason_codes_json"))
     data["evidence_json"] = _json_object(data.pop("evidence_json"))
+    data["source_watermark"] = _json_object(data.get("source_watermark"))
     return data
 
 

@@ -6,30 +6,70 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from services.config import load_settings
+from services.config import TradingMode, TradingProfile, load_settings
+from services.market_context_service import (
+    get_market_context_status,
+    rebuild_market_context_snapshots,
+)
+from services.market_index_tr_bootstrap import (
+    get_market_index_tr_bootstrap_status,
+    run_market_index_tr_bootstrap_once,
+)
 from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
     rebuild_no_buy_sentinel_snapshot,
 )
 from services.operator.operator_status import build_operator_status
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import (
     build_realtime_subscription_plan,
     run_realtime_subscription_once,
 )
-from services.runtime.evaluation_run_guard import EvaluationRunLockError
-from services.runtime.gateway_projection_routing import (
-    get_latest_market_data_append_only_routing_status,
-    list_market_data_append_only_routing_decisions,
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
+from services.runtime.evaluation_run_guard import (
+    EvaluationRunLockError,
+    get_runtime_execution_lock_status,
+)
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    build_live_sim_lifecycle_cutover_status,
+    get_latest_live_sim_lifecycle_routing_status,
+    list_live_sim_lifecycle_routing_decisions,
+)
+from services.runtime.gateway_market_index_routing import (
+    get_latest_market_index_append_only_routing_status,
+    list_market_index_append_only_routing_decisions,
 )
 from services.runtime.gateway_market_reference_routing import (
     build_market_reference_status,
     get_latest_market_reference_append_only_routing_status,
     list_market_reference_append_only_routing_decisions,
 )
+from services.runtime.gateway_market_regime_routing import (
+    get_latest_market_regime_append_only_routing_status,
+    list_market_regime_append_only_routing_decisions,
+)
+from services.runtime.gateway_market_scan_routing import (
+    get_latest_market_scan_append_only_routing_status,
+    list_market_scan_append_only_routing_decisions,
+)
+from services.runtime.gateway_projection_routing import (
+    get_latest_market_data_append_only_routing_status,
+    list_market_data_append_only_routing_decisions,
+)
 from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
+    list_incremental_evaluation_dead_letters,
     process_incremental_evaluation_batch,
+    reset_incremental_evaluation_dead_letter,
+    sweep_incremental_evaluation_retry_exhausted,
+)
+from services.runtime.live_sim_lifecycle_consumer import (
+    list_live_sim_lifecycle_inbox,
+    process_live_sim_lifecycle_batch,
+    reset_live_sim_lifecycle_dead_letter,
 )
 from services.runtime.market_data_append_only_controller import (
     build_market_data_append_only_controller_status,
@@ -40,14 +80,26 @@ from services.runtime.market_data_projection_reconcile import (
     get_latest_market_data_projection_reconcile,
     run_market_data_projection_reconcile,
 )
-from services.runtime.market_reference_projection_reconcile import (
-    get_latest_market_reference_projection_reconcile,
-    run_market_reference_projection_reconcile,
+from services.runtime.market_index_projection_reconcile import (
+    get_latest_market_index_projection_reconcile,
+    run_market_index_projection_reconcile,
 )
 from services.runtime.market_open_observe_cycle import (
     get_latest_market_open_observe_cycle_run,
     list_market_open_observe_cycle_runs,
     run_market_open_observe_cycle_once,
+)
+from services.runtime.market_reference_projection_reconcile import (
+    get_latest_market_reference_projection_reconcile,
+    run_market_reference_projection_reconcile,
+)
+from services.runtime.market_regime_projection_reconcile import (
+    get_latest_market_regime_projection_reconcile,
+    run_market_regime_projection_reconcile,
+)
+from services.runtime.market_scan_projection_reconcile import (
+    get_latest_market_scan_projection_reconcile,
+    run_market_scan_projection_reconcile,
 )
 from services.runtime.projection_outbox_backlog import (
     build_projection_outbox_backlog_status,
@@ -57,11 +109,28 @@ from services.runtime.projection_outbox_bulk_retire import (
     bulk_retire_projection_outbox,
 )
 from services.runtime.projection_outbox_worker import process_projection_outbox_batch
+from services.runtime.projection_replay import get_projection_replay_status
+from services.theme_coherency import build_theme_coherency_status
 from storage.event_retention import (
+    EventRetentionSafetyError,
     get_event_retention_status,
     prune_event_store_events,
 )
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+    list_order_broker_boundaries,
+)
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
 from storage.projection_outbox import get_projection_outbox_status
+from storage.projection_retention import build_projection_retention_rca
+from storage.projection_watermarks import (
+    ProjectionWatermarkBackfillSafetyError,
+    backfill_projection_event_results_from_outbox,
+    get_projection_watermark_status,
+    list_projection_event_results,
+)
 from storage.sqlite import open_connection
 from storage.sqlite_locking import (
     configure_sqlite_busy_timeout,
@@ -87,6 +156,19 @@ def operator_status(
             settings=settings,
             trade_date=trade_date,
             include_no_buy_rebuild=True,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/append-only-readiness/status")
+def operator_append_only_readiness_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_append_only_readiness_status(
+            connection,
+            settings=settings,
         )
     finally:
         connection.close()
@@ -226,6 +308,98 @@ def operator_incremental_evaluation_status() -> dict[str, Any]:
         connection.close()
 
 
+@router.get("/pipeline-coherency/status")
+def operator_pipeline_coherency_status(
+    trade_date: str | None = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_pipeline_coherency_status(
+            connection,
+            trade_date=trade_date,
+            max_age_sec=settings.entry_timing_stale_max_seconds,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/theme-coherency/status")
+def operator_theme_coherency_status(
+    limit: int = Query(default=10, ge=1, le=100),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_theme_coherency_status(
+            connection,
+            settings=settings,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-index/tr-bootstrap/status")
+def operator_market_index_tr_bootstrap_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_market_index_tr_bootstrap_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-index/tr-bootstrap/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_index_tr_bootstrap_run_once(
+    queue_commands: bool = Query(default=False),
+    trade_date: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return run_market_index_tr_bootstrap_once(
+            connection,
+            settings=settings,
+            queue_commands=queue_commands,
+            trade_date=trade_date,
+        ).to_dict()
+    finally:
+        connection.close()
+
+
+@router.get("/incremental-evaluation/dead-letters")
+def operator_incremental_evaluation_dead_letters(
+    status: str | None = Query(default="DEAD_LETTER", min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_incremental_evaluation_dead_letters(
+            connection,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
+    finally:
+        connection.close()
+
+
 @router.get("/projection-outbox/status")
 def operator_projection_outbox_status() -> dict[str, Any]:
     settings = load_settings()
@@ -240,6 +414,207 @@ def operator_projection_outbox_status() -> dict[str, Any]:
         status.update(projection_outbox_backlog_summary_fields(backlog))
         status["backlog"] = backlog
         return status
+    finally:
+        connection.close()
+
+
+@router.get("/projection-replay/status")
+def operator_projection_replay_status() -> dict[str, Any]:
+    return get_projection_replay_status()
+
+
+@router.get("/runtime-execution-locks/status")
+def operator_runtime_execution_locks_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_runtime_execution_lock_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/order-plan-uniqueness/status")
+def operator_live_sim_order_plan_uniqueness_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_live_sim_order_plan_uniqueness_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/gateway/order-broker-boundaries/status")
+def operator_order_broker_boundaries_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_order_broker_boundary_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/gateway/order-broker-boundaries")
+def operator_order_broker_boundaries(
+    state: str | None = Query(default=None, min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_order_broker_boundaries(
+            connection,
+            state=state,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/status")
+def operator_live_sim_lifecycle_consumer_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return build_live_sim_lifecycle_cutover_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/inbox")
+def operator_live_sim_lifecycle_consumer_inbox(
+    status: str | None = Query(default=None, min_length=1, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_live_sim_lifecycle_inbox(
+            connection,
+            status=status,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_commands_created": True,
+            "live_real_allowed": False,
+        }
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/routing/status")
+def operator_live_sim_lifecycle_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_live_sim_lifecycle_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/live-sim/lifecycle-consumer/routing")
+def operator_live_sim_lifecycle_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_live_sim_lifecycle_routing_decisions(connection, limit=limit)
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_commands_created": True,
+            "live_real_allowed": False,
+        }
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/live-sim/lifecycle-consumer/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_live_sim_lifecycle_consumer_run_once(
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: process_live_sim_lifecycle_batch(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked_error(exc):
+                raise
+            payload = {
+                "status": "LOCKED_RETRYABLE",
+                "retryable": True,
+                "reason_codes": ["SQLITE_DATABASE_LOCKED"],
+                "endpoint": "live_sim_lifecycle_consumer_run_once",
+                "locked_retry_count": locked_retry_count,
+                "lock_metadata": sqlite_lock_retry_metadata(
+                    exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                ),
+                "lifecycle_state_applied": False,
+                "no_order_commands_created": True,
+                "live_real_allowed": False,
+                "operator_action": "retry a smaller batch after ingest pressure drops",
+            }
+            configured_status = int(settings.operator_run_once_locked_http_status)
+            if configured_status == 200:
+                return payload
+            raise HTTPException(status_code=configured_status, detail=payload) from exc
+        payload = result.to_dict()
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/live-sim/lifecycle-consumer/reset-dead-letter",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_live_sim_lifecycle_consumer_reset_dead_letter(
+    event_id: str = Query(min_length=1, max_length=200),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return reset_live_sim_lifecycle_dead_letter(connection, event_id)
     finally:
         connection.close()
 
@@ -263,6 +638,7 @@ def operator_projection_outbox_run_once(
     limit: int | None = Query(default=None, ge=1, le=500),
     apply_projection: bool = Query(default=False),
     live_safe: bool = Query(default=True),
+    projection_name: str | None = Query(default=None, min_length=1, max_length=64),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -284,6 +660,7 @@ def operator_projection_outbox_run_once(
                     limit=limit,
                     apply_projection=apply_projection,
                     live_safe=live_safe,
+                    projection_name=projection_name,
                 ),
                 attempts=settings.operator_sqlite_lock_retry_attempts,
                 base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
@@ -305,6 +682,9 @@ def operator_projection_outbox_run_once(
                         and (
                             settings.projection_outbox_market_data_apply_enabled
                             or settings.projection_outbox_market_reference_apply_enabled
+                            or settings.projection_outbox_market_index_apply_enabled
+                            or settings.projection_outbox_market_regime_apply_enabled
+                            or settings.projection_outbox_market_scan_apply_enabled
                         )
                     ),
                     operator_action=(
@@ -388,6 +768,9 @@ def operator_projection_outbox_drain_once(
                         and (
                             settings.projection_outbox_market_data_apply_enabled
                             or settings.projection_outbox_market_reference_apply_enabled
+                            or settings.projection_outbox_market_index_apply_enabled
+                            or settings.projection_outbox_market_regime_apply_enabled
+                            or settings.projection_outbox_market_scan_apply_enabled
                         )
                     ),
                     operator_action=(
@@ -467,6 +850,7 @@ def operator_projection_outbox_bulk_retire(
     older_than_sec: int = Query(default=60, ge=0, le=86400),
     include_projection_names: str | None = Query(default=None),
     exclude_recent_condition_events: bool = Query(default=True),
+    protect_current_trade_date: bool = Query(default=True),
     live_safe: bool = Query(default=True),
 ) -> dict[str, Any]:
     settings = load_settings()
@@ -491,6 +875,7 @@ def operator_projection_outbox_bulk_retire(
                     older_than_sec=older_than_sec,
                     include_projection_names=_parse_csv_query(include_projection_names),
                     exclude_recent_condition_events=exclude_recent_condition_events,
+                    protect_current_trade_date=protect_current_trade_date,
                     live_safe=live_safe,
                 ),
                 attempts=settings.operator_sqlite_lock_retry_attempts,
@@ -885,6 +1270,391 @@ def operator_market_reference_status() -> dict[str, Any]:
         connection.close()
 
 
+@router.get("/market-index-projection-reconcile/latest")
+def operator_market_index_projection_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_index_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/market-context/status")
+def operator_market_context_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_market_context_status(connection, settings=settings)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-context/rebuild",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_context_rebuild(
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    if (
+        not live_safe
+        or settings.trading_profile is not TradingProfile.OBSERVE
+        or settings.trading_mode is not TradingMode.OBSERVE
+        or settings.trading_allow_live_sim
+        or settings.trading_allow_live_real
+    ):
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="market context rebuild requires OBSERVE-safe runtime settings",
+        )
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        connection.rollback()
+        locked_retry_count += 1
+
+    try:
+        try:
+            payload = retry_sqlite_locked(
+                lambda: rebuild_market_context_snapshots(
+                    connection,
+                    settings=settings,
+                    source_projection="operator",
+                    generated_by="operator_market_context_rebuild",
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_context_rebuild",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=False,
+                    operator_action="retry after live ingest pressure drops",
+                )
+            raise
+        payload["market_context_status"] = get_market_context_status(
+            connection,
+            settings=settings,
+        )
+        payload["observe_safe"] = True
+        payload["locked_retry_count"] = locked_retry_count
+        payload["retryable"] = False
+        return payload
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-index-projection-reconcile/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_index_projection_reconcile_run_once(
+    limit: int = Query(default=100, ge=1, le=5000),
+    persist: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    del live_safe
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: run_market_index_projection_reconcile(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    persist=persist,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_index_projection_reconcile_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action=(
+                        "retry later or call with persist=false during live ingest pressure"
+                    ),
+                )
+            raise
+        payload = result.to_dict()
+        payload["read_only_projection"] = True
+        payload["read_only"] = True
+        payload["persist_requested"] = bool(persist)
+        payload["retryable"] = False
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-regime-projection-reconcile/latest")
+def operator_market_regime_projection_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_regime_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-regime-projection-reconcile/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_regime_projection_reconcile_run_once(
+    limit: int = Query(default=100, ge=1, le=5000),
+    persist: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    del live_safe
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: run_market_regime_projection_reconcile(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    persist=persist,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_regime_projection_reconcile_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action="retry later or call with persist=false",
+                )
+            raise
+        payload = result.to_dict()
+        payload["read_only"] = True
+        payload["persist_requested"] = bool(persist)
+        payload["retryable"] = False
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-regime-append-only-routing/status")
+def operator_market_regime_append_only_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_regime_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-regime-append-only-routing/decisions")
+def operator_market_regime_append_only_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        decisions = list_market_regime_append_only_routing_decisions(
+            connection,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {
+        "decisions": decisions,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
+
+
+@router.get("/market-scan-projection-reconcile/latest")
+def operator_market_scan_projection_reconcile_latest() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_scan_projection_reconcile(connection)
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/market-scan-projection-reconcile/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_market_scan_projection_reconcile_run_once(
+    limit: int = Query(default=100, ge=1, le=5000),
+    persist: bool = Query(default=True),
+    live_safe: bool = Query(default=True),
+) -> dict[str, Any]:
+    del live_safe
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    _configure_operator_run_once_connection(connection, settings=settings)
+    started_at = time.monotonic()
+    locked_retry_count = 0
+
+    def _on_retry(exc: BaseException, attempt: int) -> None:
+        del exc, attempt
+        nonlocal locked_retry_count
+        locked_retry_count += 1
+
+    try:
+        try:
+            result = retry_sqlite_locked(
+                lambda: run_market_scan_projection_reconcile(
+                    connection,
+                    settings=settings,
+                    limit=limit,
+                    persist=persist,
+                ),
+                attempts=settings.operator_sqlite_lock_retry_attempts,
+                base_sleep_sec=settings.operator_sqlite_lock_retry_base_sleep_sec,
+                max_sleep_sec=settings.operator_sqlite_lock_retry_max_sleep_sec,
+                on_retry=_on_retry,
+            )
+        except sqlite3.OperationalError as exc:
+            if is_sqlite_locked_error(exc):
+                return _locked_retryable_operator_response(
+                    settings=settings,
+                    endpoint="market_scan_projection_reconcile_run_once",
+                    exc=exc,
+                    attempts=settings.operator_sqlite_lock_retry_attempts,
+                    elapsed_ms=(time.monotonic() - started_at) * 1000,
+                    locked_retry_count=locked_retry_count,
+                    read_only_projection=True,
+                    operator_action="retry later or call with persist=false",
+                )
+            raise
+        payload = result.to_dict()
+        payload["read_only"] = True
+        payload["persist_requested"] = bool(persist)
+        payload["retryable"] = False
+        payload["locked_retry_count"] = locked_retry_count
+        return payload
+    finally:
+        connection.close()
+
+
+@router.get("/market-scan-append-only-routing/status")
+def operator_market_scan_append_only_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_scan_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-scan-append-only-routing/decisions")
+def operator_market_scan_append_only_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        decisions = list_market_scan_append_only_routing_decisions(
+            connection,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {
+        "decisions": decisions,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
+
+
+@router.get("/market-index-append-only-routing/status")
+def operator_market_index_append_only_routing_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_latest_market_index_append_only_routing_status(
+            connection,
+            settings=settings,
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/market-index-append-only-routing/decisions")
+def operator_market_index_append_only_routing_decisions(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        decisions = list_market_index_append_only_routing_decisions(
+            connection,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {
+        "decisions": decisions,
+        "read_only": True,
+        "no_trading_side_effects": True,
+    }
+
+
 @router.post("/incremental-evaluation/run-once", dependencies=[Depends(require_local_token)])
 def operator_incremental_evaluation_run_once(
     limit: int | None = Query(default=None, ge=1, le=500),
@@ -908,9 +1678,60 @@ def operator_incremental_evaluation_run_once(
         connection.close()
 
 
+@router.post(
+    "/incremental-evaluation/dead-letters/reset",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_incremental_evaluation_dead_letter_reset(
+    dead_letter_id: str = Query(min_length=1, max_length=200),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return reset_incremental_evaluation_dead_letter(
+            connection,
+            dead_letter_id,
+            reset_by="operator_api",
+        )
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/incremental-evaluation/dead-letters/sweep",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_incremental_evaluation_dead_letter_sweep(
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            moved_count = sweep_incremental_evaluation_retry_exhausted(
+                connection,
+                settings=settings,
+                limit=limit,
+            )
+        except EvaluationRunLockError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
+        return {
+            "status": "MOVED" if moved_count else "NOOP",
+            "moved_count": moved_count,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
+    finally:
+        connection.close()
+
+
 @router.get("/event-retention/status")
 def operator_event_retention_status(
     retention_days: int | None = Query(default=None, ge=1),
+    exact_counts: bool = Query(default=False),
 ) -> dict[str, Any]:
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
@@ -919,6 +1740,7 @@ def operator_event_retention_status(
             connection,
             settings=settings,
             retention_days=retention_days,
+            exact_counts=exact_counts,
         )
         payload["read_only"] = True
         return payload
@@ -935,13 +1757,19 @@ def operator_event_retention_prune(
     settings = load_settings()
     connection = open_connection(settings.trading_db_path)
     try:
-        result = prune_event_store_events(
-            connection,
-            settings=settings,
-            retention_days=retention_days,
-            dry_run=dry_run,
-            limit=limit,
-        )
+        try:
+            result = prune_event_store_events(
+                connection,
+                settings=settings,
+                retention_days=retention_days,
+                dry_run=dry_run,
+                limit=limit,
+            )
+        except EventRetentionSafetyError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
         return result.to_dict()
     finally:
         connection.close()
@@ -984,6 +1812,97 @@ def operator_realtime_subscriptions_run_once(
             queue_commands=queue_commands,
         )
         return plan.to_dict()
+    finally:
+        connection.close()
+
+
+@router.get("/projection-watermarks/status")
+def operator_projection_watermarks_status() -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        return get_projection_watermark_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get("/projection-watermarks/results")
+def operator_projection_watermark_results(
+    projection_name: str | None = Query(default=None, min_length=1, max_length=64),
+    status: str | None = Query(default=None, min_length=1, max_length=16),
+    event_id: str | None = Query(default=None, min_length=1, max_length=128),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_projection_event_results(
+            connection,
+            projection_name=projection_name,
+            status=status,
+            event_id=event_id,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "no_order_side_effects": True,
+            "no_trading_side_effects": True,
+        }
+    finally:
+        connection.close()
+
+
+@router.post(
+    "/projection-watermarks/backfill",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_projection_watermark_backfill(
+    limit: int = Query(default=100, ge=1, le=5000),
+    dry_run: bool = Query(default=True),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        try:
+            return backfill_projection_event_results_from_outbox(
+                connection,
+                limit=limit,
+                dry_run=dry_run,
+                apply_enabled=settings.projection_event_result_backfill_enabled,
+            )
+        except ProjectionWatermarkBackfillSafetyError as exc:
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=exc.to_dict(),
+            ) from exc
+    finally:
+        connection.close()
+
+
+@router.get("/projection-retention/rca")
+def operator_projection_retention_rca(
+    event_id: str | None = Query(default=None, min_length=1, max_length=128),
+    retention_days: int | None = Query(default=None, ge=1),
+    limit: int = Query(default=100, ge=1, le=500),
+    blocked_only: bool = Query(default=False),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        retention = get_event_retention_status(
+            connection,
+            settings=settings,
+            retention_days=retention_days,
+        )
+        return build_projection_retention_rca(
+            connection,
+            cutoff_at=str(retention["cutoff_at"]),
+            event_id=event_id,
+            limit=limit,
+            blocked_only=blocked_only,
+        )
     finally:
         connection.close()
 

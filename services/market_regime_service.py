@@ -34,9 +34,21 @@ def rebuild_market_regime_snapshot(
     code: str | None = None,
     *,
     settings: Settings | None = None,
+    source_event_id: str | None = None,
+    source_projection: str | None = None,
+    generated_by: str | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
     target_code = REGIME_TARGET_MARKET if code is None else validate_stock_code(code)
+    source_lineage = {
+        key: value
+        for key, value in {
+            "source_event_id": source_event_id,
+            "source_projection": source_projection,
+            "generated_by": generated_by,
+        }.items()
+        if value
+    }
     market, primary_index, secondary_index = _resolve_market_indexes(connection, target_code)
     snapshot_at = datetime_to_wire(utc_now())
 
@@ -49,7 +61,7 @@ def rebuild_market_regime_snapshot(
             regime_status="DATA_WAIT",
             quality_status="DEGRADED",
             reason_codes=["MARKET_REGIME_DISABLED"],
-            evidence={"enabled": False},
+            evidence={"enabled": False, **source_lineage},
             snapshot_at=snapshot_at,
         )
         _insert_snapshot(connection, snapshot)
@@ -82,6 +94,7 @@ def rebuild_market_regime_snapshot(
             ),
         },
         "observe_only": True,
+        **source_lineage,
     }
     snapshot = _snapshot_payload(
         target_code=target_code,
@@ -153,6 +166,64 @@ def get_market_regime_for_code(
     return rebuild_market_regime_snapshot(connection, code, settings=settings)
 
 
+def evaluate_market_regime_for_market(
+    connection: sqlite3.Connection,
+    market: str,
+    *,
+    settings: Settings | None = None,
+) -> dict[str, Any]:
+    resolved_settings = settings or load_settings()
+    normalized_market = _normalize_context_market(market)
+    primary_index = normalized_market
+    secondary_index = "KOSDAQ" if normalized_market == "KOSPI" else "KOSPI"
+    snapshot_at = datetime_to_wire(utc_now())
+    if not resolved_settings.market_regime_enabled:
+        payload = _snapshot_payload(
+            target_code=f"__{normalized_market}__",
+            market=normalized_market,
+            primary_index_code=primary_index,
+            secondary_index_code=secondary_index,
+            regime_status="DATA_WAIT",
+            quality_status="DEGRADED",
+            reason_codes=["MARKET_REGIME_DISABLED"],
+            evidence={"enabled": False, "observe_only": True},
+            snapshot_at=snapshot_at,
+        )
+        payload.pop("snapshot_id", None)
+        return payload
+
+    primary = _index_context(connection, primary_index, settings=resolved_settings)
+    secondary = _index_context(connection, secondary_index, settings=resolved_settings)
+    regime_status, quality_status, reason_codes = _classify_regime(
+        market=normalized_market,
+        primary=primary,
+        secondary=secondary,
+        settings=resolved_settings,
+    )
+    payload = _snapshot_payload(
+        target_code=f"__{normalized_market}__",
+        market=normalized_market,
+        primary_index_code=primary_index,
+        secondary_index_code=secondary_index,
+        regime_status=regime_status,
+        quality_status=quality_status,
+        primary_return_5m=primary.get("return_5m"),
+        primary_drawdown_15m=primary.get("drawdown_15m"),
+        secondary_return_5m=secondary.get("return_5m"),
+        secondary_drawdown_15m=secondary.get("drawdown_15m"),
+        reason_codes=reason_codes,
+        evidence={
+            "enabled": True,
+            "primary_index": primary,
+            "secondary_index": secondary,
+            "observe_only": True,
+        },
+        snapshot_at=snapshot_at,
+    )
+    payload.pop("snapshot_id", None)
+    return payload
+
+
 def get_market_regime_status(
     connection: sqlite3.Connection,
     *,
@@ -190,6 +261,13 @@ def _resolve_market_indexes(
     if market == "KOSPI":
         return market, "KOSPI", "KOSDAQ"
     return market, "UNKNOWN", None
+
+
+def _normalize_context_market(value: object) -> str:
+    market = str(value or "").strip().upper()
+    if market not in {"KOSPI", "KOSDAQ"}:
+        raise ValueError("market must be KOSPI or KOSDAQ")
+    return market
 
 
 def _index_context(
@@ -354,6 +432,9 @@ def _insert_snapshot(connection: sqlite3.Connection, snapshot: Mapping[str, Any]
         """
         INSERT INTO market_regime_snapshots (
             snapshot_id,
+            source_event_id,
+            source_projection,
+            generated_by,
             target_code,
             market,
             primary_index_code,
@@ -368,10 +449,13 @@ def _insert_snapshot(connection: sqlite3.Connection, snapshot: Mapping[str, Any]
             evidence_json,
             snapshot_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             snapshot["snapshot_id"],
+            snapshot.get("evidence_json", {}).get("source_event_id"),
+            snapshot.get("evidence_json", {}).get("source_projection"),
+            snapshot.get("evidence_json", {}).get("generated_by"),
             snapshot["target_code"],
             snapshot.get("market"),
             snapshot["primary_index_code"],

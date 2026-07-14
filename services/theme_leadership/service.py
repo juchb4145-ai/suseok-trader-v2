@@ -64,7 +64,11 @@ class ThemeLeadershipRebuildResult:
             "watchset_selection_source": self.watchset_selection_source,
             "warning": self.warning,
             "top_themes": [
-                snapshot.to_dict(include_members=include_members) for snapshot in self.snapshots
+                {
+                    **snapshot.to_dict(include_members=include_members),
+                    "watchset_selection_source": self.watchset_selection_source,
+                }
+                for snapshot in self.snapshots
             ],
             "watchset": self.watchset.to_dict(),
             "candidate_source_events": [event.to_dict() for event in self.candidate_source_events],
@@ -293,6 +297,9 @@ def _rank_from_theme_flow_snapshots(
                 members=members,
                 reason_codes=reasons,
                 created_at=created_at,
+                source="THEME_FLOW_SNAPSHOT",
+                snapshot_id=str(row["snapshot_id"]),
+                calculated_at=row["calculated_at"],
                 avg_change_rate_pct=float(row["avg_change_rate"] or 0.0),
                 max_change_rate_pct=float(row["max_change_rate"] or 0.0),
                 leader_concentration=0.0,

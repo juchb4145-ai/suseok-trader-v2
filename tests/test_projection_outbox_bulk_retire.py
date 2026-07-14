@@ -32,6 +32,32 @@ def test_bulk_retire_price_tick_artifact_marks_applied(tmp_path) -> None:
     )
 
 
+def test_bulk_retire_protects_current_trade_date_evidence(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "bulk-current-date.sqlite3")
+    _insert_gateway_event(connection, "evt_current", "price_tick")
+    _insert_outbox(connection, "market_data", "evt_current", "price_tick")
+    _insert_price_tick_sample(connection, "evt_current")
+    connection.execute(
+        "UPDATE gateway_events SET event_ts = ? WHERE event_id = 'evt_current'",
+        (datetime_to_wire(utc_now()),),
+    )
+    connection.commit()
+
+    result = bulk_retire_projection_outbox(
+        connection,
+        dry_run=False,
+        older_than_sec=60,
+        protect_current_trade_date=True,
+    )
+    row = _outbox(connection, "market_data:evt_current")
+    connection.close()
+
+    assert result.retired_count == 0
+    assert result.protected_trade_date is not None
+    assert result.reason_counts["CURRENT_TRADE_DATE_EVIDENCE_PROTECTED"] == 1
+    assert row["status"] == "PENDING"
+
+
 def test_bulk_retire_condition_event_artifact_marks_applied(tmp_path) -> None:
     connection = initialize_database(tmp_path / "bulk-condition.sqlite3")
     _insert_gateway_event(connection, "evt_condition", "condition_event")

@@ -9,11 +9,13 @@ from typing import Any
 
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
+from storage.gateway_command_store import canonical_json
+
 from services.config import Settings, load_settings
+from services.market_reference_service import market_symbols_payload_has_symbols
 from services.runtime.market_reference_projection_reconcile import (
     get_latest_market_reference_projection_reconcile,
 )
-from storage.gateway_command_store import canonical_json
 
 PROJECTION_NAME_MARKET_REFERENCE = "market_reference"
 MARKET_REFERENCE_EFFECTIVE_SKIP_DISABLED_REASON = (
@@ -43,6 +45,18 @@ class MarketReferenceAppendOnlyRoutingDecision:
     worker_apply_enabled: bool = False
     membership_count: int = 0
     min_membership_count: int = 0
+    global_kill_switch: bool = True
+    legacy_effective_skip_guard: bool = True
+    skip_budget_limit: int = 0
+    skip_budget_used: int = 0
+    skip_budget_remaining: int = 0
+    outbox_pending_count: int = 0
+    outbox_processing_count: int = 0
+    outbox_error_count: int = 0
+    outbox_dead_letter_count: int = 0
+    rollback_required: bool = False
+    rollback_reason_codes: Sequence[str] = field(default_factory=tuple)
+    controller_status: str = "WARN"
     projection_name: str = PROJECTION_NAME_MARKET_REFERENCE
     no_trading_side_effects: bool = True
 
@@ -66,6 +80,18 @@ class MarketReferenceAppendOnlyRoutingDecision:
             "worker_apply_enabled": self.worker_apply_enabled,
             "membership_count": self.membership_count,
             "min_membership_count": self.min_membership_count,
+            "global_kill_switch": self.global_kill_switch,
+            "legacy_effective_skip_guard": self.legacy_effective_skip_guard,
+            "skip_budget_limit": self.skip_budget_limit,
+            "skip_budget_used": self.skip_budget_used,
+            "skip_budget_remaining": self.skip_budget_remaining,
+            "outbox_pending_count": self.outbox_pending_count,
+            "outbox_processing_count": self.outbox_processing_count,
+            "outbox_error_count": self.outbox_error_count,
+            "outbox_dead_letter_count": self.outbox_dead_letter_count,
+            "rollback_required": self.rollback_required,
+            "rollback_reason_codes": list(self.rollback_reason_codes),
+            "controller_status": self.controller_status,
             "blocked_reason_codes": list(self.blocked_reason_codes),
             "evidence": dict(self.evidence),
             "decided_at": self.decided_at,
@@ -85,6 +111,17 @@ def decide_market_reference_append_only_routing(
     decided_at = datetime_to_wire(utc_now())
     dry_run_enabled = bool(settings.gateway_market_reference_append_only_dry_run_enabled)
     cutover_enabled = bool(settings.gateway_market_reference_append_only_cutover_enabled)
+    global_kill_switch = bool(
+        settings.gateway_market_reference_append_only_global_kill_switch
+    )
+    legacy_effective_skip_guard = bool(
+        settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+    )
+    skip_budget_limit = int(
+        settings.gateway_market_reference_append_only_max_skip_per_minute
+    )
+    skip_budget_used = _market_reference_skip_budget_used(connection)
+    skip_budget_remaining = max(skip_budget_limit - skip_budget_used, 0)
     reconcile_required = bool(
         settings.gateway_market_reference_append_only_require_reconcile_pass
     )
@@ -117,6 +154,13 @@ def decide_market_reference_append_only_routing(
         and settings.projection_outbox_market_reference_apply_enabled
     )
     source_event_status = _gateway_event_status(connection, event.event_id)
+    outbox_counts = _market_reference_outbox_counts(connection)
+    effective_skip_health = _market_reference_effective_skip_health(connection)
+    rollback_reason_codes = _market_reference_rollback_reason_codes(
+        outbox_counts=outbox_counts,
+        effective_skip_health=effective_skip_health,
+        settings=settings,
+    )
 
     reason_codes: list[str] = []
     would_skip_inline = False
@@ -133,15 +177,18 @@ def decide_market_reference_append_only_routing(
         reason_codes.append("MARKET_REFERENCE_RECONCILE_MISSING")
     elif reconcile_required and (latest_status != "PASS" or not append_only_ready):
         reason_codes.append("MARKET_REFERENCE_RECONCILE_NOT_PASS")
+    elif reconcile_required and latest_age_sec is None:
+        reason_codes.append("MARKET_REFERENCE_RECONCILE_FRESHNESS_UNKNOWN")
     elif (
         reconcile_required
-        and latest_age_sec is not None
         and latest_age_sec
         > settings.gateway_market_reference_append_only_reconcile_max_age_sec
     ):
         reason_codes.append("MARKET_REFERENCE_RECONCILE_STALE")
     elif source_event_status != "ACCEPTED":
         reason_codes.append("SOURCE_GATEWAY_EVENT_NOT_ACCEPTED")
+    elif not market_symbols_payload_has_symbols(event.payload):
+        reason_codes.append("MARKET_REFERENCE_NO_SYMBOLS")
     elif membership_count < min_membership_count:
         reason_codes.append("MARKET_REFERENCE_MEMBERSHIP_COUNT_BELOW_MIN")
     else:
@@ -149,19 +196,72 @@ def decide_market_reference_append_only_routing(
         reason_codes.append("DRY_RUN_WOULD_SKIP_INLINE")
 
     effective_skip_inline = False
-    if cutover_enabled or would_skip_inline:
+    if would_skip_inline:
+        if not cutover_enabled:
+            reason_codes.append("MARKET_REFERENCE_CUTOVER_DISABLED")
+        elif global_kill_switch:
+            reason_codes.append("MARKET_REFERENCE_GLOBAL_KILL_SWITCH")
+        elif legacy_effective_skip_guard:
+            reason_codes.append(MARKET_REFERENCE_EFFECTIVE_SKIP_DISABLED_REASON)
+        elif not worker_apply_enabled:
+            reason_codes.append("MARKET_REFERENCE_WORKER_APPLY_NOT_ENABLED")
+        elif latest_status != "PASS" or not append_only_ready:
+            reason_codes.append("MARKET_REFERENCE_RECONCILE_NOT_PASS")
+        elif latest_age_sec is None:
+            reason_codes.append("MARKET_REFERENCE_RECONCILE_FRESHNESS_UNKNOWN")
+        elif (
+            latest_age_sec
+            > settings.gateway_market_reference_append_only_reconcile_max_age_sec
+        ):
+            reason_codes.append("MARKET_REFERENCE_RECONCILE_STALE")
+        elif rollback_reason_codes:
+            reason_codes.append("MARKET_REFERENCE_INLINE_ROLLBACK_REQUIRED")
+            reason_codes.extend(rollback_reason_codes)
+        elif skip_budget_limit <= 0:
+            reason_codes.append("MARKET_REFERENCE_SKIP_BUDGET_EXHAUSTED")
+        else:
+            reserved_budget_used = _reserve_market_reference_skip_budget(
+                connection,
+                event_id=event.event_id,
+                limit=skip_budget_limit,
+            )
+            if reserved_budget_used is None:
+                reason_codes.append("MARKET_REFERENCE_SKIP_BUDGET_EXHAUSTED")
+                skip_budget_used = _market_reference_skip_budget_used(connection)
+            else:
+                effective_skip_inline = True
+                skip_budget_used = reserved_budget_used
+                reason_codes.append("MARKET_REFERENCE_LIMITED_CUTOVER_EFFECTIVE_SKIP")
+            skip_budget_remaining = max(skip_budget_limit - skip_budget_used, 0)
+    elif cutover_enabled and legacy_effective_skip_guard:
         reason_codes.append(MARKET_REFERENCE_EFFECTIVE_SKIP_DISABLED_REASON)
 
+    controller_status = _market_reference_controller_status(
+        dry_run_enabled=dry_run_enabled,
+        cutover_enabled=cutover_enabled,
+        global_kill_switch=global_kill_switch,
+        legacy_effective_skip_guard=legacy_effective_skip_guard,
+        skip_budget_limit=skip_budget_limit,
+        worker_apply_enabled=worker_apply_enabled,
+        latest_status=latest_status,
+        append_only_ready=append_only_ready,
+        latest_age_sec=latest_age_sec,
+        membership_count=membership_count,
+        min_membership_count=min_membership_count,
+        rollback_reason_codes=rollback_reason_codes,
+        settings=settings,
+    )
+
     evidence = {
-        "pr": "PR-13",
-        "cutover_status": "DRY_RUN_ONLY",
-        "inline_projection_remains_enabled": True,
-        "effective_skip_disabled_in_pr13": bool(
-            settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
-        ),
-        "fallback_inline_projection_expected": True,
+        "pr": "PR-14",
+        "cutover_status": "LIMITED_CUTOVER" if effective_skip_inline else "INLINE_FALLBACK",
+        "inline_projection_remains_enabled": not effective_skip_inline,
+        "effective_skip_disabled_in_pr13": legacy_effective_skip_guard,
+        "fallback_inline_projection_expected": not effective_skip_inline,
         "outbox_enqueue_status": _normalize_outbox_status(outbox_status),
         "outbox_job_status": None if outbox_job is None else outbox_job["status"],
+        "outbox_counts": outbox_counts,
+        "effective_skip_health": effective_skip_health,
         "source_event_status": source_event_status,
         "latest_reconcile": (
             None
@@ -176,6 +276,13 @@ def decide_market_reference_append_only_routing(
         "worker_apply_enabled": worker_apply_enabled,
         "membership_count": membership_count,
         "min_membership_count": min_membership_count,
+        "global_kill_switch": global_kill_switch,
+        "skip_budget_limit": skip_budget_limit,
+        "skip_budget_used": skip_budget_used,
+        "skip_budget_remaining": skip_budget_remaining,
+        "rollback_required": bool(rollback_reason_codes),
+        "rollback_reason_codes": list(rollback_reason_codes),
+        "controller_status": controller_status,
         "market_data_controller_unaffected": True,
         "live_real_order_behavior_unchanged": True,
         "no_trading_side_effects": True,
@@ -198,7 +305,19 @@ def decide_market_reference_append_only_routing(
         worker_apply_enabled=worker_apply_enabled,
         membership_count=membership_count,
         min_membership_count=min_membership_count,
-        blocked_reason_codes=tuple(reason_codes),
+        global_kill_switch=global_kill_switch,
+        legacy_effective_skip_guard=legacy_effective_skip_guard,
+        skip_budget_limit=skip_budget_limit,
+        skip_budget_used=skip_budget_used,
+        skip_budget_remaining=skip_budget_remaining,
+        outbox_pending_count=outbox_counts["pending_count"],
+        outbox_processing_count=outbox_counts["processing_count"],
+        outbox_error_count=outbox_counts["error_count"],
+        outbox_dead_letter_count=outbox_counts["dead_letter_count"],
+        rollback_required=bool(rollback_reason_codes),
+        rollback_reason_codes=tuple(rollback_reason_codes),
+        controller_status=controller_status,
+        blocked_reason_codes=tuple(dict.fromkeys(reason_codes)),
         evidence=evidence,
         decided_at=decided_at,
     )
@@ -215,36 +334,100 @@ def get_latest_market_reference_append_only_routing_status(
     rows = list_market_reference_append_only_routing_decisions(connection, limit=500)
     latest_reconcile = get_latest_market_reference_projection_reconcile(connection)
     latest_run = latest_reconcile.get("latest_run")
+    latest_status = _string_or_none(
+        latest_run.get("status") if isinstance(latest_run, Mapping) else None
+    )
+    latest_created_at = _string_or_none(
+        latest_run.get("created_at") if isinstance(latest_run, Mapping) else None
+    )
+    latest_age_sec = _age_seconds(latest_created_at) if latest_created_at else None
+    append_only_ready = bool(
+        latest_run.get("append_only_ready") if isinstance(latest_run, Mapping) else False
+    )
     effective_skip_count = _count_decisions(connection, "effective_skip_inline")
     would_skip_count = _count_decisions(connection, "would_skip_inline")
-    failures: list[str] = []
-    warnings = [
-        "PR-13 dry-run only; market_reference inline projection remains enabled",
-        "market_data controller unaffected",
-        "LIVE_REAL/order behavior unchanged",
-    ]
-    if effective_skip_count > 0:
-        failures.append("MARKET_REFERENCE_EFFECTIVE_SKIP_FORBIDDEN_IN_PR13")
-    if isinstance(latest_run, Mapping) and latest_run.get("status") == "FAIL":
-        failures.append("MARKET_REFERENCE_RECONCILE_FAIL")
-    if not bool(resolved_settings.gateway_market_reference_append_only_dry_run_enabled):
-        warnings.append("market_reference append-only dry-run disabled")
-    if bool(resolved_settings.gateway_market_reference_append_only_cutover_enabled):
-        warnings.append("cutover flag ignored in PR-13; effective skip remains false")
-    blocked_reason_counts = _blocked_reason_code_counts(rows)
+    outbox_counts = _market_reference_outbox_counts(connection)
+    effective_skip_health = _market_reference_effective_skip_health(connection)
+    rollback_reason_codes = _market_reference_rollback_reason_codes(
+        outbox_counts=outbox_counts,
+        effective_skip_health=effective_skip_health,
+        settings=resolved_settings,
+    )
     membership_count = _membership_count(connection)
     min_membership_count = int(
         resolved_settings.gateway_market_reference_append_only_min_membership_count
     )
+    skip_budget_limit = int(
+        resolved_settings.gateway_market_reference_append_only_max_skip_per_minute
+    )
+    skip_budget_used = _market_reference_skip_budget_used(connection)
+    skip_budget_remaining = max(skip_budget_limit - skip_budget_used, 0)
+    controller_status = _market_reference_controller_status(
+        dry_run_enabled=bool(
+            resolved_settings.gateway_market_reference_append_only_dry_run_enabled
+        ),
+        cutover_enabled=bool(
+            resolved_settings.gateway_market_reference_append_only_cutover_enabled
+        ),
+        global_kill_switch=bool(
+            resolved_settings.gateway_market_reference_append_only_global_kill_switch
+        ),
+        legacy_effective_skip_guard=bool(
+            resolved_settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+        ),
+        skip_budget_limit=skip_budget_limit,
+        worker_apply_enabled=bool(
+            resolved_settings.projection_outbox_apply_projection_enabled
+            and resolved_settings.projection_outbox_market_reference_apply_enabled
+        ),
+        latest_status=latest_status,
+        append_only_ready=append_only_ready,
+        latest_age_sec=latest_age_sec,
+        membership_count=membership_count,
+        min_membership_count=min_membership_count,
+        rollback_reason_codes=rollback_reason_codes,
+        settings=resolved_settings,
+    )
+    failures = list(rollback_reason_codes)
+    warnings = [
+        "PR-14 market_reference limited cutover is feature-flagged",
+        "market_data controller unaffected",
+        "LIVE_REAL/order behavior unchanged",
+        "rollback: enable global kill switch or disable market_reference cutover",
+    ]
+    if isinstance(latest_run, Mapping) and latest_run.get("status") == "FAIL":
+        failures.append("MARKET_REFERENCE_RECONCILE_FAIL")
+    if not bool(resolved_settings.gateway_market_reference_append_only_dry_run_enabled):
+        warnings.append("market_reference append-only dry-run disabled")
+    if not bool(resolved_settings.gateway_market_reference_append_only_cutover_enabled):
+        warnings.append("market_reference limited cutover disabled")
+    if bool(resolved_settings.gateway_market_reference_append_only_global_kill_switch):
+        warnings.append("market_reference global kill switch enabled")
+    if bool(
+        resolved_settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+    ):
+        warnings.append("legacy PR-13 effective-skip guard enabled")
+    if skip_budget_limit <= 0:
+        warnings.append("market_reference skip budget disabled")
+    blocked_reason_counts = _blocked_reason_code_counts(rows)
     return {
-        "pr": "PR-13",
+        "pr": "PR-14",
+        "status": controller_status,
         "dry_run_enabled": bool(
             resolved_settings.gateway_market_reference_append_only_dry_run_enabled
         ),
         "cutover_enabled": bool(
             resolved_settings.gateway_market_reference_append_only_cutover_enabled
         ),
-        "effective_skip_disabled_in_pr13": True,
+        "global_kill_switch": bool(
+            resolved_settings.gateway_market_reference_append_only_global_kill_switch
+        ),
+        "effective_skip_disabled_in_pr13": bool(
+            resolved_settings.gateway_market_reference_append_only_effective_skip_disabled_in_pr13
+        ),
+        "skip_budget_limit": skip_budget_limit,
+        "skip_budget_used_current_minute": skip_budget_used,
+        "skip_budget_remaining_current_minute": skip_budget_remaining,
         "reconcile_required": bool(
             resolved_settings.gateway_market_reference_append_only_require_reconcile_pass
         ),
@@ -260,11 +443,8 @@ def get_latest_market_reference_append_only_routing_status(
         "latest_reconcile_status": (
             latest_run.get("status") if isinstance(latest_run, Mapping) else None
         ),
-        "append_only_ready": bool(
-            latest_run.get("append_only_ready")
-            if isinstance(latest_run, Mapping)
-            else False
-        ),
+        "latest_reconcile_age_sec": latest_age_sec,
+        "append_only_ready": append_only_ready,
         "worker_apply_enabled": bool(
             resolved_settings.projection_outbox_apply_projection_enabled
             and resolved_settings.projection_outbox_market_reference_apply_enabled
@@ -272,7 +452,18 @@ def get_latest_market_reference_append_only_routing_status(
         "membership_count": membership_count,
         "min_membership_count": min_membership_count,
         "membership_count_ready": membership_count >= min_membership_count,
-        "failures": failures,
+        "outbox": outbox_counts,
+        "effective_skip_health": effective_skip_health,
+        "rollback_required": bool(rollback_reason_codes),
+        "rollback_reason_codes": list(rollback_reason_codes),
+        "rollback_hint": (
+            "set GATEWAY_MARKET_REFERENCE_APPEND_ONLY_GLOBAL_KILL_SWITCH=true "
+            "or GATEWAY_MARKET_REFERENCE_APPEND_ONLY_CUTOVER_ENABLED=false"
+        ),
+        "effective_skip_allowed_now": bool(
+            controller_status == "PASS" and skip_budget_remaining > 0
+        ),
+        "failures": sorted(set(failures)),
         "warnings": warnings,
         "read_only": True,
         "no_trading_side_effects": True,
@@ -318,6 +509,12 @@ def build_market_reference_status(
         settings=resolved_settings,
     )
     outbox_counts = _market_reference_outbox_counts(connection)
+    latest_outbox_job = (
+        None
+        if latest_event is None
+        else _market_reference_outbox_job(connection, str(latest_event["event_id"]))
+    )
+    latest_outbox_payload = _market_reference_outbox_job_payload(latest_outbox_job)
     membership_count = _membership_count(connection)
     missing_membership_count = int(
         latest_run.get("missing_membership_count") or 0
@@ -325,7 +522,7 @@ def build_market_reference_status(
         else 0
     )
     return {
-        "pr": "PR-13",
+        "pr": "PR-14",
         "membership_count": membership_count,
         "latest_market_symbols_event_id": (
             None if latest_event is None else latest_event["event_id"]
@@ -346,6 +543,7 @@ def build_market_reference_status(
         ),
         "missing_membership_count": missing_membership_count,
         "outbox": outbox_counts,
+        "latest_outbox_job": latest_outbox_payload,
         "append_only_routing": routing_status,
         "append_only_dry_run_would_skip_count": int(
             routing_status.get("would_skip_inline_count") or 0
@@ -354,9 +552,10 @@ def build_market_reference_status(
             routing_status.get("effective_skip_inline_count") or 0
         ),
         "warnings": [
-            "PR-13 dry-run only; market_reference inline projection remains enabled",
+            "PR-14 market_reference limited cutover is feature-flagged",
             "market_data controller unaffected",
             "LIVE_REAL/order behavior unchanged",
+            "rollback: enable global kill switch or disable market_reference cutover",
         ],
         "read_only": True,
         "no_trading_side_effects": True,
@@ -461,6 +660,16 @@ def _market_reference_outbox_job(
     return None if row is None else dict(row)
 
 
+def _market_reference_outbox_job_payload(
+    row: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    payload = dict(row)
+    payload["metadata"] = _json_object(payload.pop("metadata_json", "{}"))
+    return payload
+
+
 def _market_reference_outbox_counts(connection: sqlite3.Connection) -> dict[str, int]:
     counts = {
         "job_count": 0,
@@ -487,6 +696,205 @@ def _market_reference_outbox_counts(connection: sqlite3.Connection) -> dict[str,
         if key in counts:
             counts[key] = count
     return counts
+
+
+def _market_reference_effective_skip_health(
+    connection: sqlite3.Connection,
+) -> dict[str, int]:
+    row = connection.execute(
+        """
+        WITH latest_market_symbols AS (
+            SELECT event_id
+            FROM gateway_events
+            WHERE status = 'ACCEPTED' AND event_type = 'market_symbols'
+            ORDER BY rowid DESC
+            LIMIT 1
+        )
+        SELECT
+            COUNT(*) AS effective_skip_count,
+            SUM(
+                CASE
+                    WHEN o.outbox_id IS NULL OR o.status != 'APPLIED' THEN 1
+                    ELSE 0
+                END
+            ) AS pending_worker_count,
+            SUM(
+                CASE
+                    WHEN o.status IN ('ERROR', 'DEAD_LETTER') THEN 1
+                    ELSE 0
+                END
+            ) AS worker_error_count,
+            SUM(
+                CASE
+                    WHEN o.status = 'APPLIED'
+                        AND COALESCE(
+                            json_extract(
+                                o.metadata_json,
+                                '$.last_worker_evidence.apply_result'
+                            ),
+                            ''
+                        ) != 'APPLIED_BY_WORKER'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS worker_apply_evidence_missing_count,
+            SUM(
+                CASE
+                    WHEN d.event_id = (
+                        SELECT event_id FROM latest_market_symbols
+                    ) AND NOT EXISTS (
+                        SELECT 1
+                        FROM market_symbol_memberships AS m
+                        WHERE m.event_id = d.event_id
+                    ) THEN 1
+                    ELSE 0
+                END
+            ) AS artifact_missing_count
+        FROM market_reference_projection_routing_decisions AS d
+        LEFT JOIN projection_outbox AS o
+            ON o.event_id = d.event_id
+            AND o.projection_name = 'market_reference'
+        WHERE d.effective_skip_inline = 1
+        """
+    ).fetchone()
+    return {
+        "effective_skip_count": int(row["effective_skip_count"] or 0),
+        "pending_worker_count": int(row["pending_worker_count"] or 0),
+        "worker_error_count": int(row["worker_error_count"] or 0),
+        "worker_apply_evidence_missing_count": int(
+            row["worker_apply_evidence_missing_count"] or 0
+        ),
+        "artifact_missing_count": int(row["artifact_missing_count"] or 0),
+    }
+
+
+def _market_reference_rollback_reason_codes(
+    *,
+    outbox_counts: Mapping[str, int],
+    effective_skip_health: Mapping[str, int],
+    settings: Settings,
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if int(outbox_counts.get("error_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_OUTBOX_ERROR")
+    if int(outbox_counts.get("dead_letter_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_OUTBOX_DEAD_LETTER")
+    if int(outbox_counts.get("processing_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_OUTBOX_PROCESSING_ACTIVE")
+    if int(outbox_counts.get("pending_count") or 0) > int(
+        settings.gateway_market_reference_append_only_max_pending_within_sla
+    ):
+        reasons.append("MARKET_REFERENCE_OUTBOX_PENDING_EXCEEDED")
+    if int(effective_skip_health.get("pending_worker_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_EFFECTIVE_SKIP_PENDING_WORKER")
+    if int(effective_skip_health.get("worker_error_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_EFFECTIVE_SKIP_WORKER_ERROR")
+    if int(
+        effective_skip_health.get("worker_apply_evidence_missing_count") or 0
+    ) > 0:
+        reasons.append("MARKET_REFERENCE_EFFECTIVE_SKIP_WORKER_EVIDENCE_MISSING")
+    if int(effective_skip_health.get("artifact_missing_count") or 0) > 0:
+        reasons.append("MARKET_REFERENCE_EFFECTIVE_SKIP_ARTIFACT_MISSING")
+    return tuple(sorted(set(reasons)))
+
+
+def _market_reference_controller_status(
+    *,
+    dry_run_enabled: bool,
+    cutover_enabled: bool,
+    global_kill_switch: bool,
+    legacy_effective_skip_guard: bool,
+    skip_budget_limit: int,
+    worker_apply_enabled: bool,
+    latest_status: str | None,
+    append_only_ready: bool,
+    latest_age_sec: float | None,
+    membership_count: int,
+    min_membership_count: int,
+    rollback_reason_codes: Sequence[str],
+    settings: Settings,
+) -> str:
+    if rollback_reason_codes:
+        return "FAIL"
+    gates_ready = bool(
+        dry_run_enabled
+        and cutover_enabled
+        and not global_kill_switch
+        and not legacy_effective_skip_guard
+        and skip_budget_limit > 0
+        and worker_apply_enabled
+        and latest_status == "PASS"
+        and append_only_ready
+        and latest_age_sec is not None
+        and latest_age_sec
+        <= settings.gateway_market_reference_append_only_reconcile_max_age_sec
+        and membership_count >= min_membership_count
+    )
+    if gates_ready:
+        return "PASS"
+    active_cutover_requested = bool(
+        cutover_enabled and not global_kill_switch and not legacy_effective_skip_guard
+    )
+    return "FAIL" if active_cutover_requested else "WARN"
+
+
+def _market_reference_skip_budget_used(connection: sqlite3.Connection) -> int:
+    minute_bucket = _market_reference_budget_minute_bucket()
+    row = connection.execute(
+        """
+        SELECT used_count
+        FROM market_reference_append_only_budget_state
+        WHERE budget_name = 'market_reference_global'
+            AND minute_bucket = ?
+        """,
+        (minute_bucket,),
+    ).fetchone()
+    return 0 if row is None else int(row["used_count"])
+
+
+def _reserve_market_reference_skip_budget(
+    connection: sqlite3.Connection,
+    *,
+    event_id: str,
+    limit: int,
+) -> int | None:
+    if limit <= 0:
+        return None
+    minute_bucket = _market_reference_budget_minute_bucket()
+    cursor = connection.execute(
+        """
+        INSERT INTO market_reference_append_only_budget_state (
+            budget_name,
+            minute_bucket,
+            used_count,
+            last_event_id,
+            updated_at
+        )
+        VALUES ('market_reference_global', ?, 1, ?, ?)
+        ON CONFLICT(budget_name) DO UPDATE SET
+            minute_bucket = excluded.minute_bucket,
+            used_count = CASE
+                WHEN market_reference_append_only_budget_state.minute_bucket
+                    = excluded.minute_bucket
+                THEN market_reference_append_only_budget_state.used_count + 1
+                ELSE 1
+            END,
+            last_event_id = excluded.last_event_id,
+            updated_at = excluded.updated_at
+        WHERE market_reference_append_only_budget_state.minute_bucket
+                != excluded.minute_bucket
+            OR market_reference_append_only_budget_state.used_count < ?
+        """,
+        (minute_bucket, event_id, datetime_to_wire(utc_now()), limit),
+    )
+    connection.commit()
+    if cursor.rowcount != 1:
+        return None
+    return _market_reference_skip_budget_used(connection)
+
+
+def _market_reference_budget_minute_bucket() -> str:
+    return datetime_to_wire(utc_now().replace(second=0, microsecond=0))
 
 
 def _outbox_is_ready(

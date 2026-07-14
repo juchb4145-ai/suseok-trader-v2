@@ -5,6 +5,7 @@ import sqlite3
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import Any
 
 from domain.broker.conditions import BrokerConditionEvent
@@ -23,6 +24,7 @@ from services.market_data_service import (
     normalize_market_data_exchange,
 )
 from services.runtime.market_data_append_only_controller import (
+    MarketDataAppendOnlyControllerStatus,
     build_market_data_append_only_controller_status,
     record_market_data_append_only_auto_rollback_event,
 )
@@ -144,12 +146,45 @@ class MarketDataAppendOnlyRoutingDecision:
         }
 
 
+@dataclass(frozen=True, kw_only=True)
+class MarketDataProjectionRoutingBatchContext:
+    controller_status: MarketDataAppendOnlyControllerStatus
+    condition_event_backlog: Mapping[str, Any] = field(default_factory=dict)
+
+
+def build_market_data_projection_routing_batch_context(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+    include_condition_event: bool = False,
+) -> MarketDataProjectionRoutingBatchContext:
+    latest_reconcile = get_latest_market_data_projection_reconcile(connection)
+    return MarketDataProjectionRoutingBatchContext(
+        controller_status=build_market_data_append_only_controller_status(
+            connection,
+            settings=settings,
+        ),
+        condition_event_backlog=(
+            _condition_event_backlog_status(
+                connection,
+                settings=settings,
+                latest_reconcile=latest_reconcile,
+            )
+            if include_condition_event
+            else {}
+        ),
+    )
+
+
 def decide_market_data_projection_routing(
     connection: sqlite3.Connection,
     event: GatewayEvent,
     *,
     settings: Settings,
     outbox_status: str | None = None,
+    commit: bool = True,
+    controller_status: MarketDataAppendOnlyControllerStatus | None = None,
+    condition_event_backlog_status: Mapping[str, Any] | None = None,
 ) -> MarketDataAppendOnlyRoutingDecision:
     event_type = event.event_type.strip().lower()
     tr_response_dry_run_enabled = bool(
@@ -297,7 +332,10 @@ def decide_market_data_projection_routing(
         else None
     )
     condition_event_backlog = (
-        _condition_event_backlog_status(
+        dict(condition_event_backlog_status)
+        if event_type == "condition_event"
+        and condition_event_backlog_status is not None
+        else _condition_event_backlog_status(
             connection,
             settings=settings,
             latest_reconcile=latest_reconcile,
@@ -582,9 +620,13 @@ def decide_market_data_projection_routing(
         reason_codes.append("EVENT_TYPE_NOT_ENABLED_FOR_PR8_CUTOVER")
         effective_skip_reason = "EVENT_TYPE_NOT_ENABLED_FOR_PR7_CUTOVER"
 
-    controller_status = build_market_data_append_only_controller_status(
-        connection,
-        settings=settings,
+    controller_status = (
+        controller_status
+        if controller_status is not None
+        else build_market_data_append_only_controller_status(
+            connection,
+            settings=settings,
+        )
     )
     controller_rollback_event_id = None
     if controller_status.auto_rollback_required:
@@ -801,7 +843,11 @@ def decide_market_data_projection_routing(
         evidence=evidence,
         decided_at=decided_at,
     )
-    _persist_market_data_projection_routing_decision(connection, decision)
+    _persist_market_data_projection_routing_decision(
+        connection,
+        decision,
+        commit=commit,
+    )
     return decision
 
 
@@ -1211,6 +1257,8 @@ def list_market_data_append_only_routing_decisions(
 def _persist_market_data_projection_routing_decision(
     connection: sqlite3.Connection,
     decision: MarketDataAppendOnlyRoutingDecision,
+    *,
+    commit: bool = True,
 ) -> None:
     connection.execute(
         """
@@ -1361,7 +1409,8 @@ def _persist_market_data_projection_routing_decision(
             decision.decided_at,
         ),
     )
-    connection.commit()
+    if commit:
+        connection.commit()
 
 
 def _market_data_outbox_job(
@@ -1576,22 +1625,167 @@ def _condition_event_backlog_status(
 ) -> dict[str, Any]:
     try:
         from services.runtime.projection_outbox_backlog import (
-            build_projection_outbox_backlog_status,
+            evaluate_projection_outbox_readiness,
         )
 
-        routing_status = {
-            "condition_event_effective_skip_count": (
-                _count_effective_skip_by_event_type(connection, "condition_event")
-            ),
-            "invalid_effective_skip_count": _count_invalid_effective_skips(connection),
+        now = utc_now()
+        recent_cutoff = datetime_to_wire(
+            now
+            - timedelta(
+                seconds=int(settings.projection_outbox_backlog_recent_window_sec)
+            )
+        )
+        stale_cutoff = datetime_to_wire(
+            now
+            - timedelta(
+                seconds=int(
+                    settings.projection_outbox_backlog_stale_processing_sec
+                )
+            )
+        )
+        status_counts = {
+            "PENDING": 0,
+            "PROCESSING": 0,
+            "ERROR": 0,
+            "DEAD_LETTER": 0,
         }
-        return build_projection_outbox_backlog_status(
+        for row in connection.execute(
+            """
+            SELECT status, COUNT(*) AS count
+            FROM projection_outbox
+            WHERE status IN ('PENDING', 'PROCESSING', 'ERROR', 'DEAD_LETTER')
+            GROUP BY status
+            """
+        ).fetchall():
+            status_counts[str(row["status"]).upper()] = int(row["count"])
+        recent_pending_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM projection_outbox
+                WHERE status = 'PENDING' AND created_at >= ?
+                """,
+                (recent_cutoff,),
+            ).fetchone()["count"]
+        )
+        condition_event_pending_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM projection_outbox
+                WHERE status = 'PENDING' AND event_type = 'condition_event'
+                """
+            ).fetchone()["count"]
+        )
+        condition_event_recent_pending_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM projection_outbox
+                WHERE status = 'PENDING'
+                    AND event_type = 'condition_event'
+                    AND created_at >= ?
+                """,
+                (recent_cutoff,),
+            ).fetchone()["count"]
+        )
+        stale_processing_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM projection_outbox
+                WHERE status = 'PROCESSING'
+                    AND locked_at IS NOT NULL
+                    AND locked_at < ?
+                """,
+                (stale_cutoff,),
+            ).fetchone()["count"]
+        )
+        effective_skip_pending_count = int(
+            connection.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM projection_outbox AS outbox
+                JOIN market_data_projection_routing_decisions AS decision
+                    ON decision.event_id = outbox.event_id
+                    AND decision.projection_name = outbox.projection_name
+                WHERE outbox.status = 'PENDING'
+                    AND decision.effective_skip_inline = 1
+                """
+            ).fetchone()["count"]
+        )
+        live_ingest_detected = (
+            connection.execute(
+                """
+                SELECT 1
+                FROM gateway_events
+                WHERE received_at >= ?
+                LIMIT 1
+                """,
+                (recent_cutoff,),
+            ).fetchone()
+            is not None
+        )
+        latest_run = latest_reconcile.get("latest_run")
+        latest_reconcile_status = (
+            str(latest_run.get("status") or "")
+            if isinstance(latest_run, Mapping)
+            else None
+        )
+        condition_event_effective_skip_count = _count_effective_skip_by_event_type(
             connection,
+            "condition_event",
+        )
+        invalid_effective_skip_count = _count_invalid_effective_skips(connection)
+        readiness = evaluate_projection_outbox_readiness(
+            total_pending_count=status_counts["PENDING"],
+            blocking_pending_count=status_counts["PENDING"],
+            total_error_count=status_counts["ERROR"],
+            total_dead_letter_count=status_counts["DEAD_LETTER"],
+            stale_processing_count=stale_processing_count,
+            recent_pending_count=recent_pending_count,
+            condition_event_pending_count=condition_event_pending_count,
+            condition_event_recent_pending_count=(
+                condition_event_recent_pending_count
+            ),
+            condition_event_blocking_pending_count=condition_event_pending_count,
+            effective_skip_pending_count=effective_skip_pending_count,
+            live_ingest_detected=live_ingest_detected,
+            latest_reconcile_status=latest_reconcile_status,
+            condition_event_effective_skip_count=(
+                condition_event_effective_skip_count
+            ),
+            invalid_effective_skip_count=invalid_effective_skip_count,
             settings=settings,
-            latest_reconcile=latest_reconcile,
-            routing_status=routing_status,
-            sample_limit=0,
-        ).to_dict()
+        )
+        return {
+            "readiness_status": readiness.status,
+            "pr11_condition_event_cutover_ready": (
+                readiness.pr11_condition_event_cutover_ready
+            ),
+            "reason_codes": list(readiness.reason_codes),
+            "operator_actions": list(readiness.operator_actions),
+            "total_pending_count": status_counts["PENDING"],
+            "total_processing_count": status_counts["PROCESSING"],
+            "total_error_count": status_counts["ERROR"],
+            "total_dead_letter_count": status_counts["DEAD_LETTER"],
+            "stale_processing_count": stale_processing_count,
+            "recent_pending_count": recent_pending_count,
+            "condition_event_pending_count": condition_event_pending_count,
+            "condition_event_recent_pending_count": (
+                condition_event_recent_pending_count
+            ),
+            "condition_event_blocking_pending_count": condition_event_pending_count,
+            "effective_skip_pending_count": effective_skip_pending_count,
+            "live_ingest_detected": live_ingest_detected,
+            "latest_reconcile_status": latest_reconcile_status,
+            "condition_event_effective_skip_count": (
+                condition_event_effective_skip_count
+            ),
+            "invalid_effective_skip_count": invalid_effective_skip_count,
+            "read_only": True,
+            "no_trading_side_effects": True,
+        }
     except Exception as exc:
         return {
             "readiness_status": "FAIL",

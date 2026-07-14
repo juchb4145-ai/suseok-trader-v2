@@ -4,7 +4,13 @@ import sqlite3
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, utc_now
+from storage.event_retention import get_event_retention_status
 from storage.event_store import get_gateway_status_values
+from storage.gateway_order_broker_boundary import get_order_broker_boundary_status
+from storage.live_sim_order_plan_uniqueness import (
+    get_live_sim_order_plan_uniqueness_status,
+)
+from storage.projection_watermarks import get_projection_watermark_status
 
 from services.ai_advisory.storage import build_status as build_ai_advisory_status
 from services.candidate_service import get_candidate_status
@@ -18,12 +24,45 @@ from services.live_sim.live_sim_service import (
     list_live_sim_lifecycle_events,
 )
 from services.market_data_service import get_market_data_status
+from services.market_index_service import get_market_index_status
+from services.market_index_tr_bootstrap import get_market_index_tr_bootstrap_status
+from services.market_regime_service import get_market_regime_status
+from services.market_scan_service import get_market_scan_status
 from services.operator.no_buy_sentinel import (
     build_no_buy_sentinel_snapshot,
     get_latest_no_buy_sentinel_snapshot,
 )
+from services.pipeline_coherency import build_pipeline_coherency_status
 from services.realtime_subscription import build_realtime_subscription_plan
+from services.runtime.append_only_readiness import (
+    build_append_only_readiness_status,
+)
+from services.runtime.evaluation_run_guard import get_runtime_execution_lock_status
+from services.runtime.gateway_live_sim_lifecycle_routing import (
+    build_live_sim_lifecycle_cutover_status,
+)
+from services.runtime.gateway_market_index_routing import (
+    get_latest_market_index_append_only_routing_status,
+)
+from services.runtime.gateway_market_regime_routing import (
+    get_latest_market_regime_append_only_routing_status,
+)
+from services.runtime.gateway_market_scan_routing import (
+    get_latest_market_scan_append_only_routing_status,
+)
+from services.runtime.incremental_evaluation import get_incremental_evaluation_status
 from services.runtime.live_sim_pilot_pipeline import list_live_sim_pilot_runs
+from services.runtime.market_index_projection_reconcile import (
+    get_latest_market_index_projection_reconcile,
+)
+from services.runtime.market_regime_projection_reconcile import (
+    get_latest_market_regime_projection_reconcile,
+)
+from services.runtime.market_scan_projection_reconcile import (
+    get_latest_market_scan_projection_reconcile,
+)
+from services.runtime.projection_replay import get_projection_replay_status
+from services.theme_coherency import build_theme_coherency_status
 from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
 
@@ -84,6 +123,39 @@ def build_operator_status(
             "broker_env": gateway_values.get("broker_env"),
             "server_mode": gateway_values.get("server_mode"),
         },
+        "runtime_execution_locks": get_runtime_execution_lock_status(connection),
+        "live_sim_order_plan_uniqueness": (
+            get_live_sim_order_plan_uniqueness_status(connection)
+        ),
+        "order_broker_boundaries": get_order_broker_boundary_status(connection),
+        "append_only_readiness": build_append_only_readiness_status(
+            connection,
+            settings=resolved_settings,
+        ),
+        "live_sim_lifecycle_consumer": build_live_sim_lifecycle_cutover_status(
+            connection,
+            settings=resolved_settings,
+        ),
+        "incremental_evaluation": get_incremental_evaluation_status(
+            connection,
+            settings=resolved_settings,
+        ),
+        "pipeline_coherency": build_pipeline_coherency_status(
+            connection,
+            max_age_sec=resolved_settings.entry_timing_stale_max_seconds,
+            limit=100,
+        ),
+        "theme_coherency": build_theme_coherency_status(
+            connection,
+            settings=resolved_settings,
+            limit=10,
+        ),
+        "projection_replay": get_projection_replay_status(),
+        "projection_watermarks": get_projection_watermark_status(connection),
+        "event_retention": get_event_retention_status(
+            connection,
+            settings=resolved_settings,
+        ),
         "live_sim": {
             "status": live_sim_status,
             "kill_switch": live_sim_status.get("kill_switch"),
@@ -105,6 +177,56 @@ def build_operator_status(
             "reconcile_latest": latest_reconcile,
         },
         "market_data": get_market_data_status(connection, settings=resolved_settings),
+        "market_index": {
+            "status": get_market_index_status(connection, settings=resolved_settings),
+            "tr_bootstrap": get_market_index_tr_bootstrap_status(
+                connection,
+                settings=resolved_settings,
+            ),
+            "projection_reconcile": get_latest_market_index_projection_reconcile(
+                connection
+            ),
+            "append_only_routing": (
+                get_latest_market_index_append_only_routing_status(
+                    connection,
+                    settings=resolved_settings,
+                )
+            ),
+        },
+        "market_index_tr_bootstrap": get_market_index_tr_bootstrap_status(
+            connection,
+            settings=resolved_settings,
+        ),
+        "market_regime": {
+            "status": get_market_regime_status(
+                connection,
+                settings=resolved_settings,
+            ),
+            "projection_reconcile": get_latest_market_regime_projection_reconcile(
+                connection
+            ),
+            "append_only_routing": (
+                get_latest_market_regime_append_only_routing_status(
+                    connection,
+                    settings=resolved_settings,
+                )
+            ),
+        },
+        "market_scan": {
+            "status": get_market_scan_status(
+                connection,
+                settings=resolved_settings,
+            ),
+            "projection_reconcile": get_latest_market_scan_projection_reconcile(
+                connection
+            ),
+            "append_only_routing": (
+                get_latest_market_scan_append_only_routing_status(
+                    connection,
+                    settings=resolved_settings,
+                )
+            ),
+        },
         "theme_leadership": get_theme_status(connection, settings=resolved_settings),
         "theme_data_wait_diagnostics": {
             "state_quality_distribution": theme_diagnostics["state_quality_distribution"],

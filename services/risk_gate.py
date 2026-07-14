@@ -30,6 +30,11 @@ from storage.gateway_command_store import canonical_json
 from services.config import Settings, load_settings
 from services.live_sim.daily_loss_guard import build_live_sim_daily_loss_evidence
 from services.market_data_service import get_latest_cross_exchange_observation
+from services.pipeline_coherency import (
+    lineage_db_values,
+    lineage_for_strategy_observation,
+    resolve_candidate_source_lineage,
+)
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -1423,8 +1428,28 @@ def _intraday_shock_observed(context: RiskInputContext, settings: Settings) -> b
 def save_risk_observation(
     connection: sqlite3.Connection,
     observation: RiskObservation,
+    *,
+    source_run_id: str | None = None,
+    source_lineage: Mapping[str, Any] | None = None,
 ) -> None:
     data = observation.to_dict(include_checks=False)
+    lineage = dict(source_lineage or {})
+    if not lineage:
+        lineage = lineage_for_strategy_observation(
+            connection,
+            observation.strategy_observation_id,
+            generated_by="risk_gate",
+        ) or resolve_candidate_source_lineage(
+            connection,
+            observation.candidate_instance_id,
+            source_run_id=source_run_id,
+            generated_by="risk_gate",
+            fallback_trade_date=observation.trade_date,
+            fallback_observed_at=data["evaluated_at"],
+        )
+    if source_run_id:
+        lineage["source_run_id"] = source_run_id
+    lineage["generated_by"] = "risk_gate"
     connection.execute(
         """
         INSERT INTO risk_observations (
@@ -1443,9 +1468,16 @@ def save_risk_observation(
             reason_codes_json,
             evidence_json,
             config_version,
-            observe_only
+            observe_only,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             data["risk_observation_id"],
@@ -1464,6 +1496,7 @@ def save_risk_observation(
             canonical_json(data["evidence_json"]),
             data["config_version"],
             1 if data["observe_only"] else 0,
+            *lineage_db_values(lineage),
         ),
     )
     for check in observation.check_observations:
@@ -1512,9 +1545,16 @@ def save_risk_observation(
             pass_count,
             reason_codes_json,
             config_version,
-            observe_only
+            observe_only,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_instance_id) DO UPDATE SET
             risk_observation_id = excluded.risk_observation_id,
             strategy_observation_id = excluded.strategy_observation_id,
@@ -1529,7 +1569,14 @@ def save_risk_observation(
             pass_count = excluded.pass_count,
             reason_codes_json = excluded.reason_codes_json,
             config_version = excluded.config_version,
-            observe_only = excluded.observe_only
+            observe_only = excluded.observe_only,
+            source_run_id = excluded.source_run_id,
+            source_watermark = excluded.source_watermark,
+            source_watermark_hash = excluded.source_watermark_hash,
+            source_event_id = excluded.source_event_id,
+            source_observed_at = excluded.source_observed_at,
+            data_age_sec = excluded.data_age_sec,
+            generated_by = excluded.generated_by
         """,
         (
             data["candidate_instance_id"],
@@ -1547,6 +1594,7 @@ def save_risk_observation(
             _json_dumps(data["reason_codes"]),
             data["config_version"],
             1 if data["observe_only"] else 0,
+            *lineage_db_values(lineage),
         ),
     )
 
@@ -1560,6 +1608,7 @@ def evaluate_risk_observations(
     candidate_instance_id: str | None = None,
     strategy_observation_id: str | None = None,
     manage_run_lock: bool = True,
+    source_run_id: str | None = None,
 ) -> RiskEvaluationRunResult:
     with runtime_execution_lock(
         connection,
@@ -1576,6 +1625,7 @@ def evaluate_risk_observations(
                 settings=settings,
                 candidate_instance_id=candidate_instance_id,
                 strategy_observation_id=strategy_observation_id,
+                source_run_id=source_run_id,
             )
 
 
@@ -1587,6 +1637,7 @@ def _evaluate_risk_observations(
     settings: Settings | None = None,
     candidate_instance_id: str | None = None,
     strategy_observation_id: str | None = None,
+    source_run_id: str | None = None,
 ) -> RiskEvaluationRunResult:
     resolved_settings = settings or load_settings()
     run_id = new_message_id("risk_run")
@@ -1645,7 +1696,11 @@ def _evaluate_risk_observations(
                     target["candidate_instance_id"],
                     settings=resolved_settings,
                 )
-            save_risk_observation(connection, observation)
+            save_risk_observation(
+                connection,
+                observation,
+                source_run_id=source_run_id,
+            )
             evaluated_count += 1
             if observation.overall_status is RiskObservationStatus.OBSERVE_PASS:
                 observe_pass_count += 1
@@ -2333,6 +2388,7 @@ def _latest_observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["reason_codes"] = _json_load_array(data.pop("reason_codes_json"))
     evidence_json = data.pop("evidence_json", None)
     data["evidence_json"] = _json_load_object(evidence_json) if evidence_json else {}
+    data["source_watermark"] = _json_load_object(data.get("source_watermark"))
     return data
 
 
@@ -2341,6 +2397,7 @@ def _observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["observe_only"] = bool(data["observe_only"])
     data["reason_codes"] = _json_load_array(data.pop("reason_codes_json"))
     data["evidence_json"] = _json_load_object(data.pop("evidence_json"))
+    data["source_watermark"] = _json_load_object(data.get("source_watermark"))
     return data
 
 

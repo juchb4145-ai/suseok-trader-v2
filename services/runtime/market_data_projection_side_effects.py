@@ -80,6 +80,7 @@ def enqueue_incremental_for_price_tick_projection(
     *,
     settings: Settings | None = None,
     source: str,
+    commit: bool = True,
 ) -> MarketDataProjectionSideEffectResult:
     resolved_settings = settings or load_settings()
     try:
@@ -87,6 +88,7 @@ def enqueue_incremental_for_price_tick_projection(
             connection,
             event,
             settings=resolved_settings,
+            commit=commit,
         )
     except Exception as exc:
         logger.exception("price_tick incremental side effect enqueue failed")
@@ -209,6 +211,7 @@ def refresh_condition_fusion_for_condition_event_projection(
     *,
     settings: Settings | None = None,
     source: str,
+    commit: bool = True,
 ) -> MarketDataProjectionSideEffectResult:
     resolved_settings = settings or load_settings()
     base_evidence: dict[str, Any] = {
@@ -251,6 +254,7 @@ def refresh_condition_fusion_for_condition_event_projection(
             connection,
             condition.code,
             settings=resolved_settings,
+            commit=commit,
         )
     except Exception as exc:
         logger.exception("condition_fusion refresh side effect failed")

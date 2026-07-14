@@ -74,6 +74,14 @@ def _base_report() -> dict[str, object]:
             "ok": True,
             "data": {"pending_count": 0, "error_count": 0, "dead_letter_count": 0},
         },
+        "projection_outbox_backlog": {
+            "ok": True,
+            "data": {
+                "readiness_status": "PASS",
+                "pr11_condition_event_cutover_ready": True,
+                "operator_actions": [],
+            },
+        },
         "latest_reconcile": {
             "ok": True,
             "data": {

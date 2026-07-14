@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -143,6 +143,18 @@ class OrderPlanDraftBuilder:
         item: EntryTimingInput,
         evaluation: EntryTimingEvaluation,
     ) -> tuple[OrderPlanStatus, list[str]]:
+        pipeline_coherency = item.raw_context.get("pipeline_coherency")
+        if isinstance(pipeline_coherency, Mapping) and (
+            str(pipeline_coherency.get("status") or "").upper() != "PASS"
+        ):
+            reasons = [
+                str(reason).strip().upper()
+                for reason in pipeline_coherency.get("reason_codes", [])
+                if str(reason).strip()
+            ]
+            return OrderPlanStatus.DATA_WAIT, _dedupe(
+                [*reasons, "PIPELINE_COHERENCY_GUARD_BLOCKED"]
+            )
         if item.risk_observation_status == "OBSERVE_BLOCK":
             return OrderPlanStatus.BLOCKED_RISK, ["RISK_OBSERVE_BLOCK"]
         if item.risk_observation_status in {"DATA_WAIT", "INVALID_CONTEXT"}:

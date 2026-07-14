@@ -40,6 +40,10 @@ from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
+from services.pipeline_coherency import (
+    lineage_db_values,
+    resolve_candidate_source_lineage,
+)
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     immediate_transaction,
@@ -295,8 +299,20 @@ def evaluate_theme_follower_expansion(
 def save_strategy_observation(
     connection: sqlite3.Connection,
     observation: StrategyObservation,
+    *,
+    source_run_id: str | None = None,
+    source_lineage: Mapping[str, Any] | None = None,
 ) -> None:
     data = observation.to_dict(include_setups=False)
+    lineage = dict(source_lineage or {}) or resolve_candidate_source_lineage(
+        connection,
+        observation.candidate_instance_id,
+        source_run_id=source_run_id,
+        generated_by="strategy_engine",
+        fallback_trade_date=observation.trade_date,
+        fallback_observed_at=data["evaluated_at"],
+    )
+    lineage["generated_by"] = "strategy_engine"
     connection.execute(
         """
         INSERT INTO strategy_observations (
@@ -314,9 +330,16 @@ def save_strategy_observation(
             reason_codes_json,
             evidence_json,
             config_version,
-            observe_only
+            observe_only,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             data["strategy_observation_id"],
@@ -334,6 +357,7 @@ def save_strategy_observation(
             canonical_json(data["evidence_json"]),
             data["config_version"],
             1 if data["observe_only"] else 0,
+            *lineage_db_values(lineage),
         ),
     )
     for setup in observation.setup_observations:
@@ -381,9 +405,16 @@ def save_strategy_observation(
             confidence,
             reason_codes_json,
             config_version,
-            observe_only
+            observe_only,
+            source_run_id,
+            source_watermark,
+            source_watermark_hash,
+            source_event_id,
+            source_observed_at,
+            data_age_sec,
+            generated_by
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(candidate_instance_id) DO UPDATE SET
             strategy_observation_id = excluded.strategy_observation_id,
             trade_date = excluded.trade_date,
@@ -397,7 +428,14 @@ def save_strategy_observation(
             confidence = excluded.confidence,
             reason_codes_json = excluded.reason_codes_json,
             config_version = excluded.config_version,
-            observe_only = excluded.observe_only
+            observe_only = excluded.observe_only,
+            source_run_id = excluded.source_run_id,
+            source_watermark = excluded.source_watermark,
+            source_watermark_hash = excluded.source_watermark_hash,
+            source_event_id = excluded.source_event_id,
+            source_observed_at = excluded.source_observed_at,
+            data_age_sec = excluded.data_age_sec,
+            generated_by = excluded.generated_by
         """,
         (
             data["candidate_instance_id"],
@@ -414,6 +452,7 @@ def save_strategy_observation(
             _json_dumps(data["reason_codes"]),
             data["config_version"],
             1 if data["observe_only"] else 0,
+            *lineage_db_values(lineage),
         ),
     )
 
@@ -426,6 +465,7 @@ def evaluate_candidates(
     settings: Settings | None = None,
     candidate_instance_id: str | None = None,
     manage_run_lock: bool = True,
+    source_run_id: str | None = None,
 ) -> StrategyEvaluationRunResult:
     with runtime_execution_lock(
         connection,
@@ -441,6 +481,7 @@ def evaluate_candidates(
                 limit=limit,
                 settings=settings,
                 candidate_instance_id=candidate_instance_id,
+                source_run_id=source_run_id,
             )
 
 
@@ -451,6 +492,7 @@ def _evaluate_candidates(
     limit: int | None = None,
     settings: Settings | None = None,
     candidate_instance_id: str | None = None,
+    source_run_id: str | None = None,
 ) -> StrategyEvaluationRunResult:
     resolved_settings = settings or load_settings()
     run_id = new_message_id("strategy_run")
@@ -500,7 +542,11 @@ def _evaluate_candidates(
                 row["candidate_instance_id"],
                 settings=resolved_settings,
             )
-            save_strategy_observation(connection, observation)
+            save_strategy_observation(
+                connection,
+                observation,
+                source_run_id=source_run_id or run_id,
+            )
             evaluated_count += 1
             if observation.overall_status is StrategyObservationStatus.DATA_WAIT:
                 data_wait_count += 1
@@ -1457,6 +1503,7 @@ def _latest_observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["reason_codes"] = json.loads(data.pop("reason_codes_json"))
     evidence_json = data.pop("evidence_json", None)
     data["evidence_json"] = _json_load_object(evidence_json) if evidence_json else {}
+    data["source_watermark"] = _json_load_object(data.get("source_watermark"))
     return data
 
 
@@ -1465,6 +1512,7 @@ def _observation_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     data["observe_only"] = bool(data["observe_only"])
     data["reason_codes"] = json.loads(data.pop("reason_codes_json"))
     data["evidence_json"] = json.loads(data.pop("evidence_json"))
+    data["source_watermark"] = _json_load_object(data.get("source_watermark"))
     return data
 
 

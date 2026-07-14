@@ -589,6 +589,8 @@ def handle_live_sim_gateway_event(
     event_type = event.event_type.strip().lower()
     if event_type in LIVE_SIM_RUNTIME_STATUS_EVENT_TYPES:
         return {"handled": False, "reason": "runtime_status_event_not_live_sim"}
+    if event_type in {"order_pre_ack", "order_broker_unconfirmed"}:
+        return {"handled": False, "reason": "broker_boundary_event"}
     if event_type in {"command_started", "command_ack", "command_failed"}:
         return _handle_live_sim_command_event(connection, event)
     if event_type == "execution_event":
@@ -3771,6 +3773,7 @@ def _insert_intent(connection: sqlite3.Connection, intent: LiveSimIntent) -> Non
             candidate_instance_id,
             strategy_observation_id,
             risk_observation_id,
+            order_plan_id,
             dry_run_intent_id,
             dry_run_order_id,
             trade_date,
@@ -3793,13 +3796,14 @@ def _insert_intent(connection: sqlite3.Connection, intent: LiveSimIntent) -> Non
             created_at,
             expires_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?)
         """,
         (
             data["live_sim_intent_id"],
             data["candidate_instance_id"],
             data["strategy_observation_id"],
             data["risk_observation_id"],
+            data["order_plan_id"],
             data["dry_run_intent_id"],
             data["dry_run_order_id"],
             data["trade_date"],

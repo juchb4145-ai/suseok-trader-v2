@@ -13,10 +13,23 @@ from typing import Any
 from domain.broker.commands import GatewayCommand
 from domain.broker.utils import datetime_to_wire, normalize_payload, parse_timestamp, utc_now
 
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+    is_order_command_type,
+    mark_order_commands_unconfirmed,
+    record_order_broker_event,
+    record_order_command_claim,
+)
+
 
 class GatewayCommandStatus(StrEnum):
     QUEUED = "QUEUED"
     DISPATCHED = "DISPATCHED"
+    CLAIMED = "CLAIMED"
+    GATEWAY_STARTED = "GATEWAY_STARTED"
+    PRE_ACK_RECORDED = "PRE_ACK_RECORDED"
+    BROKER_ACCEPTED = "BROKER_ACCEPTED"
+    CHEJAN_CONFIRMED = "CHEJAN_CONFIRMED"
     UNCONFIRMED = "UNCONFIRMED"
     ACKED = "ACKED"
     REJECTED = "REJECTED"
@@ -212,14 +225,48 @@ def record_command_event(
     command_id: str,
     event_type: str,
     payload: dict[str, Any],
+    event_id: str | None = None,
+    occurred_at: str | None = None,
     commit: bool = True,
 ) -> GatewayCommandStatus | None:
     payload_json = canonical_json(payload)
-    next_status = _status_for_command_event(event_type)
+    command = connection.execute(
+        "SELECT * FROM gateway_commands WHERE command_id = ?",
+        (command_id,),
+    ).fetchone()
+    order_command = bool(
+        command is not None and is_order_command_type(command["command_type"])
+    )
+    next_status = _status_for_command_event(
+        event_type,
+        order_command=order_command,
+    )
+    boundary_state = None
+    if order_command and command is not None:
+        boundary_state = record_order_broker_event(
+            connection,
+            command,
+            event_type=event_type,
+            payload=payload,
+            event_id=event_id,
+            occurred_at=occurred_at,
+        )
+        if next_status in {
+            GatewayCommandStatus.GATEWAY_STARTED,
+            GatewayCommandStatus.PRE_ACK_RECORDED,
+            GatewayCommandStatus.BROKER_ACCEPTED,
+            GatewayCommandStatus.CHEJAN_CONFIRMED,
+        } and boundary_state is not None:
+            next_status = GatewayCommandStatus(boundary_state)
+        elif next_status is not None:
+            next_status = _effective_order_command_status(
+                current_status=str(command["status"]),
+                proposed_status=next_status,
+            )
     last_error = (
         _extract_error_message(payload) if next_status is GatewayCommandStatus.FAILED else None
     )
-    now = datetime_to_wire(utc_now())
+    now = occurred_at or datetime_to_wire(utc_now())
 
     connection.execute(
         """
@@ -236,6 +283,16 @@ def record_command_event(
     )
 
     if event_type.strip().lower() == "rate_limited":
+        current_status = str(command["status"]) if command is not None else ""
+        if order_command and current_status in {
+            GatewayCommandStatus.PRE_ACK_RECORDED.value,
+            GatewayCommandStatus.BROKER_ACCEPTED.value,
+            GatewayCommandStatus.CHEJAN_CONFIRMED.value,
+            GatewayCommandStatus.UNCONFIRMED.value,
+        }:
+            if commit:
+                connection.commit()
+            return GatewayCommandStatus(current_status)
         wait_time_sec = _extract_wait_time_sec(payload)
         available_at = datetime_to_wire(utc_now() + timedelta(seconds=wait_time_sec))
         connection.execute(
@@ -350,7 +407,7 @@ def expire_stale_gateway_commands(
             ) AS timed_out_dispatched_count,
             SUM(
                 CASE
-                    WHEN status = ?
+                    WHEN status IN (?, ?, ?, ?)
                         AND command_type IN ('send_order', 'cancel_order')
                         AND dispatched_at IS NOT NULL
                         AND dispatched_at <= ?
@@ -365,6 +422,9 @@ def expire_stale_gateway_commands(
             GatewayCommandStatus.DISPATCHED.value,
             dispatched_cutoff,
             GatewayCommandStatus.DISPATCHED.value,
+            GatewayCommandStatus.CLAIMED.value,
+            GatewayCommandStatus.GATEWAY_STARTED.value,
+            GatewayCommandStatus.PRE_ACK_RECORDED.value,
             dispatched_cutoff,
         ),
     ).fetchone()
@@ -414,6 +474,23 @@ def expire_stale_gateway_commands(
             dispatched_cutoff,
         ),
     )
+    stale_order_rows = connection.execute(
+        """
+        SELECT command_id
+        FROM gateway_commands
+        WHERE status IN (?, ?, ?, ?)
+            AND command_type IN ('send_order', 'cancel_order')
+            AND dispatched_at IS NOT NULL
+            AND dispatched_at <= ?
+        """,
+        (
+            GatewayCommandStatus.DISPATCHED.value,
+            GatewayCommandStatus.CLAIMED.value,
+            GatewayCommandStatus.GATEWAY_STARTED.value,
+            GatewayCommandStatus.PRE_ACK_RECORDED.value,
+            dispatched_cutoff,
+        ),
+    ).fetchall()
     order_cursor = connection.execute(
         """
         UPDATE gateway_commands
@@ -423,7 +500,7 @@ def expire_stale_gateway_commands(
                 last_error,
                 'Gateway order dispatch timed out; reconciliation required.'
             )
-        WHERE status = ?
+        WHERE status IN (?, ?, ?, ?)
             AND command_type IN ('send_order', 'cancel_order')
             AND dispatched_at IS NOT NULL
             AND dispatched_at <= ?
@@ -431,8 +508,17 @@ def expire_stale_gateway_commands(
         (
             GatewayCommandStatus.UNCONFIRMED.value,
             GatewayCommandStatus.DISPATCHED.value,
+            GatewayCommandStatus.CLAIMED.value,
+            GatewayCommandStatus.GATEWAY_STARTED.value,
+            GatewayCommandStatus.PRE_ACK_RECORDED.value,
             dispatched_cutoff,
         ),
+    )
+    mark_order_commands_unconfirmed(
+        connection,
+        [str(row["command_id"]) for row in stale_order_rows],
+        occurred_at=now,
+        reason="Gateway order command timed out before durable broker confirmation.",
     )
     _upsert_command_queue_health(connection, healthy=True)
     connection.commit()
@@ -580,8 +666,15 @@ def _dispatch_ready_commands(
     limit: int,
 ) -> list[GatewayCommand]:
     now = datetime_to_wire(utc_now())
+    order_routing_blocked = bool(
+        get_order_broker_boundary_status(connection).get("block_new_order_routing")
+    )
     has_expired_queued = _has_expired_queued_command(connection, now)
-    has_ready_queued = _has_ready_queued_command(connection, now)
+    has_ready_queued = _has_ready_queued_command(
+        connection,
+        now,
+        order_routing_blocked=order_routing_blocked,
+    )
     if not has_expired_queued and not has_ready_queued:
         return []
 
@@ -612,11 +705,16 @@ def _dispatch_ready_commands(
                 idempotency_key,
                 payload_json,
                 created_at,
+                attempts,
                 expires_at
             FROM gateway_commands
             WHERE status = ?
                 AND (available_at IS NULL OR available_at <= ?)
                 AND (expires_at IS NULL OR expires_at > ?)
+                AND (
+                    ? = 0
+                    OR lower(command_type) <> 'send_order'
+                )
             ORDER BY
                 CASE
                     WHEN command_type IN ('send_order', 'cancel_order') THEN 0
@@ -627,9 +725,20 @@ def _dispatch_ready_commands(
                 command_id ASC
             LIMIT ?
             """,
-            (GatewayCommandStatus.QUEUED.value, now, now, limit),
+            (
+                GatewayCommandStatus.QUEUED.value,
+                now,
+                now,
+                int(order_routing_blocked),
+                limit,
+            ),
         ).fetchall()
         for row in rows:
+            next_status = (
+                GatewayCommandStatus.CLAIMED
+                if is_order_command_type(row["command_type"])
+                else GatewayCommandStatus.DISPATCHED
+            )
             connection.execute(
                 """
                 UPDATE gateway_commands
@@ -639,12 +748,20 @@ def _dispatch_ready_commands(
                 WHERE command_id = ? AND status = ?
                 """,
                 (
-                    GatewayCommandStatus.DISPATCHED.value,
+                    next_status.value,
                     now,
                     row["command_id"],
                     GatewayCommandStatus.QUEUED.value,
                 ),
             )
+            if next_status is GatewayCommandStatus.CLAIMED:
+                command_data = dict(row)
+                command_data["attempts"] = int(row["attempts"] or 0) + 1
+                record_order_command_claim(
+                    connection,
+                    command_data,
+                    claimed_at=now,
+                )
         connection.commit()
     except Exception:
         connection.rollback()
@@ -668,7 +785,12 @@ def _has_expired_queued_command(connection: sqlite3.Connection, now: str) -> boo
     return row is not None
 
 
-def _has_ready_queued_command(connection: sqlite3.Connection, now: str) -> bool:
+def _has_ready_queued_command(
+    connection: sqlite3.Connection,
+    now: str,
+    *,
+    order_routing_blocked: bool,
+) -> bool:
     row = connection.execute(
         """
         SELECT 1
@@ -676,9 +798,18 @@ def _has_ready_queued_command(connection: sqlite3.Connection, now: str) -> bool:
         WHERE status = ?
             AND (available_at IS NULL OR available_at <= ?)
             AND (expires_at IS NULL OR expires_at > ?)
+            AND (
+                ? = 0
+                OR lower(command_type) <> 'send_order'
+            )
         LIMIT 1
         """,
-        (GatewayCommandStatus.QUEUED.value, now, now),
+        (
+            GatewayCommandStatus.QUEUED.value,
+            now,
+            now,
+            int(order_routing_blocked),
+        ),
     ).fetchone()
     return row is not None
 
@@ -733,17 +864,90 @@ def _upsert_command_queue_health(connection: sqlite3.Connection, *, healthy: boo
     )
 
 
-def _status_for_command_event(event_type: str) -> GatewayCommandStatus | None:
+def _status_for_command_event(
+    event_type: str,
+    *,
+    order_command: bool = False,
+) -> GatewayCommandStatus | None:
     normalized = event_type.strip().lower()
     if normalized == "command_started":
-        return GatewayCommandStatus.DISPATCHED
+        return (
+            GatewayCommandStatus.GATEWAY_STARTED
+            if order_command
+            else GatewayCommandStatus.DISPATCHED
+        )
+    if normalized == "order_pre_ack" and order_command:
+        return GatewayCommandStatus.PRE_ACK_RECORDED
     if normalized == "command_ack":
-        return GatewayCommandStatus.ACKED
+        return (
+            GatewayCommandStatus.BROKER_ACCEPTED
+            if order_command
+            else GatewayCommandStatus.ACKED
+        )
     if normalized == "execution_event":
-        return GatewayCommandStatus.ACKED
+        return (
+            GatewayCommandStatus.CHEJAN_CONFIRMED
+            if order_command
+            else GatewayCommandStatus.ACKED
+        )
+    if normalized == "kiwoom_order_chejan" and order_command:
+        return GatewayCommandStatus.CHEJAN_CONFIRMED
+    if normalized == "order_broker_unconfirmed" and order_command:
+        return GatewayCommandStatus.UNCONFIRMED
     if normalized == "command_failed":
         return GatewayCommandStatus.FAILED
     return None
+
+
+def _effective_order_command_status(
+    *,
+    current_status: str,
+    proposed_status: GatewayCommandStatus,
+) -> GatewayCommandStatus:
+    current = str(current_status).upper()
+    if current == GatewayCommandStatus.CHEJAN_CONFIRMED.value:
+        return GatewayCommandStatus.CHEJAN_CONFIRMED
+    if proposed_status is GatewayCommandStatus.CHEJAN_CONFIRMED:
+        return proposed_status
+    if proposed_status is GatewayCommandStatus.BROKER_ACCEPTED:
+        return proposed_status
+    if current == GatewayCommandStatus.BROKER_ACCEPTED.value:
+        return GatewayCommandStatus.BROKER_ACCEPTED
+    if proposed_status in {
+        GatewayCommandStatus.FAILED,
+        GatewayCommandStatus.REJECTED,
+        GatewayCommandStatus.EXPIRED,
+        GatewayCommandStatus.CANCELLED,
+    }:
+        return proposed_status
+    if current in {
+        GatewayCommandStatus.FAILED.value,
+        GatewayCommandStatus.REJECTED.value,
+        GatewayCommandStatus.EXPIRED.value,
+        GatewayCommandStatus.CANCELLED.value,
+    }:
+        return GatewayCommandStatus(current)
+    if current == GatewayCommandStatus.UNCONFIRMED.value and proposed_status in {
+        GatewayCommandStatus.CLAIMED,
+        GatewayCommandStatus.GATEWAY_STARTED,
+        GatewayCommandStatus.PRE_ACK_RECORDED,
+    }:
+        return GatewayCommandStatus.UNCONFIRMED
+    rank = {
+        GatewayCommandStatus.CLAIMED: 10,
+        GatewayCommandStatus.GATEWAY_STARTED: 20,
+        GatewayCommandStatus.PRE_ACK_RECORDED: 30,
+        GatewayCommandStatus.UNCONFIRMED: 35,
+    }
+    try:
+        current_enum = GatewayCommandStatus(current)
+    except ValueError:
+        return proposed_status
+    return (
+        proposed_status
+        if rank.get(proposed_status, 0) >= rank.get(current_enum, 0)
+        else current_enum
+    )
 
 
 def _extract_error_message(payload: dict[str, Any]) -> str | None:
@@ -796,6 +1000,8 @@ def _is_simulation_like(value: object) -> bool:
 
 _COMPLETED_STATUSES = {
     GatewayCommandStatus.ACKED,
+    GatewayCommandStatus.BROKER_ACCEPTED,
+    GatewayCommandStatus.CHEJAN_CONFIRMED,
     GatewayCommandStatus.REJECTED,
     GatewayCommandStatus.FAILED,
     GatewayCommandStatus.EXPIRED,

@@ -3,14 +3,20 @@ param(
     [switch]$CoreOnly,
     [switch]$GatewayOnly,
     [switch]$ThemeRefreshOnly,
+    [switch]$EvidenceKeeperOnly,
     [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
 
-$OnlySwitchCount = @($CoreOnly, $GatewayOnly, $ThemeRefreshOnly).Where({ $_ }).Count
+$OnlySwitchCount = @(
+    $CoreOnly,
+    $GatewayOnly,
+    $ThemeRefreshOnly,
+    $EvidenceKeeperOnly
+).Where({ $_ }).Count
 if ($OnlySwitchCount -gt 1) {
-    throw "Use only one of -CoreOnly, -GatewayOnly, or -ThemeRefreshOnly."
+    throw "Use only one of -CoreOnly, -GatewayOnly, -ThemeRefreshOnly, or -EvidenceKeeperOnly."
 }
 
 $OriginalWhatIfPreference = $WhatIfPreference
@@ -49,6 +55,9 @@ function Get-TargetLabel {
     if ((Test-TargetFilter -Label "theme_refresh_loop") -and $Normalized -match "start_theme_refresh_loop\.ps1") {
         return "theme_refresh_loop"
     }
+    if ((Test-TargetFilter -Label "append_only_evidence_keeper") -and $Normalized -match "ops_append_only_evidence_keeper\.py") {
+        return "append_only_evidence_keeper"
+    }
 
     return $null
 }
@@ -64,6 +73,9 @@ function Test-TargetFilter {
     }
     if ($ThemeRefreshOnly) {
         return $Label -eq "theme_refresh_loop"
+    }
+    if ($EvidenceKeeperOnly) {
+        return $Label -eq "append_only_evidence_keeper"
     }
     return $true
 }
@@ -140,11 +152,11 @@ $Targets = @(
 )
 
 if ($Targets.Count -eq 0) {
-    Write-Host "No running Core/Gateway/theme refresh loop process found."
+    Write-Host "No running Core/Gateway/theme refresh/append-only keeper process found."
     return
 }
 
-Write-Host "Core/Gateway/theme refresh loop processes to stop:"
+Write-Host "Core/Gateway/theme refresh/append-only keeper processes to stop:"
 foreach ($Target in $Targets) {
     $Process = $Target.Process
     Write-Host ("- {0}: PID={1}, PPID={2}, Name={3}" -f $Target.Label, $Process.ProcessId, $Process.ParentProcessId, $Process.Name)

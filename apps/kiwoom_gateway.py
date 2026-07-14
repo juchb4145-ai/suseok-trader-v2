@@ -74,6 +74,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=float(os.environ.get("GATEWAY_COMMAND_WAIT_SEC", "0.0")),
     )
     parser.add_argument("--heartbeat-interval-sec", type=float, default=2.0)
+    parser.add_argument(
+        "--event-timeout-sec",
+        type=float,
+        default=float(os.environ.get("GATEWAY_EVENT_TIMEOUT_SEC", "15.0")),
+        help="Core event or event-batch HTTP timeout.",
+    )
     parser.add_argument("--command-limit", type=int, default=20)
     parser.add_argument("--condition-name", default=os.environ.get("KIWOOM_CONDITION_NAME"))
     parser.add_argument(
@@ -91,6 +97,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--condition-realtime", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--realtime-codes", default=os.environ.get("KIWOOM_REALTIME_CODES", ""))
+    parser.add_argument(
+        "--realtime-max-total",
+        type=int,
+        default=int(os.environ.get("REALTIME_SUBSCRIPTION_MAX_TOTAL", "50")),
+        help="Hard cap shared with the Core realtime subscription planner.",
+    )
+    parser.add_argument(
+        "--clear-realtime-on-login",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Call SetRealRemove(ALL, ALL) after login before configured registration.",
+    )
     parser.add_argument(
         "--realtime-exchange",
         choices=("krx", "nxt", "all"),
@@ -259,7 +277,11 @@ def run_gateway(args: argparse.Namespace) -> int:
 
     runtime = KiwoomGatewayRuntime(
         client=client,
-        core_client=CoreClient(core_url=args.core_url, token=args.token),
+        core_client=CoreClient(
+            core_url=args.core_url,
+            token=args.token,
+            timeout_sec=max(float(args.event_timeout_sec), 1.0),
+        ),
         config=KiwoomGatewayRuntimeConfig(
             command_limit=max(int(args.command_limit), 1),
             command_wait_sec=max(float(args.poll_wait_sec), 0.0),
@@ -269,6 +291,8 @@ def run_gateway(args: argparse.Namespace) -> int:
             condition_profiles=parse_condition_profiles(args.condition_profiles),
             realtime_codes=tuple(_parse_codes(args.realtime_codes)),
             realtime_exchange=str(args.realtime_exchange or "krx").upper(),
+            realtime_max_total=max(int(args.realtime_max_total), 1),
+            clear_realtime_on_login=bool(args.clear_realtime_on_login),
             realtime_recover_stale_sec=max(float(args.realtime_recover_stale_sec), 0.0),
             realtime_recover_interval_sec=max(float(args.realtime_recover_interval_sec), 1.0),
             market_index_enabled=bool(args.market_index_enabled),

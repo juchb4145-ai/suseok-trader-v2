@@ -80,6 +80,7 @@ class BrokerTrResponse:
     rows: list[dict[str, Any]]
     message: str | None = None
     continuation_key: str | None = None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     ts: datetime = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -98,6 +99,7 @@ class BrokerTrResponse:
             "continuation_key",
             optional_non_empty_str(self.continuation_key, "continuation_key"),
         )
+        object.__setattr__(self, "metadata", normalize_payload(self.metadata))
         object.__setattr__(self, "ts", parse_timestamp(self.ts, "ts"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,6 +115,8 @@ class BrokerTrResponse:
             data["message"] = self.message
         if self.continuation_key is not None:
             data["continuation_key"] = self.continuation_key
+        if self.metadata:
+            data["metadata"] = normalize_payload(self.metadata)
         return data
 
     @classmethod
@@ -131,6 +135,7 @@ class BrokerTrResponse:
             rows=_normalize_rows(mapping["rows"]),
             message=mapping.get("message"),
             continuation_key=mapping.get("continuation_key"),
+            metadata=normalize_payload(mapping.get("metadata", {})),
             ts=parse_timestamp(mapping["ts"], "ts") if "ts" in mapping else utc_now(),
         )
 

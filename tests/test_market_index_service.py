@@ -94,7 +94,7 @@ def test_market_index_tick_projection_updates_latest_samples_and_bars(tmp_path) 
     assert stock_tick_count == 0
 
 
-def test_older_market_index_tick_is_ignored_without_rewinding_projection(tmp_path) -> None:
+def test_older_market_index_tick_is_sampled_without_rewinding_projection(tmp_path) -> None:
     connection = initialize_database(tmp_path / "market_index.sqlite3")
     settings = Settings(market_index_stale_sec=999_999_999)
     newer = index_tick_event(
@@ -121,11 +121,15 @@ def test_older_market_index_tick_is_ignored_without_rewinding_projection(tmp_pat
     bars_60 = list_market_index_bars(connection, "KOSPI", interval_sec=60)
     connection.close()
 
-    assert result.status == "IGNORED"
+    assert result.status == "APPLIED"
+    assert result.applied_count == 1
     assert latest is not None
     assert latest["event_id"] == "evt_kospi_newer"
     assert latest["price"] == 2805.0
-    assert [row["event_id"] for row in samples] == ["evt_kospi_newer"]
+    assert [row["event_id"] for row in samples] == [
+        "evt_kospi_older",
+        "evt_kospi_newer",
+    ]
     assert bars_60[0]["close"] == 2805.0
     assert bars_60[0]["tick_count"] == 1
 
