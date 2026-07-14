@@ -8,12 +8,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, new_message_id, parse_timestamp, utc_now
+from storage.gateway_command_store import canonical_json
+
 from services.config import Settings, load_settings
 from services.market_reference_service import (
     extract_market_symbol_memberships,
     market_symbols_payload_shape,
 )
-from storage.gateway_command_store import canonical_json
 
 PROJECTION_NAME_MARKET_REFERENCE = "market_reference"
 MARKET_REFERENCE_EVENT_TYPE = "market_symbols"

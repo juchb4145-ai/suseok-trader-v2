@@ -141,7 +141,7 @@ def emit_alerts(
     alerts: list[dict[str, Any]],
     *,
     alert_state: dict[str, float],
-    alert_channel: "TelegramAlertChannel",
+    alert_channel: TelegramAlertChannel,
     min_interval_sec: float,
 ) -> None:
     now = time.monotonic()

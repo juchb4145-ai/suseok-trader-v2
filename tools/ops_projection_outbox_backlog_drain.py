@@ -14,7 +14,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from tools.ops_market_data_tr_response_side_effect_check import (
+from tools.ops_market_data_tr_response_side_effect_check import (  # noqa: E402
     fetch_json,
     is_locked_retryable_payload,
 )
@@ -232,7 +232,8 @@ def render_markdown_summary(report: dict[str, Any]) -> str:
         f"- verdict: `{verdict.get('status')}`",
         f"- block_next_pr: `{verdict.get('block_next_pr')}`",
         f"- readiness_status: `{final.get('readiness_status')}`",
-        f"- pr11_condition_event_cutover_ready: `{final.get('pr11_condition_event_cutover_ready')}`",
+        "- pr11_condition_event_cutover_ready: "
+        f"`{final.get('pr11_condition_event_cutover_ready')}`",
         f"- pending_count: `{final.get('pending_count')}`",
         f"- recent_pending_count: `{final.get('recent_pending_count')}`",
         f"- condition_event_pending_count: `{final.get('condition_event_pending_count')}`",
