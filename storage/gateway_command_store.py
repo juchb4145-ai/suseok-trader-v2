@@ -666,36 +666,48 @@ def _dispatch_ready_commands(
     limit: int,
 ) -> list[GatewayCommand]:
     now = datetime_to_wire(utc_now())
-    order_routing_blocked = bool(
-        get_order_broker_boundary_status(connection).get("block_new_order_routing")
-    )
     has_expired_queued = _has_expired_queued_command(connection, now)
     has_ready_queued = _has_ready_queued_command(
         connection,
         now,
-        order_routing_blocked=order_routing_blocked,
+        order_routing_blocked=False,
     )
+    if not has_expired_queued and not has_ready_queued:
+        return []
+
+    precheck_order_routing_blocked = _order_broker_boundary_blocks_routing(
+        get_order_broker_boundary_status(connection)
+    )
+    if precheck_order_routing_blocked:
+        has_ready_queued = _has_ready_queued_command(
+            connection,
+            now,
+            order_routing_blocked=True,
+        )
     if not has_expired_queued and not has_ready_queued:
         return []
 
     try:
         connection.execute("BEGIN IMMEDIATE")
-        if has_expired_queued:
-            connection.execute(
-                """
-                UPDATE gateway_commands
-                SET status = ?, completed_at = ?
-                WHERE status = ?
-                    AND expires_at IS NOT NULL
-                    AND expires_at <= ?
-                """,
-                (
-                    GatewayCommandStatus.EXPIRED.value,
-                    now,
-                    GatewayCommandStatus.QUEUED.value,
-                    now,
-                ),
-            )
+        order_routing_blocked = _order_broker_boundary_blocks_routing(
+            get_order_broker_boundary_status(connection)
+        )
+        now = datetime_to_wire(utc_now())
+        connection.execute(
+            """
+            UPDATE gateway_commands
+            SET status = ?, completed_at = ?
+            WHERE status = ?
+                AND expires_at IS NOT NULL
+                AND expires_at <= ?
+            """,
+            (
+                GatewayCommandStatus.EXPIRED.value,
+                now,
+                GatewayCommandStatus.QUEUED.value,
+                now,
+            ),
+        )
         rows = connection.execute(
             """
             SELECT
@@ -768,6 +780,13 @@ def _dispatch_ready_commands(
         raise
 
     return [_row_to_gateway_command(row) for row in rows]
+
+
+def _order_broker_boundary_blocks_routing(status: Mapping[str, Any]) -> bool:
+    effective = status.get("effective_block_new_order_routing")
+    if isinstance(effective, bool):
+        return effective
+    return status.get("block_new_order_routing") is True
 
 
 def _has_expired_queued_command(connection: sqlite3.Connection, now: str) -> bool:

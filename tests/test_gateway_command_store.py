@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime, timedelta
 
+import storage.gateway_command_store as gateway_command_store
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
@@ -12,6 +14,11 @@ from storage.gateway_command_store import (
     expire_stale_gateway_commands,
     get_command_status_counts,
     poll_commands,
+)
+from storage.gateway_order_broker_boundary import (
+    get_order_broker_boundary_status,
+    preview_order_broker_boundary_resolution,
+    record_order_broker_boundary_resolution,
 )
 from storage.sqlite import initialize_database
 
@@ -257,6 +264,129 @@ def test_order_commands_are_claimed_before_market_data_backlog(tmp_path) -> None
     assert attempts["cmd_send_new"] == 1
     assert statuses["cmd_request_old"] == GatewayCommandStatus.QUEUED.value
     assert statuses["cmd_realtime_old"] == GatewayCommandStatus.QUEUED.value
+
+
+def test_resolution_maintenance_fence_keeps_new_order_queued(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "resolution-fence.sqlite3")
+    old_command = make_live_sim_order_command("cmd-old-unconfirmed")
+    enqueue_command(connection, old_command)
+    assert poll_commands(connection, limit=1, wait_sec=0)[0].command_id == (
+        old_command.command_id
+    )
+    connection.execute(
+        """
+        UPDATE gateway_commands
+        SET status = 'UNCONFIRMED'
+        WHERE command_id = ?
+        """,
+        (old_command.command_id,),
+    )
+    connection.execute(
+        """
+        UPDATE gateway_order_broker_boundaries
+        SET state = 'UNCONFIRMED', unconfirmed_at = updated_at
+        WHERE command_id = ?
+        """,
+        (old_command.command_id,),
+    )
+    connection.commit()
+    preview = preview_order_broker_boundary_resolution(
+        connection, old_command.command_id
+    )
+    record_order_broker_boundary_resolution(
+        connection,
+        command_id=old_command.command_id,
+        request_id="request-resolution-fence",
+        expected_fingerprint=preview["source_boundary_fingerprint"],
+        reason_code="OPERATOR_CONFIRMED_BROKER_NOT_REACHED",
+        evidence_type="SIMULATION_HTS_ORDER_HISTORY_EXPORT",
+        evidence_ref="artifact-resolution-fence",
+        evidence_sha256=hashlib.sha256(b"redacted-evidence").hexdigest(),
+        operator_id="operator.resolution-fence",
+    )
+    new_command = make_live_sim_order_command("cmd-new-must-stay-queued")
+    enqueue_command(connection, new_command)
+
+    commands = poll_commands(connection, limit=10, wait_sec=0)
+    new_row = connection.execute(
+        "SELECT status, attempts FROM gateway_commands WHERE command_id = ?",
+        (new_command.command_id,),
+    ).fetchone()
+    status = get_order_broker_boundary_status(connection)
+    connection.close()
+
+    assert commands == []
+    assert new_row["status"] == "QUEUED"
+    assert new_row["attempts"] == 0
+    assert status["fast_0_status"] == "BLOCKED"
+    assert status["resolution_maintenance_fence_active"] is True
+    assert status["effective_block_new_order_routing"] is True
+
+
+def test_order_routing_status_is_rechecked_inside_immediate_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "dispatch-recheck.sqlite3")
+    command = make_live_sim_order_command("cmd-authoritative-recheck")
+    enqueue_command(connection, command)
+    transaction_states: list[bool] = []
+
+    def blocking_status(active_connection):
+        transaction_states.append(active_connection.in_transaction)
+        return {
+            "effective_block_new_order_routing": len(transaction_states) > 1
+        }
+
+    monkeypatch.setattr(
+        gateway_command_store,
+        "get_order_broker_boundary_status",
+        blocking_status,
+    )
+
+    commands = poll_commands(connection, limit=1, wait_sec=0)
+    row = connection.execute(
+        "SELECT status, attempts FROM gateway_commands WHERE command_id = ?",
+        (command.command_id,),
+    ).fetchone()
+    connection.close()
+
+    assert transaction_states == [False, True]
+    assert commands == []
+    assert row["status"] == "QUEUED"
+    assert row["attempts"] == 0
+
+
+def test_dispatch_rechecks_expiry_after_acquiring_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "dispatch-expiry-recheck.sqlite3")
+    before_lock = datetime(2026, 7, 15, 1, 0, 0, tzinfo=UTC)
+    after_lock = before_lock + timedelta(seconds=2)
+    command = make_command("cmd-expires-during-lock")
+    enqueue_command(
+        connection,
+        command,
+        expires_at=before_lock + timedelta(seconds=1),
+    )
+    observed_times = iter((before_lock, after_lock))
+    monkeypatch.setattr(
+        gateway_command_store,
+        "utc_now",
+        lambda: next(observed_times),
+    )
+
+    commands = gateway_command_store._dispatch_ready_commands(connection, 1)
+    row = connection.execute(
+        "SELECT status, attempts FROM gateway_commands WHERE command_id = ?",
+        (command.command_id,),
+    ).fetchone()
+    connection.close()
+
+    assert commands == []
+    assert row["status"] == "EXPIRED"
+    assert row["attempts"] == 0
 
 
 def test_stale_dispatched_command_is_failed_and_queue_health_refreshed(tmp_path) -> None:

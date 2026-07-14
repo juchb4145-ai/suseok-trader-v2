@@ -93,6 +93,7 @@ _SIDE_EFFECT_EXACT_TABLES = frozenset(
         "gateway_command_events",
         "gateway_command_dedupe_keys",
         "gateway_order_broker_boundaries",
+        "gateway_order_broker_boundary_resolutions",
         "incremental_evaluation_queue",
         "order_plan_drafts",
         "order_plan_drafts_latest",

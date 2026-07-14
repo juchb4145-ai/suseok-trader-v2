@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import shutil
 import sqlite3
 import sys
 import time
@@ -18,6 +20,8 @@ if str(ROOT_DIR) not in sys.path:
 from storage.sqlite import SCHEMA_VERSION, initialize_database  # noqa: E402
 
 REQUIRED_TARGET_TABLES = (
+    "gateway_order_broker_boundary_resolutions",
+    "gateway_order_broker_boundaries",
     "market_scan_projection_routing_decisions",
     "market_scan_append_only_budget_state",
     "live_sim_lifecycle_inbox",
@@ -25,11 +29,110 @@ REQUIRED_TARGET_TABLES = (
     "live_sim_lifecycle_routing_decisions",
     "incremental_evaluation_dead_letters",
 )
+REQUIRED_TARGET_COLUMNS = {
+    "gateway_order_broker_boundary_resolutions": frozenset(
+        {
+            "resolution_id",
+            "request_id",
+            "request_hash",
+            "command_id",
+            "sequence_no",
+            "action",
+            "resolution_type",
+            "supersedes_resolution_id",
+            "reason_code",
+            "evidence_type",
+            "evidence_ref",
+            "evidence_sha256",
+            "operator_id",
+            "source_boundary_fingerprint",
+            "source_boundary_updated_at",
+            "boundary_snapshot_json",
+            "created_at",
+            "live_sim_only",
+            "live_real_allowed",
+            "routing_fence_active",
+        }
+    ),
+    "gateway_order_broker_boundaries": frozenset(
+        {
+            "command_id",
+            "state",
+            "broker_order_no",
+            "pre_ack_recorded_at",
+            "broker_accepted_at",
+            "chejan_confirmed_at",
+            "unconfirmed_at",
+            "updated_at",
+        }
+    ),
+}
+REQUIRED_TARGET_TABLE_SQL_TOKENS = {
+    "gateway_order_broker_boundary_resolutions": (
+        "CHECK (SEQUENCE_NO > 0)",
+        "RESOLVE_BROKER_NOT_REACHED",
+        "CHECK (RESOLUTION_TYPE = 'BROKER_NOT_REACHED')",
+        "CHECK (LIVE_SIM_ONLY = 1)",
+        "CHECK (LIVE_REAL_ALLOWED = 0)",
+        "CHECK (ROUTING_FENCE_ACTIVE = 1)",
+        "FOREIGN KEY (COMMAND_ID)",
+        "FOREIGN KEY (SUPERSEDES_RESOLUTION_ID)",
+    ),
+}
+REQUIRED_TARGET_INDEX_CONTRACTS: dict[str, dict[str, Any]] = {
+    "idx_gateway_order_boundary_resolutions_created": {
+        "table": "gateway_order_broker_boundary_resolutions",
+        "columns": ("created_at", "resolution_id"),
+        "unique": False,
+        "partial": False,
+        "descending": (True, True),
+    },
+    "uq_gateway_order_boundary_resolutions_request_id": {
+        "table": "gateway_order_broker_boundary_resolutions",
+        "columns": ("request_id",),
+        "unique": True,
+        "partial": False,
+        "descending": (False,),
+    },
+    "uq_gateway_order_boundary_resolutions_command_sequence": {
+        "table": "gateway_order_broker_boundary_resolutions",
+        "columns": ("command_id", "sequence_no"),
+        "unique": True,
+        "partial": False,
+        "descending": (False, False),
+    },
+    "uq_gateway_order_boundary_idempotency": {
+        "table": "gateway_order_broker_boundaries",
+        "columns": ("idempotency_key",),
+        "unique": True,
+        "partial": True,
+        "descending": (False,),
+        "where_sql": "WHERE IDEMPOTENCY_KEY IS NOT NULL",
+    },
+    "idx_gateway_order_boundary_state_updated": {
+        "table": "gateway_order_broker_boundaries",
+        "columns": ("state", "updated_at"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, False),
+    },
+}
+REQUIRED_TARGET_TRIGGER_CONTRACTS: dict[str, dict[str, str]] = {
+    "trg_gateway_order_boundary_resolutions_no_update": {
+        "table": "gateway_order_broker_boundary_resolutions",
+        "operation": "UPDATE",
+    },
+    "trg_gateway_order_boundary_resolutions_no_delete": {
+        "table": "gateway_order_broker_boundary_resolutions",
+        "operation": "DELETE",
+    },
+}
 FINGERPRINT_FILES = {
     "main": "",
     "wal": "-wal",
     "shm": "-shm",
 }
+MIGRATION_MUTABLE_TABLES: frozenset[str] = frozenset()
 
 
 def main() -> int:
@@ -41,7 +144,7 @@ def main() -> int:
     )
     parser.add_argument("--source-db", required=True)
     parser.add_argument("--clone-db", required=True)
-    parser.add_argument("--require-source-schema", default="")
+    parser.add_argument("--require-source-schema", required=True)
     parser.add_argument("--skip-quick-check", action="store_true")
     parser.add_argument(
         "--out-dir",
@@ -52,7 +155,7 @@ def main() -> int:
     report = run_preflight(
         source_db=Path(args.source_db),
         clone_db=Path(args.clone_db),
-        required_source_schema=args.require_source_schema or None,
+        required_source_schema=args.require_source_schema,
         run_quick_check=not args.skip_quick_check,
         out_dir=Path(args.out_dir),
     )
@@ -73,8 +176,19 @@ def run_preflight(
     _validate_paths(source=source, clone=clone)
 
     source_files_before = _file_fingerprints(source)
+    disk_space = _disk_space_contract(source=source, clone=clone)
+    if disk_space["sufficient"] is not True:
+        raise RuntimeError("insufficient free space for migration preflight clone")
     source_connection = _open_read_only(source)
     try:
+        source_quick_check_started = time.perf_counter()
+        source_quick_check = [
+            str(row[0])
+            for row in source_connection.execute("PRAGMA quick_check(1)")
+        ]
+        source_quick_check_elapsed_sec = (
+            time.perf_counter() - source_quick_check_started
+        )
         source_snapshot = _database_snapshot(source_connection)
         if (
             required_source_schema is not None
@@ -115,6 +229,7 @@ def run_preflight(
     idempotent.close()
     idempotent_elapsed_sec = time.perf_counter() - idempotent_started
 
+    contract_probes = _probe_target_contracts(clone)
     clone_after = _snapshot_path(clone)
     quick_check_started = time.perf_counter()
     quick_check = _quick_check(clone) if run_quick_check else ["SKIPPED"]
@@ -127,17 +242,22 @@ def run_preflight(
             "files_before": source_files_before,
             "files_after": source_files_after,
             "snapshot": source_snapshot,
+            "quick_check": source_quick_check,
+            "quick_check_elapsed_sec": source_quick_check_elapsed_sec,
             "opened_read_only": True,
             "query_only": True,
+            "immutable": True,
         },
         "clone": {
             "path": str(clone),
+            "disk_space": disk_space,
             "backup_elapsed_sec": backup_elapsed_sec,
             "migration_elapsed_sec": migration_elapsed_sec,
             "idempotent_elapsed_sec": idempotent_elapsed_sec,
             "quick_check_elapsed_sec": quick_check_elapsed_sec,
             "before_migration": clone_before,
             "after_migration": clone_after,
+            "contract_probes": contract_probes,
             "quick_check": quick_check,
         },
         "target_schema_version": str(SCHEMA_VERSION),
@@ -158,10 +278,22 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
 
     required_source_schema = report.get("required_source_schema")
-    if required_source_schema and source_snapshot.get("schema_version") != str(
-        required_source_schema
-    ):
+    if not required_source_schema:
+        failures.append("SOURCE_SCHEMA_REQUIREMENT_MISSING")
+    elif source_snapshot.get("schema_version") != str(required_source_schema):
         failures.append("SOURCE_SCHEMA_MISMATCH")
+    try:
+        source_schema_number = int(source_snapshot.get("schema_version") or -1)
+        target_schema_number = int(report.get("target_schema_version") or -1)
+    except (TypeError, ValueError):
+        source_schema_number = -1
+        target_schema_number = -1
+    if source_schema_number < 0:
+        failures.append("SOURCE_SCHEMA_INVALID")
+    if target_schema_number < 0:
+        failures.append("TARGET_SCHEMA_INVALID")
+    if source_schema_number > target_schema_number >= 0:
+        failures.append("SOURCE_SCHEMA_NEWER_THAN_TARGET")
     if clone_before.get("schema_version") != source_snapshot.get("schema_version"):
         failures.append("BACKUP_SCHEMA_MISMATCH")
     if clone_after.get("schema_version") != str(report.get("target_schema_version")):
@@ -170,12 +302,86 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("BACKUP_OUTBOX_MISMATCH")
     if clone_after.get("projection_outbox") != source_snapshot.get("projection_outbox"):
         failures.append("MIGRATION_OUTBOX_MISMATCH")
+    if clone_before.get("sqlite_sequence") != source_snapshot.get("sqlite_sequence"):
+        failures.append("BACKUP_SQLITE_SEQUENCE_MISMATCH")
+    if clone_after.get("sqlite_sequence") != source_snapshot.get("sqlite_sequence"):
+        failures.append("MIGRATION_SQLITE_SEQUENCE_MISMATCH")
+    backup_table_changes = _changed_table_content(
+        before=_mapping(source_snapshot.get("table_content")),
+        after=_mapping(clone_before.get("table_content")),
+    )
+    if backup_table_changes:
+        failures.append("BACKUP_TABLE_CONTENT_MISMATCH")
+    migration_table_changes = _changed_table_content(
+        before=_mapping(source_snapshot.get("table_content")),
+        after=_mapping(clone_after.get("table_content")),
+        excluded=MIGRATION_MUTABLE_TABLES,
+    )
+    if migration_table_changes:
+        failures.append("MIGRATION_TABLE_CONTENT_MISMATCH")
+    contract_probes = _mapping(clone.get("contract_probes"))
+    if not contract_probes or not all(
+        value is True for value in contract_probes.values()
+    ):
+        failures.append("TARGET_BEHAVIOR_CONTRACT_INVALID")
+    disk_space = _mapping(clone.get("disk_space"))
+    if (
+        not disk_space
+        or disk_space.get("sufficient") is not True
+        or not isinstance(disk_space.get("free_bytes"), int)
+        or not isinstance(disk_space.get("required_bytes"), int)
+    ):
+        failures.append("CLONE_DISK_SPACE_INSUFFICIENT")
+    source_table_content = _mapping(source_snapshot.get("table_content"))
+    clone_table_content = _mapping(clone_after.get("table_content"))
+    resolution_was_absent = (
+        "gateway_order_broker_boundary_resolutions" not in source_table_content
+    )
+    pretarget_resolution_table_present = bool(
+        source_schema_number < 60 and not resolution_was_absent
+    )
+    if pretarget_resolution_table_present:
+        failures.append("SOURCE_PRETARGET_RESOLUTION_TABLE_PRESENT")
+    target_resolution = _mapping(
+        clone_table_content.get("gateway_order_broker_boundary_resolutions")
+    )
+    target_resolution_ledger_empty = bool(
+        not pretarget_resolution_table_present
+        and (
+            not resolution_was_absent
+            or int(target_resolution.get("row_count") or 0) == 0
+        )
+    )
+    if not target_resolution_ledger_empty:
+        failures.append("TARGET_RESOLUTION_LEDGER_NOT_EMPTY")
 
     required_tables = _mapping(clone_after.get("required_tables"))
     if not all(bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES):
         failures.append("TARGET_TABLE_MISSING")
-    if clone.get("quick_check") not in (["ok"], ["SKIPPED"]):
+    required_columns = _mapping(clone_after.get("required_columns"))
+    if not all(
+        bool(_mapping(required_columns.get(table)).get("valid"))
+        for table in REQUIRED_TARGET_COLUMNS
+    ):
+        failures.append("TARGET_COLUMN_CONTRACT_INVALID")
+    required_indexes = _mapping(clone_after.get("required_indexes"))
+    if not all(
+        bool(_mapping(required_indexes.get(index_name)).get("valid"))
+        for index_name in REQUIRED_TARGET_INDEX_CONTRACTS
+    ):
+        failures.append("TARGET_INDEX_CONTRACT_INVALID")
+    required_triggers = _mapping(clone_after.get("required_triggers"))
+    if not all(
+        bool(_mapping(required_triggers.get(trigger_name)).get("valid"))
+        for trigger_name in REQUIRED_TARGET_TRIGGER_CONTRACTS
+    ):
+        failures.append("TARGET_APPEND_ONLY_TRIGGER_CONTRACT_INVALID")
+    if clone.get("quick_check") == ["SKIPPED"]:
+        failures.append("CLONE_QUICK_CHECK_SKIPPED")
+    elif clone.get("quick_check") != ["ok"]:
         failures.append("CLONE_QUICK_CHECK_FAILED")
+    if source.get("quick_check") != ["ok"]:
+        failures.append("SOURCE_QUICK_CHECK_FAILED")
 
     before_files = _mapping(source.get("files_before"))
     after_files = _mapping(source.get("files_after"))
@@ -196,11 +402,38 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "outbox_preserved": (
             clone_after.get("projection_outbox") == source_snapshot.get("projection_outbox")
         ),
+        "sqlite_sequence_preserved": bool(
+            clone_before.get("sqlite_sequence")
+            == source_snapshot.get("sqlite_sequence")
+            == clone_after.get("sqlite_sequence")
+        ),
+        "backup_table_content_preserved": not backup_table_changes,
+        "migration_table_content_preserved": not migration_table_changes,
+        "backup_table_content_changes": backup_table_changes,
+        "migration_table_content_changes": migration_table_changes,
+        "target_behavior_contract_valid": bool(
+            contract_probes
+            and all(value is True for value in contract_probes.values())
+        ),
+        "clone_disk_space_sufficient": disk_space.get("sufficient") is True,
+        "target_resolution_ledger_empty": target_resolution_ledger_empty,
         "required_tables_present": all(
             bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES
         ),
+        "required_columns_present": all(
+            bool(_mapping(required_columns.get(table)).get("valid"))
+            for table in REQUIRED_TARGET_COLUMNS
+        ),
+        "required_indexes_present": all(
+            bool(_mapping(required_indexes.get(index_name)).get("valid"))
+            for index_name in REQUIRED_TARGET_INDEX_CONTRACTS
+        ),
+        "required_append_only_triggers_present": all(
+            bool(_mapping(required_triggers.get(trigger_name)).get("valid"))
+            for trigger_name in REQUIRED_TARGET_TRIGGER_CONTRACTS
+        ),
         "quick_check": clone.get("quick_check"),
-        "operating_database_mutated": False,
+        "operating_database_mutated": bool(changed_source_files),
     }
 
 
@@ -222,14 +455,40 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
         raise FileNotFoundError(f"source database was not found: {source}")
     if source == clone:
         raise ValueError("clone database must differ from source database")
+    if Path(f"{source}-wal").exists() or Path(f"{source}-shm").exists():
+        raise RuntimeError(
+            "source database must be quiescent with no WAL/SHM sidecars"
+        )
     if clone.exists() or Path(f"{clone}-wal").exists() or Path(f"{clone}-shm").exists():
         raise FileExistsError(f"clone database artifacts already exist: {clone}")
+
+
+def _disk_space_contract(*, source: Path, clone: Path) -> dict[str, Any]:
+    source_bytes = sum(
+        candidate.stat().st_size
+        for candidate in (source, Path(f"{source}-wal"), Path(f"{source}-shm"))
+        if candidate.exists()
+    )
+    probe = clone.parent
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    free_bytes = int(shutil.disk_usage(probe).free)
+    required_bytes = max(
+        int(source_bytes) * 3,
+        int(source_bytes) + 256 * 1024 * 1024,
+    )
+    return {
+        "free_bytes": free_bytes,
+        "required_bytes": required_bytes,
+        "source_bytes": int(source_bytes),
+        "sufficient": free_bytes >= required_bytes,
+    }
 
 
 def _open_read_only(path: Path) -> sqlite3.Connection:
     uri_path = quote(path.as_posix(), safe="/:")
     connection = sqlite3.connect(
-        f"file:{uri_path}?mode=ro",
+        f"file:{uri_path}?mode=ro&immutable=1",
         uri=True,
         timeout=60.0,
     )
@@ -268,13 +527,600 @@ def _database_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
                 "FROM projection_outbox GROUP BY status ORDER BY status"
             )
         }
+    sqlite_sequence: dict[str, int] = {}
+    if "sqlite_sequence" in tables:
+        sqlite_sequence = {
+            str(row["name"]): int(row["seq"] or 0)
+            for row in connection.execute(
+                "SELECT name, seq FROM sqlite_sequence ORDER BY name"
+            )
+        }
     return {
         "schema_version": schema_version,
         "journal_mode": str(connection.execute("PRAGMA journal_mode").fetchone()[0]),
         "table_count": len(tables),
         "projection_outbox": outbox,
+        "sqlite_sequence": sqlite_sequence,
+        "table_content": _table_content_fingerprints(
+            connection,
+            tables={table for table in tables if not table.startswith("sqlite_")},
+        ),
         "required_tables": {table: table in tables for table in REQUIRED_TARGET_TABLES},
+        "required_columns": _required_column_contracts(connection, tables=tables),
+        "required_indexes": _required_index_contracts(connection),
+        "required_triggers": _required_trigger_contracts(connection),
     }
+
+
+def _required_column_contracts(
+    connection: sqlite3.Connection,
+    *,
+    tables: set[str],
+) -> dict[str, dict[str, Any]]:
+    contracts: dict[str, dict[str, Any]] = {}
+    for table_name, required in REQUIRED_TARGET_COLUMNS.items():
+        columns = (
+            {
+                str(row["name"])
+                for row in connection.execute(
+                    f"PRAGMA table_info({_quote_identifier(table_name)})"
+                )
+            }
+            if table_name in tables
+            else set()
+        )
+        missing = sorted(required - columns)
+        table_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table_name,),
+        ).fetchone()
+        table_sql = "" if table_row is None else str(table_row["sql"] or "")
+        normalized_table_sql = " ".join(table_sql.upper().split())
+        required_tokens = REQUIRED_TARGET_TABLE_SQL_TOKENS.get(table_name, ())
+        missing_sql_tokens = [
+            token
+            for token in required_tokens
+            if " ".join(token.upper().split()) not in normalized_table_sql
+        ]
+        contracts[table_name] = {
+            "exists": table_name in tables,
+            "required_columns": sorted(required),
+            "missing_columns": missing,
+            "missing_sql_tokens": missing_sql_tokens,
+            "valid": table_name in tables and not missing and not missing_sql_tokens,
+        }
+    return contracts
+
+
+def _required_index_contracts(
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    contracts: dict[str, dict[str, Any]] = {}
+    for index_name, expected in REQUIRED_TARGET_INDEX_CONTRACTS.items():
+        table_name = str(expected["table"])
+        index_rows = connection.execute(
+            f"PRAGMA index_list({_quote_identifier(table_name)})"
+        ).fetchall()
+        index_row = next(
+            (row for row in index_rows if str(row["name"]) == index_name),
+            None,
+        )
+        index_xinfo = connection.execute(
+            f"PRAGMA index_xinfo({_quote_identifier(index_name)})"
+        ).fetchall()
+        key_rows = [row for row in index_xinfo if int(row["key"] or 0) == 1]
+        columns = tuple(str(row["name"]) for row in key_rows)
+        descending = tuple(bool(row["desc"]) for row in key_rows)
+        exists = index_row is not None
+        unique = bool(index_row["unique"]) if index_row is not None else False
+        partial = bool(index_row["partial"]) if index_row is not None else False
+        expected_columns = tuple(str(item) for item in expected["columns"])
+        expected_descending = tuple(
+            bool(item) for item in expected.get("descending", ())
+        )
+        sql_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+            (index_name,),
+        ).fetchone()
+        index_sql = "" if sql_row is None else str(sql_row["sql"] or "")
+        normalized_index_sql = " ".join(index_sql.upper().split())
+        where_sql = str(expected.get("where_sql") or "")
+        where_valid = not where_sql or (
+            " ".join(where_sql.upper().split()) in normalized_index_sql
+        )
+        contracts[index_name] = {
+            "exists": exists,
+            "table": table_name,
+            "columns": list(columns),
+            "expected_columns": list(expected_columns),
+            "descending": list(descending),
+            "expected_descending": list(expected_descending),
+            "unique": unique,
+            "expected_unique": bool(expected["unique"]),
+            "partial": partial,
+            "expected_partial": bool(expected["partial"]),
+            "where_valid": where_valid,
+            "valid": (
+                exists
+                and columns == expected_columns
+                and descending == expected_descending
+                and unique is bool(expected["unique"])
+                and partial is bool(expected["partial"])
+                and where_valid
+            ),
+        }
+    return contracts
+
+
+def _required_trigger_contracts(
+    connection: sqlite3.Connection,
+) -> dict[str, dict[str, Any]]:
+    contracts: dict[str, dict[str, Any]] = {}
+    for trigger_name, expected in REQUIRED_TARGET_TRIGGER_CONTRACTS.items():
+        row = connection.execute(
+            "SELECT tbl_name, sql FROM sqlite_master "
+            "WHERE type = 'trigger' AND name = ?",
+            (trigger_name,),
+        ).fetchone()
+        sql = "" if row is None else str(row["sql"] or "")
+        table_name = str(expected["table"])
+        operation = str(expected["operation"])
+        compact_sql = "".join(sql.upper().split()).replace(
+            "IFNOTEXISTS", ""
+        ).rstrip(";")
+        expected_sql = (
+            f"CREATETRIGGER{trigger_name.upper()}BEFORE{operation}ON"
+            f"{table_name.upper()}BEGINSELECTRAISE(ABORT,"
+            "'GATEWAYORDER-BOUNDARYRESOLUTIONSAREAPPEND-ONLY');END"
+        )
+        contracts[trigger_name] = {
+            "exists": row is not None,
+            "table": None if row is None else str(row["tbl_name"]),
+            "expected_table": table_name,
+            "operation": operation,
+            "valid": bool(
+                row is not None
+                and str(row["tbl_name"]) == table_name
+                and compact_sql == expected_sql
+            ),
+        }
+    return contracts
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + str(value).replace('"', '""') + '"'
+
+
+def _probe_target_contracts(path: Path) -> dict[str, bool]:
+    connection = sqlite3.connect(path, timeout=60.0)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA foreign_keys=ON")
+    results: dict[str, bool] = {}
+    connection.execute("SAVEPOINT target_contract_probe")
+    try:
+        boundary_values = (
+            "probe-boundary-one",
+            "probe-idempotency",
+            "2026-01-01T00:00:00Z",
+        )
+        connection.execute(
+            """
+            INSERT INTO gateway_order_broker_boundaries (
+                command_id, idempotency_key, command_type, source, state,
+                created_at, updated_at, live_sim_only, live_real_allowed
+            )
+            VALUES (?, ?, 'send_order', 'migration_probe', 'UNCONFIRMED',
+                    ?, ?, 1, 0)
+            """,
+            (*boundary_values, boundary_values[2]),
+        )
+        results["boundary_idempotency_unique"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundaries (
+                command_id, idempotency_key, command_type, source, state,
+                created_at, updated_at, live_sim_only, live_real_allowed
+            )
+            VALUES ('probe-boundary-two', 'probe-idempotency', 'send_order',
+                    'migration_probe', 'UNCONFIRMED',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0)
+            """,
+        )
+        resolution_values = (
+            "probe-resolution-one",
+            "probe-request-one",
+            "0" * 64,
+            "probe-boundary-one",
+            1,
+            "RESOLVE_BROKER_NOT_REACHED",
+            "BROKER_NOT_REACHED",
+            "PROBE_REASON",
+            "PROBE_EVIDENCE",
+            "probe-evidence",
+            "1" * 64,
+            "probe.operator",
+            "2" * 64,
+            "2026-01-01T00:00:00Z",
+            "{}",
+            "2026-01-01T00:00:00Z",
+        )
+        connection.execute(
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at, live_sim_only,
+                live_real_allowed, routing_fence_active
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 1)
+            """,
+            resolution_values,
+        )
+        results["resolution_revoke_insert_supported"] = _expect_success(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type,
+                supersedes_resolution_id, reason_code, evidence_type,
+                evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at, live_sim_only,
+                live_real_allowed, routing_fence_active
+            )
+            VALUES ('probe-resolution-valid-revoke', 'probe-request-valid-revoke',
+                    ?, 'probe-boundary-one', 2, 'REVOKE',
+                    'BROKER_NOT_REACHED', 'probe-resolution-one',
+                    'PROBE_REVOKE_REASON', 'PROBE_REVOKE_EVIDENCE',
+                    'probe-revoke-evidence', ?, 'probe.operator', ?,
+                    '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:01Z', 1, 0, 1)
+            """,
+            ("f" * 64, "e" * 64, "d" * 64),
+        )
+        results["resolution_request_unique"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-request-duplicate', 'probe-request-one',
+                    ?, 'probe-boundary-one', 3, 'REVOKE', 'BROKER_NOT_REACHED',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-two', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("3" * 64, "4" * 64, "5" * 64),
+        )
+        results["resolution_sequence_unique"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-sequence-duplicate', 'probe-request-two',
+                    ?, 'probe-boundary-one', 1, 'REVOKE', 'BROKER_NOT_REACHED',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-three', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("6" * 64, "7" * 64, "8" * 64),
+        )
+        results["resolution_action_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-action-invalid', 'probe-request-three', ?,
+                    'probe-boundary-one', 4, 'INVALID', 'BROKER_NOT_REACHED',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-four', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("9" * 64, "a" * 64, "b" * 64),
+        )
+        results["resolution_sequence_positive_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-sequence-zero', 'probe-request-sequence-zero',
+                    ?, 'probe-boundary-one', 0, 'REVOKE', 'BROKER_NOT_REACHED',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-sequence-zero',
+                    ?, 'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("1" * 64, "2" * 64, "3" * 64),
+        )
+        results["resolution_type_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-type-invalid', 'probe-request-type-invalid',
+                    ?, 'probe-boundary-one', 6, 'REVOKE', 'INVALID',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-type-invalid',
+                    ?, 'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("4" * 64, "5" * 64, "6" * 64),
+        )
+        results["resolution_scope_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at, live_sim_only
+            )
+            VALUES ('probe-resolution-scope-invalid', 'probe-request-four', ?,
+                    'probe-boundary-one', 5, 'REVOKE', 'BROKER_NOT_REACHED',
+                    'PROBE_REASON', 'PROBE_EVIDENCE', 'probe-evidence-five', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z', 0)
+            """,
+            ("c" * 64, "d" * 64, "e" * 64),
+        )
+        results["resolution_live_real_scope_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at, live_real_allowed
+            )
+            VALUES ('probe-resolution-live-real-invalid',
+                    'probe-request-live-real-invalid', ?, 'probe-boundary-one',
+                    7, 'REVOKE', 'BROKER_NOT_REACHED', 'PROBE_REASON',
+                    'PROBE_EVIDENCE', 'probe-evidence-live-real-invalid', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z', 1)
+            """,
+            ("7" * 64, "8" * 64, "9" * 64),
+        )
+        results["resolution_routing_fence_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at, routing_fence_active
+            )
+            VALUES ('probe-resolution-fence-invalid',
+                    'probe-request-fence-invalid', ?, 'probe-boundary-one',
+                    8, 'REVOKE', 'BROKER_NOT_REACHED', 'PROBE_REASON',
+                    'PROBE_EVIDENCE', 'probe-evidence-fence-invalid', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z', 0)
+            """,
+            ("a" * 64, "b" * 64, "c" * 64),
+        )
+        results["resolution_command_foreign_key"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type, reason_code,
+                evidence_type, evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-command-orphan',
+                    'probe-request-command-orphan', ?, 'probe-boundary-missing',
+                    1, 'REVOKE', 'BROKER_NOT_REACHED', 'PROBE_REASON',
+                    'PROBE_EVIDENCE', 'probe-evidence-command-orphan', ?,
+                    'probe.operator', ?, '2026-01-01T00:00:00Z', '{}',
+                    '2026-01-01T00:00:00Z')
+            """,
+            ("d" * 64, "e" * 64, "f" * 64),
+        )
+        results["resolution_supersedes_foreign_key"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO gateway_order_broker_boundary_resolutions (
+                resolution_id, request_id, request_hash, command_id,
+                sequence_no, action, resolution_type,
+                supersedes_resolution_id, reason_code, evidence_type,
+                evidence_ref, evidence_sha256, operator_id,
+                source_boundary_fingerprint, source_boundary_updated_at,
+                boundary_snapshot_json, created_at
+            )
+            VALUES ('probe-resolution-supersedes-orphan',
+                    'probe-request-supersedes-orphan', ?, 'probe-boundary-one',
+                    9, 'REVOKE', 'BROKER_NOT_REACHED', 'missing-resolution',
+                    'PROBE_REASON', 'PROBE_EVIDENCE',
+                    'probe-evidence-supersedes-orphan', ?, 'probe.operator', ?,
+                    '2026-01-01T00:00:00Z', '{}', '2026-01-01T00:00:00Z')
+            """,
+            ("0" * 64, "1" * 64, "2" * 64),
+        )
+        results["resolution_update_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            UPDATE gateway_order_broker_boundary_resolutions
+            SET reason_code = 'MUTATED'
+            WHERE resolution_id = 'probe-resolution-one'
+            """,
+        )
+        results["resolution_delete_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            DELETE FROM gateway_order_broker_boundary_resolutions
+            WHERE resolution_id = 'probe-resolution-one'
+            """,
+        )
+    finally:
+        connection.execute("ROLLBACK TO target_contract_probe")
+        connection.execute("RELEASE target_contract_probe")
+        connection.close()
+    return results
+
+
+def _expect_integrity_error(
+    connection: sqlite3.Connection,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> bool:
+    try:
+        connection.execute(sql, params)
+    except sqlite3.IntegrityError:
+        return True
+    return False
+
+
+def _expect_success(
+    connection: sqlite3.Connection,
+    sql: str,
+    params: tuple[object, ...] = (),
+) -> bool:
+    try:
+        connection.execute(sql, params)
+    except sqlite3.Error:
+        return False
+    return True
+
+
+def _table_content_fingerprints(
+    connection: sqlite3.Connection,
+    *,
+    tables: set[str],
+) -> dict[str, dict[str, Any]]:
+    fingerprints: dict[str, dict[str, Any]] = {}
+    for table_name in sorted(tables):
+        column_rows = connection.execute(
+            f"PRAGMA table_info({_quote_identifier(table_name)})"
+        ).fetchall()
+        columns = [str(row["name"]) for row in column_rows]
+        digest = hashlib.sha256()
+        digest.update(
+            json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        )
+        row_count = 0
+        if columns:
+            column_sql = ", ".join(_quote_identifier(column) for column in columns)
+            primary_key_columns = [
+                str(row["name"])
+                for row in sorted(
+                    (row for row in column_rows if int(row["pk"] or 0) > 0),
+                    key=lambda row: int(row["pk"]),
+                )
+            ]
+            table_row = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table_name,),
+            ).fetchone()
+            table_sql = "" if table_row is None else str(table_row["sql"] or "")
+            include_rowid = "WITHOUT ROWID" not in table_sql.upper()
+            order_sql = (
+                "_rowid_"
+                if include_rowid
+                else ", ".join(
+                    _quote_identifier(column) for column in primary_key_columns
+                )
+            )
+            select_sql = (
+                f"_rowid_ AS {_quote_identifier('__codex_rowid__')}, {column_sql}"
+                if include_rowid
+                else column_sql
+            )
+            where_sql = (
+                "WHERE key <> 'schema_version'"
+                if table_name == "app_metadata" and "key" in columns
+                else ""
+            )
+            query = (
+                f"SELECT {select_sql} FROM {_quote_identifier(table_name)} "
+                f"{where_sql} "
+                f"ORDER BY {order_sql}"
+            )
+            for row in connection.execute(query):
+                values = [
+                    _sql_value_for_hash(row[column]) for column in columns
+                ]
+                if include_rowid:
+                    values.insert(
+                        0,
+                        {
+                            "type": "rowid",
+                            "value": int(row["__codex_rowid__"]),
+                        },
+                    )
+                encoded = json.dumps(
+                    values,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+                row_count += 1
+        fingerprints[table_name] = {
+            "row_count": row_count,
+            "sha256": digest.hexdigest(),
+        }
+    return fingerprints
+
+
+def _sql_value_for_hash(value: object) -> dict[str, Any]:
+    if value is None:
+        return {"type": "null", "value": None}
+    if isinstance(value, bytes):
+        return {
+            "type": "blob",
+            "value": hashlib.sha256(value).hexdigest(),
+            "size": len(value),
+        }
+    if isinstance(value, float):
+        return {"type": "float", "value": value.hex()}
+    if isinstance(value, int):
+        return {"type": "integer", "value": value}
+    return {"type": "text", "value": str(value)}
+
+
+def _changed_table_content(
+    *,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    excluded: frozenset[str] = frozenset(),
+) -> list[str]:
+    return sorted(
+        table_name
+        for table_name, fingerprint in before.items()
+        if table_name not in excluded and after.get(table_name) != fingerprint
+    )
 
 
 def _quick_check(path: Path) -> list[str]:
@@ -291,15 +1137,29 @@ def _file_fingerprints(path: Path) -> dict[str, dict[str, Any]]:
     for label, suffix in FINGERPRINT_FILES.items():
         candidate = Path(f"{path}{suffix}")
         if not candidate.exists():
-            fingerprints[label] = {"exists": False, "size": 0, "mtime_ns": None}
+            fingerprints[label] = {
+                "exists": False,
+                "size": 0,
+                "mtime_ns": None,
+                "sha256": None,
+            }
             continue
         stat = candidate.stat()
         fingerprints[label] = {
             "exists": True,
             "size": int(stat.st_size),
             "mtime_ns": int(stat.st_mtime_ns),
+            "sha256": _sha256_file(candidate),
         }
     return fingerprints
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _changed_source_data_files(
@@ -308,16 +1168,9 @@ def _changed_source_data_files(
     after: Mapping[str, Any],
 ) -> list[str]:
     changed: list[str] = []
-    if before.get("main") != after.get("main"):
-        changed.append("<main>")
-
-    wal_before = _mapping(before.get("wal"))
-    wal_after = _mapping(after.get("wal"))
-    if wal_before.get("exists"):
-        if wal_before != wal_after:
-            changed.append("-wal")
-    elif wal_after.get("exists") and int(wal_after.get("size") or 0) > 0:
-        changed.append("-wal")
+    for label, display_name in (("main", "<main>"), ("wal", "-wal"), ("shm", "-shm")):
+        if before.get(label) != after.get(label):
+            changed.append(display_name)
     return changed
 
 
@@ -384,6 +1237,12 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"`{str(bool(verdict.get('source_data_files_unchanged'))).lower()}`",
             "- required_tables_present: "
             f"`{str(bool(verdict.get('required_tables_present'))).lower()}`",
+            "- required_columns_present: "
+            f"`{str(bool(verdict.get('required_columns_present'))).lower()}`",
+            "- required_indexes_present: "
+            f"`{str(bool(verdict.get('required_indexes_present'))).lower()}`",
+            "- required_append_only_triggers_present: "
+            f"`{str(bool(verdict.get('required_append_only_triggers_present'))).lower()}`",
             f"- failures: `{json.dumps(verdict.get('failures') or [])}`",
             "",
             "The source database was opened with SQLite `mode=ro` and "

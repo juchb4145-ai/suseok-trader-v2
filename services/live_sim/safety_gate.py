@@ -186,7 +186,7 @@ def check_live_sim_safety_gate(
         reason_codes.append(LiveSimReasonCode.ORDER_ROUTING_DISABLED.value)
     if (
         resolved_purpose == "NEW_BUY"
-        and order_broker_boundary.get("block_new_order_routing") is True
+        and _order_broker_boundary_blocks_routing(order_broker_boundary)
     ):
         reason_codes.append(
             LiveSimReasonCode.ORDER_BROKER_BOUNDARY_BLOCKED.value
@@ -304,6 +304,13 @@ def check_live_sim_safety_gate(
 
 def is_simulation_like(value: str | None) -> bool:
     return _is_simulation_like(value)
+
+
+def _order_broker_boundary_blocks_routing(status: Mapping[str, Any]) -> bool:
+    effective = status.get("effective_block_new_order_routing")
+    if isinstance(effective, bool):
+        return effective
+    return status.get("block_new_order_routing") is True
 
 
 def live_sim_entry_window_state(settings: Settings) -> dict[str, Any]:

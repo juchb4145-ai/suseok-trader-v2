@@ -226,11 +226,55 @@ def test_projection_replay_write_guard_denies_order_table_write(tmp_path) -> Non
                 VALUES ('cmd-replay', 'send_order', 'test', 'QUEUED', '{}', 'hash')
                 """
             )
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            connection.execute(
+                """
+                INSERT INTO gateway_order_broker_boundary_resolutions (
+                    resolution_id,
+                    request_id,
+                    request_hash,
+                    command_id,
+                    sequence_no,
+                    action,
+                    resolution_type,
+                    reason_code,
+                    evidence_type,
+                    evidence_ref,
+                    evidence_sha256,
+                    operator_id,
+                    source_boundary_fingerprint,
+                    source_boundary_updated_at,
+                    created_at
+                )
+                VALUES (
+                    'resolution-replay',
+                    'request-replay',
+                    ?,
+                    'cmd-replay',
+                    1,
+                    'RESOLVE_BROKER_NOT_REACHED',
+                    'BROKER_NOT_REACHED',
+                    'TEST_ONLY',
+                    'TEST_ARTIFACT',
+                    'TEST_REFERENCE',
+                    ?,
+                    'test-operator',
+                    ?,
+                    '2026-07-15T00:00:00Z',
+                    '2026-07-15T00:00:00Z'
+                )
+                """,
+                ("a" * 64, "b" * 64, "c" * 64),
+            )
     finally:
         connection.close()
 
     assert blocked
     assert blocked[0]["table_name"] == "gateway_commands"
+    assert any(
+        item["table_name"] == "gateway_order_broker_boundary_resolutions"
+        for item in blocked
+    )
 
 
 def test_projection_replay_status_is_read_only_in_operator_and_dashboard(

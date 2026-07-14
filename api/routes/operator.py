@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -117,8 +118,10 @@ from storage.event_retention import (
     prune_event_store_events,
 )
 from storage.gateway_order_broker_boundary import (
+    OrderBrokerBoundaryResolutionError,
     get_order_broker_boundary_status,
     list_order_broker_boundaries,
+    preview_order_broker_boundary_resolution,
 )
 from storage.live_sim_order_plan_uniqueness import (
     get_live_sim_order_plan_uniqueness_status,
@@ -443,27 +446,35 @@ def operator_live_sim_order_plan_uniqueness_status() -> dict[str, Any]:
         connection.close()
 
 
-@router.get("/gateway/order-broker-boundaries/status")
+@router.get(
+    "/gateway/order-broker-boundaries/status",
+    dependencies=[Depends(require_local_token)],
+)
 def operator_order_broker_boundaries_status() -> dict[str, Any]:
     settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
     try:
         return get_order_broker_boundary_status(connection)
     finally:
         connection.close()
 
 
-@router.get("/gateway/order-broker-boundaries")
+@router.get(
+    "/gateway/order-broker-boundaries",
+    dependencies=[Depends(require_local_token)],
+)
 def operator_order_broker_boundaries(
     state: str | None = Query(default=None, min_length=1, max_length=32),
+    effective_state: str | None = Query(default=None, min_length=1, max_length=64),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
     try:
         items = list_order_broker_boundaries(
             connection,
             state=state,
+            effective_state=effective_state,
             limit=limit,
         )
         return {
@@ -473,6 +484,38 @@ def operator_order_broker_boundaries(
             "no_order_side_effects": True,
             "no_trading_side_effects": True,
         }
+    finally:
+        connection.close()
+
+
+def _open_boundary_read_only_connection(db_path: str | Path) -> sqlite3.Connection:
+    path = Path(db_path).expanduser().resolve()
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?mode=ro",
+        uri=True,
+        timeout=15.0,
+    )
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA query_only=ON")
+    return connection
+
+
+@router.get(
+    "/gateway/order-broker-boundaries/{command_id}",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_order_broker_boundary_preview(command_id: str) -> dict[str, Any]:
+    settings = load_settings()
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
+    try:
+        return preview_order_broker_boundary_resolution(connection, command_id)
+    except OrderBrokerBoundaryResolutionError as exc:
+        if exc.code == "BOUNDARY_NOT_FOUND":
+            raise HTTPException(
+                status_code=http_status.HTTP_404_NOT_FOUND,
+                detail=exc.to_dict(),
+            ) from exc
+        raise
     finally:
         connection.close()
 
@@ -1911,7 +1954,7 @@ def _locked_retryable_operator_response(
     *,
     settings: Any,
     endpoint: str,
-    exc: BaseException,
+    exc: sqlite3.OperationalError,
     attempts: int,
     elapsed_ms: float,
     locked_retry_count: int,

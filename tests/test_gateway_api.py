@@ -379,10 +379,30 @@ def test_gateway_pre_ack_api_confirms_durable_boundary_without_order_side_effect
             headers={"X-Local-Token": "test-token"},
         )
         status_response = client.get(
+            "/api/operator/gateway/order-broker-boundaries/status",
+            headers={"X-Local-Token": "test-token"},
+        )
+        unauthorized_status = client.get(
             "/api/operator/gateway/order-broker-boundaries/status"
         )
-        list_response = client.get(
+        unauthorized_list = client.get(
             "/api/operator/gateway/order-broker-boundaries?limit=10"
+        )
+        unauthorized_preview = client.get(
+            f"/api/operator/gateway/order-broker-boundaries/{command.command_id}"
+        )
+        list_response = client.get(
+            "/api/operator/gateway/order-broker-boundaries?limit=10",
+            headers={"X-Local-Token": "test-token"},
+        )
+        effective_list_response = client.get(
+            "/api/operator/gateway/order-broker-boundaries"
+            "?effective_state=PRE_ACK_RECORDED&limit=10",
+            headers={"X-Local-Token": "test-token"},
+        )
+        preview_response = client.get(
+            f"/api/operator/gateway/order-broker-boundaries/{command.command_id}",
+            headers={"X-Local-Token": "test-token"},
         )
 
     assert polled.status_code == 200
@@ -392,11 +412,24 @@ def test_gateway_pre_ack_api_confirms_durable_boundary_without_order_side_effect
     assert accepted.json()["durable_pre_ack_recorded"] is True
     assert duplicate.json()["duplicate"] is True
     assert duplicate.json()["durable_pre_ack_recorded"] is True
+    assert unauthorized_status.status_code == 401
+    assert unauthorized_list.status_code == 401
+    assert unauthorized_preview.status_code == 401
     assert status_response.json()["status"] == "PASS"
     assert status_response.json()["durable_pre_ack_count"] == 1
     assert list_response.json()["count"] == 1
     assert list_response.json()["items"][0]["state"] == "PRE_ACK_RECORDED"
     assert list_response.json()["no_order_side_effects"] is True
+    assert effective_list_response.status_code == 200
+    assert effective_list_response.json()["count"] == 1
+    assert preview_response.status_code == 200
+    assert preview_response.json()["raw_state"] == "PRE_ACK_RECORDED"
+    public_payload = json.dumps(
+        [list_response.json(), preview_response.json()],
+        ensure_ascii=False,
+    )
+    assert "1234567890" not in public_payload
+    assert str(command.idempotency_key) not in public_payload
 
 
 def test_gateway_event_api_requires_token_when_configured(tmp_path, monkeypatch) -> None:
