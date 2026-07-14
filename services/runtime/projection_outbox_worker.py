@@ -25,7 +25,7 @@ from storage.projection_outbox import (
     mark_projection_outbox_skipped,
     reset_stale_projection_outbox_processing,
 )
-from storage.sqlite_locking import retry_sqlite_locked
+from storage.sqlite_locking import is_sqlite_locked_error, retry_sqlite_locked
 
 from services.config import Settings, TradingMode, TradingProfile, load_settings
 from services.market_context_service import (
@@ -1023,7 +1023,9 @@ def _apply_market_scan_projection(
             no_order_side_effects=True,
             no_trading_side_effects=True,
         )
-    if verification_before.status == "ERROR":
+    if verification_before.status == "ERROR" and not bool(
+        verification_before.evidence.get("retryable")
+    ):
         return _verification_error(
             verification_before.reason,
             verification_before.error_message or verification_before.reason,
@@ -1062,19 +1064,22 @@ def _apply_market_scan_projection(
             market_data_dependency=dependency,
             apply_result="APPLY_ERROR",
             verification_before_apply=verification_before_payload,
+            retryable=is_sqlite_locked_error(exc),
         )
 
     projection_result_payload = projection_result.to_dict()
     if projection_result.status in {"ERROR", "PARTIAL"}:
+        error_message = projection_result.error_message or projection_result.status
         return _verification_error(
             "MARKET_SCAN_APPLY_FAILED",
-            projection_result.error_message or projection_result.status,
+            error_message,
             event_id=event_id,
             event_type=event_type,
             market_data_dependency=dependency,
             projection_result=projection_result_payload,
             apply_result="APPLY_ERROR",
             verification_before_apply=verification_before_payload,
+            retryable=_is_sqlite_locked_message(error_message),
         )
     if projection_result.status == "IGNORED":
         return _verification_skipped(
@@ -1303,6 +1308,7 @@ def _apply_market_regime_continuity_verification(
                 or should_rebuild_market_context_snapshots(
                     connection,
                     settings=settings,
+                    min_interval_sec=0.0,
                 )
             )
         )
@@ -1899,15 +1905,6 @@ def _verify_market_scan(
     event_id: str,
     payload: Mapping[str, Any],
 ) -> ProjectionOutboxVerificationResult:
-    inline_error = _market_scan_inline_error(connection, event_id)
-    if inline_error is not None:
-        return _verification_error(
-            "MARKET_SCAN_INLINE_ERROR",
-            str(inline_error.get("error_message") or "market_scan inline error"),
-            event_id=event_id,
-            inline_projection_status="ERROR",
-            inline_error=inline_error,
-        )
     request_id = str(payload.get("request_id") or "").strip()
     if request_id:
         row = connection.execute(
@@ -1927,6 +1924,19 @@ def _verify_market_scan(
                 event_id=event_id,
                 request_id=request_id,
             )
+    inline_error = _market_scan_inline_error(connection, event_id)
+    if inline_error is not None:
+        error_message = str(
+            inline_error.get("error_message") or "market_scan inline error"
+        )
+        return _verification_error(
+            "MARKET_SCAN_INLINE_ERROR",
+            error_message,
+            event_id=event_id,
+            inline_projection_status="ERROR",
+            inline_error=inline_error,
+            retryable=_is_sqlite_locked_message(error_message),
+        )
     return _verification_skipped(
         "MARKET_SCAN_ARTIFACT_NOT_YET_APPLIED",
         event_id=event_id,
@@ -2439,6 +2449,10 @@ def _market_scan_inline_error(
     event_id: str,
 ) -> dict[str, Any] | None:
     return _latest_inline_error(connection, "market_scan_errors", event_id)
+
+
+def _is_sqlite_locked_message(value: object) -> bool:
+    return is_sqlite_locked_error(sqlite3.OperationalError(str(value or "")))
 
 
 def _latest_inline_error(

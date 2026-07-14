@@ -47,6 +47,78 @@ def test_market_regime_reconcile_passes_coherent_context_and_persists(tmp_path) 
     assert rerun.status == "PASS"
 
 
+def test_market_regime_reconcile_allows_index_dependency_within_sla(
+    tmp_path,
+) -> None:
+    connection = initialize_database(
+        tmp_path / "market-regime-index-pending.sqlite3"
+    )
+    settings = market_regime_settings()
+    _, settled_kosdaq = seed_ready_context(connection, settings=settings)
+    seed_index_event(
+        connection,
+        "KOSDAQ",
+        "evt_regime_index_pending_within_sla",
+        settings=settings,
+        apply_index=False,
+    )
+
+    result = run_market_regime_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=10,
+        persist=False,
+    )
+    connection.close()
+
+    assert result.status == "PASS"
+    assert result.append_only_ready is True
+    assert result.latest_event_covered is True
+    assert result.checked_event_count == 3
+    assert result.observed_index_count == 2
+    assert result.latest_event_id == settled_kosdaq.event_id
+    assert (
+        "MARKET_REGIME_INDEX_DEPENDENCY_PENDING_WITHIN_SLA"
+        in result.reason_codes
+    )
+
+
+def test_market_regime_reconcile_rejects_stale_index_dependency(tmp_path) -> None:
+    connection = initialize_database(
+        tmp_path / "market-regime-index-stale.sqlite3"
+    )
+    settings = market_regime_settings()
+    seed_ready_context(connection, settings=settings)
+    pending = seed_index_event(
+        connection,
+        "KOSDAQ",
+        "evt_regime_index_stale",
+        settings=settings,
+        apply_index=False,
+    )
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET created_at = '2000-01-01T00:00:00Z'
+        WHERE projection_name = 'market_index' AND event_id = ?
+        """,
+        (pending.event_id,),
+    )
+    connection.commit()
+
+    result = run_market_regime_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=10,
+        persist=False,
+    )
+    connection.close()
+
+    assert result.status == "FAIL"
+    assert result.append_only_ready is False
+    assert "MARKET_REGIME_INDEX_DEPENDENCY_MISSING" in result.reason_codes
+
+
 def test_market_regime_reconcile_fails_when_context_watermark_is_behind(
     tmp_path,
 ) -> None:

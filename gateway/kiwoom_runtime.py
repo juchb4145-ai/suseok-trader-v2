@@ -346,6 +346,7 @@ class KiwoomGatewayRuntime:
         self._market_index_callback_count = 0
         self._parsed_market_index_tick_count = 0
         self._market_index_parse_error_count = 0
+        self._latest_market_index_callback_at: datetime | None = None
         self._latest_market_index_tick_at: datetime | None = None
         self._latest_market_index_parse_error: dict[str, Any] = {}
         self._latest_market_index_registration_result: dict[str, Any] = {}
@@ -812,6 +813,9 @@ class KiwoomGatewayRuntime:
             "market_index_callback_count": self._market_index_callback_count,
             "parsed_market_index_tick_count": self._parsed_market_index_tick_count,
             "market_index_parse_error_count": self._market_index_parse_error_count,
+            "latest_market_index_callback_at": _datetime_or_empty(
+                self._latest_market_index_callback_at
+            ),
             "latest_market_index_tick_at": _datetime_or_empty(
                 self._latest_market_index_tick_at
             ),
@@ -1101,7 +1105,8 @@ class KiwoomGatewayRuntime:
         real_type: str,
         real_data_present: bool = False,
     ) -> None:
-        self._last_realtime_callback_at = utc_now()
+        observed_at = utc_now()
+        self._last_realtime_callback_at = observed_at
         self._realtime_callback_count += 1
         normalized_real_type = str(real_type or "").strip() or "UNKNOWN"
         self._realtime_callback_real_type_counts[normalized_real_type] = (
@@ -1109,6 +1114,7 @@ class KiwoomGatewayRuntime:
         )
         if _is_market_index_runtime_callback(code=code, real_type=real_type):
             self._market_index_callback_count += 1
+            self._latest_market_index_callback_at = observed_at
 
     def on_realtime_registration_result(self, payload: Mapping[str, Any]) -> None:
         normalized = dict(payload)
@@ -2001,7 +2007,11 @@ class KiwoomGatewayRuntime:
             return
         if not self.kiwoom_logged_in():
             return
-        if self._market_index_adapter_health() != "REGISTERED_WAITING_CALLBACK":
+        adapter_health = self._market_index_adapter_health()
+        if adapter_health not in {
+            "REGISTERED_WAITING_CALLBACK",
+            "CALLBACK_ACTIVE_WAITING_VALID_TICK",
+        }:
             return
         if self._last_realtime_callback_at is None or self._realtime_callback_count <= 0:
             return
@@ -2016,6 +2026,10 @@ class KiwoomGatewayRuntime:
             baseline = now
             self._last_market_index_registration_at = baseline
         wait_sec = max(float(self.config.market_index_poll_sec), 1.0)
+        if adapter_health == "CALLBACK_ACTIVE_WAITING_VALID_TICK":
+            latest_callback = self._latest_market_index_callback_at
+            if latest_callback is None or (now - latest_callback).total_seconds() < wait_sec:
+                return
         if (now - baseline).total_seconds() < wait_sec:
             return
         if (
@@ -2070,6 +2084,9 @@ class KiwoomGatewayRuntime:
                 "realtime_callback_count": self._realtime_callback_count,
                 "market_index_callback_count": self._market_index_callback_count,
                 "parsed_market_index_tick_count": self._parsed_market_index_tick_count,
+                "latest_market_index_callback_at": _datetime_or_empty(
+                    self._latest_market_index_callback_at
+                ),
                 "market_index_recover_count": self._market_index_recover_count,
             },
         )

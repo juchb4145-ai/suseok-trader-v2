@@ -6,6 +6,8 @@ param(
     [string]$TradeDate = $(Get-Date -Format "yyyy-MM-dd"),
     [ValidateRange(1, 30)]
     [int]$SettleSec = 3,
+    [ValidateRange(5, 180)]
+    [int]$KeeperStopWaitSec = 60,
     [switch]$KeepCore
 )
 
@@ -51,8 +53,36 @@ $ThemeProcesses = Get-CimInstance Win32_Process | Where-Object {
     $_.CommandLine -match "start_theme_refresh_loop\.ps1" -and
     $_.CommandLine -like "*$CoreUrl*"
 }
+$KeeperProcesses = Get-CimInstance Win32_Process | Where-Object {
+    $_.Name -eq "python.exe" -and
+    $_.CommandLine -match "ops_append_only_evidence_keeper\.py" -and
+    $_.CommandLine -like "*$CoreUrl*"
+}
 @($GatewayProcesses) + @($ThemeProcesses) | ForEach-Object {
     Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+}
+$KeeperStopPath = "$SessionStatePath.keeper.stop"
+if (@($KeeperProcesses).Count -gt 0) {
+    New-Item -ItemType File -Path $KeeperStopPath -Force | Out-Null
+    $KeeperDeadline = (Get-Date).AddSeconds($KeeperStopWaitSec)
+    while ((Get-Date) -lt $KeeperDeadline) {
+        $AliveKeeperCount = @(
+            $KeeperProcesses | Where-Object {
+                Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+            }
+        ).Count
+        if ($AliveKeeperCount -eq 0) { break }
+        Start-Sleep -Seconds 1
+    }
+    $KeeperProcesses | Where-Object {
+        Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+    } | ForEach-Object {
+        Write-Warning "Evidence keeper did not stop gracefully; forcing PID=$($_.ProcessId)."
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+}
+if (Test-Path -LiteralPath $KeeperStopPath) {
+    Remove-Item -LiteralPath $KeeperStopPath -Force
 }
 Start-Sleep -Seconds $SettleSec
 

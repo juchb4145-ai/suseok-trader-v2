@@ -26,6 +26,7 @@ from storage.gateway_command_store import (
     canonical_json,
     enqueue_command,
 )
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from services.config import Settings, load_settings
 
@@ -423,6 +424,8 @@ def process_market_scan_event(
         connection.commit()
     except Exception as exc:
         connection.rollback()
+        if is_sqlite_locked_error(exc):
+            raise
         _record_scan_error(
             connection,
             event=event,
@@ -940,14 +943,22 @@ def _event_already_projected(
         return True
     error = connection.execute(
         """
-        SELECT 1
+        SELECT error_message
         FROM market_scan_errors
         WHERE event_id = ?
+        ORDER BY id DESC
         LIMIT 1
         """,
         (event_id,),
     ).fetchone()
-    return error is not None
+    return bool(
+        error is not None
+        and not _is_sqlite_locked_message(error["error_message"])
+    )
+
+
+def _is_sqlite_locked_message(value: object) -> bool:
+    return is_sqlite_locked_error(sqlite3.OperationalError(str(value or "")))
 
 
 def _event_store_times(

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
+
+import pytest
 from domain.broker.events import GatewayEvent
 from gateway.command_handlers import GatewayCommandHandler
 from gateway.event_factory import make_tr_response_event
+from services import market_scan_service
 from services.config import Settings
 from services.market_scan_service import (
     get_latest_market_scan,
@@ -107,6 +111,45 @@ def test_market_scan_parses_korean_rows_and_latest_projection(tmp_path) -> None:
     assert latest["price"] == 70000
     assert latest["change_rate"] == 2.5
     assert latest["trade_value"] == 1_200_000_000
+
+
+def test_market_scan_reraises_sqlite_lock_without_recording_data_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "market-scan-locked.sqlite3")
+    settings = Settings(market_scan_enabled=True)
+    event = make_tr_response_event(
+        request_id="market_scan:TRADE_VALUE:KOSPI:locked",
+        tr_code="OPT10032",
+        request_name="market_scan_trade_value_kospi",
+        rows=[
+            {
+                "종목코드": "005930",
+                "종목명": "삼성전자",
+                "순위": "1",
+                "현재가": "+70000",
+                "등락률": "+1.25",
+                "거래대금": "1000000000",
+                "거래량": "100000",
+            }
+        ],
+        source="test-gateway",
+    )
+
+    def raise_locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(market_scan_service, "_insert_scan_snapshot", raise_locked)
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        process_market_scan_event(connection, event, settings=settings)
+
+    assert list_market_scan_errors(connection) == []
+    assert connection.execute(
+        "SELECT COUNT(*) FROM market_scan_snapshots"
+    ).fetchone()[0] == 0
+    connection.close()
 
 
 def test_market_scan_accepts_alphanumeric_krx_short_codes(tmp_path) -> None:

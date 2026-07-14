@@ -10,11 +10,19 @@ param(
     [int]$GatewayStabilizeSec = 15,
     [ValidateRange(1, 3)]
     [int]$GatewayStartAttempts = 2,
+    [ValidateRange(30, 240)]
+    [int]$KeeperIntervalSec = 45,
+    [ValidateRange(100, 1000)]
+    [int]$KeeperReconcileLimit = 500,
     [switch]$KrxTradingDayConfirmed
 )
 
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$Python64 = Join-Path $Root "venv_64\Scripts\python.exe"
+if (-not (Test-Path -LiteralPath $Python64)) {
+    $Python64 = (Get-Command python -ErrorAction Stop).Source
+}
 
 function Import-DotEnv {
     param([string]$Path)
@@ -40,6 +48,13 @@ function Get-CommandCount {
         }
     }
     return $Count
+}
+
+function Quote-CommandArgument {
+    param([string]$Value)
+    if ($null -eq $Value) { return '""' }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    return '"' + ($Value -replace '\\(?=\\*")', '$0$0' -replace '"', '\"') + '"'
 }
 
 Import-DotEnv -Path (Join-Path $Root ".env")
@@ -168,9 +183,54 @@ $ThemeParameters = $Parameters.Clone()
 $ThemeParameters.RunThemeRefreshLoop = $true
 & $StartScript @ThemeParameters
 
+$env:TRADING_CORE_TOKEN = $Token
+$env:GATEWAY_CORE_TOKEN = $Token
+$KeeperScript = Join-Path $PSScriptRoot "ops_append_only_evidence_keeper.py"
+$KeeperStopPath = "$SessionStatePath.keeper.stop"
+if (Test-Path -LiteralPath $KeeperStopPath) {
+    Remove-Item -LiteralPath $KeeperStopPath -Force
+}
+$KeeperArguments = @(
+    $KeeperScript,
+    "--core-url", $CoreUrl,
+    "--expected-db-path", $ResolvedDbPath,
+    "--trade-date", $TradeDate,
+    "--interval-sec", [string]$KeeperIntervalSec,
+    "--reconcile-limit", [string]$KeeperReconcileLimit,
+    "--outbox-limit", "100",
+    "--outbox-max-batches", "5",
+    "--stop-file", $KeeperStopPath
+)
+$LogDir = Join-Path $Root "logs\runtime"
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$KeeperStamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$KeeperOutLog = Join-Path $LogDir "append_only_evidence_keeper_$KeeperStamp.out.log"
+$KeeperErrLog = Join-Path $LogDir "append_only_evidence_keeper_$KeeperStamp.err.log"
+$KeeperProcess = Start-Process `
+    -FilePath $Python64 `
+    -ArgumentList (($KeeperArguments | ForEach-Object { Quote-CommandArgument $_ }) -join " ") `
+    -WorkingDirectory $Root `
+    -WindowStyle Hidden `
+    -RedirectStandardOutput $KeeperOutLog `
+    -RedirectStandardError $KeeperErrLog `
+    -PassThru
+Start-Sleep -Seconds 2
+if ($KeeperProcess.HasExited) {
+    throw "Append-only evidence keeper exited during startup. stderr=$KeeperErrLog"
+}
+$SessionState["keeper_pid"] = $KeeperProcess.Id
+$SessionState["keeper_interval_sec"] = $KeeperIntervalSec
+$SessionState["keeper_reconcile_limit"] = $KeeperReconcileLimit
+$SessionState["keeper_started_at"] = [datetime]::UtcNow.ToString("o")
+$SessionState["keeper_stop_path"] = $KeeperStopPath
+$SessionState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $SessionStatePath -Encoding UTF8
+
 Write-Host "Persistent append-only evidence session started."
 Write-Host "Trade date: $TradeDate"
 Write-Host "Evidence DB: $ResolvedDbPath"
 Write-Host "Session state: $SessionStatePath"
+Write-Host "Evidence keeper: PID=$($KeeperProcess.Id) interval=$KeeperIntervalSec sec reconcile_limit=$KeeperReconcileLimit"
+Write-Host "  stdout: $KeeperOutLog"
+Write-Host "  stderr: $KeeperErrLog"
 Write-Host "Close command:"
 Write-Host "  .\tools\close_append_only_daily_evidence.ps1 -CoreUrl $CoreUrl -CorePort $CorePort -EvidenceDbPath `"$ResolvedDbPath`" -TradeDate $TradeDate"

@@ -235,8 +235,6 @@ def build_market_data_append_only_controller_status(
     )
     if not resolved_settings.gateway_market_data_append_only_require_backlog_ready:
         backlog_ready = True
-    elif operating_mode == "MARKET_DATA_FULL_GUARDED":
-        backlog_ready = backlog_readiness_status == "PASS"
     else:
         backlog_ready = backlog_readiness_status in {"PASS", "WARN"}
     worker_apply_enabled = bool(

@@ -151,6 +151,7 @@ def run_market_index_projection_reconcile(
     counters: Counter[str] = Counter()
     outbox_counts: Counter[str] = Counter()
     observed_index_codes: set[str] = set()
+    projected_index_codes: set[str] = set()
     outbox_rollout_rowid = _outbox_rollout_rowid(connection)
 
     if not events:
@@ -237,6 +238,7 @@ def run_market_index_projection_reconcile(
             )
 
         outbox = _outbox_job(connection, event_id)
+        outbox_pending_within_sla = False
         if outbox is None:
             is_legacy = bool(
                 outbox_rollout_rowid is not None
@@ -265,6 +267,12 @@ def run_market_index_projection_reconcile(
             counters["outbox_job_count"] += 1
             outbox_status = str(outbox["status"]).upper()
             outbox_counts[outbox_status] += 1
+            outbox_pending_within_sla = _outbox_pending_within_sla(
+                outbox,
+                max_age_sec=(
+                    resolved_settings.gateway_market_index_append_only_reconcile_max_age_sec
+                ),
+            )
             _check_outbox(
                 issues,
                 run_id=run_id,
@@ -293,8 +301,11 @@ def run_market_index_projection_reconcile(
                 evidence=dict(projection_error),
             )
         if sample is None:
-            counters["missing_sample_count"] += 1
-            if projection_error is None:
+            if outbox_pending_within_sla and projection_error is None:
+                counters["pending_sample_within_sla_count"] += 1
+            else:
+                counters["missing_sample_count"] += 1
+            if projection_error is None and not outbox_pending_within_sla:
                 _add_issue(
                     issues,
                     run_id=run_id,
@@ -308,6 +319,7 @@ def run_market_index_projection_reconcile(
                 )
         else:
             counters["sample_count"] += 1
+            projected_index_codes.add(str(sample["index_code"]).strip().upper())
             if index_code and str(sample["index_code"]) != index_code:
                 _add_issue(
                     issues,
@@ -322,6 +334,12 @@ def run_market_index_projection_reconcile(
                     evidence={"sample_index_code": sample["index_code"]},
                 )
 
+        if sample is None and outbox_pending_within_sla and projection_error is None:
+            if parser_verified:
+                counters["pending_parser_verified_count"] += 1
+            else:
+                counters["pending_parser_unverified_count"] += 1
+            continue
         data_usable = bool(usability.get("data_usable")) and sample is not None
         if data_usable:
             counters["data_usable_count"] += 1
@@ -340,7 +358,7 @@ def run_market_index_projection_reconcile(
                 evidence=usability,
             )
 
-    missing_codes = sorted(REQUIRED_INDEX_CODES - observed_index_codes)
+    missing_codes = sorted(REQUIRED_INDEX_CODES - projected_index_codes)
     if events and missing_codes:
         _add_issue(
             issues,
@@ -352,16 +370,27 @@ def run_market_index_projection_reconcile(
         )
 
     checked_count = int(counters["checked_event_count"])
+    settled_checked_count = checked_count - int(
+        counters["pending_sample_within_sla_count"]
+    )
     data_usability_ready = bool(
-        checked_count > 0
-        and int(counters["data_usable_count"]) == checked_count
+        settled_checked_count > 0
+        and int(counters["data_usable_count"]) == settled_checked_count
         and int(counters["data_unusable_count"]) == 0
         and not missing_codes
     )
     parser_confidence_ready = bool(
-        checked_count > 0
-        and int(counters["parser_verified_count"]) == checked_count
-        and int(counters["parser_unverified_count"]) == 0
+        settled_checked_count > 0
+        and (
+            int(counters["parser_verified_count"])
+            - int(counters["pending_parser_verified_count"])
+            == settled_checked_count
+        )
+        and (
+            int(counters["parser_unverified_count"])
+            - int(counters["pending_parser_unverified_count"])
+            == 0
+        )
     )
     status = _run_status(issues, checked_event_count=checked_count)
     append_only_ready = bool(
@@ -665,8 +694,11 @@ def _check_outbox(
 ) -> None:
     status = str(outbox["status"]).upper()
     if status in {"PENDING", "PROCESSING"}:
-        age = _age_seconds(outbox["created_at"] if status == "PENDING" else outbox["updated_at"])
-        severity = "FAIL" if age is not None and age > max_age_sec else "WARN"
+        timestamp = (
+            outbox["created_at"] if status == "PENDING" else outbox["updated_at"]
+        )
+        age = _age_seconds(timestamp)
+        severity = "FAIL" if age is None or age > max_age_sec else "INFO"
         _add_issue(
             issues,
             run_id=run_id,
@@ -696,6 +728,23 @@ def _check_outbox(
             message=f"market_index outbox job is {status}",
             evidence={"last_error": outbox.get("last_error")},
         )
+
+
+def _outbox_pending_within_sla(
+    outbox: Mapping[str, Any],
+    *,
+    max_age_sec: int,
+) -> bool:
+    status = str(outbox.get("status") or "").upper()
+    if status not in {"PENDING", "PROCESSING"}:
+        return False
+    timestamp = (
+        outbox.get("created_at")
+        if status == "PENDING"
+        else outbox.get("updated_at")
+    )
+    age = _age_seconds(timestamp)
+    return age is not None and age <= max(int(max_age_sec), 0)
 
 
 def _add_issue(

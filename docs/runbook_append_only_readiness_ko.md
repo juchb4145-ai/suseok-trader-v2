@@ -88,6 +88,10 @@ start wrapper는 다음을 강제한다.
 - PR-30에서 확인한 설치본에 한해 Core 임시 env의 market-scan parser를
   `KOA_STUDIO_VERIFIED`로 명시한다. 일반 launcher 기본값은 계속 unverified다.
 - KRX theme refresh, Kiwoom Gateway와 Core를 영속 DB에 연결한다.
+- theme 시작 뒤 OBSERVE-safe evidence keeper를 자동 기동한다. keeper는 기본 180초 주기로
+  short outbox drain, bounded reconcile(limit 500), controller snapshot을 갱신한다. 주문·설정·
+  cutover flag를 만들거나 변경하지 않으며 Core OBSERVE/LIVE false 또는 order baseline이 깨지면
+  POST 동작 전에 중단한다.
 
 장 마감 후에는 Gateway/theme ingest를 먼저 내리고 같은 DB를 마감한다.
 
@@ -95,7 +99,7 @@ start wrapper는 다음을 강제한다.
 .\tools\close_append_only_daily_evidence.ps1
 ```
 
-close wrapper는 Gateway와 해당 Core URL의 theme loop만 중지한 뒤
+close wrapper는 Gateway, 해당 Core URL의 theme loop와 evidence keeper를 먼저 중지한 뒤
 `tools/ops_append_only_daily_evidence.py`를 실행한다. Python closer는 다음 순서로 동작한다.
 
 1. Core `OBSERVE`, LIVE false, expected DB path와 append-only configuration을 확인한다.
@@ -114,6 +118,21 @@ close wrapper는 Gateway와 해당 Core URL의 theme loop만 중지한 뒤
 `reports/append_only_daily_evidence/YYYY-MM-DD/` 아래에 저장한다.
 성공한 마감만 `.session.json` sidecar를 제거한다. sidecar가 남아 있으면 다음 start를 거부하므로
 실패 원인을 조사하고 같은 세션을 마감하기 전 임의 삭제하지 않는다.
+
+복구 불가능한 FAIL 세션은 row를 수정하거나 sidecar를 삭제하지 말고 다음 도구로 보관한다.
+
+```powershell
+python tools/archive_failed_append_only_daily_evidence.py `
+  --db-path $db `
+  --latest-report-path $latest `
+  --summary-report-path $summary `
+  --apply
+```
+
+도구는 FAIL verdict와 trade date/DB 경로 일치를 확인하고 WAL checkpoint, source/archive
+`PRAGMA quick_check`, SHA-256 일치를 기록한 뒤 원본 DB와 sidecar를 같은 volume의 archive로
+원자 이동한다. PASS 세션과 다른 volume archive는 거부한다. canonical 경로가 비워진 뒤에만
+다음 10거래일 측정을 새 DB로 시작한다.
 
 ## 일별 evidence 계약
 

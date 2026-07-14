@@ -1039,6 +1039,51 @@ def test_runtime_recovers_market_index_when_stock_callbacks_are_active(monkeypat
     )
 
 
+def test_runtime_recovers_after_expected_market_index_callbacks_go_stale(
+    monkeypatch,
+) -> None:
+    clock = {"now": datetime(2026, 7, 14, 0, 0, 0, tzinfo=UTC)}
+    monkeypatch.setattr("gateway.kiwoom_runtime.utc_now", lambda: clock["now"])
+
+    client = MockKiwoomClient()
+    runtime = KiwoomGatewayRuntime(
+        client=client,
+        core_client=object(),
+        config=KiwoomGatewayRuntimeConfig(
+            market_index_enabled=True,
+            market_index_realtime_enabled=True,
+            market_index_codes=("KOSPI", "KOSDAQ"),
+            market_index_screen_no="5700",
+            market_index_poll_sec=30.0,
+            realtime_callback_timeout_sec=120.0,
+        ),
+    )
+
+    runtime.on_connected(True, 0, "ok")
+    clock["now"] += timedelta(seconds=10)
+    runtime.on_realtime_data(
+        code="KOSPI",
+        real_type="예상업종지수",
+        real_data_present=False,
+    )
+    clock["now"] += timedelta(seconds=20)
+    runtime.emit_heartbeat()
+    assert client.removed_market_index_codes == []
+
+    clock["now"] += timedelta(seconds=11)
+    runtime.on_realtime_data(
+        code="005930",
+        real_type="주식체결",
+        real_data_present=True,
+    )
+    runtime.emit_heartbeat()
+    payload = runtime.heartbeat_payload()
+
+    assert set(client.removed_market_index_codes) == {"KOSPI", "KOSDAQ"}
+    assert payload["market_index_recover_count"] == 1
+    assert payload["latest_market_index_callback_at"] == "2026-07-14T00:00:10Z"
+
+
 def test_mock_kiwoom_market_index_tick_flows_to_core_projection(tmp_path) -> None:
     connection = initialize_database(tmp_path / "mock_index_flow.sqlite3")
 

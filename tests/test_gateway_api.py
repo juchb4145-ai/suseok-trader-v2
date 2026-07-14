@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 from apps.core_api import app
@@ -127,6 +128,64 @@ def test_gateway_event_batch_retires_completed_market_index_shadow_jobs(
     assert response.json()["failed_count"] == 0
     assert statuses["market_index"] == "APPLIED"
     assert statuses["market_regime"] == "APPLIED"
+
+
+def test_gateway_event_batch_keeps_market_context_at_latest_index_pair(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "api-batch-index-context.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    monkeypatch.setenv("MARKET_INDEX_ENABLED", "true")
+    monkeypatch.setenv("MARKET_REGIME_ENABLED", "true")
+    metadata = {"parser_status": "VERIFIED", "projection_source": "REALTIME"}
+    events = [
+        make_market_index_tick_event(
+            source="test-gateway",
+            index_code=index_code,
+            price=price,
+            metadata=metadata,
+        )
+        for index_code, price in (
+            ("KOSPI", 2800.0),
+            ("KOSDAQ", 850.0),
+            ("KOSPI", 2801.0),
+            ("KOSDAQ", 851.0),
+        )
+    ]
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": [event.to_dict() for event in events]},
+            headers={"X-Local-Token": "test-token"},
+        )
+
+    connection = open_connection(db_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT snapshot.market, snapshot.source_watermark_json
+            FROM market_context_latest AS latest
+            JOIN market_context_snapshots AS snapshot
+              ON snapshot.snapshot_id = latest.snapshot_id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    expected_event_ids = {
+        "KOSPI": events[2].event_id,
+        "KOSDAQ": events[3].event_id,
+    }
+    assert response.status_code == 200
+    assert response.json()["failed_count"] == 0
+    assert len(rows) == 2
+    for row in rows:
+        watermark = json.loads(row["source_watermark_json"])
+        assert {
+            index_code: item["event_id"] for index_code, item in watermark.items()
+        } == expected_event_ids
 
 
 def test_gateway_event_batch_api_isolates_permanent_rejection(tmp_path, monkeypatch) -> None:
@@ -417,6 +476,7 @@ def test_gateway_status_exposes_market_index_adapter_separate_from_projection_er
         "market_index_callback_count": 1,
         "parsed_market_index_tick_count": 0,
         "market_index_parse_error_count": 1,
+        "latest_market_index_callback_at": TS,
         "latest_market_index_tick_at": "",
         "latest_market_index_parse_error": {
             "reason": "INDEX_PARSE_ERROR",
@@ -450,6 +510,7 @@ def test_gateway_status_exposes_market_index_adapter_separate_from_projection_er
     assert projection_response.status_code == 200
     assert projection_response.json()["projection_statuses"]["market_index"] == "ERROR"
     assert gateway_status.json()["market_index_parse_error_count"] == 1
+    assert gateway_status.json()["latest_market_index_callback_at"] == TS
     assert gateway_status.json()["latest_market_index_parse_error"]["reason"] == (
         "INDEX_PARSE_ERROR"
     )

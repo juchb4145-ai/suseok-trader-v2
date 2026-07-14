@@ -52,6 +52,89 @@ def test_market_index_reconcile_passes_verified_realtime_pair(tmp_path) -> None:
     assert latest["latest_run"]["observed_index_codes"] == ["KOSDAQ", "KOSPI"]
 
 
+def test_market_index_reconcile_allows_pending_sample_within_sla(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-index-pending.sqlite3")
+    settings = _settings()
+    for index, code in enumerate(("KOSPI", "KOSDAQ")):
+        event = _event(
+            f"evt_index_settled_{code.lower()}",
+            code,
+            2800.0 if code == "KOSPI" else 900.0,
+            ts=TS + timedelta(seconds=index),
+        )
+        _append_inline_and_shadow(connection, event, settings)
+    pending = _event(
+        "evt_index_pending_within_sla",
+        "KOSDAQ",
+        901.0,
+        ts=TS + timedelta(seconds=2),
+    )
+    assert append_gateway_event(connection, pending).status == "ACCEPTED"
+    enqueue_projection_jobs_for_gateway_event(connection, pending)
+
+    result = run_market_index_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=10,
+        persist=False,
+    )
+    connection.close()
+
+    assert result.status == "PASS"
+    assert result.checked_event_count == 3
+    assert result.sample_count == 2
+    assert result.missing_sample_count == 0
+    assert result.outbox_pending_count == 1
+    assert result.data_usability_ready is True
+    assert result.parser_confidence_ready is True
+    assert result.append_only_ready is True
+    assert "MARKET_INDEX_OUTBOX_PENDING_WITHIN_SLA" in result.reason_codes
+
+
+def test_market_index_reconcile_rejects_stale_pending_sample(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "market-index-stale-pending.sqlite3")
+    settings = _settings()
+    for index, code in enumerate(("KOSPI", "KOSDAQ")):
+        event = _event(
+            f"evt_index_stale_base_{code.lower()}",
+            code,
+            2800.0 if code == "KOSPI" else 900.0,
+            ts=TS + timedelta(seconds=index),
+        )
+        _append_inline_and_shadow(connection, event, settings)
+    pending = _event(
+        "evt_index_stale_pending",
+        "KOSDAQ",
+        901.0,
+        ts=TS + timedelta(seconds=2),
+    )
+    assert append_gateway_event(connection, pending).status == "ACCEPTED"
+    enqueue_projection_jobs_for_gateway_event(connection, pending)
+    connection.execute(
+        """
+        UPDATE projection_outbox
+        SET created_at = '2000-01-01T00:00:00Z'
+        WHERE projection_name = 'market_index' AND event_id = ?
+        """,
+        (pending.event_id,),
+    )
+    connection.commit()
+
+    result = run_market_index_projection_reconcile(
+        connection,
+        settings=settings,
+        limit=10,
+        persist=False,
+    )
+    connection.close()
+
+    assert result.status == "FAIL"
+    assert result.missing_sample_count == 1
+    assert result.append_only_ready is False
+    assert "MARKET_INDEX_OUTBOX_STALE" in result.reason_codes
+    assert "MARKET_INDEX_SAMPLE_MISSING" in result.reason_codes
+
+
 def test_market_index_reconcile_separates_usable_data_from_parser_confidence(
     tmp_path,
 ) -> None:

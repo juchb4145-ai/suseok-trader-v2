@@ -126,6 +126,10 @@ def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -
     assert "Historical or future evidence start is forbidden" in start_script
     assert "Persistent 10-day evidence DB cannot be stored under TEMP" in start_script
     assert "append-only-10day.sqlite3" in start_script
+    assert 'Join-Path $Root "venv_64\\Scripts\\python.exe"' in start_script
+    assert "Get-Command python -ErrorAction Stop" in start_script
+    assert "[ValidateRange(30, 240)]" in start_script
+    assert "[int]$KeeperIntervalSec = 45" in start_script
     assert 'MarketDataOperatingMode = "MARKET_DATA_FULL_GUARDED"' in start_script
     assert 'ThemeRefreshTradingSession = "KRX"' in start_script
     assert 'ThemeRefreshQueueRealtimeCommands = "false"' in start_script
@@ -133,6 +137,12 @@ def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -
     assert "$CoreParameters.RunCore = $true" in start_script
     assert "$GatewayParameters.RunGateway = $true" in start_script
     assert "$ThemeParameters.RunThemeRefreshLoop = $true" in start_script
+    assert "ops_append_only_evidence_keeper.py" in start_script
+    assert '"--interval-sec", [string]$KeeperIntervalSec' in start_script
+    assert '"--reconcile-limit", [string]$KeeperReconcileLimit' in start_script
+    assert '"--stop-file", $KeeperStopPath' in start_script
+    assert "-WindowStyle Hidden" in start_script
+    assert '$SessionState["keeper_pid"]' in start_script
     assert "GatewayStabilizeSec" in start_script
     assert "GatewayStartAttempts" in start_script
     assert "Gateway did not stabilize; retrying after 5 seconds" in start_script
@@ -144,6 +154,9 @@ def test_append_only_daily_evidence_wrappers_require_persistent_safe_runtime() -
 
     assert "apps\\.kiwoom_gateway" in close_script
     assert "start_theme_refresh_loop\\.ps1" in close_script
+    assert "ops_append_only_evidence_keeper\\.py" in close_script
+    assert "KeeperStopWaitSec" in close_script
+    assert "did not stop gracefully" in close_script
     assert "ops_append_only_daily_evidence.py" in close_script
     assert '"--session-state-path", $SessionStatePath' in close_script
     assert "Daily evidence close failed. Core remains running" in close_script
@@ -231,7 +244,9 @@ def test_stop_core_gateway_script_targets_core_gateway_and_theme_refresh_loop() 
     assert "apps\\.mock_gateway" in script
     assert "apps\\.kiwoom_gateway" in script
     assert "ThemeRefreshOnly" in script
+    assert "EvidenceKeeperOnly" in script
     assert "start_theme_refresh_loop\\.ps1" in script
+    assert "ops_append_only_evidence_keeper\\.py" in script
     assert "theme_refresh_loop" in script
     assert "parentprocessid" in lowered
     assert 'conhost.exe' in lowered

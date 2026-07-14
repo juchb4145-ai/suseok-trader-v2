@@ -443,6 +443,7 @@ def _process_gateway_event(
                             elif should_rebuild_market_context_snapshots(
                                 connection,
                                 settings=settings,
+                                min_interval_sec=0.0,
                             ):
                                 market_context = rebuild_market_context_snapshots(
                                     connection,
@@ -1160,6 +1161,9 @@ def get_gateway_status() -> dict[str, Any]:
         ),
         "market_index_parse_error_count": _json_value(
             status_values.get("market_index_parse_error_count")
+        ),
+        "latest_market_index_callback_at": status_values.get(
+            "latest_market_index_callback_at"
         ),
         "latest_market_index_tick_at": status_values.get("latest_market_index_tick_at"),
         "latest_market_index_parse_error": _json_value(

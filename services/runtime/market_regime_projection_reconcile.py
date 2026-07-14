@@ -7,13 +7,19 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from domain.broker.utils import datetime_to_wire, new_message_id, utc_now
+from domain.broker.utils import (
+    datetime_to_wire,
+    new_message_id,
+    parse_timestamp,
+    utc_now,
+)
 from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, load_settings
 from services.market_context_service import get_market_context_status
 
 PROJECTION_NAME_MARKET_REGIME = "market_regime"
+PROJECTION_NAME_MARKET_INDEX = "market_index"
 MARKET_INDEX_EVENT_TYPE = "market_index_tick"
 REQUIRED_INDEX_CODES: tuple[str, ...] = ("KOSPI", "KOSDAQ")
 _STATUS_KEYS = {
@@ -121,13 +127,12 @@ def run_market_regime_projection_reconcile(
     run_id = new_message_id("market_regime_projection_reconcile")
     created_at = datetime_to_wire(utc_now())
     events = _select_events(connection, limit=bounded_limit)
-    latest_event = events[-1] if events else None
-    latest_by_code = _latest_events_by_code(events)
     outbox_rollout_rowid = _outbox_rollout_rowid(connection)
     issues: list[MarketRegimeProjectionReconcileIssue] = []
     outbox_counts: Counter[str] = Counter()
     outbox_job_count = 0
     event_linked_regime_count = 0
+    settled_events: list[Mapping[str, Any]] = []
 
     if not events:
         _add_issue(
@@ -141,16 +146,56 @@ def run_market_regime_projection_reconcile(
     for event in events:
         event_id = str(event["event_id"])
         index_code = _event_index_code(event)
-        if not _market_index_sample_exists(connection, event_id):
-            _add_issue(
-                issues,
-                run_id=run_id,
-                severity="ERROR",
-                reason_code="MARKET_REGIME_INDEX_DEPENDENCY_MISSING",
-                message="market index sample is missing for regime source event",
+        if _market_index_sample_exists(connection, event_id):
+            settled_events.append(event)
+        else:
+            dependency_outbox = _projection_outbox_job(
+                connection,
+                projection_name=PROJECTION_NAME_MARKET_INDEX,
                 event_id=event_id,
-                index_code=index_code,
             )
+            dependency_age_sec = _outbox_age_seconds(dependency_outbox)
+            if _outbox_pending_within_sla(
+                dependency_outbox,
+                max_age_sec=(
+                    resolved_settings.gateway_market_index_append_only_reconcile_max_age_sec
+                ),
+            ):
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="INFO",
+                    reason_code=(
+                        "MARKET_REGIME_INDEX_DEPENDENCY_PENDING_WITHIN_SLA"
+                    ),
+                    message=(
+                        "market index dependency is still in flight within its SLA"
+                    ),
+                    event_id=event_id,
+                    index_code=index_code,
+                    evidence={
+                        "status": dependency_outbox.get("status"),
+                        "age_sec": dependency_age_sec,
+                    },
+                )
+            else:
+                _add_issue(
+                    issues,
+                    run_id=run_id,
+                    severity="ERROR",
+                    reason_code="MARKET_REGIME_INDEX_DEPENDENCY_MISSING",
+                    message="market index sample is missing for regime source event",
+                    event_id=event_id,
+                    index_code=index_code,
+                    evidence={
+                        "dependency_outbox_status": (
+                            None
+                            if dependency_outbox is None
+                            else dependency_outbox.get("status")
+                        ),
+                        "dependency_outbox_age_sec": dependency_age_sec,
+                    },
+                )
         if _event_linked_regime_exists(connection, event_id):
             event_linked_regime_count += 1
         outbox = _outbox_job(connection, event_id)
@@ -193,6 +238,8 @@ def run_market_regime_projection_reconcile(
                 index_code=index_code,
             )
 
+    latest_event = settled_events[-1] if settled_events else None
+    latest_by_code = _latest_events_by_code(settled_events)
     missing_codes = [
         code for code in REQUIRED_INDEX_CODES if code not in latest_by_code
     ]
@@ -400,15 +447,60 @@ def _structural_context_ready(status: Mapping[str, Any]) -> bool:
 
 
 def _outbox_job(connection: sqlite3.Connection, event_id: str) -> dict[str, Any] | None:
+    return _projection_outbox_job(
+        connection,
+        projection_name=PROJECTION_NAME_MARKET_REGIME,
+        event_id=event_id,
+    )
+
+
+def _projection_outbox_job(
+    connection: sqlite3.Connection,
+    *,
+    projection_name: str,
+    event_id: str,
+) -> dict[str, Any] | None:
     row = connection.execute(
         """
         SELECT * FROM projection_outbox
         WHERE projection_name = ? AND event_id = ?
         LIMIT 1
         """,
-        (PROJECTION_NAME_MARKET_REGIME, event_id),
+        (projection_name, event_id),
     ).fetchone()
     return None if row is None else _row_to_dict(row)
+
+
+def _outbox_pending_within_sla(
+    outbox: Mapping[str, Any] | None,
+    *,
+    max_age_sec: int,
+) -> bool:
+    if outbox is None:
+        return False
+    status = str(outbox.get("status") or "").upper()
+    if status not in {"PENDING", "PROCESSING"}:
+        return False
+    age = _outbox_age_seconds(outbox)
+    return age is not None and age <= max(int(max_age_sec), 0)
+
+
+def _outbox_age_seconds(outbox: Mapping[str, Any] | None) -> float | None:
+    if outbox is None:
+        return None
+    status = str(outbox.get("status") or "").upper()
+    timestamp = (
+        outbox.get("created_at")
+        if status == "PENDING"
+        else outbox.get("updated_at")
+    )
+    if timestamp in (None, ""):
+        return None
+    try:
+        parsed = parse_timestamp(timestamp, "projection_outbox_timestamp")
+    except ValueError:
+        return None
+    return max((utc_now() - parsed).total_seconds(), 0.0)
 
 
 def _outbox_rollout_rowid(connection: sqlite3.Connection) -> int | None:
