@@ -19,6 +19,13 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
         uniqueness_status = client.get(
             "/api/operator/live-sim/order-plan-uniqueness/status"
         )
+        lifecycle_unauthorized = client.get(
+            "/api/operator/live-sim/execution-lifecycle/status?limit=10&offset=0"
+        )
+        lifecycle_status = client.get(
+            "/api/operator/live-sim/execution-lifecycle/status?limit=10&offset=0",
+            headers={"X-Local-Token": "secret-token"},
+        )
         boundary_status = client.get(
             "/api/operator/gateway/order-broker-boundaries/status",
             headers={"X-Local-Token": "secret-token"},
@@ -58,6 +65,11 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
     assert status.json()["runtime_execution_locks"]["status"] == "PASS"
     assert status.json()["live_sim_order_plan_uniqueness"]["status"] == "PASS"
     assert status.json()["order_broker_boundaries"]["status"] == "PASS"
+    assert "recent_events" not in status.json()["live_sim"]["execution_lifecycle"]
+    assert status.json()["live_sim"]["execution_lifecycle"]["summary_only"] is True
+    assert status.json()["live_sim"]["execution_lifecycle"][
+        "raw_payload_exposed"
+    ] is False
     assert lock_status.status_code == 200
     assert lock_status.json()["lock_count"] == 0
     assert lock_status.json()["read_only"] is True
@@ -67,6 +79,15 @@ def test_operator_api_read_only_and_rebuild_snapshot_only(tmp_path, monkeypatch)
         "DIRECT_ORDER_PLAN_ID_INDEX_LOOKUP"
     )
     assert uniqueness_status.json()["duplicate_group_count"] == 0
+    assert lifecycle_unauthorized.status_code == 401
+    assert "secret-token" not in lifecycle_unauthorized.text
+    assert lifecycle_status.status_code == 200
+    assert lifecycle_status.json()["qualification_status"] == "PASS"
+    assert lifecycle_status.json()["read_only"] is True
+    assert lifecycle_status.json()["no_order_side_effects"] is True
+    assert lifecycle_status.json()["raw_payload_exposed"] is False
+    assert lifecycle_status.json()["account_identifier_exposed"] is False
+    assert lifecycle_status.json()["token_exposed"] is False
     assert boundary_status.status_code == 200
     assert boundary_status.json()["status"] == "PASS"
     assert boundary_list.status_code == 200

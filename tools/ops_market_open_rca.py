@@ -31,6 +31,30 @@ STAGES = (
     "OrderSafety",
 )
 STATUS_RANK = {"UNKNOWN": 0, "PASS": 1, "WARN": 2, "BLOCK": 3}
+_LIVE_SIM_LIFECYCLE_CLASSIFICATIONS = frozenset(
+    {
+        "ACTIVE_LIFECYCLE_BLOCKER",
+        "HISTORICAL_RUNTIME_STATUS_AUDIT",
+        "MANUAL_REVIEW_BLOCKER",
+    }
+)
+_LIVE_SIM_LIFECYCLE_PUBLIC_ITEM_KEYS = frozenset(
+    {
+        "subject_id",
+        "subject_fingerprint",
+        "classification",
+        "reason_codes",
+        "mirror_status",
+        "error_surface_count",
+        "lifecycle_surface_count",
+        "created_at",
+        "code",
+        "inner_event_type",
+        "payload_sha256",
+        "event_metadata_consistent",
+        "identifier_free",
+    }
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -136,6 +160,11 @@ ENDPOINTS: tuple[DiagnosticEndpoint, ...] = (
         key="live_sim_reconcile_latest",
         stage="LiveSim",
         path="/api/live-sim/reconcile/latest",
+    ),
+    DiagnosticEndpoint(
+        key="live_sim_execution_lifecycle_status",
+        stage="LiveSim",
+        path="/api/operator/live-sim/execution-lifecycle/status?limit=500&offset=0",
     ),
 )
 
@@ -379,12 +408,17 @@ def render_markdown_summary(summary: Mapping[str, Any]) -> str:
 
 def _render_error_detail_lines(summary: Mapping[str, Any]) -> list[str]:
     rows: list[tuple[str, str, str, str, str]] = []
-    for stage in summary.get("stages", []):
+    stage_values = summary.get("stages")
+    if not isinstance(stage_values, Sequence) or isinstance(stage_values, (str, bytes)):
+        return []
+    for stage in stage_values:
         if not isinstance(stage, Mapping):
             continue
         stage_name = str(stage.get("stage") or "")
-        checks = stage.get("checks") if isinstance(stage.get("checks"), list) else []
-        for check in checks:
+        check_values = stage.get("checks")
+        if not isinstance(check_values, list):
+            continue
+        for check in check_values:
             if not isinstance(check, Mapping):
                 continue
             details = check.get("details")
@@ -1092,26 +1126,63 @@ def _classify_live_sim(
     stages: dict[str, dict[str, Any]],
     endpoint_results: Mapping[str, Mapping[str, Any]],
 ) -> None:
-    if _endpoint_unavailable(endpoint_results, "live_sim_status"):
-        return
+    live_sim_status_unavailable = _endpoint_unavailable(
+        endpoint_results,
+        "live_sim_status",
+    )
     status = _payload(endpoint_results, "live_sim_status")
     operator_status = _payload(endpoint_results, "live_sim_operator_status")
     rejections = _list_from_payload(_payload(endpoint_results, "live_sim_rejections"), "rejections")
-    errors = _list_from_payload(_payload(endpoint_results, "live_sim_errors"), "errors")
     reasons: list[str] = []
     if status.get("enabled") is False:
         reasons.append("LIVE_SIM_DISABLED_EXPECTED")
     if status.get("kill_switch") is True:
         reasons.append("LIVE_SIM_KILL_SWITCH_ON_EXPECTED")
-    if errors:
+    lifecycle_result = endpoint_results.get("live_sim_execution_lifecycle_status")
+    lifecycle = _payload(endpoint_results, "live_sim_execution_lifecycle_status")
+    lifecycle_contract_failures = _live_sim_lifecycle_contract_failures(
+        lifecycle_result,
+        lifecycle,
+    )
+    if lifecycle_contract_failures:
         _mark(
             stages,
             "LiveSim",
             "BLOCK",
-            reasons,
-            f"LIVE_SIM errors exist: {len(errors)}",
-            {"errors": errors[:5]},
+            [*reasons, *lifecycle_contract_failures],
+            "LIVE_SIM execution lifecycle qualification is missing or malformed.",
+            {
+                "qualification_status": lifecycle.get("qualification_status"),
+                "contract_failures": lifecycle_contract_failures,
+            },
         )
+    elif str(lifecycle.get("qualification_status")).upper() != "PASS":
+        qualification_reasons = lifecycle.get("qualification_reason_codes")
+        if not isinstance(qualification_reasons, list):
+            qualification_reasons = []
+        _mark(
+            stages,
+            "LiveSim",
+            "BLOCK",
+            [
+                *reasons,
+                "LIVE_SIM_EXECUTION_LIFECYCLE_BLOCKED",
+                *(str(reason) for reason in qualification_reasons),
+            ],
+            (
+                "LIVE_SIM execution lifecycle qualification is blocked: "
+                f"active={lifecycle.get('active_lifecycle_blocker_count')}, "
+                f"manual={lifecycle.get('manual_review_blocker_count')}, "
+                f"effective={lifecycle.get('effective_blocker_count')}"
+            ),
+            {
+                "qualification_status": lifecycle.get("qualification_status"),
+                "qualification_reason_codes": qualification_reasons,
+                "classification_counts": lifecycle.get("classification_counts"),
+            },
+        )
+    elif live_sim_status_unavailable:
+        return
     elif rejections:
         _mark(
             stages,
@@ -1127,8 +1198,32 @@ def _classify_live_sim(
             "LiveSim",
             "PASS",
             reasons,
-            "LIVE_SIM read-only status collected; command queue remains disabled.",
-            {"status": status, "operator_status": operator_status},
+            (
+                "LIVE_SIM execution lifecycle qualification passed; "
+                f"active={lifecycle.get('active_lifecycle_blocker_count')}, "
+                f"historical={lifecycle.get('historical_runtime_status_audit_count')}, "
+                f"manual={lifecycle.get('manual_review_blocker_count')}; "
+                "command queue remains disabled."
+            ),
+            {
+                "status": status,
+                "operator_status": operator_status,
+                "lifecycle_qualification": {
+                    "qualification_status": lifecycle.get("qualification_status"),
+                    "canonical_status": lifecycle.get("canonical_status"),
+                    "classification_counts": lifecycle.get("classification_counts"),
+                    "active_lifecycle_blocker_count": lifecycle.get(
+                        "active_lifecycle_blocker_count"
+                    ),
+                    "historical_runtime_status_audit_count": lifecycle.get(
+                        "historical_runtime_status_audit_count"
+                    ),
+                    "manual_review_blocker_count": lifecycle.get(
+                        "manual_review_blocker_count"
+                    ),
+                    "effective_blocker_count": lifecycle.get("effective_blocker_count"),
+                },
+            },
         )
     blocking_reasons = operator_status.get("blocking_reasons") or []
     if blocking_reasons:
@@ -1140,6 +1235,257 @@ def _classify_live_sim(
             "LIVE_SIM operator status has blocking reasons for order modes.",
             {"blocking_reasons": blocking_reasons},
         )
+
+
+def _live_sim_lifecycle_contract_failures(
+    result: Mapping[str, Any] | None,
+    payload: Mapping[str, Any],
+) -> list[str]:
+    failures: list[str] = []
+    if not result:
+        return ["LIVE_SIM_EXECUTION_LIFECYCLE_ENDPOINT_MISSING"]
+    if result.get("ok") is not True:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_ENDPOINT_UNAVAILABLE")
+    qualification_status = payload.get("qualification_status")
+    if not isinstance(qualification_status, str) or qualification_status not in {
+        "PASS",
+        "BLOCKED",
+    }:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    status_alias = payload.get("status")
+    canonical_status = payload.get("canonical_status")
+    canonical_reason_codes = payload.get("canonical_reason_codes")
+    if (
+        not isinstance(status_alias, str)
+        or not isinstance(qualification_status, str)
+        or status_alias not in {"PASS", "BLOCKED"}
+        or status_alias != qualification_status
+        or not isinstance(canonical_status, str)
+        or canonical_status not in {"PASS", "BLOCKED"}
+        or not isinstance(canonical_reason_codes, list)
+        or not all(isinstance(reason, str) for reason in canonical_reason_codes)
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    qualification_reasons = payload.get("qualification_reason_codes")
+    if not isinstance(qualification_reasons, list) or not all(
+        isinstance(reason, str) for reason in qualification_reasons
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    classification_counts = payload.get("classification_counts")
+    if (
+        not isinstance(classification_counts, Mapping)
+        or frozenset(classification_counts) != _LIVE_SIM_LIFECYCLE_CLASSIFICATIONS
+        or not all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in classification_counts.values()
+        )
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    for key in (
+        "raw_error_count",
+        "mirror_lifecycle_count",
+        "logical_subject_count",
+        "active_lifecycle_blocker_count",
+        "historical_runtime_status_audit_count",
+        "manual_review_blocker_count",
+        "active_reconcile_blocker_count",
+        "historical_reconcile_event_count",
+        "reconcile_manual_review_count",
+        "effective_blocker_count",
+        "full_count",
+    ):
+        value = payload.get(key)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if (
+        payload.get("inventory_count_consistent") is not True
+        or payload.get("read_only") is not True
+        or payload.get("observe_only") is not True
+        or payload.get("no_order_side_effects") is not True
+        or payload.get("real_order_allowed") is not False
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    items = payload.get("items")
+    limit = payload.get("limit")
+    offset = payload.get("offset")
+    returned_count = payload.get("returned_count")
+    has_more = payload.get("has_more")
+    next_offset = payload.get("next_offset")
+    pagination = payload.get("pagination")
+    if (
+        payload.get("code_filter") is not None
+        or payload.get("code_filter_diagnostic_only") is not True
+        or not isinstance(items, list)
+        or not all(_valid_live_sim_lifecycle_public_item(item) for item in items)
+        or not isinstance(limit, int)
+        or isinstance(limit, bool)
+        or limit != 500
+        or offset != 0
+        or not isinstance(returned_count, int)
+        or isinstance(returned_count, bool)
+        or returned_count < 0
+        or returned_count != len(items)
+        or not isinstance(has_more, bool)
+        or not isinstance(pagination, Mapping)
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    pagination_full_count = payload.get("full_count")
+    if (
+        isinstance(returned_count, int)
+        and not isinstance(returned_count, bool)
+        and isinstance(limit, int)
+        and not isinstance(limit, bool)
+        and isinstance(pagination_full_count, int)
+        and not isinstance(pagination_full_count, bool)
+        and isinstance(pagination, Mapping)
+    ):
+        expected_returned_count = min(limit, pagination_full_count)
+        expected_has_more = returned_count < pagination_full_count
+        expected_next_offset = returned_count if expected_has_more else None
+        if (
+            pagination_full_count < 0
+            or returned_count != expected_returned_count
+            or has_more != expected_has_more
+            or next_offset != expected_next_offset
+        ):
+            failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+        if any(
+            pagination.get(key) != payload.get(key)
+            for key in (
+                "limit",
+                "offset",
+                "returned_count",
+                "full_count",
+                "has_more",
+                "next_offset",
+            )
+        ):
+            failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    digests = [
+        payload.get("inventory_digest"),
+        payload.get("scanned_inventory_digest"),
+        payload.get("ending_inventory_digest"),
+    ]
+    if not all(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+        for value in digests
+    ) or len(set(digests)) != 1:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    effective_count = payload.get("effective_blocker_count")
+    active_count = payload.get("active_lifecycle_blocker_count")
+    historical_count = payload.get("historical_runtime_status_audit_count")
+    manual_count = payload.get("manual_review_blocker_count")
+    active_reconcile_count = payload.get("active_reconcile_blocker_count")
+    historical_reconcile_count = payload.get("historical_reconcile_event_count")
+    reconcile_manual_count = payload.get("reconcile_manual_review_count")
+    logical_count = payload.get("logical_subject_count")
+    full_count = payload.get("full_count")
+    if (
+        isinstance(effective_count, int)
+        and not isinstance(effective_count, bool)
+        and isinstance(active_count, int)
+        and not isinstance(active_count, bool)
+        and isinstance(historical_count, int)
+        and not isinstance(historical_count, bool)
+        and isinstance(manual_count, int)
+        and not isinstance(manual_count, bool)
+        and isinstance(active_reconcile_count, int)
+        and not isinstance(active_reconcile_count, bool)
+        and isinstance(historical_reconcile_count, int)
+        and not isinstance(historical_reconcile_count, bool)
+        and isinstance(reconcile_manual_count, int)
+        and not isinstance(reconcile_manual_count, bool)
+        and (
+            effective_count != active_count + manual_count
+            or active_reconcile_count > active_count
+            or historical_reconcile_count > historical_count
+            or reconcile_manual_count > manual_count
+        )
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if full_count != logical_count:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if (
+        isinstance(classification_counts, Mapping)
+        and frozenset(classification_counts) == _LIVE_SIM_LIFECYCLE_CLASSIFICATIONS
+        and all(
+            isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            for value in classification_counts.values()
+        )
+    ):
+        classification_aliases = {
+            "ACTIVE_LIFECYCLE_BLOCKER": active_count,
+            "HISTORICAL_RUNTIME_STATUS_AUDIT": historical_count,
+            "MANUAL_REVIEW_BLOCKER": manual_count,
+        }
+        if (
+            any(
+                classification_counts.get(classification) != alias_count
+                for classification, alias_count in classification_aliases.items()
+            )
+            or sum(int(value) for value in classification_counts.values())
+            != logical_count
+        ):
+            failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if qualification_status == "PASS" and effective_count != 0:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if not isinstance(payload.get("mirror_consistent"), bool) or (
+        qualification_status == "PASS" and payload.get("mirror_consistent") is not True
+    ):
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    if qualification_status == "BLOCKED" and effective_count == 0:
+        failures.append("LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED")
+    return _dedupe(failures)
+
+
+def _valid_live_sim_lifecycle_public_item(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if frozenset(value) != _LIVE_SIM_LIFECYCLE_PUBLIC_ITEM_KEYS:
+        return False
+    if not _is_live_sim_lifecycle_digest(value.get("subject_id")) or not (
+        _is_live_sim_lifecycle_digest(value.get("subject_fingerprint"))
+        and _is_live_sim_lifecycle_digest(value.get("payload_sha256"))
+    ):
+        return False
+    classification = value.get("classification")
+    if classification not in _LIVE_SIM_LIFECYCLE_CLASSIFICATIONS:
+        return False
+    reason_codes = value.get("reason_codes")
+    if not isinstance(reason_codes, list) or not all(
+        isinstance(reason, str) for reason in reason_codes
+    ):
+        return False
+    for key in ("error_surface_count", "lifecycle_surface_count"):
+        count = value.get(key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            return False
+    for key in ("mirror_status", "created_at", "code", "inner_event_type"):
+        if value.get(key) is not None and not isinstance(value.get(key), str):
+            return False
+    metadata_consistent = value.get("event_metadata_consistent")
+    identifier_free = value.get("identifier_free")
+    if not isinstance(metadata_consistent, bool) or not isinstance(
+        identifier_free, bool
+    ):
+        return False
+    is_historical_runtime_mirror = bool(
+        classification == "HISTORICAL_RUNTIME_STATUS_AUDIT"
+        and value.get("mirror_status") == "EXACT_1_TO_1"
+    )
+    return not is_historical_runtime_mirror or (
+        metadata_consistent is True and identifier_free is True
+    )
+
+
+def _is_live_sim_lifecycle_digest(value: Any) -> bool:
+    return bool(
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
 
 
 def _classify_order_safety(
@@ -1260,6 +1606,8 @@ def _latest_event_payload(events: Sequence[Mapping[str, Any]], event_type: str) 
 
 def _optional_int(value: object) -> int | None:
     if value is None or value == "":
+        return None
+    if not isinstance(value, (str, bytes, bytearray, int, float)):
         return None
     try:
         return int(value)

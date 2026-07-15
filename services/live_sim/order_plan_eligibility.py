@@ -333,7 +333,7 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_EXIT_EXISTS.value)
     if _active_cancel_count_for_code(connection, code) > 0:
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_CANCEL_EXISTS.value)
-    if _unresolved_lifecycle_error_count(connection, code=code) > 0:
+    if _unresolved_lifecycle_error_count(connection) > 0:
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_LIFECYCLE_ERROR_BLOCK.value)
     if _daily_order_count(connection, str(order_plan["trade_date"])) >= (
         resolved_settings.live_sim_max_daily_order_count

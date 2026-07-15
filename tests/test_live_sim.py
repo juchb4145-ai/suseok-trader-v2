@@ -1351,8 +1351,17 @@ def _insert_reconcile_mismatch(connection) -> None:
         (
             json.dumps(
                 {
+                    "broker_snapshot": {},
+                    "open_orders": [],
+                    "positions": [],
                     "mismatches": [{"reason": "command_terminal_mismatch"}],
+                    "broker_snapshot_available": False,
+                    "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
                     "blocking_new_buy": True,
+                    "allow_exit": True,
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                    "broker_order_path": "LIVE_SIM_ONLY",
                 },
                 sort_keys=True,
             ),
@@ -1387,7 +1396,12 @@ def _insert_reconcile_mismatch(connection) -> None:
         )
         """,
         (
-            json.dumps({"mismatches": [{"reason": "command_terminal_mismatch"}]}),
+            json.dumps(
+                {
+                    "mismatches": [{"reason": "command_terminal_mismatch"}],
+                    "blocking_new_buy": True,
+                }
+            ),
             now,
         ),
     )

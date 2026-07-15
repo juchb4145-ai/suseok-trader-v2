@@ -128,12 +128,34 @@ def test_preflight_warn_block_cases_are_classified(tmp_path) -> None:
     assert eod_warn.status is not PreflightStatus.BLOCK
 
 
-def test_preflight_ignores_unknown_gateway_status_lifecycle_errors(tmp_path) -> None:
+def test_preflight_passes_mirrored_historical_gateway_status_audit(tmp_path) -> None:
     connection, _ = _prepared_order_plan_connection(
         tmp_path / "preflight-unknown-status-event.sqlite3"
     )
     settings = _operating_settings()
     now = datetime_to_wire(utc_now())
+    runtime_status_event = {
+        "event_id": "historical-heartbeat-event",
+        "event_type": "heartbeat",
+        "source": "kiwoom_gateway",
+        "ts": now,
+        "payload": {
+            "mode": "LIVE_SIM",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+        },
+    }
+    connection.execute(
+        """
+        INSERT INTO live_sim_errors (
+            error_message,
+            payload_json,
+            created_at
+        )
+        VALUES ('UNKNOWN_LIVE_SIM_GATEWAY_EVENT', ?, ?)
+        """,
+        (json.dumps(runtime_status_event), now),
+    )
     connection.execute(
         """
         INSERT INTO live_sim_lifecycle_events (
@@ -162,10 +184,9 @@ def test_preflight_ignores_unknown_gateway_status_lifecycle_errors(tmp_path) -> 
         (
             json.dumps(
                 {
-                    "payload": {
-                        "event_type": "heartbeat",
-                        "payload": {"mode": "LIVE_SIM"},
-                    }
+                    "run_id": None,
+                    "code": None,
+                    "payload": runtime_status_event,
                 }
             ),
             now,
@@ -225,6 +246,79 @@ def test_preflight_ignores_unknown_gateway_status_lifecycle_errors(tmp_path) -> 
     assert _check_status(preflight, "lifecycle_error_count") == "PASS"
     assert _check_status(blocked, "lifecycle_error_count") == "BLOCK"
     assert any("lifecycle_error_count" in reason for reason in blocked.blocking_reasons)
+
+
+def test_preflight_blocks_orphan_historical_gateway_status_lifecycle_row(tmp_path) -> None:
+    connection, _ = _prepared_order_plan_connection(
+        tmp_path / "preflight-orphan-status-event.sqlite3"
+    )
+    settings = _operating_settings()
+    now = datetime_to_wire(utc_now())
+    runtime_status_event = {
+        "event_id": "orphan-heartbeat-event",
+        "event_type": "heartbeat",
+        "source": "kiwoom_gateway",
+        "ts": now,
+        "payload": {
+            "mode": "LIVE_SIM",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+        },
+    }
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_events (
+            lifecycle_event_id,
+            event_type,
+            entity_type,
+            status,
+            reason,
+            evidence_json,
+            created_at,
+            live_sim_only,
+            live_real_allowed
+        )
+        VALUES (
+            'orphan-heartbeat-error',
+            'LIFECYCLE_ERROR',
+            'LIVE_SIM_ERROR',
+            'ERROR',
+            'UNKNOWN_LIVE_SIM_GATEWAY_EVENT',
+            ?,
+            ?,
+            1,
+            0
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "run_id": None,
+                    "code": None,
+                    "payload": runtime_status_event,
+                }
+            ),
+            now,
+        ),
+    )
+
+    result = run_live_sim_preflight(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+    )
+    check = _check(result, "lifecycle_error_count")
+    connection.close()
+
+    assert check.status is PreflightStatus.BLOCK
+    assert check.details["effective_blocker_count"] >= 1
+    assert check.details["manual_review_blocker_count"] >= 1
+    assert "LIVE_SIM_LIFECYCLE_MIRROR_INCONSISTENT" in check.details[
+        "qualification_reason_codes"
+    ]
 
 
 def test_preflight_safety_preview_does_not_block_on_exhausted_buy_limit(
@@ -920,6 +1014,7 @@ def _operating_settings(**overrides) -> Settings:
 
 def _insert_reconcile_block(connection) -> None:
     now = datetime_to_wire(utc_now())
+    mismatches = [{"reason": "operating_test_reconcile_mismatch"}]
     connection.execute(
         """
         INSERT INTO live_sim_reconcile_snapshots (
@@ -936,7 +1031,63 @@ def _insert_reconcile_block(connection) -> None:
         VALUES ('operating-reconcile-block', 'SIM-12345678', '2026-06-27', 1,
             'RECONCILE_MISMATCH', ?, ?, 1, 1)
         """,
-        (json.dumps({"blocking_new_buy": True}), now),
+        (
+            json.dumps(
+                {
+                    "broker_snapshot": {},
+                    "open_orders": [],
+                    "positions": [],
+                    "mismatches": mismatches,
+                    "broker_snapshot_available": False,
+                    "broker_snapshot_status": "BROKER_SNAPSHOT_UNAVAILABLE",
+                    "blocking_new_buy": True,
+                    "allow_exit": True,
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                    "broker_order_path": "LIVE_SIM_ONLY",
+                },
+                sort_keys=True,
+            ),
+            now,
+        ),
+    )
+    connection.execute(
+        """
+        INSERT INTO live_sim_lifecycle_events (
+            lifecycle_event_id,
+            event_type,
+            entity_type,
+            entity_id,
+            status,
+            reason,
+            evidence_json,
+            created_at,
+            live_sim_only,
+            live_real_allowed
+        )
+        VALUES (
+            'operating-reconcile-block-event',
+            'RECONCILE_MISMATCH',
+            'RECONCILE',
+            'operating-reconcile-block',
+            'RECONCILE_MISMATCH',
+            'RECONCILE_MISMATCH',
+            ?,
+            ?,
+            1,
+            0
+        )
+        """,
+        (
+            json.dumps(
+                {
+                    "mismatches": mismatches,
+                    "blocking_new_buy": True,
+                },
+                sort_keys=True,
+            ),
+            now,
+        ),
     )
     connection.commit()
 

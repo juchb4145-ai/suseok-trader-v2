@@ -15,7 +15,7 @@ from services.ai_advisory.storage import build_status as build_ai_advisory_statu
 from services.config import Settings, TradingMode, load_settings
 from services.entry_timing.service import get_entry_timing_status
 from services.live_sim.live_sim_service import (
-    _unresolved_lifecycle_error_count,
+    _execution_lifecycle_blocker_status,
     get_latest_live_sim_reconcile,
     get_live_sim_status,
 )
@@ -585,19 +585,31 @@ def _add_count_checks(
         {"active_exit_count": counts.get("active_exit_count", 0)},
     )
     lifecycle_error_count = int(counts.get("lifecycle_error_count") or 0)
+    lifecycle_status = dict(counts.get("execution_lifecycle") or {})
+    classifier_fail_closed = bool(lifecycle_status.get("classifier_fail_closed"))
+    if classifier_fail_closed:
+        lifecycle_check_status = PreflightStatus.BLOCK
+        lifecycle_message = (
+            "Execution lifecycle classification failed; preflight is blocked fail-closed."
+        )
+    elif lifecycle_error_count and mode.includes_buy:
+        lifecycle_check_status = PreflightStatus.BLOCK
+        lifecycle_message = "Effective lifecycle blockers block BUY mode."
+    elif lifecycle_error_count:
+        lifecycle_check_status = PreflightStatus.WARN
+        lifecycle_message = "Effective lifecycle blockers exist."
+    else:
+        lifecycle_check_status = PreflightStatus.PASS
+        lifecycle_message = "No effective lifecycle blockers were found."
     add(
         "lifecycle_error_count",
-        PreflightStatus.BLOCK
-        if lifecycle_error_count and mode.includes_buy
-        else PreflightStatus.WARN
-        if lifecycle_error_count
-        else PreflightStatus.PASS,
-        "Unresolved lifecycle errors block BUY mode."
-        if lifecycle_error_count and mode.includes_buy
-        else "Lifecycle errors exist."
-        if lifecycle_error_count
-        else "No unresolved lifecycle errors were found.",
-        {"lifecycle_error_count": lifecycle_error_count},
+        lifecycle_check_status,
+        lifecycle_message,
+        {
+            "lifecycle_error_count": lifecycle_error_count,
+            "effective_blocker_count": lifecycle_error_count,
+            **lifecycle_status,
+        },
     )
 
 
@@ -856,20 +868,145 @@ def _counts_from_live_sim_status(
     connection: sqlite3.Connection,
     live_sim_status: Mapping[str, Any],
 ) -> dict[str, Any]:
+    lifecycle_status = _safe_execution_lifecycle_blocker_status(connection)
     return {
         "open_order_count": int(live_sim_status.get("open_order_count") or 0),
         "open_position_count": int(live_sim_status.get("open_position_count") or 0),
         "active_cancel_count": int(live_sim_status.get("cancel_pending_count") or 0),
         "active_exit_count": int(live_sim_status.get("active_exit_signal_count") or 0),
-        "lifecycle_error_count": _lifecycle_error_count(connection),
+        # Compatibility alias: this now means the global effective blocker count,
+        # not the historical raw lifecycle event count.
+        "lifecycle_error_count": int(lifecycle_status["effective_blocker_count"]),
+        "execution_lifecycle": lifecycle_status,
     }
 
 
-def _lifecycle_error_count(connection: sqlite3.Connection) -> int:
+def _safe_execution_lifecycle_blocker_status(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
     try:
-        return _unresolved_lifecycle_error_count(connection)
-    except sqlite3.Error:
-        return 0
+        status = _execution_lifecycle_blocker_status(connection)
+        if not isinstance(status, Mapping):
+            raise TypeError("classifier status must be a mapping")
+        qualification_reason_codes = _classifier_reason_codes(
+            status.get("qualification_reason_codes")
+        )
+        canonical_reason_codes = _classifier_reason_codes(
+            status.get("canonical_reason_codes")
+        )
+        classification_counts = status.get("classification_counts") or {}
+        if not isinstance(classification_counts, Mapping):
+            raise TypeError("classification counts must be a mapping")
+        normalized_status = {
+            "status": str(status.get("status") or "UNKNOWN"),
+            "qualification_status": str(
+                status.get("qualification_status") or "UNKNOWN"
+            ),
+            "qualification_reason_codes": qualification_reason_codes,
+            "canonical_status": str(status.get("canonical_status") or "UNKNOWN"),
+            "canonical_reason_codes": canonical_reason_codes,
+            "classification_counts": _classifier_classification_counts(
+                classification_counts
+            ),
+            "raw_error_count": _classifier_count(status.get("raw_error_count", 0)),
+            "mirror_lifecycle_count": _classifier_count(
+                status.get("mirror_lifecycle_count", 0)
+            ),
+            "logical_subject_count": _classifier_count(
+                status.get("logical_subject_count", 0)
+            ),
+            "active_lifecycle_blocker_count": _classifier_count(
+                status.get("active_lifecycle_blocker_count", 0)
+            ),
+            "historical_runtime_status_audit_count": _classifier_count(
+                status.get("historical_runtime_status_audit_count", 0)
+            ),
+            "manual_review_blocker_count": _classifier_count(
+                status.get("manual_review_blocker_count", 0)
+            ),
+            "effective_blocker_count": _classifier_count(
+                status.get("effective_blocker_count")
+            ),
+            "classifier_fail_closed": False,
+            "classifier_failure_reason_code": None,
+            "classifier_error_type": None,
+        }
+    except sqlite3.Error as exc:
+        return _failed_execution_lifecycle_status(
+            reason_code="EXECUTION_LIFECYCLE_CLASSIFIER_SQLITE_ERROR",
+            error_type=type(exc).__name__,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        return _failed_execution_lifecycle_status(
+            reason_code="EXECUTION_LIFECYCLE_CLASSIFIER_INVALID_RESULT",
+            error_type=type(exc).__name__,
+        )
+    except Exception as exc:
+        return _failed_execution_lifecycle_status(
+            reason_code="EXECUTION_LIFECYCLE_CLASSIFIER_ERROR",
+            error_type=type(exc).__name__,
+        )
+
+    return normalized_status
+
+
+def _classifier_count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("classifier count must be an integer")
+    if value < 0:
+        raise ValueError("classifier count cannot be negative")
+    return value
+
+
+def _classifier_classification_counts(value: Mapping[object, object]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for key, count in value.items():
+        if not isinstance(key, str):
+            raise TypeError("classifier classification keys must be strings")
+        counts[key] = _classifier_count(count)
+    return counts
+
+
+def _classifier_reason_codes(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise TypeError("classifier reason codes must be a sequence")
+    reason_codes: list[str] = []
+    for reason in value:
+        if not isinstance(reason, str):
+            raise TypeError("classifier reason codes must contain only strings")
+        reason_codes.append(reason)
+    return reason_codes
+
+
+def _failed_execution_lifecycle_status(
+    *,
+    reason_code: str,
+    error_type: str,
+) -> dict[str, Any]:
+    return {
+        "status": "BLOCKED",
+        "qualification_status": "BLOCKED",
+        "qualification_reason_codes": [reason_code],
+        "canonical_status": "MANUAL_REVIEW_BLOCKER",
+        "canonical_reason_codes": [reason_code],
+        "classification_counts": {
+            "ACTIVE_LIFECYCLE_BLOCKER": 0,
+            "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+            "MANUAL_REVIEW_BLOCKER": 1,
+        },
+        "raw_error_count": 0,
+        "mirror_lifecycle_count": 0,
+        "logical_subject_count": 1,
+        "active_lifecycle_blocker_count": 0,
+        "historical_runtime_status_audit_count": 0,
+        "manual_review_blocker_count": 1,
+        "effective_blocker_count": 1,
+        "classifier_fail_closed": True,
+        "classifier_failure_reason_code": reason_code,
+        "classifier_error_type": error_type,
+    }
 
 
 def _overall_status(checks: Sequence[PreflightCheck]) -> PreflightStatus:
