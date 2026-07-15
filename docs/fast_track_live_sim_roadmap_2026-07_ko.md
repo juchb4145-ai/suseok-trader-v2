@@ -97,7 +97,7 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 
 | 단계 | 상태 | 의존성 | 핵심 산출물 |
 | --- | --- | --- | --- |
-| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1/R2 병합, R3/R4/R5 필요 | 검증 report, 운영 baseline |
+| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1~R4 병합, R5 offline evidence 완료, blocker 6개 | 검증 report, 운영 baseline |
 | FAST-1 Pure Preview | `BLOCKED_BY_FAST_0` | FAST-0 PASS | 무기록 preview API |
 | Operational Gate C1 | `BLOCKED_BY_FAST_1` | Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `BLOCKED_BY_FAST_0` | FAST-0 PASS | virtual-clock replay |
@@ -184,7 +184,8 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - runtime active lock 이상 0
 - unresolved order-plan uniqueness conflict 0
 - unresolved broker-boundary gap/UNCONFIRMED 0
-- pipeline coherency `FAIL=0`
+- pipeline coherency qualification `PASS`이고 active/pending blocker `0`; canonical historical
+  `FAIL`은 삭제하지 않고 warning/audit로 보존 가능
 - projection `ERROR=0`, `DEAD_LETTER=0`
 - lifecycle active/manual/effective blocker `0`; canonical historical audit는 R4 classifier로
   검증되고 raw/mirror logical-subject count가 일치
@@ -197,12 +198,12 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - append-only evidence `1/10` 등 기간 미충족
 - 기능 오류가 아닌 현재 장외 freshness
 
-### 2026-07-16 현재 복원 상태
+### 2026-07-15 현재 복원 상태
 
 이 절은 최초 작성 당시의 schema 59 예시보다 우선하는 현재 실행 기록이다.
 
-- PR #10(FAST-0), #11(FAST-0R1), #12(FAST-0R2), #13(FAST-0R3)은 `main`에
-  병합됐다.
+- PR #10(FAST-0), #11(FAST-0R1), #12(FAST-0R2), #13(FAST-0R3), #14(FAST-0R4)는
+  `main`에 병합됐다.
 - 운영 DB schema `61→62` migration은 clone preflight, backup, apply 후 무결성 검증을
   거쳐 완료됐다. preflight evidence는
   `reports/database_migration_preflight/20260715T143959Z/raw.json`, apply evidence는
@@ -213,16 +214,23 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
   effective `UNCONFIRMED=0`이다. raw count를 삭제하거나 성공으로 오인하지 않는다.
 - incremental dead-letter raw `38`은 보존돼 있고 disposition ledger가 비어 있어 effective
   blocker도 `38`이다. 별도 승인 전에는 apply하지 않는다.
-- canonical pipeline `FAIL=159`는 그대로 유지한다. FAST-0R3는 historical closed `149`,
-  manual `10`, active/current `0`을 별도 RCA view에서 분류하되 canonical 결과를 낮추지 않는다.
+- canonical pipeline `FAIL=159`는 그대로 유지한다. FAST-0R3 당시 snapshot은 historical
+  closed `149`, manual `10`, active/current `0`을 별도 RCA view에서 분류했으며 canonical
+  결과를 낮추지 않았다. 현재 판정은 아래 R5 snapshot의 `149/9/1` 분류가 대체한다.
 - FAST-0R4 운영 재검증에서 lifecycle raw/mirrored/matched pair는 `346/346/346`,
   historical reconcile은 `265`, 전체 logical subject는 `611`이었다. active lifecycle,
   active reconcile, manual review, effective blocker는 모두 `0`이고 qualification은 `PASS`다.
   canonical은 과거 감사 이력을 보존해 `BLOCKED`이며 raw audit row를 UPDATE/DELETE하지 않는다.
-- FAST-0은 broker boundary raw `UNCONFIRMED=3`, R5 strict requalification 미완료,
-  최종 OBSERVE smoke 미완료 때문에 `BLOCKED`다. append-only resolution의 effective
-  count가 `0`이어도 raw `UNCONFIRMED`를 FAST-0 PASS로 오인하지 않으며 FAST-1을 시작하지
-  않는다.
+- FAST-0은 broker boundary raw `UNCONFIRMED=3`, incremental effective dead-letter `38`,
+  pipeline qualification blocker, authoritative runtime coverage 부재와 최종 OBSERVE smoke
+  미완료 때문에 `BLOCKED`다. append-only
+  resolution의 effective count가 `0`이어도 raw `UNCONFIRMED`를 FAST-0 PASS로 오인하지
+  않으며 FAST-1을 시작하지 않는다.
+- FAST-0R5 strict offline requalification은 2026-07-15 완료됐다. evidence는
+  `reports/fast_track/fast_0_strict_requalification/20260715T211029.344659Z/`이며
+  `evidence_status=PASS`, `fast0_status=BLOCKED`, exit `2`다. pinned DB identity, DB 전후
+  fingerprint와 sidecar 부재, quick check, schema manifest `50/50`, migration evidence
+  chain이 모두 PASS다.
 
 ### FAST-0R4 lifecycle qualification 계약
 
@@ -240,6 +248,60 @@ qualification을 제공한다.
 - report에는 raw 행, raw payload, error message, 계좌 식별자, token을 기록하지 않는다.
 
 세부 절차는 `docs/runbook_live_sim_execution_lifecycle_qualification_ko.md`를 따른다.
+
+### FAST-0R5 strict offline requalification 계약 및 실행 상태
+
+FAST-0R5는 schema-62 운영 DB와 승인된 migration apply report/runtime log를 입력으로
+사용하는 strict read-only 최종 재점검이다. Core/Gateway/worker를 시작하거나 운영 DB를
+변경하지 않는다.
+
+- runbook: `docs/runbook_fast0_strict_requalification_ko.md`
+- strict tool: `python -B -m tools.ops_fast0_strict_requalification`
+- DB는 writer 종료와 checkpoint를 먼저 확인하고 `mode=ro&immutable=1`,
+  `query_only=ON`으로만 연다. 하나의 pinned read handle/file identity를 hash·SQLite
+  snapshot·최종 hash 전체에 유지한다.
+- `quick_check(1)`, schema/app identity, pinned identity/path stability, sidecar 부재와 전후
+  main file fingerprint를 필수로 검증한다.
+- schema `61→62` migration을 다시 실행하지 않고 승인된 apply `raw.json`과 그 report가
+  참조하는 preflight `raw.json`을 read-only evidence로 검증한다. apply report에는 승인
+  기록에서 독립적으로 고정한 SHA-256을 `--migration-apply-report-sha256`로 전달한다.
+- runtime log가 여러 개면 `--runtime-log <path>`를 반복하며, raw line 대신
+  `EVALUATION_RUN_FENCE_LOST`, `OWNER_ALIVE_AFTER_TTL` marker count만 기록한다. 파일은 최대
+  32개/합계 1 GiB이고 이 bounded historical scan은 authoritative runtime window나 현재
+  owner liveness를 증명하지 않는다.
+- projection outbox와 watermark unresolved error를 별도 aggregate로 검증한다.
+- order-plan partial UNIQUE index는 column/predicate까지 확인하고, normalized
+  `modify_order`를 gateway command/dedupe key/broker boundary 세 표면에서 각각 `0` 계약으로
+  둔다.
+- pipeline age 60초, incremental retry 3/backlog 100·1000/stale 30·300초, projection stale
+  PROCESSING 120초와 최소 disk 1 GiB는 fixed policy이며 CLI로 완화하지 않는다.
+- report는 aggregate count/boolean/digest만 포함하며 raw row, raw payload, error message,
+  token 또는 원 계좌번호를 기록하지 않는다.
+
+R5는 `evidence_status`와 `fast0_status`를 분리한다. evidence 수집과 파일 불변 검증이
+`PASS`여도 checker는 runtime log coverage를 non-authoritative로 기록하고 최종 OBSERVE
+smoke를 실행하지 않으므로 단독 FAST-0 결과는 `BLOCKED`, process exit code는 `2`다.
+기준 완화나 DB write로 exit code를 없애지 않는다.
+
+2026-07-15 실행 결과는 다음과 같다.
+
+- R5 evidence/FAST-0/process exit: **`PASS` / `BLOCKED` / `2`**
+- broker raw/effective UNCONFIRMED: `3/0`
+- incremental raw/effective dead-letter: `38/38`; queue/retry-exhausted/stale-fail `0/0/0`
+- pipeline canonical/qualification: `FAIL/BLOCKED`; historical closed `149`, missing-candidate
+  manual review `9`, active-current `1`, disposition pending `158`
+- lifecycle canonical/qualification/strict: `BLOCKED/PASS/PASS`; effective blocker `0`
+- projection readiness/latest reconcile: `WARN/PASS`; pending `717`, processing/error/
+  dead-letter/event-result-error `0/0/0/0`, invalid effective skip `0`
+- order-plan exact partial UNIQUE PASS; `modify_order` 세 표면 `0`; runtime lock `0`, fence `1`
+- DB identity pin은 snapshot 전체 유지/path stable PASS이고 raw file ID는 기록하지 않음
+- DB와 6개 bounded log의 두 runtime marker count 모두 `0`; coverage는 non-authoritative
+- 최종 OBSERVE smoke: 별도 승인 단계 미실행
+
+qualification blocker는 `BROKER_BOUNDARY_SEMANTIC_BLOCKER`,
+`BROKER_RAW_UNCONFIRMED_PRESENT`, `INCREMENTAL_EFFECTIVE_DEAD_LETTER_PRESENT`,
+`PIPELINE_QUALIFICATION_NOT_PASS`, `RUNTIME_LOG_COVERAGE_NOT_AUTHORITATIVE`,
+`FINAL_OBSERVE_SMOKE_NOT_RUN`의 6개다.
 
 ### 중단 조건
 
@@ -667,7 +729,7 @@ PR: FAST-4: Add Kiwoom simulation broker snapshot reconciliation
 - FAST-3 치명적 fill disagreement 없음
 - FAST-4 broker reconcile PASS
 - unresolved broker boundary/UNCONFIRMED 0
-- pipeline coherency PASS
+- pipeline coherency qualification PASS
 
 ### 초기 운영 한도
 
@@ -691,7 +753,7 @@ kill switch 유지
 - broker snapshot mismatch/stale
 - UNCONFIRMED
 - lifecycle dead-letter/gap
-- pipeline coherency FAIL
+- pipeline coherency qualification non-PASS
 - duplicate intent/command
 - daily loss limit
 - Gateway heartbeat/orderable/simulation mode failure
@@ -724,7 +786,7 @@ kill switch 유지
 
 ### Gate S1 — Operational Baseline
 
-- 해당 단계의 코드가 요구하는 current target schema exact 일치 (현재 FAST-0R3: schema 62)
+- 해당 단계의 코드가 요구하는 current target schema exact 일치 (현재 FAST-0R5: schema 62)
 - OBSERVE smoke PASS
 - 주문 delta 0
 - coherency/boundary/dead-letter blocker 0
@@ -814,7 +876,7 @@ PR: FAST-0: Qualify post-audit main and operating database
 - LIVE_REAL 허용 또는 real server ambiguity
 - unresolved `UNCONFIRMED`
 - broker-boundary/pre-ack gap
-- pipeline coherency `FAIL`
+- pipeline coherency qualification non-PASS 또는 active/pending blocker
 - projection/lifecycle `ERROR` 또는 `DEAD_LETTER`
 - 동일 order plan의 중복 intent/command
 - 운영 DB 무단 mutation
