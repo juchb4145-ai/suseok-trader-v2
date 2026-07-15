@@ -34,3 +34,6 @@ logs/
 
 .DS_Store
 Thumbs.db
+
+# Codex local attachments
+.codex-remote-attachments/
