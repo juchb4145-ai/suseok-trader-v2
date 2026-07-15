@@ -208,7 +208,7 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
   `reports/database_migration_preflight/20260715T143959Z/raw.json`, apply evidence는
   `reports/database_migration_apply/20260715T151225.565090Z/raw.json`이다.
 - 현재 운영 DB schema는 `62`다. FAST-0R4 strict read-only evidence는
-  `reports/live_sim_execution_lifecycle_check/20260715T171541Z/raw.json`이다.
+  `reports/live_sim_execution_lifecycle_check/20260715T174834Z/raw.json`이다.
 - broker boundary raw `UNCONFIRMED=3`은 보존되고 검증된 append-only resolution 기준
   effective `UNCONFIRMED=0`이다. raw count를 삭제하거나 성공으로 오인하지 않는다.
 - incremental dead-letter raw `38`은 보존돼 있고 disposition ledger가 비어 있어 effective

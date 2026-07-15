@@ -753,9 +753,26 @@ def _classify_reconcile(
         for item in evaluations
         if str(item.get("reconcile_id") or "")
     }
-    latest = evaluations[0] if evaluations else None
+    valid_snapshot_times = [
+        item["created_at_parsed"]
+        for item in evaluations
+        if item.get("created_at_parsed") is not None
+    ]
+    latest_time = max(valid_snapshot_times) if valid_snapshot_times else None
+    latest_candidates = (
+        [
+            item
+            for item in evaluations
+            if item.get("created_at_parsed") == latest_time
+        ]
+        if latest_time is not None
+        else evaluations[:1]
+    )
+    latest = latest_candidates[0] if latest_candidates else None
     latest_kind = None if latest is None else str(latest["kind"])
-    latest_time = None if latest is None else latest.get("created_at_parsed")
+    latest_semantic_conflict = len(
+        {str(item.get("kind")) for item in latest_candidates}
+    ) > 1
     subjects: list[dict[str, Any]] = []
     latest_active_subject_present = False
     events_by_snapshot: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
@@ -792,6 +809,9 @@ def _classify_reconcile(
         elif not _reconcile_event_matches_snapshot(evidence, linked):
             classification = "MANUAL_REVIEW_BLOCKER"
             reasons.append("LIVE_SIM_RECONCILE_EVENT_SNAPSHOT_EVIDENCE_MISMATCH")
+        elif latest_semantic_conflict:
+            classification = "MANUAL_REVIEW_BLOCKER"
+            reasons.append("LIVE_SIM_RECONCILE_LATEST_TIMESTAMP_CONFLICT")
         elif latest_kind == "INVALID" or latest_time is None:
             classification = "MANUAL_REVIEW_BLOCKER"
             reasons.append("LIVE_SIM_RECONCILE_LATEST_SNAPSHOT_INVALID")
@@ -881,7 +901,12 @@ def _classify_reconcile(
                 payload_sha256=str(evaluation.get("snapshot_sha256") or ""),
             )
         )
-    if latest_kind == "ACTIVE" and latest is not None and not latest_active_subject_present:
+    if (
+        latest_kind == "ACTIVE"
+        and latest is not None
+        and not latest_semantic_conflict
+        and not latest_active_subject_present
+    ):
         fingerprint = _sha(
             {
                 "kind": "reconcile_current_active_snapshot",
@@ -910,6 +935,8 @@ def _classify_reconcile(
     )
     if latest is None:
         public_status = "LATEST_SNAPSHOT_MISSING" if events else "NO_RECONCILE_EVIDENCE"
+    elif latest_semantic_conflict:
+        public_status = "LATEST_SNAPSHOT_CONFLICT"
     elif latest_kind == "CLEAN":
         public_status = "LATEST_SNAPSHOT_CLEAN"
     elif latest_kind == "ACTIVE":
@@ -924,7 +951,9 @@ def _classify_reconcile(
         "public": {
             "status": public_status,
             "latest_snapshot_present": latest is not None,
-            "latest_snapshot_clean": latest_kind == "CLEAN",
+            "latest_snapshot_clean": (
+                not latest_semantic_conflict and latest_kind == "CLEAN"
+            ),
             "mismatch_count": None if latest is None else latest.get("mismatch_count"),
             "blocking_new_buy": (
                 None if latest is None else latest.get("blocking_new_buy")

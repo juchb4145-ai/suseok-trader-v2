@@ -1369,6 +1369,100 @@ def test_reconcile_event_newer_than_latest_clean_snapshot_is_active(
     connection.close()
 
 
+@pytest.mark.parametrize(
+    ("active_suffix", "clean_suffix", "active_at", "clean_at"),
+    [
+        (
+            "a-active",
+            "z-clean",
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T00:00:00Z",
+        ),
+        (
+            "z-active",
+            "a-clean",
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T00:00:00Z",
+        ),
+        (
+            "a-active-offset",
+            "z-clean-offset",
+            "2026-07-15T00:00:00Z",
+            "2026-07-15T09:00:00+09:00",
+        ),
+    ],
+)
+def test_reconcile_latest_timestamp_semantic_tie_is_manual(
+    tmp_path: Path,
+    active_suffix: str,
+    clean_suffix: str,
+    active_at: str,
+    clean_at: str,
+) -> None:
+    connection = _connection(tmp_path / f"reconcile-tie-{active_suffix}.sqlite3")
+    _insert_reconcile_snapshot(
+        connection,
+        suffix=active_suffix,
+        created_at=active_at,
+        mismatch_count=1,
+        blocking_new_buy=1,
+        status="RECONCILE_MISMATCH",
+    )
+    _insert_reconcile_event(
+        connection,
+        suffix=active_suffix,
+        created_at=active_at,
+        entity_id=f"reconcile-{active_suffix}",
+    )
+    _insert_reconcile_snapshot(
+        connection,
+        suffix=clean_suffix,
+        created_at=clean_at,
+    )
+    connection.commit()
+
+    report = build_live_sim_execution_lifecycle_status(connection)
+
+    assert report["qualification_status"] == "BLOCKED"
+    assert report["effective_blocker_count"] == 1
+    assert report["active_reconcile_blocker_count"] == 0
+    assert report["historical_reconcile_event_count"] == 0
+    assert report["reconcile_manual_review_count"] == 1
+    assert report["reconcile"]["status"] == "LATEST_SNAPSHOT_CONFLICT"
+    assert report["reconcile"]["latest_snapshot_clean"] is False
+    assert "LIVE_SIM_RECONCILE_LATEST_TIMESTAMP_CONFLICT" in report["items"][0][
+        "reason_codes"
+    ]
+    connection.close()
+
+
+def test_reconcile_latest_clean_and_invalid_timestamp_tie_is_manual(
+    tmp_path: Path,
+) -> None:
+    connection = _connection(tmp_path / "reconcile-clean-invalid-tie.sqlite3")
+    created_at = "2026-07-15T00:00:00Z"
+    _insert_reconcile_snapshot(
+        connection,
+        suffix="clean",
+        created_at=created_at,
+    )
+    _insert_reconcile_snapshot(
+        connection,
+        suffix="invalid",
+        created_at=created_at,
+        snapshot_json="{not-json",
+    )
+    connection.commit()
+
+    report = build_live_sim_execution_lifecycle_status(connection)
+
+    assert report["qualification_status"] == "BLOCKED"
+    assert report["reconcile_manual_review_count"] == 1
+    assert report["reconcile"]["status"] == "LATEST_SNAPSHOT_CONFLICT"
+    assert report["reconcile"]["latest_snapshot_clean"] is False
+    connection.close()
+
+
 def test_full_pagination_and_global_digests_cover_more_than_500_pairs(
     tmp_path: Path,
 ) -> None:

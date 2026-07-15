@@ -524,74 +524,93 @@ def queue_live_sim_order_command(
         idempotency_key=intent_row["idempotency_key"],
     )
     buy_boundary = intent_row["side"] == LiveSimSide.BUY.value
+    caller_transaction = connection.in_transaction
     boundary_lock_owned = False
     if buy_boundary:
         boundary_lock_owned = _acquire_buy_queue_boundary_write_lock(connection)
+    enqueue_savepoint = "live_sim_order_command_enqueue"
+    enqueue_savepoint_active = False
     try:
         if buy_boundary:
             _enforce_buy_execution_lifecycle_queue_boundary(connection, intent_row)
+        connection.execute(f"SAVEPOINT {enqueue_savepoint}")
+        enqueue_savepoint_active = True
         enqueue_result = enqueue_command(
             connection,
             command,
             expires_at=intent_row.get("expires_at"),
+            manage_transaction=False,
         )
+        if not enqueue_result.accepted:
+            _rollback_and_release_savepoint(connection, enqueue_savepoint)
+            enqueue_savepoint_active = False
+            _save_rejection(
+                connection,
+                candidate_instance_id=intent_row["candidate_instance_id"],
+                strategy_observation_id=intent_row["strategy_observation_id"],
+                risk_observation_id=intent_row["risk_observation_id"],
+                trade_date=intent_row["trade_date"],
+                account_id=intent_row["account_id"],
+                code=intent_row["code"],
+                reason_codes=[LiveSimReasonCode.COMMAND_QUEUE_REJECTED.value],
+                evidence={
+                    "intent": intent_row,
+                    "enqueue_error": enqueue_result.error_message,
+                    "payload_hash": enqueue_result.payload_hash,
+                },
+            )
+            if not caller_transaction:
+                connection.commit()
+            raise ValueError(
+                enqueue_result.error_message
+                or LiveSimReasonCode.COMMAND_QUEUE_REJECTED.value
+            )
+
+        now = datetime_to_wire(utc_now())
+        order = LiveSimOrderRecord(
+            live_sim_order_id=new_message_id("live_sim_order"),
+            live_sim_intent_id=live_sim_intent_id,
+            gateway_command_id=command.command_id,
+            account_id=intent_row["account_id"],
+            code=intent_row["code"],
+            name=intent_row["name"],
+            side=intent_row["side"],
+            order_type=intent_row["order_type"],
+            quantity=int(intent_row["quantity"]),
+            limit_price=intent_row["limit_price"],
+            notional=float(intent_row["notional"]),
+            status=LiveSimOrderStatus.COMMAND_QUEUED,
+            filled_quantity=0,
+            remaining_quantity=int(intent_row["quantity"]),
+            idempotency_key=intent_row["idempotency_key"],
+            created_at=now,
+            command_queued_at=now,
+        )
+        _insert_order(connection, order, trade_date=str(intent_row["trade_date"]))
+        connection.execute(
+            """
+            UPDATE live_sim_intents
+            SET status = ?,
+                gateway_command_id = ?
+            WHERE live_sim_intent_id = ?
+            """,
+            (
+                LiveSimIntentStatus.COMMAND_QUEUED.value,
+                command.command_id,
+                live_sim_intent_id,
+            ),
+        )
+        connection.execute(f"RELEASE SAVEPOINT {enqueue_savepoint}")
+        enqueue_savepoint_active = False
+        if not caller_transaction:
+            connection.commit()
+        return order
     except BaseException:
+        if enqueue_savepoint_active:
+            _rollback_and_release_savepoint(connection, enqueue_savepoint)
         if boundary_lock_owned and connection.in_transaction:
             connection.rollback()
         raise
-    if not enqueue_result.accepted:
-        _save_rejection(
-            connection,
-            candidate_instance_id=intent_row["candidate_instance_id"],
-            strategy_observation_id=intent_row["strategy_observation_id"],
-            risk_observation_id=intent_row["risk_observation_id"],
-            trade_date=intent_row["trade_date"],
-            account_id=intent_row["account_id"],
-            code=intent_row["code"],
-            reason_codes=[LiveSimReasonCode.COMMAND_QUEUE_REJECTED.value],
-            evidence={
-                "intent": intent_row,
-                "enqueue_error": enqueue_result.error_message,
-                "payload_hash": enqueue_result.payload_hash,
-            },
-        )
-        connection.commit()
-        raise ValueError(
-            enqueue_result.error_message or LiveSimReasonCode.COMMAND_QUEUE_REJECTED.value
-        )
-
-    now = datetime_to_wire(utc_now())
-    order = LiveSimOrderRecord(
-        live_sim_order_id=new_message_id("live_sim_order"),
-        live_sim_intent_id=live_sim_intent_id,
-        gateway_command_id=command.command_id,
-        account_id=intent_row["account_id"],
-        code=intent_row["code"],
-        name=intent_row["name"],
-        side=intent_row["side"],
-        order_type=intent_row["order_type"],
-        quantity=int(intent_row["quantity"]),
-        limit_price=intent_row["limit_price"],
-        notional=float(intent_row["notional"]),
-        status=LiveSimOrderStatus.COMMAND_QUEUED,
-        filled_quantity=0,
-        remaining_quantity=int(intent_row["quantity"]),
-        idempotency_key=intent_row["idempotency_key"],
-        created_at=now,
-        command_queued_at=now,
-    )
-    _insert_order(connection, order, trade_date=str(intent_row["trade_date"]))
-    connection.execute(
-        """
-        UPDATE live_sim_intents
-        SET status = ?,
-            gateway_command_id = ?
-        WHERE live_sim_intent_id = ?
-        """,
-        (LiveSimIntentStatus.COMMAND_QUEUED.value, command.command_id, live_sim_intent_id),
-    )
-    connection.commit()
-    return order
 
 
 def handle_live_sim_gateway_event(
@@ -4542,12 +4561,21 @@ def _execution_lifecycle_blocker_status(
     return status
 
 
+def _rollback_and_release_savepoint(
+    connection: sqlite3.Connection,
+    savepoint: str,
+) -> None:
+    connection.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+    connection.execute(f"RELEASE SAVEPOINT {savepoint}")
+
+
 def _acquire_buy_queue_boundary_write_lock(connection: sqlite3.Connection) -> bool:
     """Serialize the final lifecycle check with the gateway command insert.
 
-    ``enqueue_command`` commits its insert, so an IMMEDIATE transaction here keeps
-    other SQLite writers out from the classifier read through that existing commit
-    boundary. A caller-owned transaction is upgraded with a zero-row write.
+    The LIVE_SIM queue path runs ``enqueue_command`` without internal transaction
+    management, so an IMMEDIATE transaction here keeps other SQLite writers out
+    from the classifier read through the final queue commit. A caller-owned
+    transaction is upgraded with a zero-row write and retains commit ownership.
     """
 
     if connection.in_transaction:

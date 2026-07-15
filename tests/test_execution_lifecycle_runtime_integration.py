@@ -381,6 +381,9 @@ def test_buy_lifecycle_check_holds_write_lock_until_command_enqueue(
     command_count = connection.execute(
         "SELECT COUNT(*) AS count FROM gateway_commands"
     ).fetchone()["count"]
+    assert connection.in_transaction is caller_transaction
+    if caller_transaction:
+        connection.commit()
     connection.close()
 
     assert competing_writer_blocked is True
@@ -433,6 +436,109 @@ def test_owned_buy_boundary_lock_rolls_back_when_enqueue_raises(
         (intent.live_sim_intent_id,),
     ).fetchone()["status"] == LiveSimIntentStatus.CREATED.value
     connection.close()
+
+
+def test_caller_transaction_partial_enqueue_error_rolls_back_only_queue_writes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "caller-transaction-partial-enqueue.sqlite3"
+    connection, candidate_id = _prepared_connection(path)
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+    monkeypatch.setattr(
+        live_sim_service,
+        "build_live_sim_execution_lifecycle_status",
+        lambda _connection, **_kwargs: _classifier_status(effective_blocker_count=0),
+    )
+
+    def insert_gateway_command_then_raise(
+        enqueue_connection: sqlite3.Connection,
+        command,
+        **kwargs,
+    ) -> None:
+        assert kwargs["manage_transaction"] is False
+        enqueue_connection.execute(
+            """
+            INSERT INTO gateway_commands (
+                command_id,
+                command_type,
+                source,
+                status,
+                idempotency_key,
+                payload_json,
+                payload_hash
+            )
+            VALUES (?, ?, ?, 'QUEUED', ?, '{}', 'synthetic-payload-hash')
+            """,
+            (
+                command.command_id,
+                command.command_type,
+                command.source,
+                command.idempotency_key,
+            ),
+        )
+        raise sqlite3.OperationalError("synthetic post-command-insert failure")
+
+    monkeypatch.setattr(
+        live_sim_service,
+        "enqueue_command",
+        insert_gateway_command_then_raise,
+    )
+    connection.execute("BEGIN DEFERRED")
+    connection.execute(
+        "INSERT INTO gateway_status (key, value) VALUES ('caller_tx_marker', 'kept')"
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="post-command-insert"):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    assert connection.in_transaction is True
+    assert connection.execute(
+        "SELECT COUNT(*) AS count FROM gateway_status WHERE key = 'caller_tx_marker'"
+    ).fetchone()["count"] == 1
+    assert connection.execute(
+        "SELECT COUNT(*) AS count FROM gateway_commands WHERE command_type = 'send_order'"
+    ).fetchone()["count"] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) AS count FROM gateway_command_dedupe_keys"
+    ).fetchone()["count"] == 0
+    assert connection.execute(
+        "SELECT COUNT(*) AS count FROM live_sim_orders"
+    ).fetchone()["count"] == 0
+    assert connection.execute(
+        """
+        SELECT status
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()["status"] == LiveSimIntentStatus.CREATED.value
+
+    connection.commit()
+    connection.close()
+    verification = sqlite3.connect(path)
+    try:
+        assert verification.execute(
+            "SELECT COUNT(*) FROM gateway_status WHERE key = 'caller_tx_marker'"
+        ).fetchone()[0] == 1
+        assert verification.execute(
+            "SELECT COUNT(*) FROM gateway_commands WHERE command_type = 'send_order'"
+        ).fetchone()[0] == 0
+        assert verification.execute(
+            "SELECT COUNT(*) FROM gateway_command_dedupe_keys"
+        ).fetchone()[0] == 0
+        assert verification.execute(
+            "SELECT COUNT(*) FROM live_sim_orders"
+        ).fetchone()[0] == 0
+    finally:
+        verification.close()
 
 
 def test_sell_command_queue_skips_new_buy_lifecycle_blocker(

@@ -79,6 +79,7 @@ def enqueue_command(
     command: GatewayCommand,
     *,
     expires_at: datetime | str | None = None,
+    manage_transaction: bool = True,
 ) -> EnqueueCommandResult:
     command_type = _normalize_command_type(command.command_type)
     payload_json = canonical_json(command.payload)
@@ -172,9 +173,11 @@ def enqueue_command(
                     expires_at_wire,
                 ),
             )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
     except sqlite3.IntegrityError as exc:
-        connection.rollback()
+        if manage_transaction:
+            connection.rollback()
         return EnqueueCommandResult(
             accepted=False,
             command_id=command.command_id,
