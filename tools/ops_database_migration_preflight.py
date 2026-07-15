@@ -28,6 +28,7 @@ REQUIRED_TARGET_TABLES = (
     "live_sim_lifecycle_consumer_runs",
     "live_sim_lifecycle_routing_decisions",
     "incremental_evaluation_dead_letters",
+    "incremental_evaluation_dead_letter_dispositions",
 )
 REQUIRED_TARGET_COLUMNS = {
     "gateway_order_broker_boundary_resolutions": frozenset(
@@ -66,6 +67,33 @@ REQUIRED_TARGET_COLUMNS = {
             "updated_at",
         }
     ),
+    "incremental_evaluation_dead_letter_dispositions": frozenset(
+        {
+            "disposition_id",
+            "request_id",
+            "request_hash",
+            "dead_letter_id",
+            "sequence_no",
+            "action",
+            "supersedes_disposition_id",
+            "reason_code",
+            "operator_id",
+            "expected_dead_letter_fingerprint",
+            "expected_candidate_version",
+            "evidence_ref",
+            "evidence_sha256",
+            "evidence_json",
+            "recovery_session_id",
+            "batch_size",
+            "fencing_token",
+            "safety_snapshot_json",
+            "created_at",
+            "observe_only",
+            "live_sim_allowed",
+            "live_real_allowed",
+            "auto_run_evaluation",
+        }
+    ),
 }
 REQUIRED_TARGET_TABLE_SQL_TOKENS = {
     "gateway_order_broker_boundary_resolutions": (
@@ -77,6 +105,23 @@ REQUIRED_TARGET_TABLE_SQL_TOKENS = {
         "CHECK (ROUTING_FENCE_ACTIVE = 1)",
         "FOREIGN KEY (COMMAND_ID)",
         "FOREIGN KEY (SUPERSEDES_RESOLUTION_ID)",
+    ),
+    "incremental_evaluation_dead_letter_dispositions": (
+        "CHECK (SEQUENCE_NO > 0)",
+        "DISPOSE_OBSOLETE_CLOSED_CANDIDATE",
+        "RESET_CANARY",
+        "VERIFY_CANARY",
+        "RESET_BATCH",
+        "CHECK (OBSERVE_ONLY = 1)",
+        "CHECK (LIVE_SIM_ALLOWED = 0)",
+        "CHECK (LIVE_REAL_ALLOWED = 0)",
+        "CHECK (AUTO_RUN_EVALUATION = 0)",
+        "CHECK (ACTION != 'RESET_CANARY' OR BATCH_SIZE = 1)",
+        "CHECK (ACTION != 'VERIFY_CANARY' OR BATCH_SIZE = 1)",
+        "OR (BATCH_SIZE BETWEEN 2 AND 5)",
+        "UNIQUE (DEAD_LETTER_ID, SEQUENCE_NO)",
+        "FOREIGN KEY (DEAD_LETTER_ID)",
+        "FOREIGN KEY (SUPERSEDES_DISPOSITION_ID)",
     ),
 }
 REQUIRED_TARGET_INDEX_CONTRACTS: dict[str, dict[str, Any]] = {
@@ -116,21 +161,73 @@ REQUIRED_TARGET_INDEX_CONTRACTS: dict[str, dict[str, Any]] = {
         "partial": False,
         "descending": (False, False),
     },
+    "idx_incremental_evaluation_dead_letter_candidate_time": {
+        "table": "incremental_evaluation_dead_letters",
+        "columns": ("candidate_instance_id", "dead_lettered_at", "dead_letter_id"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, True, True),
+    },
+    "idx_incremental_evaluation_dead_letter_status_time": {
+        "table": "incremental_evaluation_dead_letters",
+        "columns": ("status", "dead_lettered_at"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, True),
+    },
+    "idx_incremental_dead_letter_disposition_effective": {
+        "table": "incremental_evaluation_dead_letter_dispositions",
+        "columns": ("dead_letter_id", "sequence_no"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, True),
+    },
+    "idx_incremental_dead_letter_disposition_session": {
+        "table": "incremental_evaluation_dead_letter_dispositions",
+        "columns": ("recovery_session_id", "created_at", "disposition_id"),
+        "unique": False,
+        "partial": True,
+        "descending": (False, False, False),
+        "where_sql": "WHERE RECOVERY_SESSION_ID IS NOT NULL",
+    },
 }
 REQUIRED_TARGET_TRIGGER_CONTRACTS: dict[str, dict[str, str]] = {
     "trg_gateway_order_boundary_resolutions_no_update": {
         "table": "gateway_order_broker_boundary_resolutions",
         "operation": "UPDATE",
+        "error_message": "gateway order-boundary resolutions are append-only",
     },
     "trg_gateway_order_boundary_resolutions_no_delete": {
         "table": "gateway_order_broker_boundary_resolutions",
         "operation": "DELETE",
+        "error_message": "gateway order-boundary resolutions are append-only",
+    },
+    "trg_incremental_evaluation_dead_letters_no_update": {
+        "table": "incremental_evaluation_dead_letters",
+        "operation": "UPDATE",
+        "error_message": "incremental evaluation dead letters are immutable",
+    },
+    "trg_incremental_evaluation_dead_letters_no_delete": {
+        "table": "incremental_evaluation_dead_letters",
+        "operation": "DELETE",
+        "error_message": "incremental evaluation dead letters are immutable",
+    },
+    "trg_incremental_dead_letter_dispositions_no_update": {
+        "table": "incremental_evaluation_dead_letter_dispositions",
+        "operation": "UPDATE",
+        "error_message": ("incremental evaluation dead-letter dispositions are append-only"),
+    },
+    "trg_incremental_dead_letter_dispositions_no_delete": {
+        "table": "incremental_evaluation_dead_letter_dispositions",
+        "operation": "DELETE",
+        "error_message": ("incremental evaluation dead-letter dispositions are append-only"),
     },
 }
 FINGERPRINT_FILES = {
     "main": "",
     "wal": "-wal",
     "shm": "-shm",
+    "journal": "-journal",
 }
 MIGRATION_MUTABLE_TABLES: frozenset[str] = frozenset()
 
@@ -183,12 +280,9 @@ def run_preflight(
     try:
         source_quick_check_started = time.perf_counter()
         source_quick_check = [
-            str(row[0])
-            for row in source_connection.execute("PRAGMA quick_check(1)")
+            str(row[0]) for row in source_connection.execute("PRAGMA quick_check(1)")
         ]
-        source_quick_check_elapsed_sec = (
-            time.perf_counter() - source_quick_check_started
-        )
+        source_quick_check_elapsed_sec = time.perf_counter() - source_quick_check_started
         source_snapshot = _database_snapshot(source_connection)
         if (
             required_source_schema is not None
@@ -320,9 +414,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     if migration_table_changes:
         failures.append("MIGRATION_TABLE_CONTENT_MISMATCH")
     contract_probes = _mapping(clone.get("contract_probes"))
-    if not contract_probes or not all(
-        value is True for value in contract_probes.values()
-    ):
+    if not contract_probes or not all(value is True for value in contract_probes.values()):
         failures.append("TARGET_BEHAVIOR_CONTRACT_INVALID")
     disk_space = _mapping(clone.get("disk_space"))
     if (
@@ -334,9 +426,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("CLONE_DISK_SPACE_INSUFFICIENT")
     source_table_content = _mapping(source_snapshot.get("table_content"))
     clone_table_content = _mapping(clone_after.get("table_content"))
-    resolution_was_absent = (
-        "gateway_order_broker_boundary_resolutions" not in source_table_content
-    )
+    resolution_was_absent = "gateway_order_broker_boundary_resolutions" not in source_table_content
     pretarget_resolution_table_present = bool(
         source_schema_number < 60 and not resolution_was_absent
     )
@@ -347,13 +437,28 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     )
     target_resolution_ledger_empty = bool(
         not pretarget_resolution_table_present
-        and (
-            not resolution_was_absent
-            or int(target_resolution.get("row_count") or 0) == 0
-        )
+        and (not resolution_was_absent or int(target_resolution.get("row_count") or 0) == 0)
     )
     if not target_resolution_ledger_empty:
         failures.append("TARGET_RESOLUTION_LEDGER_NOT_EMPTY")
+
+    disposition_was_absent = (
+        "incremental_evaluation_dead_letter_dispositions" not in source_table_content
+    )
+    pretarget_disposition_table_present = bool(
+        source_schema_number < 61 and not disposition_was_absent
+    )
+    if pretarget_disposition_table_present:
+        failures.append("SOURCE_PRETARGET_DEAD_LETTER_DISPOSITION_TABLE_PRESENT")
+    target_disposition = _mapping(
+        clone_table_content.get("incremental_evaluation_dead_letter_dispositions")
+    )
+    target_disposition_ledger_empty = bool(
+        not pretarget_disposition_table_present
+        and (not disposition_was_absent or int(target_disposition.get("row_count") or 0) == 0)
+    )
+    if not target_disposition_ledger_empty:
+        failures.append("TARGET_DEAD_LETTER_DISPOSITION_LEDGER_NOT_EMPTY")
 
     required_tables = _mapping(clone_after.get("required_tables"))
     if not all(bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES):
@@ -412,11 +517,11 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "backup_table_content_changes": backup_table_changes,
         "migration_table_content_changes": migration_table_changes,
         "target_behavior_contract_valid": bool(
-            contract_probes
-            and all(value is True for value in contract_probes.values())
+            contract_probes and all(value is True for value in contract_probes.values())
         ),
         "clone_disk_space_sufficient": disk_space.get("sufficient") is True,
         "target_resolution_ledger_empty": target_resolution_ledger_empty,
+        "target_dead_letter_disposition_ledger_empty": (target_disposition_ledger_empty),
         "required_tables_present": all(
             bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES
         ),
@@ -455,9 +560,12 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
         raise FileNotFoundError(f"source database was not found: {source}")
     if source == clone:
         raise ValueError("clone database must differ from source database")
-    if Path(f"{source}-wal").exists() or Path(f"{source}-shm").exists():
+    source_sidecars = tuple(
+        Path(f"{source}{suffix}") for suffix in ("-wal", "-shm", "-journal")
+    )
+    if any(sidecar.exists() for sidecar in source_sidecars):
         raise RuntimeError(
-            "source database must be quiescent with no WAL/SHM sidecars"
+            "source database must be quiescent with no WAL/SHM/rollback-journal sidecars"
         )
     if clone.exists() or Path(f"{clone}-wal").exists() or Path(f"{clone}-shm").exists():
         raise FileExistsError(f"clone database artifacts already exist: {clone}")
@@ -466,7 +574,12 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
 def _disk_space_contract(*, source: Path, clone: Path) -> dict[str, Any]:
     source_bytes = sum(
         candidate.stat().st_size
-        for candidate in (source, Path(f"{source}-wal"), Path(f"{source}-shm"))
+        for candidate in (
+            source,
+            Path(f"{source}-wal"),
+            Path(f"{source}-shm"),
+            Path(f"{source}-journal"),
+        )
         if candidate.exists()
     )
     probe = clone.parent
@@ -531,9 +644,7 @@ def _database_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
     if "sqlite_sequence" in tables:
         sqlite_sequence = {
             str(row["name"]): int(row["seq"] or 0)
-            for row in connection.execute(
-                "SELECT name, seq FROM sqlite_sequence ORDER BY name"
-            )
+            for row in connection.execute("SELECT name, seq FROM sqlite_sequence ORDER BY name")
         }
     return {
         "schema_version": schema_version,
@@ -562,9 +673,7 @@ def _required_column_contracts(
         columns = (
             {
                 str(row["name"])
-                for row in connection.execute(
-                    f"PRAGMA table_info({_quote_identifier(table_name)})"
-                )
+                for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table_name)})")
             }
             if table_name in tables
             else set()
@@ -615,9 +724,7 @@ def _required_index_contracts(
         unique = bool(index_row["unique"]) if index_row is not None else False
         partial = bool(index_row["partial"]) if index_row is not None else False
         expected_columns = tuple(str(item) for item in expected["columns"])
-        expected_descending = tuple(
-            bool(item) for item in expected.get("descending", ())
-        )
+        expected_descending = tuple(bool(item) for item in expected.get("descending", ()))
         sql_row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
             (index_name,),
@@ -625,9 +732,7 @@ def _required_index_contracts(
         index_sql = "" if sql_row is None else str(sql_row["sql"] or "")
         normalized_index_sql = " ".join(index_sql.upper().split())
         where_sql = str(expected.get("where_sql") or "")
-        where_valid = not where_sql or (
-            " ".join(where_sql.upper().split()) in normalized_index_sql
-        )
+        where_valid = not where_sql or (" ".join(where_sql.upper().split()) in normalized_index_sql)
         contracts[index_name] = {
             "exists": exists,
             "table": table_name,
@@ -658,20 +763,18 @@ def _required_trigger_contracts(
     contracts: dict[str, dict[str, Any]] = {}
     for trigger_name, expected in REQUIRED_TARGET_TRIGGER_CONTRACTS.items():
         row = connection.execute(
-            "SELECT tbl_name, sql FROM sqlite_master "
-            "WHERE type = 'trigger' AND name = ?",
+            "SELECT tbl_name, sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
             (trigger_name,),
         ).fetchone()
         sql = "" if row is None else str(row["sql"] or "")
         table_name = str(expected["table"])
         operation = str(expected["operation"])
-        compact_sql = "".join(sql.upper().split()).replace(
-            "IFNOTEXISTS", ""
-        ).rstrip(";")
+        error_message = str(expected["error_message"])
+        compact_sql = "".join(sql.upper().split()).replace("IFNOTEXISTS", "").rstrip(";")
         expected_sql = (
             f"CREATETRIGGER{trigger_name.upper()}BEFORE{operation}ON"
             f"{table_name.upper()}BEGINSELECTRAISE(ABORT,"
-            "'GATEWAYORDER-BOUNDARYRESOLUTIONSAREAPPEND-ONLY');END"
+            f"'{''.join(error_message.upper().split())}');END"
         )
         contracts[trigger_name] = {
             "exists": row is not None,
@@ -980,6 +1083,298 @@ def _probe_target_contracts(path: Path) -> dict[str, bool]:
             WHERE resolution_id = 'probe-resolution-one'
             """,
         )
+        connection.execute(
+            """
+            INSERT INTO incremental_evaluation_dead_letters (
+                dead_letter_id, candidate_instance_id, trade_date, code,
+                reason, source_event_id, priority, original_enqueued_at,
+                last_queue_updated_at, attempts, last_error, status,
+                dead_lettered_at
+            )
+            VALUES (
+                'probe-dead-letter-one', 'probe-candidate-one', '2026-01-01',
+                '005930', 'PRICE_TICK', 'probe-source-event', 0,
+                '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 3,
+                'LEGACY_RETRY_EXHAUSTED', 'DEAD_LETTER',
+                '2026-01-01T00:00:01Z'
+            )
+            """
+        )
+        results["incremental_dead_letter_multiple_generations_supported"] = _expect_success(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letters (
+                    dead_letter_id, candidate_instance_id, trade_date, code,
+                    reason, source_event_id, priority, original_enqueued_at,
+                    last_queue_updated_at, attempts, last_error, status,
+                    dead_lettered_at
+                ) VALUES (
+                    'probe-dead-letter-two', 'probe-candidate-one',
+                    '2026-01-01', '005930', 'PRICE_TICK',
+                    'probe-source-event-two', 0,
+                    '2026-01-01T00:00:02Z', '2026-01-01T00:00:02Z', 3,
+                    'SECOND_GENERATION', 'DEAD_LETTER',
+                    '2026-01-01T00:00:03Z'
+                )
+                """,
+        )
+        connection.execute(
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_dead_letter_fingerprint, expected_candidate_version,
+                evidence_ref, evidence_sha256, evidence_json, created_at
+            )
+            VALUES (
+                'probe-disposition-one', 'probe-disposition-request-one', ?,
+                'probe-dead-letter-one', 1,
+                'DISPOSE_OBSOLETE_CLOSED_CANDIDATE', 'PROBE_OBSOLETE',
+                'probe.operator', ?, ?, 'probe-evidence', ?, '{}',
+                '2026-01-01T00:00:02Z'
+            )
+            """,
+            ("1" * 64, "2" * 64, "3" * 64, "4" * 64),
+        )
+        results["dead_letter_disposition_revoke_insert_supported"] = _expect_success(
+            connection,
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, supersedes_disposition_id, reason_code,
+                operator_id, expected_dead_letter_fingerprint,
+                expected_candidate_version, evidence_ref, evidence_sha256,
+                evidence_json, created_at
+            )
+            VALUES (
+                'probe-disposition-revoke', 'probe-disposition-request-revoke',
+                ?, 'probe-dead-letter-one', 2, 'REVOKE',
+                'probe-disposition-one', 'PROBE_REVOKE', 'probe.operator', ?,
+                ?, 'probe-revoke-evidence', ?, '{}',
+                '2026-01-01T00:00:03Z'
+            )
+            """,
+            ("5" * 64, "6" * 64, "7" * 64, "8" * 64),
+        )
+        results["dead_letter_disposition_request_unique"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_dead_letter_fingerprint, expected_candidate_version,
+                evidence_ref, evidence_sha256, created_at
+            ) VALUES (
+                'probe-disposition-request-duplicate',
+                'probe-disposition-request-one', ?, 'probe-dead-letter-one', 3,
+                'REVOKE', 'PROBE_DUPLICATE', 'probe.operator', ?, ?,
+                'probe-evidence', ?, '2026-01-01T00:00:04Z'
+            )
+            """,
+            ("9" * 64, "a" * 64, "b" * 64, "c" * 64),
+        )
+        results["dead_letter_disposition_sequence_unique"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_dead_letter_fingerprint, expected_candidate_version,
+                evidence_ref, evidence_sha256, created_at
+            ) VALUES (
+                'probe-disposition-sequence-duplicate',
+                'probe-disposition-request-sequence-duplicate', ?,
+                'probe-dead-letter-one', 1, 'REVOKE', 'PROBE_DUPLICATE',
+                'probe.operator', ?, ?, 'probe-evidence', ?,
+                '2026-01-01T00:00:04Z'
+            )
+            """,
+            ("d" * 64, "e" * 64, "f" * 64, "0" * 64),
+        )
+        results["dead_letter_disposition_action_check"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_dead_letter_fingerprint, expected_candidate_version,
+                evidence_ref, evidence_sha256, created_at
+            ) VALUES (
+                'probe-disposition-invalid-action',
+                'probe-disposition-request-invalid-action', ?,
+                'probe-dead-letter-one', 3, 'INVALID', 'PROBE_INVALID',
+                'probe.operator', ?, ?, 'probe-evidence', ?,
+                '2026-01-01T00:00:04Z'
+            )
+            """,
+            ("0" * 64, "1" * 64, "2" * 64, "3" * 64),
+        )
+        results["dead_letter_disposition_sequence_positive"] = _expect_integrity_error(
+            connection,
+            """
+            INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                disposition_id, request_id, request_hash, dead_letter_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_dead_letter_fingerprint, expected_candidate_version,
+                evidence_ref, evidence_sha256, created_at
+            ) VALUES (
+                'probe-disposition-sequence-zero',
+                'probe-disposition-request-sequence-zero', ?,
+                'probe-dead-letter-one', 0, 'REVOKE', 'PROBE_INVALID',
+                'probe.operator', ?, ?, 'probe-evidence', ?,
+                '2026-01-01T00:00:04Z'
+            )
+            """,
+            ("4" * 64, "5" * 64, "6" * 64, "7" * 64),
+        )
+        results["dead_letter_disposition_dead_letter_foreign_key"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    created_at
+                ) VALUES (
+                    'probe-disposition-orphan',
+                    'probe-disposition-request-orphan', ?,
+                    'probe-dead-letter-missing', 1, 'REVOKE', 'PROBE_ORPHAN',
+                    'probe.operator', ?, ?, 'probe-evidence', ?,
+                    '2026-01-01T00:00:04Z'
+                )
+                """,
+            ("8" * 64, "9" * 64, "a" * 64, "b" * 64),
+        )
+        results["dead_letter_disposition_supersedes_foreign_key"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, supersedes_disposition_id,
+                    reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    created_at
+                ) VALUES (
+                    'probe-disposition-supersedes-orphan',
+                    'probe-disposition-request-supersedes-orphan', ?,
+                    'probe-dead-letter-one', 3, 'REVOKE',
+                    'probe-disposition-missing', 'PROBE_ORPHAN',
+                    'probe.operator', ?, ?, 'probe-evidence', ?,
+                    '2026-01-01T00:00:04Z'
+                )
+                """,
+            ("c" * 64, "d" * 64, "e" * 64, "f" * 64),
+        )
+        results["dead_letter_disposition_observe_scope_check"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    created_at, observe_only
+                ) VALUES (
+                    'probe-disposition-observe-invalid',
+                    'probe-disposition-request-observe-invalid', ?,
+                    'probe-dead-letter-one', 3, 'REVOKE', 'PROBE_INVALID',
+                    'probe.operator', ?, ?, 'probe-evidence', ?,
+                    '2026-01-01T00:00:04Z', 0
+                )
+                """,
+            ("1" * 64, "2" * 64, "3" * 64, "4" * 64),
+        )
+        results["dead_letter_disposition_canary_requires_fence"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    created_at
+                ) VALUES (
+                    'probe-disposition-canary-no-fence',
+                    'probe-disposition-request-canary-no-fence', ?,
+                    'probe-dead-letter-one', 3, 'RESET_CANARY',
+                    'PROBE_INVALID', 'probe.operator', ?, ?,
+                    'probe-evidence', ?, '2026-01-01T00:00:04Z'
+                )
+                """,
+            ("5" * 64, "6" * 64, "7" * 64, "8" * 64),
+        )
+        results["dead_letter_disposition_canary_exactly_one"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    recovery_session_id, batch_size, fencing_token, created_at
+                ) VALUES (
+                    'probe-disposition-canary-two',
+                    'probe-disposition-request-canary-two', ?,
+                    'probe-dead-letter-one', 3, 'RESET_CANARY',
+                    'PROBE_INVALID', 'probe.operator', ?, ?,
+                    'probe-evidence', ?, 'probe-session', 2, 1,
+                    '2026-01-01T00:00:04Z'
+                )
+                """,
+            ("9" * 64, "a" * 64, "b" * 64, "c" * 64),
+        )
+        results["dead_letter_disposition_batch_max_five"] = _expect_integrity_error(
+            connection,
+            """
+                INSERT INTO incremental_evaluation_dead_letter_dispositions (
+                    disposition_id, request_id, request_hash, dead_letter_id,
+                    sequence_no, action, reason_code, operator_id,
+                    expected_dead_letter_fingerprint,
+                    expected_candidate_version, evidence_ref, evidence_sha256,
+                    recovery_session_id, batch_size, fencing_token, created_at
+                ) VALUES (
+                    'probe-disposition-batch-six',
+                    'probe-disposition-request-batch-six', ?,
+                    'probe-dead-letter-one', 3, 'RESET_BATCH',
+                    'PROBE_INVALID', 'probe.operator', ?, ?,
+                    'probe-evidence', ?, 'probe-session', 6, 1,
+                    '2026-01-01T00:00:04Z'
+                )
+                """,
+            ("d" * 64, "e" * 64, "f" * 64, "0" * 64),
+        )
+        results["incremental_dead_letter_update_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            UPDATE incremental_evaluation_dead_letters
+            SET last_error = 'MUTATED'
+            WHERE dead_letter_id = 'probe-dead-letter-one'
+            """,
+        )
+        results["incremental_dead_letter_delete_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            DELETE FROM incremental_evaluation_dead_letters
+            WHERE dead_letter_id = 'probe-dead-letter-one'
+            """,
+        )
+        results["dead_letter_disposition_update_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            UPDATE incremental_evaluation_dead_letter_dispositions
+            SET reason_code = 'MUTATED'
+            WHERE disposition_id = 'probe-disposition-one'
+            """,
+        )
+        results["dead_letter_disposition_delete_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            DELETE FROM incremental_evaluation_dead_letter_dispositions
+            WHERE disposition_id = 'probe-disposition-one'
+            """,
+        )
     finally:
         connection.execute("ROLLBACK TO target_contract_probe")
         connection.execute("RELEASE target_contract_probe")
@@ -1024,9 +1419,7 @@ def _table_content_fingerprints(
         columns = [str(row["name"]) for row in column_rows]
         digest = hashlib.sha256()
         digest.update(
-            json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode(
-                "utf-8"
-            )
+            json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
         row_count = 0
         if columns:
@@ -1047,9 +1440,7 @@ def _table_content_fingerprints(
             order_sql = (
                 "_rowid_"
                 if include_rowid
-                else ", ".join(
-                    _quote_identifier(column) for column in primary_key_columns
-                )
+                else ", ".join(_quote_identifier(column) for column in primary_key_columns)
             )
             select_sql = (
                 f"_rowid_ AS {_quote_identifier('__codex_rowid__')}, {column_sql}"
@@ -1067,9 +1458,7 @@ def _table_content_fingerprints(
                 f"ORDER BY {order_sql}"
             )
             for row in connection.execute(query):
-                values = [
-                    _sql_value_for_hash(row[column]) for column in columns
-                ]
+                values = [_sql_value_for_hash(row[column]) for column in columns]
                 if include_rowid:
                     values.insert(
                         0,
@@ -1168,7 +1557,12 @@ def _changed_source_data_files(
     after: Mapping[str, Any],
 ) -> list[str]:
     changed: list[str] = []
-    for label, display_name in (("main", "<main>"), ("wal", "-wal"), ("shm", "-shm")):
+    for label, display_name in (
+        ("main", "<main>"),
+        ("wal", "-wal"),
+        ("shm", "-shm"),
+        ("journal", "-journal"),
+    ):
         if before.get(label) != after.get(label):
             changed.append(display_name)
     return changed
@@ -1243,6 +1637,8 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"`{str(bool(verdict.get('required_indexes_present'))).lower()}`",
             "- required_append_only_triggers_present: "
             f"`{str(bool(verdict.get('required_append_only_triggers_present'))).lower()}`",
+            "- target_dead_letter_disposition_ledger_empty: "
+            f"`{str(bool(verdict.get('target_dead_letter_disposition_ledger_empty'))).lower()}`",
             f"- failures: `{json.dumps(verdict.get('failures') or [])}`",
             "",
             "The source database was opened with SQLite `mode=ro` and "

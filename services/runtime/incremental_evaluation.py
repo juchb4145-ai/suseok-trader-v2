@@ -26,6 +26,11 @@ from services.runtime.evaluation_run_guard import (
     assert_runtime_execution_fence,
     runtime_execution_lock,
 )
+from services.runtime.incremental_evaluation_dead_letter_resolution import (
+    build_incremental_evaluation_dead_letter_effective_status,
+    can_append_incremental_evaluation_dead_letter_generation,
+    is_incremental_evaluation_candidate_blocked_by_dead_letter,
+)
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 
 DIRTY_REASON_PRICE_TICK = "PRICE_TICK"
@@ -59,13 +64,9 @@ class IncrementalEvaluationEnqueueResult:
             "code": self.code,
             "enqueued_count": self.enqueued_count,
             "candidate_ids": list(self.candidate_ids),
-            "retry_exhausted_dead_lettered_count": (
-                self.retry_exhausted_dead_lettered_count
-            ),
+            "retry_exhausted_dead_lettered_count": (self.retry_exhausted_dead_lettered_count),
             "dead_letter_blocked_count": self.dead_letter_blocked_count,
-            "dead_letter_blocked_candidate_ids": list(
-                self.dead_letter_blocked_candidate_ids
-            ),
+            "dead_letter_blocked_candidate_ids": list(self.dead_letter_blocked_candidate_ids),
         }
 
 
@@ -494,17 +495,11 @@ def process_incremental_evaluation_batch(
         queued_after = _queue_count(connection)
         return IncrementalEvaluationBatchResult(
             run_id=run_id,
-            status=(
-                "COMPLETED_WITH_DEAD_LETTERS"
-                if legacy_dead_lettered_count
-                else "IDLE"
-            ),
+            status=("COMPLETED_WITH_DEAD_LETTERS" if legacy_dead_lettered_count else "IDLE"),
             queued_before=queued_before,
             queued_after=queued_after,
             dead_letter_count=dead_letter_count,
-            legacy_retry_exhausted_dead_lettered_count=(
-                legacy_dead_lettered_count
-            ),
+            legacy_retry_exhausted_dead_lettered_count=(legacy_dead_lettered_count),
         )
 
     queued_after = _queue_count(connection)
@@ -602,10 +597,35 @@ def get_incremental_evaluation_status(
     if dead_letter_count:
         status = "FAIL"
         reason_codes.append("INCREMENTAL_QUEUE_DEAD_LETTER_PRESENT")
+    effective = build_incremental_evaluation_dead_letter_effective_status(connection)
+    combined_reason_codes = list(
+        dict.fromkeys(
+            [
+                *reason_codes,
+                *(str(code) for code in effective.get("reason_codes") or []),
+            ]
+        )
+    )
+    non_raw_reason_codes = [
+        code for code in reason_codes if code != "INCREMENTAL_QUEUE_DEAD_LETTER_PRESENT"
+    ]
+    effective_status = str(effective["effective_status"])
+    if any(
+        code
+        in {
+            "INCREMENTAL_QUEUE_BACKLOG_FAIL",
+            "INCREMENTAL_QUEUE_STALE_FAIL",
+            "INCREMENTAL_QUEUE_RETRY_EXHAUSTED_ACTIVE",
+        }
+        for code in non_raw_reason_codes
+    ):
+        effective_status = "FAIL"
+    elif non_raw_reason_codes and effective_status == "PASS":
+        effective_status = "WARN"
+    fast_0_status = "CLEAR" if effective_status == "PASS" else "BLOCKED"
     return {
         "status": status,
         "backlog_status": status,
-        "reason_codes": reason_codes,
         "enabled": resolved_settings.incremental_evaluation_enabled,
         "worker_enabled": resolved_settings.incremental_evaluation_worker_enabled,
         "worker_interval_sec": resolved_settings.incremental_evaluation_worker_interval_sec,
@@ -624,13 +644,13 @@ def get_incremental_evaluation_status(
         "max_attempts": int(row["max_attempts"] or 0),
         "oldest_dead_lettered_at": dead_letter["oldest_dead_lettered_at"],
         "latest_dead_lettered_at": dead_letter["latest_dead_lettered_at"],
+        **effective,
+        "reason_codes": combined_reason_codes,
+        "effective_status": effective_status,
+        "fast_0_status": fast_0_status,
         "thresholds": {
-            "backlog_warn_count": (
-                resolved_settings.incremental_evaluation_backlog_warn_count
-            ),
-            "backlog_fail_count": (
-                resolved_settings.incremental_evaluation_backlog_fail_count
-            ),
+            "backlog_warn_count": (resolved_settings.incremental_evaluation_backlog_warn_count),
+            "backlog_fail_count": (resolved_settings.incremental_evaluation_backlog_fail_count),
             "stale_warn_sec": resolved_settings.incremental_evaluation_stale_warn_sec,
             "stale_fail_sec": resolved_settings.incremental_evaluation_stale_fail_sec,
         },
@@ -669,9 +689,7 @@ def list_incremental_evaluation_dead_letters(
     results: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        item["reset_evidence"] = _json_object(
-            item.pop("reset_evidence_json", "{}")
-        )
+        item["reset_evidence"] = _json_object(item.pop("reset_evidence_json", "{}"))
         results.append(item)
     return results
 
@@ -688,110 +706,12 @@ def reset_incremental_evaluation_dead_letter(
         raise ValueError("dead_letter_id must not be empty")
     if not normalized_reset_by:
         raise ValueError("reset_by must not be empty")
-    connection.execute("BEGIN IMMEDIATE")
-    try:
-        row = connection.execute(
-            """
-            SELECT *
-            FROM incremental_evaluation_dead_letters
-            WHERE dead_letter_id = ?
-            """,
-            (normalized_id,),
-        ).fetchone()
-        if row is None:
-            connection.commit()
-            return {
-                "status": "NOT_FOUND",
-                "dead_letter_id": normalized_id,
-                "reset_count": 0,
-            }
-        if str(row["status"]) != "DEAD_LETTER":
-            connection.commit()
-            return {
-                "status": "ALREADY_RESET",
-                "dead_letter_id": normalized_id,
-                "reset_count": 0,
-            }
-        candidate_id = str(row["candidate_instance_id"])
-        if not _is_candidate_active(connection, candidate_id):
-            connection.commit()
-            return {
-                "status": "BLOCKED_CANDIDATE_NOT_ACTIVE",
-                "dead_letter_id": normalized_id,
-                "candidate_instance_id": candidate_id,
-                "reset_count": 0,
-            }
-        existing = connection.execute(
-            """
-            SELECT source_event_id, updated_at
-            FROM incremental_evaluation_queue
-            WHERE candidate_instance_id = ?
-            """,
-            (candidate_id,),
-        ).fetchone()
-        if existing is not None:
-            connection.commit()
-            return {
-                "status": "BLOCKED_ACTIVE_QUEUE_EXISTS",
-                "dead_letter_id": normalized_id,
-                "candidate_instance_id": candidate_id,
-                "active_source_event_id": existing["source_event_id"],
-                "reset_count": 0,
-            }
-        now = datetime_to_wire(utc_now())
-        connection.execute(
-            """
-            INSERT INTO incremental_evaluation_queue (
-                candidate_instance_id,
-                trade_date,
-                code,
-                reason,
-                source_event_id,
-                priority,
-                enqueued_at,
-                updated_at,
-                attempts,
-                last_error
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL)
-            """,
-            (
-                candidate_id,
-                row["trade_date"],
-                row["code"],
-                row["reason"],
-                row["source_event_id"],
-                row["priority"],
-                now,
-                now,
-            ),
-        )
-        evidence = {
-            "previous_attempts": int(row["attempts"]),
-            "previous_last_error": row["last_error"],
-            "restored_source_event_id": row["source_event_id"],
-        }
-        connection.execute(
-            """
-            UPDATE incremental_evaluation_dead_letters
-            SET status = 'RESET',
-                reset_at = ?,
-                reset_by = ?,
-                reset_evidence_json = ?
-            WHERE dead_letter_id = ? AND status = 'DEAD_LETTER'
-            """,
-            (now, normalized_reset_by, _json_dumps(evidence), normalized_id),
-        )
-        connection.commit()
-    except Exception:
-        connection.rollback()
-        raise
     return {
-        "status": "RESET",
+        "status": "UNGUARDED_RESET_DISABLED",
         "dead_letter_id": normalized_id,
-        "candidate_instance_id": candidate_id,
-        "reset_count": 1,
+        "reset_count": 0,
         "reset_by": normalized_reset_by,
+        "message": "Use the schema 61 guarded offline recovery workflow.",
         "no_order_side_effects": True,
     }
 
@@ -1063,16 +983,10 @@ def _candidate_has_unresolved_dead_letter(
     connection: sqlite3.Connection,
     candidate_instance_id: str,
 ) -> bool:
-    row = connection.execute(
-        """
-        SELECT 1
-        FROM incremental_evaluation_dead_letters
-        WHERE candidate_instance_id = ? AND status = 'DEAD_LETTER'
-        LIMIT 1
-        """,
-        (candidate_instance_id,),
-    ).fetchone()
-    return row is not None
+    return is_incremental_evaluation_candidate_blocked_by_dead_letter(
+        connection,
+        candidate_instance_id,
+    )
 
 
 def _move_queue_row_to_dead_letter(
@@ -1084,67 +998,47 @@ def _move_queue_row_to_dead_letter(
 ) -> None:
     candidate_id = str(row["candidate_instance_id"])
     now = datetime_to_wire(utc_now())
-    existing = connection.execute(
+    if not can_append_incremental_evaluation_dead_letter_generation(
+        connection,
+        candidate_id,
+    ):
+        raise RuntimeError(
+            "incremental evaluation candidate already has an unresolved dead-letter generation"
+        )
+    connection.execute(
         """
-        SELECT dead_letter_id
-        FROM incremental_evaluation_dead_letters
-        WHERE candidate_instance_id = ? AND status = 'DEAD_LETTER'
+        INSERT INTO incremental_evaluation_dead_letters (
+            dead_letter_id,
+            candidate_instance_id,
+            trade_date,
+            code,
+            reason,
+            source_event_id,
+            priority,
+            original_enqueued_at,
+            last_queue_updated_at,
+            attempts,
+            last_error,
+            status,
+            dead_lettered_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DEAD_LETTER', ?)
         """,
-        (candidate_id,),
-    ).fetchone()
-    if existing is None:
-        connection.execute(
-            """
-            INSERT INTO incremental_evaluation_dead_letters (
-                dead_letter_id,
-                candidate_instance_id,
-                trade_date,
-                code,
-                reason,
-                source_event_id,
-                priority,
-                original_enqueued_at,
-                last_queue_updated_at,
-                attempts,
-                last_error,
-                status,
-                dead_lettered_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'DEAD_LETTER', ?)
-            """,
-            (
-                new_message_id("incremental_dead_letter"),
-                candidate_id,
-                row["trade_date"],
-                row["code"],
-                row["reason"],
-                row["source_event_id"],
-                int(row["priority"]),
-                row["enqueued_at"],
-                row["updated_at"],
-                max(int(attempts), 1),
-                _truncate_error(error_message),
-                now,
-            ),
-        )
-    else:
-        connection.execute(
-            """
-            UPDATE incremental_evaluation_dead_letters
-            SET attempts = ?,
-                last_error = ?,
-                last_queue_updated_at = ?,
-                dead_lettered_at = ?
-            WHERE dead_letter_id = ?
-            """,
-            (
-                max(int(attempts), 1),
-                _truncate_error(error_message),
-                row["updated_at"],
-                now,
-                existing["dead_letter_id"],
-            ),
-        )
+        (
+            new_message_id("incremental_dead_letter"),
+            candidate_id,
+            row["trade_date"],
+            row["code"],
+            row["reason"],
+            row["source_event_id"],
+            int(row["priority"]),
+            row["enqueued_at"],
+            row["updated_at"],
+            max(int(attempts), 1),
+            _truncate_error(error_message),
+            now,
+        ),
+    )
     _delete_queue_row(connection, candidate_id)
 
 

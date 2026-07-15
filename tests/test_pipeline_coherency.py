@@ -89,7 +89,7 @@ def test_schema_59_pipeline_lineage_migration_is_additive_and_reentrant(tmp_path
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "60"
+    assert schema_version == str(SCHEMA_VERSION) == "61"
     for table_name, columns in table_columns.items():
         assert columns <= migrated_columns[table_name]
     assert {

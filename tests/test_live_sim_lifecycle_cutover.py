@@ -75,7 +75,7 @@ def test_lifecycle_cutover_tables_migrate_and_rerun(tmp_path) -> None:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "60"
+    assert schema_version == str(SCHEMA_VERSION) == "61"
     assert "live_sim_lifecycle_consumer_runs" in tables
     assert "live_sim_lifecycle_routing_decisions" in tables
     assert "idx_live_sim_lifecycle_routing_effective" in indexes
