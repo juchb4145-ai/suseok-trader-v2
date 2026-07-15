@@ -49,7 +49,7 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "60"
+    assert schema_version == "61"
     assert {
         "market_regime_projection_reconcile_issues",
         "market_regime_projection_reconcile_runs",
@@ -112,7 +112,7 @@ def test_schema_52_adds_market_regime_cutover_budget_and_routing_columns(
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "60"
+    assert schema_version == "61"
     assert set(new_columns) <= columns
     assert "idx_market_regime_routing_effective_skip" in indexes
     assert budget_exists == 1

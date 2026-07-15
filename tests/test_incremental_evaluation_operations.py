@@ -99,13 +99,43 @@ def test_schema_58_dead_letter_migration_is_reentrant(tmp_path) -> None:
                 "PRAGMA index_list(incremental_evaluation_dead_letters)"
             ).fetchall()
         }
+        disposition_indexes = {
+            row["name"]
+            for row in rerun.execute(
+                "PRAGMA index_list(incremental_evaluation_dead_letter_dispositions)"
+            ).fetchall()
+        }
+        tables = {
+            row["name"]
+            for row in rerun.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        triggers = {
+            row["name"]
+            for row in rerun.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'trigger'"
+            ).fetchall()
+        }
     finally:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "60"
+    assert schema_version == str(SCHEMA_VERSION) == "61"
     assert {"dead_letter_id", "candidate_instance_id", "attempts", "status"} <= columns
-    assert "uq_incremental_evaluation_dead_letter_active" in indexes
+    assert "uq_incremental_evaluation_dead_letter_active" not in indexes
+    assert "idx_incremental_evaluation_dead_letter_candidate_time" in indexes
+    assert "incremental_evaluation_dead_letter_dispositions" in tables
+    assert {
+        "idx_incremental_dead_letter_disposition_effective",
+        "idx_incremental_dead_letter_disposition_session",
+    } <= disposition_indexes
+    assert {
+        "trg_incremental_evaluation_dead_letters_no_update",
+        "trg_incremental_evaluation_dead_letters_no_delete",
+        "trg_incremental_dead_letter_dispositions_no_update",
+        "trg_incremental_dead_letter_dispositions_no_delete",
+    } <= triggers
 
 
 def test_incremental_status_reports_backlog_age_and_stale_severity(tmp_path) -> None:
@@ -255,7 +285,7 @@ def test_new_event_moves_unswept_exhausted_row_then_blocks_enqueue(tmp_path) -> 
     assert dead_letter_count == 1
 
 
-def test_retry_reset_restores_only_when_no_active_queue_exists(tmp_path) -> None:
+def test_legacy_retry_reset_is_disabled_without_guarded_recovery(tmp_path) -> None:
     connection = initialize_database(tmp_path / "incremental-reset.sqlite3")
     candidate_id = _insert_strategy_fixture(connection)
     _insert_queue_row(
@@ -278,11 +308,6 @@ def test_retry_reset_restores_only_when_no_active_queue_exists(tmp_path) -> None
         dead_letter_id,
         reset_by="test_operator",
     )
-    second_reset = reset_incremental_evaluation_dead_letter(
-        connection,
-        dead_letter_id,
-        reset_by="test_operator",
-    )
     queue = connection.execute(
         "SELECT attempts, last_error FROM incremental_evaluation_queue"
     ).fetchone()
@@ -296,16 +321,15 @@ def test_retry_reset_restores_only_when_no_active_queue_exists(tmp_path) -> None
     ).fetchone()
     connection.close()
 
-    assert reset["status"] == "RESET"
-    assert second_reset["status"] == "ALREADY_RESET"
-    assert queue["attempts"] == 0
-    assert queue["last_error"] is None
-    assert dead_letter["status"] == "RESET"
-    assert dead_letter["reset_by"] == "test_operator"
-    assert "previous_last_error" in dead_letter["reset_evidence_json"]
+    assert reset["status"] == "UNGUARDED_RESET_DISABLED"
+    assert reset["reset_count"] == 0
+    assert queue is None
+    assert dead_letter["status"] == "DEAD_LETTER"
+    assert dead_letter["reset_by"] is None
+    assert dead_letter["reset_evidence_json"] == "{}"
 
 
-def test_operator_and_dashboard_expose_dead_letter_then_reset(
+def test_operator_exposes_effective_dead_letter_and_rejects_unguarded_reset(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -332,6 +356,13 @@ def test_operator_and_dashboard_expose_dead_letter_then_reset(
         dead_letters = client.get(
             "/api/operator/incremental-evaluation/dead-letters?limit=10"
         )
+        effective = client.get(
+            "/api/operator/incremental-evaluation/dead-letters/effective?limit=10"
+        )
+        preview = client.get(
+            "/api/operator/incremental-evaluation/dead-letters/disposition-preview",
+            params={"dead_letter_id": dead_letter_id},
+        )
         dashboard = client.get(
             "/api/dashboard/snapshot?fast=true&sections=incremental_evaluation"
         )
@@ -353,11 +384,28 @@ def test_operator_and_dashboard_expose_dead_letter_then_reset(
 
     assert status_before.json()["status"] == "FAIL"
     assert status_before.json()["dead_letter_count"] == 1
+    assert status_before.json()["raw_dead_letter_count"] == 1
+    assert status_before.json()["effective_dead_letter_count"] == 1
+    assert status_before.json()["active_unresolved_dead_letter_count"] == 1
+    assert status_before.json()["historical_pending_disposition_count"] == 0
+    assert status_before.json()["historical_disposed_dead_letter_count"] == 0
+    assert status_before.json()["manual_review_dead_letter_count"] == 0
+    assert status_before.json()["fast_0_status"] == "BLOCKED"
     assert dead_letters.json()["count"] == 1
     assert dead_letters.json()["read_only"] is True
+    assert effective.status_code == 200
+    assert effective.json()["count"] == 1
+    assert effective.json()["effective_status"]["raw_dead_letter_count"] == 1
+    assert (
+        effective.json()["effective_status"]["effective_dead_letter_count"] == 1
+    )
+    assert preview.status_code == 409
+    assert preview.json()["detail"]["eligible"] is False
+    assert preview.json()["detail"]["read_only"] is True
     assert dashboard.json()["incremental_evaluation"]["dead_letter_count"] == 1
     assert operator.json()["incremental_evaluation"]["dead_letter_count"] == 1
-    assert reset.json()["status"] == "RESET"
-    assert status_after.json()["dead_letter_count"] == 0
-    assert status_after.json()["queued_count"] == 1
+    assert reset.status_code == 409
+    assert reset.json()["detail"]["status"] == "UNGUARDED_RESET_DISABLED"
+    assert status_after.json()["dead_letter_count"] == 1
+    assert status_after.json()["queued_count"] == 0
     assert command_count == 0

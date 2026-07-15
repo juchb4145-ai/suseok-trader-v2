@@ -64,8 +64,14 @@ from services.runtime.incremental_evaluation import (
     get_incremental_evaluation_status,
     list_incremental_evaluation_dead_letters,
     process_incremental_evaluation_batch,
-    reset_incremental_evaluation_dead_letter,
     sweep_incremental_evaluation_retry_exhausted,
+)
+from services.runtime.incremental_evaluation_dead_letter_resolution import (
+    ACTION_DISPOSE_OBSOLETE_CLOSED_CANDIDATE,
+    IncrementalEvaluationDeadLetterResolutionError,
+    build_incremental_evaluation_dead_letter_effective_status,
+    list_incremental_evaluation_dead_letter_effective_rows,
+    preview_incremental_evaluation_dead_letter_disposition,
 )
 from services.runtime.live_sim_lifecycle_consumer import (
     list_live_sim_lifecycle_inbox,
@@ -399,6 +405,87 @@ def operator_incremental_evaluation_dead_letters(
             "observe_only": True,
             "no_order_side_effects": True,
         }
+    finally:
+        connection.close()
+
+
+@router.get("/incremental-evaluation/dead-letters/effective")
+def operator_incremental_evaluation_dead_letters_effective(
+    bucket: str | None = Query(default=None, min_length=1, max_length=64),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        items = list_incremental_evaluation_dead_letter_effective_rows(
+            connection,
+            bucket=bucket,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "effective_status": build_incremental_evaluation_dead_letter_effective_status(
+                connection
+            ),
+            "read_only": True,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"status": "INVALID_EFFECTIVE_BUCKET", "message": str(exc)},
+        ) from exc
+    finally:
+        connection.close()
+
+
+@router.get("/incremental-evaluation/dead-letters/disposition-preview")
+def operator_incremental_evaluation_dead_letter_disposition_preview(
+    dead_letter_id: str = Query(min_length=1, max_length=200),
+    action: str = Query(
+        default=ACTION_DISPOSE_OBSOLETE_CLOSED_CANDIDATE,
+        min_length=1,
+        max_length=64,
+    ),
+    expected_dead_letter_fingerprint: str | None = Query(
+        default=None,
+        min_length=64,
+        max_length=64,
+    ),
+    expected_candidate_version: str | None = Query(
+        default=None,
+        min_length=64,
+        max_length=64,
+    ),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        preview = preview_incremental_evaluation_dead_letter_disposition(
+            connection,
+            dead_letter_id,
+            action=action,
+            expected_dead_letter_fingerprint=expected_dead_letter_fingerprint,
+            expected_candidate_version=expected_candidate_version,
+        )
+        if not bool(preview.get("eligible")):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=preview,
+            )
+        return preview
+    except IncrementalEvaluationDeadLetterResolutionError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.to_dict(),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"status": "INVALID_DISPOSITION_PREVIEW", "message": str(exc)},
+        ) from exc
     finally:
         connection.close()
 
@@ -1728,16 +1815,18 @@ def operator_incremental_evaluation_run_once(
 def operator_incremental_evaluation_dead_letter_reset(
     dead_letter_id: str = Query(min_length=1, max_length=200),
 ) -> dict[str, Any]:
-    settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
-    try:
-        return reset_incremental_evaluation_dead_letter(
-            connection,
-            dead_letter_id,
-            reset_by="operator_api",
-        )
-    finally:
-        connection.close()
+    raise HTTPException(
+        status_code=http_status.HTTP_409_CONFLICT,
+        detail={
+            "status": "UNGUARDED_RESET_DISABLED",
+            "dead_letter_id": dead_letter_id,
+            "message": (
+                "Use the offline guarded recovery workflow; the legacy reset API "
+                "is disabled."
+            ),
+            "no_order_side_effects": True,
+        },
+    )
 
 
 @router.post(
