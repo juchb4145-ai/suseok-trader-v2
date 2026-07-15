@@ -11,7 +11,11 @@ from services.live_sim.order_plan_eligibility import (
 from services.pipeline_coherency import build_pipeline_coherency_status
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
-from storage.sqlite import SCHEMA_VERSION, initialize_database
+from storage.sqlite import (
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 from tests.test_entry_timing import _raise_fixture_turnover, _settings
 from tests.test_live_sim_order_plan_pipeline import (
     _pilot_settings,
@@ -67,16 +71,15 @@ def test_schema_59_pipeline_lineage_migration_is_additive_and_reentrant(tmp_path
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
-    rerun = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
+    rerun = initialize_database_for_offline_migration(db_path)
     try:
         schema_version = migrated.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
         ).fetchone()["value"]
         migrated_columns = {
             table_name: {
-                row["name"]
-                for row in migrated.execute(f"PRAGMA table_info({table_name})")
+                row["name"] for row in migrated.execute(f"PRAGMA table_info({table_name})")
             }
             for table_name in table_columns
         }
@@ -89,7 +92,7 @@ def test_schema_59_pipeline_lineage_migration_is_additive_and_reentrant(tmp_path
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "61"
+    assert schema_version == str(SCHEMA_VERSION) == "62"
     for table_name, columns in table_columns.items():
         assert columns <= migrated_columns[table_name]
     assert {
@@ -129,33 +132,24 @@ def test_candidate_to_order_plan_persists_one_coherent_source_run(tmp_path) -> N
         max_age_sec=settings.entry_timing_stale_max_seconds,
     )
     rows = {
-        "strategy": connection.execute(
-            "SELECT * FROM strategy_observations_latest"
-        ).fetchone(),
+        "strategy": connection.execute("SELECT * FROM strategy_observations_latest").fetchone(),
         "risk": connection.execute("SELECT * FROM risk_observations_latest").fetchone(),
-        "entry": connection.execute(
-            "SELECT * FROM entry_timing_evaluations"
-        ).fetchone(),
+        "entry": connection.execute("SELECT * FROM entry_timing_evaluations").fetchone(),
         "plan": connection.execute("SELECT * FROM order_plan_drafts_latest").fetchone(),
     }
-    command_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM gateway_commands"
-    ).fetchone()["count"]
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
     connection.close()
 
     assert result.plan_ready_count == 1
     assert status["status"] == "PASS"
     assert status["coherent_count"] == 1
-    assert {row["source_run_id"] for row in rows.values()} == {
-        "pipeline-run-coherent"
-    }
+    assert {row["source_run_id"] for row in rows.values()} == {"pipeline-run-coherent"}
     assert len({row["source_watermark_hash"] for row in rows.values()}) == 1
     assert rows["risk"]["strategy_observation_id"] == strategy.strategy_observation_id
     assert rows["entry"]["risk_observation_id"] == risk.risk_observation_id
-    assert (
-        rows["plan"]["entry_timing_evaluation_id"]
-        == rows["entry"]["entry_timing_evaluation_id"]
-    )
+    assert rows["plan"]["entry_timing_evaluation_id"] == rows["entry"]["entry_timing_evaluation_id"]
     assert command_count == 0
 
 
@@ -188,9 +182,9 @@ def test_watermark_mismatch_blocks_plan_ready_and_dashboard_reports_fail(tmp_pat
         connection,
         max_age_sec=settings.entry_timing_stale_max_seconds,
     )
-    command_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM gateway_commands"
-    ).fetchone()["count"]
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
     connection.close()
 
     assert result.plan_ready_count == 0
@@ -308,8 +302,7 @@ def test_pipeline_coherency_operator_and_fast_dashboard_are_read_only(
             "/api/operator/pipeline-coherency/status?trade_date=2026-07-10&limit=5"
         )
         dashboard = client.get(
-            "/api/dashboard/snapshot?fast=true&sections="
-            "pipeline_coherency,pipeline_summary"
+            "/api/dashboard/snapshot?fast=true&sections=pipeline_coherency,pipeline_summary"
         )
 
     assert operator.status_code == 200
@@ -320,6 +313,36 @@ def test_pipeline_coherency_operator_and_fast_dashboard_are_read_only(
     assert dashboard.status_code == 200
     assert dashboard.json()["pipeline_coherency"]["status"] == "WARN"
     assert dashboard.json()["pipeline_summary"]["coherency"]["status"] == "WARN"
+
+
+def test_pipeline_coherency_rca_operator_routes_are_read_only(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "pipeline-rca-api.sqlite3"
+    initialize_database(db_path).close()
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+
+    with TestClient(app) as client:
+        rca = client.get(
+            "/api/operator/pipeline-coherency/rca/status?trade_date=2026-07-15&limit=5&offset=0"
+        )
+        dispositions = client.get("/api/operator/pipeline-coherency/dispositions?limit=5")
+        preview = client.get(
+            "/api/operator/pipeline-coherency/disposition-preview"
+            "?trade_date=2026-07-15&candidate_instance_id=missing-candidate"
+            "&action=DISPOSE_ORPHAN_PIPELINE_OBSERVATION"
+        )
+
+    assert rca.status_code == 200
+    assert rca.json()["read_only"] is True
+    assert rca.json()["full_count"] == 0
+    assert dispositions.status_code == 200
+    assert dispositions.json()["items"] == []
+    assert dispositions.json()["read_only"] is True
+    assert preview.status_code == 409
+    assert not (tmp_path / "pipeline-rca-api.sqlite3-wal").exists()
+    assert not (tmp_path / "pipeline-rca-api.sqlite3-shm").exists()
 
 
 def test_live_sim_order_plan_revalidates_persisted_lineage(tmp_path) -> None:
@@ -353,16 +376,17 @@ def test_live_sim_order_plan_revalidates_persisted_lineage(tmp_path) -> None:
         connection,
         max_age_sec=999_999_999,
     )
-    command_count = connection.execute(
-        "SELECT COUNT(*) AS count FROM gateway_commands"
-    ).fetchone()["count"]
+    command_count = connection.execute("SELECT COUNT(*) AS count FROM gateway_commands").fetchone()[
+        "count"
+    ]
     connection.close()
 
     assert eligibility.eligible is False
     assert LiveSimReasonCode.ORDER_PLAN_LINEAGE_INVALID.value in eligibility.reason_codes
     assert eligibility.evidence_json["pipeline_lineage_guard"]["status"] == "FAIL"
-    assert "ORDER_PLAN_WATERMARK_HASH_INVALID" in eligibility.evidence_json[
-        "pipeline_lineage_guard"
-    ]["reason_codes"]
+    assert (
+        "ORDER_PLAN_WATERMARK_HASH_INVALID"
+        in eligibility.evidence_json["pipeline_lineage_guard"]["reason_codes"]
+    )
     assert coherency["status"] == "FAIL"
     assert command_count == 0

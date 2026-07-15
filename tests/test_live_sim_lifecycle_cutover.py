@@ -17,7 +17,11 @@ from services.runtime.live_sim_lifecycle_consumer import (
     process_live_sim_lifecycle_batch,
 )
 from storage.event_store import append_gateway_event
-from storage.sqlite import SCHEMA_VERSION, initialize_database
+from storage.sqlite import (
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 
 
 def _event(event_id: str) -> GatewayEvent:
@@ -53,8 +57,8 @@ def test_lifecycle_cutover_tables_migrate_and_rerun(tmp_path) -> None:
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
-    rerun = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
+    rerun = initialize_database_for_offline_migration(db_path)
     try:
         schema_version = migrated.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
@@ -75,7 +79,7 @@ def test_lifecycle_cutover_tables_migrate_and_rerun(tmp_path) -> None:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "61"
+    assert schema_version == str(SCHEMA_VERSION) == "62"
     assert "live_sim_lifecycle_consumer_runs" in tables
     assert "live_sim_lifecycle_routing_decisions" in tables
     assert "idx_live_sim_lifecycle_routing_effective" in indexes

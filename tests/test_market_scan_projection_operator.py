@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from apps.core_api import app
 from fastapi.testclient import TestClient
-from storage.sqlite import initialize_database, open_connection
+from storage.sqlite import (
+    initialize_database,
+    initialize_database_for_offline_migration,
+    open_connection,
+)
 
 
 def test_schema_53_additively_migrates_market_scan_projection_contract(tmp_path) -> None:
@@ -31,7 +35,7 @@ def test_schema_53_additively_migrates_market_scan_projection_contract(tmp_path)
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     schema_version = migrated.execute(
         "SELECT value FROM app_metadata WHERE key = 'schema_version'"
     ).fetchone()["value"]
@@ -57,7 +61,7 @@ def test_schema_53_additively_migrates_market_scan_projection_contract(tmp_path)
     migrated.close()
     initialize_database(db_path).close()
 
-    assert schema_version == "61"
+    assert schema_version == "62"
     lineage = {"source_event_id", "request_id", "parser_status", "generated_by"}
     assert lineage <= snapshot_columns
     assert lineage <= latest_columns
@@ -150,7 +154,7 @@ def test_schema_54_adds_market_scan_cutover_budget_and_controller_columns(
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     schema_version = migrated.execute(
         "SELECT value FROM app_metadata WHERE key = 'schema_version'"
     ).fetchone()["value"]
@@ -175,7 +179,7 @@ def test_schema_54_adds_market_scan_cutover_budget_and_controller_columns(
     migrated.close()
     initialize_database(db_path).close()
 
-    assert schema_version == "61"
+    assert schema_version == "62"
     assert set(columns) <= migrated_columns
     assert "idx_market_scan_routing_effective_skip" in indexes
     assert budget_exists == 1

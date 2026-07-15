@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from apps.core_api import app
 from fastapi.testclient import TestClient
-from storage.sqlite import initialize_database, open_connection
+from storage.sqlite import (
+    initialize_database,
+    initialize_database_for_offline_migration,
+    open_connection,
+)
 
 
 def test_schema_51_additively_migrates_market_regime_projection_tables(
@@ -20,7 +24,7 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     schema_version = migrated.execute(
         "SELECT value FROM app_metadata WHERE key = 'schema_version'"
     ).fetchone()["value"]
@@ -49,7 +53,7 @@ def test_schema_51_additively_migrates_market_regime_projection_tables(
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "61"
+    assert schema_version == "62"
     assert {
         "market_regime_projection_reconcile_issues",
         "market_regime_projection_reconcile_runs",
@@ -86,7 +90,7 @@ def test_schema_52_adds_market_regime_cutover_budget_and_routing_columns(
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     schema_version = migrated.execute(
         "SELECT value FROM app_metadata WHERE key = 'schema_version'"
     ).fetchone()["value"]
@@ -112,7 +116,7 @@ def test_schema_52_adds_market_regime_cutover_budget_and_routing_columns(
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "61"
+    assert schema_version == "62"
     assert set(new_columns) <= columns
     assert "idx_market_regime_routing_effective_skip" in indexes
     assert budget_exists == 1

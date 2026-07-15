@@ -15,7 +15,10 @@ from storage.live_sim_order_plan_uniqueness import (
     LiveSimOrderPlanUniquenessError,
     get_live_sim_order_plan_uniqueness_status,
 )
-from storage.sqlite import initialize_database
+from storage.sqlite import (
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 from tests.test_live_sim_order_plan_pipeline import (
     _pilot_settings,
     _prepared_order_plan_connection,
@@ -42,7 +45,7 @@ def test_legacy_order_plan_ids_are_backfilled_with_partial_unique_index_and_reen
         ],
     )
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
     migrated = connection.execute(
         """
         SELECT live_sim_intent_id, order_plan_id
@@ -95,7 +98,7 @@ def test_legacy_duplicate_order_plan_id_fails_closed_and_rolls_back_migration(
     )
 
     with pytest.raises(LiveSimOrderPlanUniquenessError) as raised:
-        initialize_database(db_path)
+        initialize_database_for_offline_migration(db_path)
 
     verification = sqlite3.connect(db_path)
     columns = {
@@ -129,7 +132,7 @@ def test_existing_order_plan_column_evidence_mismatch_fails_closed(tmp_path) -> 
     )
 
     with pytest.raises(LiveSimOrderPlanUniquenessError) as raised:
-        initialize_database(db_path)
+        initialize_database_for_offline_migration(db_path)
 
     verification = sqlite3.connect(db_path)
     row = verification.execute(

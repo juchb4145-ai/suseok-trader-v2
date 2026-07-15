@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from urllib.parse import quote
 
 from storage.gateway_order_broker_boundary import (
     ensure_gateway_order_broker_boundary_schema,
@@ -10,23 +11,75 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 61
+SCHEMA_VERSION = 62
 APP_NAME = "suseok-trader-v2"
+
+PIPELINE_QUALIFICATION_TABLE = "pipeline_coherency_dispositions"
+PIPELINE_QUALIFICATION_INDEXES = frozenset(
+    {
+        "idx_pipeline_coherency_disposition_effective",
+        "idx_pipeline_coherency_disposition_action_created",
+    }
+)
+PIPELINE_QUALIFICATION_TRIGGERS = frozenset(
+    {
+        "trg_pipeline_coherency_dispositions_no_update",
+        "trg_pipeline_coherency_dispositions_no_delete",
+    }
+)
 
 
 def open_connection(db_path: str | Path) -> sqlite3.Connection:
+    connection = _open_unconfigured_connection(db_path)
+    _configure_connection(connection)
+    return connection
+
+
+def _open_unconfigured_connection(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path)
     if path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
 
     connection = sqlite3.connect(path, timeout=15.0)
     connection.row_factory = sqlite3.Row
-    _configure_connection(connection)
     return connection
 
 
 def initialize_database(db_path: str | Path) -> sqlite3.Connection:
-    connection = open_connection(db_path)
+    return _initialize_database(db_path, allow_existing_migration=False)
+
+
+def initialize_database_for_offline_migration(
+    db_path: str | Path,
+) -> sqlite3.Connection:
+    """Run historical additive migrations only on an explicitly isolated clone.
+
+    Core and ordinary tools must use :func:`initialize_database`. Schema 61 is
+    deliberately excluded because its exact 61 -> 62 migration has a stricter
+    preflight-qualified public path.
+    """
+
+    _raise_if_schema_61_requires_exact_migration(Path(db_path))
+    return _initialize_database(db_path, allow_existing_migration=True)
+
+
+def _initialize_database(
+    db_path: str | Path,
+    *,
+    allow_existing_migration: bool,
+) -> sqlite3.Connection:
+    # Existing databases must never be upgraded, downgraded, or repaired across
+    # a schema-version boundary as a Core-startup side effect.
+    if not allow_existing_migration:
+        _raise_if_existing_database_schema_mismatch(Path(db_path))
+    connection = _open_unconfigured_connection(db_path)
+    try:
+        if not allow_existing_migration:
+            _raise_if_connection_schema_mismatch(connection)
+    except Exception:
+        connection.close()
+        raise
+    _configure_connection(connection)
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS app_metadata (
@@ -72,10 +125,171 @@ def initialize_database(db_path: str | Path) -> sqlite3.Connection:
     _create_live_sim_lifecycle_consumer_tables(connection)
     _create_live_sim_lifecycle_cutover_tables(connection)
     _create_operator_tables(connection)
+    _create_pipeline_qualification_tables(connection)
     _upsert_metadata(connection, "app_name", APP_NAME)
     _upsert_metadata(connection, "schema_version", str(SCHEMA_VERSION))
     connection.commit()
     return connection
+
+
+def _raise_if_schema_61_requires_exact_migration(path: Path) -> None:
+    if str(path) == ":memory:" or not path.is_file() or path.stat().st_size == 0:
+        return
+    resolved = path.expanduser().resolve()
+    uri_path = quote(resolved.as_posix(), safe="/:")
+    connection = sqlite3.connect(
+        f"file:{uri_path}?mode=ro&immutable=1",
+        uri=True,
+        timeout=15.0,
+    )
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'"
+        ).fetchone()
+        if table is None:
+            return
+        rows = connection.execute(
+            "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+        ).fetchall()
+        if len(rows) == 1 and str(rows[0][0]) == "61" and SCHEMA_VERSION == 62:
+            raise RuntimeError(
+                "schema 61 requires the exact preflight-qualified 61 -> 62 apply path; "
+                "generic offline migration is blocked"
+            )
+    finally:
+        connection.close()
+
+
+def _raise_if_existing_database_schema_mismatch(path: Path) -> None:
+    if str(path) == ":memory:" or not path.is_file() or path.stat().st_size == 0:
+        return
+    resolved = path.expanduser().resolve()
+    uri_path = quote(resolved.as_posix(), safe="/:")
+    connection = sqlite3.connect(
+        f"file:{uri_path}?mode=ro&immutable=1",
+        uri=True,
+        timeout=15.0,
+    )
+    try:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'"
+        ).fetchone()
+        if table is None:
+            raise RuntimeError(
+                "existing database has no schema metadata; initialize_database is blocked"
+            )
+        _raise_if_connection_schema_mismatch(connection)
+    finally:
+        connection.close()
+
+
+def _raise_if_connection_schema_mismatch(
+    connection: sqlite3.Connection,
+) -> None:
+    table = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'"
+    ).fetchone()
+    if table is None:
+        return
+    schema_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchall()
+    app_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'app_name'"
+    ).fetchall()
+    actual = None if len(schema_rows) != 1 else str(schema_rows[0][0])
+    actual_app = None if len(app_rows) != 1 else str(app_rows[0][0])
+    if (
+        len(schema_rows) == 1
+        and actual == str(SCHEMA_VERSION)
+        and len(app_rows) == 1
+        and actual_app == APP_NAME
+    ):
+        return
+    migration_hint = (
+        "schema 61 requires the exact preflight-qualified 61 -> 62 apply path"
+        if actual == "61" and SCHEMA_VERSION == 62
+        else "an explicit preflight-qualified migration or recovery path is required"
+    )
+    raise RuntimeError(
+        "existing database schema mismatch: "
+        f"code_target={SCHEMA_VERSION} actual={actual!r} rows={len(schema_rows)} "
+        f"expected_app={APP_NAME!r} actual_app={actual_app!r} app_rows={len(app_rows)}; "
+        f"{migration_hint}; initialize_database is blocked"
+    )
+
+
+def migrate_schema_61_to_62(connection: sqlite3.Connection) -> None:
+    """Apply only the additive schema 61 -> 62 pipeline ledger migration.
+
+    The caller owns the surrounding transaction and must commit or roll it back.
+    This deliberately does not call :func:`initialize_database`, change connection
+    pragmas, or make the migration generic for any other source schema.
+    """
+
+    if not connection.in_transaction:
+        raise RuntimeError("schema 61 -> 62 migration requires an active transaction")
+
+    databases = [str(row[1]) for row in connection.execute("PRAGMA database_list").fetchall()]
+    if databases != ["main"]:
+        raise RuntimeError("schema 61 -> 62 migration requires only the main database")
+
+    metadata_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchall()
+    if len(metadata_rows) != 1 or str(metadata_rows[0][0]) != "61":
+        actual = None if not metadata_rows else str(metadata_rows[0][0])
+        raise RuntimeError(
+            "schema 61 -> 62 source CAS mismatch: "
+            f"expected=61 actual={actual!r} rows={len(metadata_rows)}"
+        )
+    app_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'app_name'"
+    ).fetchall()
+    if len(app_rows) != 1 or str(app_rows[0][0]) != APP_NAME:
+        actual_app = None if not app_rows else str(app_rows[0][0])
+        raise RuntimeError(
+            "schema 61 -> 62 application identity mismatch: "
+            f"expected={APP_NAME!r} actual={actual_app!r} rows={len(app_rows)}"
+        )
+
+    target_objects = {
+        PIPELINE_QUALIFICATION_TABLE,
+        *PIPELINE_QUALIFICATION_INDEXES,
+        *PIPELINE_QUALIFICATION_TRIGGERS,
+    }
+    placeholders = ", ".join("?" for _ in target_objects)
+    existing_objects = connection.execute(
+        f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+        tuple(sorted(target_objects)),
+    ).fetchall()
+    if existing_objects:
+        names = sorted(str(row[0]) for row in existing_objects)
+        raise RuntimeError(
+            "schema 61 -> 62 target objects must be absent before migration: " + ",".join(names)
+        )
+
+    _create_pipeline_qualification_tables(connection)
+    updated = connection.execute(
+        """
+        UPDATE app_metadata
+        SET value = '62', updated_at = datetime('now')
+        WHERE key = 'schema_version' AND value = '61'
+        """
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("schema 61 -> 62 metadata CAS update failed")
+
+    row = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    if row is None or str(row[0]) != "62":
+        raise RuntimeError("schema 61 -> 62 metadata verification failed")
+    ledger_count = int(
+        connection.execute("SELECT COUNT(*) FROM pipeline_coherency_dispositions").fetchone()[0]
+    )
+    if ledger_count != 0:
+        raise RuntimeError("schema 61 -> 62 target ledger must start empty")
 
 
 def _configure_connection(connection: sqlite3.Connection) -> None:
@@ -1170,6 +1384,140 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         """
         CREATE INDEX IF NOT EXISTS idx_no_buy_sentinel_snapshots_status_created
         ON no_buy_sentinel_snapshots (status, created_at)
+        """
+    )
+
+
+def _create_pipeline_qualification_tables(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pipeline_coherency_dispositions (
+            disposition_id TEXT PRIMARY KEY NOT NULL,
+            request_id TEXT NOT NULL UNIQUE,
+            request_hash TEXT NOT NULL CHECK (
+                typeof(request_hash) = 'text'
+                AND length(request_hash) = 64
+                AND request_hash NOT GLOB '*[^0-9a-f]*'
+            ),
+            candidate_instance_id TEXT NOT NULL,
+            subject_key TEXT NOT NULL,
+            trade_date TEXT,
+            order_plan_id TEXT,
+            sequence_no INTEGER NOT NULL CHECK (
+                typeof(sequence_no) = 'integer' AND sequence_no > 0
+            ),
+            action TEXT NOT NULL CHECK (
+                action IN (
+                    'DISPOSE_EXPIRED_PLAN_READY',
+                    'DISPOSE_ORPHAN_PIPELINE_OBSERVATION',
+                    'DISPOSE_STALE_OTHER_DATE',
+                    'REVOKE'
+                )
+            ),
+            supersedes_disposition_id TEXT,
+            reason_code TEXT NOT NULL,
+            operator_id TEXT NOT NULL,
+            expected_pipeline_fingerprint TEXT NOT NULL CHECK (
+                typeof(expected_pipeline_fingerprint) = 'text'
+                AND length(expected_pipeline_fingerprint) = 64
+                AND expected_pipeline_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            expected_subject_version TEXT NOT NULL CHECK (
+                typeof(expected_subject_version) = 'text'
+                AND length(expected_subject_version) = 64
+                AND expected_subject_version NOT GLOB '*[^0-9a-f]*'
+            ),
+            expected_source_fingerprint TEXT NOT NULL CHECK (
+                typeof(expected_source_fingerprint) = 'text'
+                AND length(expected_source_fingerprint) = 64
+                AND expected_source_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            expected_candidate_fingerprint TEXT NOT NULL CHECK (
+                typeof(expected_candidate_fingerprint) = 'text'
+                AND length(expected_candidate_fingerprint) = 64
+                AND expected_candidate_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            expected_downstream_fingerprint TEXT NOT NULL CHECK (
+                typeof(expected_downstream_fingerprint) = 'text'
+                AND length(expected_downstream_fingerprint) = 64
+                AND expected_downstream_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            expected_boundary_fingerprint TEXT NOT NULL CHECK (
+                typeof(expected_boundary_fingerprint) = 'text'
+                AND length(expected_boundary_fingerprint) = 64
+                AND expected_boundary_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            evidence_type TEXT NOT NULL,
+            evidence_ref TEXT NOT NULL,
+            evidence_sha256 TEXT NOT NULL CHECK (
+                typeof(evidence_sha256) = 'text'
+                AND length(evidence_sha256) = 64
+                AND evidence_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            safety_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1 CHECK (
+                typeof(observe_only) = 'integer' AND observe_only = 1
+            ),
+            live_sim_allowed INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(live_sim_allowed) = 'integer' AND live_sim_allowed = 0
+            ),
+            live_real_allowed INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(live_real_allowed) = 'integer' AND live_real_allowed = 0
+            ),
+            order_commands_allowed INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(order_commands_allowed) = 'integer'
+                AND order_commands_allowed = 0
+            ),
+            not_order_intent INTEGER NOT NULL DEFAULT 1 CHECK (
+                typeof(not_order_intent) = 'integer' AND not_order_intent = 1
+            ),
+            no_order_side_effects INTEGER NOT NULL DEFAULT 1 CHECK (
+                typeof(no_order_side_effects) = 'integer'
+                AND no_order_side_effects = 1
+            ),
+            auto_run_evaluation INTEGER NOT NULL DEFAULT 0 CHECK (
+                typeof(auto_run_evaluation) = 'integer'
+                AND auto_run_evaluation = 0
+            ),
+            UNIQUE (subject_key, sequence_no),
+            FOREIGN KEY (supersedes_disposition_id)
+                REFERENCES pipeline_coherency_dispositions (disposition_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pipeline_coherency_disposition_effective
+        ON pipeline_coherency_dispositions (
+            subject_key,
+            sequence_no DESC
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_pipeline_coherency_disposition_action_created
+        ON pipeline_coherency_dispositions (action, created_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_pipeline_coherency_dispositions_no_update
+        BEFORE UPDATE ON pipeline_coherency_dispositions
+        BEGIN
+            SELECT RAISE(ABORT, 'pipeline coherency dispositions are append-only');
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_pipeline_coherency_dispositions_no_delete
+        BEFORE DELETE ON pipeline_coherency_dispositions
+        BEGIN
+            SELECT RAISE(ABORT, 'pipeline coherency dispositions are append-only');
+        END
         """
     )
 

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from apps.core_api import app
 from fastapi.testclient import TestClient
-from storage.sqlite import initialize_database, open_connection
+from storage.sqlite import (
+    initialize_database,
+    initialize_database_for_offline_migration,
+    open_connection,
+)
 
 
 def test_schema_48_additively_migrates_market_index_and_context_tables(tmp_path) -> None:
@@ -32,7 +36,7 @@ def test_schema_48_additively_migrates_market_index_and_context_tables(tmp_path)
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     schema_version = migrated.execute(
         "SELECT value FROM app_metadata WHERE key = 'schema_version'"
     ).fetchone()["value"]
@@ -106,7 +110,7 @@ def test_schema_48_additively_migrates_market_index_and_context_tables(tmp_path)
     rerun = initialize_database(db_path)
     rerun.close()
 
-    assert schema_version == "61"
+    assert schema_version == "62"
     assert {
         "market_index_projection_reconcile_issues",
         "market_index_projection_reconcile_runs",

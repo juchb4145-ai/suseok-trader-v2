@@ -197,7 +197,7 @@ def test_disposition_apply_is_append_only_idempotent_and_redacts_evidence_path(
     safe_env = _write_safe_env(tmp_path, db_path)
     monkeypatch.setenv("TRADING_ENV_FILE", str(safe_env))
     evidence_content = '{"classification":"obsolete-closed-candidate"}'
-    evidence = tmp_path / "private-account-81271118-evidence.json"
+    evidence = tmp_path / "private-account-98765432-evidence.json"
     evidence.write_text(evidence_content, encoding="utf-8")
     fingerprint, candidate_version = _preview_versions(db_path, capsys)
     args = _disposition_args(
@@ -1363,7 +1363,7 @@ def test_account_like_operator_label_is_rejected_before_write(
         candidate_version=candidate_version,
     )
     operator_index = args.index("--operator-id") + 1
-    args[operator_index] = "operator.8127-1118"
+    args[operator_index] = "operator.9876-5432"
 
     exit_code = main(args)
     payload = json.loads(capsys.readouterr().out)
@@ -1379,22 +1379,22 @@ def test_sanitize_redacts_paths_secrets_and_labeled_account_values() -> None:
             {
                 "message": (
                     r"failed C:\private\evidence.json "
-                    "token=super-secret-token account=8127-1118 "
+                    "token=super-secret-token account=9876-5432 "
                     "access_token=access-token-value client_secret=client-secret-value "
                     "raw-account 1234-5678 plain-account 12345678 "
                     "refreshToken=refresh-token-value clientSecret=camel-secret-value "
                     "Authorization: Digest username=alice, response=secret-response"
                 ),
-                "raw_json": ('{"token":"nested-secret-token","account_id":"8127-1118"}'),
+                "raw_json": ('{"token":"nested-secret-token","account_id":"9876-5432"}'),
                 "bearer": "Authorization: Bearer abcdefghijklmnop",
                 "embedded": (
                     'failed payload={"token":"embedded-secret-token",'
-                    '"account_id":"8127-1118","password":"hunter2",'
+                    '"account_id":"9876-5432","password":"hunter2",'
                     '"credential":"embedded-credential"}'
                 ),
-                "embedded_numeric": ('failed payload={"account_id":81271118,"token":123456789}'),
+                "embedded_numeric": ('failed payload={"account_id":98765432,"token":123456789}'),
                 "embedded_escaped_quote": (
-                    'failed payload={"token":"abc\\"remaining-secret","account_id":"81271118"}'
+                    'failed payload={"token":"abc\\"remaining-secret","account_id":"98765432"}'
                 ),
                 "api_key": "opaque-api-key-value",
                 "authorization": "opaque-authorization-value",
@@ -1425,7 +1425,7 @@ def test_sanitize_redacts_paths_secrets_and_labeled_account_values() -> None:
     assert "opaque-authorization-value" not in rendered
     assert "opaque-password-value" not in rendered
     assert "opaque-credential-value" not in rendered
-    assert "8127-1118" not in rendered
+    assert "9876-5432" not in rendered
     assert "REDACTED_PATH" in rendered
     assert "REDACTED_SECRET" in rendered
     assert "REDACTED_ACCOUNT" in rendered
