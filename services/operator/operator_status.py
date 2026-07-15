@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any
 
@@ -17,11 +18,12 @@ from services.candidate_service import get_candidate_status
 from services.config import Settings, load_settings
 from services.dashboard_service import build_safety_section
 from services.entry_timing.service import get_entry_timing_status
+from services.live_sim.execution_lifecycle_status import (
+    build_live_sim_execution_lifecycle_status,
+)
 from services.live_sim.live_sim_service import (
     get_latest_live_sim_reconcile,
     get_live_sim_status,
-    list_live_sim_errors,
-    list_live_sim_lifecycle_events,
 )
 from services.market_data_service import get_market_data_status
 from services.market_index_service import get_market_index_status
@@ -66,6 +68,74 @@ from services.theme_coherency import build_theme_coherency_status
 from services.theme_diagnostics import build_theme_data_wait_diagnostics
 from services.theme_service import get_theme_status
 
+_PUBLIC_LIFECYCLE_STATUS_KEYS = (
+    "status",
+    "qualification_status",
+    "qualification_reason_codes",
+    "canonical_status",
+    "canonical_reason_codes",
+    "canonical",
+    "classification_counts",
+    "raw_error_count",
+    "mirror_lifecycle_count",
+    "logical_subject_count",
+    "active_lifecycle_blocker_count",
+    "historical_runtime_status_audit_count",
+    "manual_review_blocker_count",
+    "active_reconcile_blocker_count",
+    "historical_reconcile_event_count",
+    "reconcile_manual_review_count",
+    "effective_blocker_count",
+    "mirrored_pair_count",
+    "mirror_consistent",
+    "reconcile",
+    "code_filter",
+    "code_filter_diagnostic_only",
+    "limit",
+    "offset",
+    "returned_count",
+    "full_count",
+    "has_more",
+    "next_offset",
+    "pagination",
+    "inventory_count_consistent",
+    "inventory_digest",
+    "scanned_inventory_digest",
+    "ending_inventory_digest",
+    "read_only",
+    "observe_only",
+    "no_order_side_effects",
+    "real_order_allowed",
+)
+_PUBLIC_LIFECYCLE_ITEM_KEYS = (
+    "subject_id",
+    "subject_fingerprint",
+    "classification",
+    "reason_codes",
+    "mirror_status",
+    "error_surface_count",
+    "lifecycle_surface_count",
+    "created_at",
+    "code",
+    "inner_event_type",
+    "payload_sha256",
+    "event_metadata_consistent",
+    "identifier_free",
+)
+_PUBLIC_LIFECYCLE_INNER_EVENT_TYPES = frozenset({"heartbeat", "orderability"})
+_SENSITIVE_LIFECYCLE_VALUE_PATTERNS = (
+    re.compile(r"(?i)(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?i)github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"(?i)\bsk-[A-Za-z0-9_-]{20,}\b"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{16,}=*"),
+    re.compile(r"(?i)(?:acct|account|계좌)[_.:@/-]?\d{6,16}"),
+    re.compile(r"(?<![A-Za-z0-9])\d{8,16}(?![A-Za-z0-9])"),
+)
+_HYPHENATED_ACCOUNT_PATTERN = re.compile(
+    r"(?<!\d)\d{3,6}-\d{2,6}(?:-\d{1,6})?(?!\d)"
+)
+_ISO_DATE_PATTERN = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
+
 
 def build_operator_status(
     connection: sqlite3.Connection,
@@ -100,6 +170,23 @@ def build_operator_status(
         settings=resolved_settings,
         limit=20,
     )
+    execution_lifecycle = build_live_sim_execution_lifecycle_public_status(
+        connection,
+        limit=1,
+        offset=0,
+    )
+    for page_key in (
+        "items",
+        "code_filter",
+        "limit",
+        "offset",
+        "returned_count",
+        "has_more",
+        "next_offset",
+        "pagination",
+    ):
+        execution_lifecycle.pop(page_key, None)
+    execution_lifecycle["summary_only"] = True
 
     return {
         "generated_at": generated_at,
@@ -170,10 +257,7 @@ def build_operator_status(
                 ),
                 "latest_runs": list_live_sim_pilot_runs(connection, limit=5),
             },
-            "execution_lifecycle": {
-                "recent_events": list_live_sim_lifecycle_events(connection, limit=5),
-                "recent_errors": list_live_sim_errors(connection, limit=5),
-            },
+            "execution_lifecycle": execution_lifecycle,
             "reconcile_latest": latest_reconcile,
         },
         "market_data": get_market_data_status(connection, settings=resolved_settings),
@@ -260,3 +344,101 @@ def build_operator_status(
         "ai_advisory": build_ai_advisory_status(connection, settings=resolved_settings),
         "no_buy_sentinel": no_buy_latest,
     }
+
+
+def build_live_sim_execution_lifecycle_public_status(
+    connection: sqlite3.Connection,
+    *,
+    limit: int = 100,
+    offset: int = 0,
+    code: str | None = None,
+) -> dict[str, Any]:
+    status = build_live_sim_execution_lifecycle_status(
+        connection,
+        limit=limit,
+        offset=offset,
+        code=code,
+    )
+    if not isinstance(status, dict):
+        raise TypeError("execution lifecycle classifier must return a mapping")
+    missing_status_keys = set(_PUBLIC_LIFECYCLE_STATUS_KEYS).difference(status)
+    if missing_status_keys:
+        raise ValueError("execution lifecycle classifier status contract is incomplete")
+    public = {
+        key: _sanitize_lifecycle_public_value(status.get(key), key=key)
+        for key in _PUBLIC_LIFECYCLE_STATUS_KEYS
+        if key in status
+    }
+    items = status.get("items")
+    if not isinstance(items, list):
+        raise TypeError("execution lifecycle classifier items must be a list")
+    if (
+        not all(isinstance(item, dict) for item in items)
+        or any(
+            set(_PUBLIC_LIFECYCLE_ITEM_KEYS).difference(item)
+            for item in items
+            if isinstance(item, dict)
+        )
+        or status.get("returned_count") != len(items)
+    ):
+        raise ValueError("execution lifecycle classifier item contract is invalid")
+    public["items"] = [
+        {
+            key: _sanitize_lifecycle_public_value(item.get(key), key=key)
+            for key in _PUBLIC_LIFECYCLE_ITEM_KEYS
+            if key in item
+        }
+        for item in items
+        if isinstance(item, dict)
+    ]
+    public["raw_payload_exposed"] = False
+    public["account_identifier_exposed"] = False
+    public["token_exposed"] = False
+    return public
+
+
+def _sanitize_lifecycle_public_value(value: Any, *, key: str) -> Any:
+    lowered = key.lower()
+    if lowered == "inner_event_type":
+        return (
+            value
+            if isinstance(value, str)
+            and value in _PUBLIC_LIFECYCLE_INNER_EVENT_TYPES
+            else None
+        )
+    if (
+        lowered in {"payload", "raw_payload", "error_message"}
+        or "account" in lowered
+        or "token" in lowered
+        or "password" in lowered
+        or "secret" in lowered
+    ) and not lowered.endswith("_sha256"):
+        return "[REDACTED]"
+    if isinstance(value, dict):
+        return {
+            str(child_key): _sanitize_lifecycle_public_value(
+                child_value,
+                key=str(child_key),
+            )
+            for child_key, child_value in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_lifecycle_public_value(item, key=key)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return [
+            _sanitize_lifecycle_public_value(item, key=key)
+            for item in value
+        ]
+    if isinstance(value, str):
+        if any(
+            pattern.search(value) is not None
+            for pattern in _SENSITIVE_LIFECYCLE_VALUE_PATTERNS
+        ):
+            return "[REDACTED]"
+        without_iso_dates = _ISO_DATE_PATTERN.sub("", value)
+        if _HYPHENATED_ACCOUNT_PATTERN.search(without_iso_dates) is not None:
+            return "[REDACTED]"
+    return value

@@ -138,6 +138,62 @@ def _healthy_results() -> dict[str, dict[str, object]]:
         "live_sim_rejections": _ok("LiveSim", {"rejections": []}),
         "live_sim_errors": _ok("LiveSim", {"errors": []}),
         "live_sim_reconcile_latest": _ok("LiveSim", {"reconcile": None}),
+        "live_sim_execution_lifecycle_status": _ok(
+            "LiveSim",
+            _healthy_lifecycle_qualification(),
+        ),
+    }
+
+
+def _healthy_lifecycle_qualification() -> dict[str, object]:
+    digest = "a" * 64
+    return {
+        "status": "PASS",
+        "qualification_status": "PASS",
+        "qualification_reason_codes": [],
+        "canonical_status": "PASS",
+        "canonical_reason_codes": [],
+        "classification_counts": {
+            "ACTIVE_LIFECYCLE_BLOCKER": 0,
+            "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+            "MANUAL_REVIEW_BLOCKER": 0,
+        },
+        "raw_error_count": 0,
+        "mirror_lifecycle_count": 0,
+        "logical_subject_count": 0,
+        "active_lifecycle_blocker_count": 0,
+        "historical_runtime_status_audit_count": 0,
+        "manual_review_blocker_count": 0,
+        "active_reconcile_blocker_count": 0,
+        "historical_reconcile_event_count": 0,
+        "reconcile_manual_review_count": 0,
+        "effective_blocker_count": 0,
+        "mirror_consistent": True,
+        "code_filter": None,
+        "code_filter_diagnostic_only": True,
+        "limit": 500,
+        "offset": 0,
+        "returned_count": 0,
+        "full_count": 0,
+        "has_more": False,
+        "next_offset": None,
+        "pagination": {
+            "limit": 500,
+            "offset": 0,
+            "returned_count": 0,
+            "full_count": 0,
+            "has_more": False,
+            "next_offset": None,
+        },
+        "inventory_count_consistent": True,
+        "inventory_digest": digest,
+        "scanned_inventory_digest": digest,
+        "ending_inventory_digest": digest,
+        "read_only": True,
+        "observe_only": True,
+        "no_order_side_effects": True,
+        "real_order_allowed": False,
+        "items": [],
     }
 
 

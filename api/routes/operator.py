@@ -21,7 +21,10 @@ from services.operator.no_buy_sentinel import (
     get_latest_no_buy_sentinel_snapshot,
     rebuild_no_buy_sentinel_snapshot,
 )
-from services.operator.operator_status import build_operator_status
+from services.operator.operator_status import (
+    build_live_sim_execution_lifecycle_public_status,
+    build_operator_status,
+)
 from services.pipeline_coherency import (
     build_pipeline_coherency_rca_status,
     build_pipeline_coherency_status,
@@ -635,6 +638,28 @@ def operator_live_sim_order_plan_uniqueness_status() -> dict[str, Any]:
     connection = open_connection(settings.trading_db_path)
     try:
         return get_live_sim_order_plan_uniqueness_status(connection)
+    finally:
+        connection.close()
+
+
+@router.get(
+    "/live-sim/execution-lifecycle/status",
+    dependencies=[Depends(require_local_token)],
+)
+def operator_live_sim_execution_lifecycle_status(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    code: str | None = Query(default=None, min_length=1, max_length=32),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
+    try:
+        return build_live_sim_execution_lifecycle_public_status(
+            connection,
+            limit=limit,
+            offset=offset,
+            code=code,
+        )
     finally:
         connection.close()
 

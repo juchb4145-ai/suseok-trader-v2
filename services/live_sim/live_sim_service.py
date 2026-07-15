@@ -6,7 +6,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Never
 
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
@@ -42,6 +42,9 @@ from storage.gateway_command_store import enqueue_command
 from services.admission import AdmissionPolicy, AdmissionReason, evaluate_trade_admission
 from services.config import Settings, load_settings
 from services.entry_timing.tick_size import add_ticks
+from services.live_sim.execution_lifecycle_status import (
+    build_live_sim_execution_lifecycle_status,
+)
 from services.live_sim.safety_gate import check_live_sim_safety_gate, is_simulation_like
 
 ACTIVE_LIVE_SIM_INTENT_STATUSES = {
@@ -285,7 +288,7 @@ def evaluate_live_sim_eligibility(
             reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_EXIT_EXISTS.value)
         if _active_cancel_count_for_code(connection, code) > 0:
             reason_codes.append(LiveSimReasonCode.LIVE_SIM_ACTIVE_CANCEL_EXISTS.value)
-        if _unresolved_lifecycle_error_count(connection, code=code) > 0:
+        if _unresolved_lifecycle_error_count(connection) > 0:
             reason_codes.append(LiveSimReasonCode.LIVE_SIM_LIFECYCLE_ERROR_BLOCK.value)
         if (
             _daily_order_count(connection, trade_date)
@@ -520,11 +523,22 @@ def queue_live_sim_order_command(
         payload=payload,
         idempotency_key=intent_row["idempotency_key"],
     )
-    enqueue_result = enqueue_command(
-        connection,
-        command,
-        expires_at=intent_row.get("expires_at"),
-    )
+    buy_boundary = intent_row["side"] == LiveSimSide.BUY.value
+    boundary_lock_owned = False
+    if buy_boundary:
+        boundary_lock_owned = _acquire_buy_queue_boundary_write_lock(connection)
+    try:
+        if buy_boundary:
+            _enforce_buy_execution_lifecycle_queue_boundary(connection, intent_row)
+        enqueue_result = enqueue_command(
+            connection,
+            command,
+            expires_at=intent_row.get("expires_at"),
+        )
+    except BaseException:
+        if boundary_lock_owned and connection.in_transaction:
+            connection.rollback()
+        raise
     if not enqueue_result.accepted:
         _save_rejection(
             connection,
@@ -4486,66 +4500,158 @@ def _latest_reconcile_blocks_new_buy(
 
 def _unresolved_lifecycle_error_count(
     connection: sqlite3.Connection,
-    *,
-    code: str | None = None,
 ) -> int:
-    clauses = [
-        """
-        (
-            event_type = 'LIFECYCLE_ERROR'
-            AND NOT (
-                entity_type = 'LIVE_SIM_ERROR'
-                AND reason = 'UNKNOWN_LIVE_SIM_GATEWAY_EVENT'
-                AND live_sim_order_id IS NULL
-                AND position_id IS NULL
-            )
+    status = _execution_lifecycle_blocker_status(connection)
+    return status["effective_blocker_count"]
+
+
+def _effective_lifecycle_blocker_count(status: Mapping[str, Any]) -> int:
+    effective_blocker_count = status.get("effective_blocker_count")
+    if isinstance(effective_blocker_count, bool) or not isinstance(
+        effective_blocker_count, int
+    ):
+        raise ValueError("execution lifecycle effective blocker count must be an integer")
+    count = effective_blocker_count
+    if count < 0:
+        raise ValueError("execution lifecycle effective blocker count cannot be negative")
+    qualification_status = status.get("qualification_status")
+    status_alias = status.get("status")
+    if not isinstance(qualification_status, str) or qualification_status not in {
+        "PASS",
+        "BLOCKED",
+    }:
+        raise ValueError("execution lifecycle qualification status is invalid")
+    if not isinstance(status_alias, str) or status_alias != qualification_status:
+        raise ValueError("execution lifecycle status alias does not match qualification")
+    if qualification_status == "PASS" and count != 0:
+        raise ValueError("passing execution lifecycle status cannot contain blockers")
+    if qualification_status == "BLOCKED" and count < 1:
+        raise ValueError("blocked execution lifecycle status requires a blocker")
+    return count
+
+
+def _execution_lifecycle_blocker_status(
+    connection: sqlite3.Connection,
+) -> Mapping[str, Any]:
+    """Return the global lifecycle qualification used by all new-BUY gates."""
+
+    status = build_live_sim_execution_lifecycle_status(connection)
+    if not isinstance(status, Mapping):
+        raise TypeError("execution lifecycle status must be a mapping")
+    _validate_execution_lifecycle_blocker_status(status)
+    return status
+
+
+def _acquire_buy_queue_boundary_write_lock(connection: sqlite3.Connection) -> bool:
+    """Serialize the final lifecycle check with the gateway command insert.
+
+    ``enqueue_command`` commits its insert, so an IMMEDIATE transaction here keeps
+    other SQLite writers out from the classifier read through that existing commit
+    boundary. A caller-owned transaction is upgraded with a zero-row write.
+    """
+
+    if connection.in_transaction:
+        connection.execute(
+            "UPDATE live_sim_intents SET status = status WHERE 0"
         )
-        """,
-    ]
-    params: list[Any] = []
-    if code is not None:
-        clauses.append("evidence_json LIKE ?")
-        params.append(f'%"{validate_stock_code(code)}"%')
-    row = connection.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM live_sim_lifecycle_events
-        WHERE {" AND ".join(clauses)}
-        """,
-        tuple(params),
-    ).fetchone()
-    lifecycle_error_count = int(row["count"] or 0)
-    if _latest_reconcile_is_clean(connection):
-        return lifecycle_error_count
-
-    reconcile_clauses = ["event_type = 'RECONCILE_MISMATCH'"]
-    reconcile_params: list[Any] = []
-    if code is not None:
-        reconcile_clauses.append("evidence_json LIKE ?")
-        reconcile_params.append(f'%"{validate_stock_code(code)}"%')
-    reconcile_row = connection.execute(
-        f"""
-        SELECT COUNT(*) AS count
-        FROM live_sim_lifecycle_events
-        WHERE {" AND ".join(reconcile_clauses)}
-        """,
-        tuple(reconcile_params),
-    ).fetchone()
-    return lifecycle_error_count + int(reconcile_row["count"] or 0)
-
-
-def _latest_reconcile_is_clean(connection: sqlite3.Connection) -> bool:
-    row = connection.execute(
-        """
-        SELECT mismatch_count, blocking_new_buy
-        FROM live_sim_reconcile_snapshots
-        ORDER BY created_at DESC, reconcile_id DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    if row is None:
         return False
-    return int(row["mismatch_count"] or 0) == 0 and not bool(row["blocking_new_buy"])
+    connection.execute("BEGIN IMMEDIATE")
+    return True
+
+
+def _enforce_buy_execution_lifecycle_queue_boundary(
+    connection: sqlite3.Connection,
+    intent_row: Mapping[str, Any],
+) -> None:
+    effective_blocker_count = 0
+    classifier_error_type: str | None = None
+    try:
+        status = _execution_lifecycle_blocker_status(connection)
+        effective_blocker_count = status["effective_blocker_count"]
+    except Exception as exc:
+        classifier_error_type = type(exc).__name__
+    if classifier_error_type is not None:
+        _reject_buy_execution_lifecycle_queue_boundary(
+            connection,
+            intent_row,
+            gate_evidence={
+                "stage": "gateway_send_order_enqueue_boundary",
+                "scope": "GLOBAL",
+                "status": "BLOCKED",
+                "qualification_status": "BLOCKED",
+                "effective_blocker_count": 1,
+                "classifier_fail_closed": True,
+                "classifier_error_type": classifier_error_type,
+                "live_sim_only": True,
+                "live_real_allowed": False,
+            },
+        )
+    if effective_blocker_count < 1:
+        return
+    _reject_buy_execution_lifecycle_queue_boundary(
+        connection,
+        intent_row,
+        gate_evidence={
+            "stage": "gateway_send_order_enqueue_boundary",
+            "scope": "GLOBAL",
+            "status": "BLOCKED",
+            "qualification_status": "BLOCKED",
+            "effective_blocker_count": effective_blocker_count,
+            "classifier_fail_closed": False,
+            "classifier_error_type": None,
+            "live_sim_only": True,
+            "live_real_allowed": False,
+        },
+    )
+
+
+def _validate_execution_lifecycle_blocker_status(
+    status: Mapping[str, Any],
+) -> int:
+    effective_blocker_count = _effective_lifecycle_blocker_count(status)
+    qualification_status = status["qualification_status"]
+    for key in ("mirror_consistent", "inventory_count_consistent"):
+        value = status.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"execution lifecycle {key} contract is invalid")
+        if qualification_status == "PASS" and value is not True:
+            raise ValueError(f"execution lifecycle PASS requires {key}=true")
+    for key in (
+        "read_only",
+        "observe_only",
+        "no_order_side_effects",
+    ):
+        if status.get(key) is not True:
+            raise ValueError(f"execution lifecycle {key} contract is invalid")
+    if status.get("real_order_allowed") is not False:
+        raise ValueError("execution lifecycle real_order_allowed contract is invalid")
+    return effective_blocker_count
+
+
+def _reject_buy_execution_lifecycle_queue_boundary(
+    connection: sqlite3.Connection,
+    intent_row: Mapping[str, Any],
+    *,
+    gate_evidence: Mapping[str, Any],
+) -> Never:
+    reason = LiveSimReasonCode.LIVE_SIM_LIFECYCLE_ERROR_BLOCK.value
+    _save_rejection(
+        connection,
+        candidate_instance_id=intent_row.get("candidate_instance_id"),
+        strategy_observation_id=intent_row.get("strategy_observation_id"),
+        risk_observation_id=intent_row.get("risk_observation_id"),
+        trade_date=intent_row.get("trade_date"),
+        account_id=intent_row.get("account_id"),
+        code=intent_row.get("code"),
+        reason_codes=[reason],
+        evidence={
+            "live_sim_intent_id": intent_row.get("live_sim_intent_id"),
+            "side": intent_row.get("side"),
+            "execution_lifecycle_gate": dict(gate_evidence),
+        },
+    )
+    connection.commit()
+    raise ValueError(reason) from None
 
 
 def _live_sim_candidate_targets(

@@ -155,6 +155,7 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 ```text
 /api/operator/runtime-execution-locks/status
 /api/operator/live-sim/order-plan-uniqueness/status
+/api/operator/live-sim/execution-lifecycle/status
 /api/operator/gateway/order-broker-boundaries/status
 /api/operator/pipeline-coherency/status
 /api/operator/incremental-evaluation/status
@@ -184,7 +185,9 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - unresolved order-plan uniqueness conflict 0
 - unresolved broker-boundary gap/UNCONFIRMED 0
 - pipeline coherency `FAIL=0`
-- projection/lifecycle `ERROR=0`, `DEAD_LETTER=0`
+- projection `ERROR=0`, `DEAD_LETTER=0`
+- lifecycle active/manual/effective blocker `0`; canonical historical audit는 R4 classifier로
+  검증되고 raw/mirror logical-subject count가 일치
 - OBSERVE smoke의 `send_order/cancel_order/modify_order` delta 0
 - Core/Gateway profile이 OBSERVE이며 LIVE_SIM/LIVE_REAL false
 
@@ -194,24 +197,49 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - append-only evidence `1/10` 등 기간 미충족
 - 기능 오류가 아닌 현재 장외 freshness
 
-### 2026-07-15 복원 기준 상태
+### 2026-07-16 현재 복원 상태
 
 이 절은 최초 작성 당시의 schema 59 예시보다 우선하는 현재 실행 기록이다.
 
-- PR #10(FAST-0), #11(FAST-0R1), #12(FAST-0R2)은 `main`에 병합됐다.
-- 운영 DB는 strict read-only 점검 기준 schema `61`, `quick_check(1)=ok`다.
+- PR #10(FAST-0), #11(FAST-0R1), #12(FAST-0R2), #13(FAST-0R3)은 `main`에
+  병합됐다.
+- 운영 DB schema `61→62` migration은 clone preflight, backup, apply 후 무결성 검증을
+  거쳐 완료됐다. preflight evidence는
+  `reports/database_migration_preflight/20260715T143959Z/raw.json`, apply evidence는
+  `reports/database_migration_apply/20260715T151225.565090Z/raw.json`이다.
+- 현재 운영 DB schema는 `62`다. FAST-0R4 strict read-only evidence는
+  `reports/live_sim_execution_lifecycle_check/20260715T171541Z/raw.json`이다.
 - broker boundary raw `UNCONFIRMED=3`은 보존되고 검증된 append-only resolution 기준
   effective `UNCONFIRMED=0`이다. raw count를 삭제하거나 성공으로 오인하지 않는다.
 - incremental dead-letter raw `38`은 보존돼 있고 disposition ledger가 비어 있어 effective
   blocker도 `38`이다. 별도 승인 전에는 apply하지 않는다.
 - canonical pipeline `FAIL=159`는 그대로 유지한다. FAST-0R3는 historical closed `149`,
   manual `10`, active/current `0`을 별도 RCA view에서 분류하되 canonical 결과를 낮추지 않는다.
-- lifecycle audit raw/mirrored `346/346`은 FAST-0R4 classifier 전까지 canonical blocker로
-  취급한다. raw audit row를 UPDATE/DELETE하지 않는다.
-- FAST-0R3 코드 target은 schema `62`이며 새 pipeline disposition ledger만 additive하게
-  추가한다. 운영 `61→62`는 clone preflight, backup, 무결성 검증과 별도 승인 뒤에만 적용한다.
-- FAST-0은 R2의 38건 disposition, R3의 required disposition, R4 classifier와 R5 strict
-  requalification이 끝나기 전까지 `IN_PROGRESS/BLOCKED`이며 FAST-1을 시작하지 않는다.
+- FAST-0R4 운영 재검증에서 lifecycle raw/mirrored/matched pair는 `346/346/346`,
+  historical reconcile은 `265`, 전체 logical subject는 `611`이었다. active lifecycle,
+  active reconcile, manual review, effective blocker는 모두 `0`이고 qualification은 `PASS`다.
+  canonical은 과거 감사 이력을 보존해 `BLOCKED`이며 raw audit row를 UPDATE/DELETE하지 않는다.
+- FAST-0은 broker boundary raw `UNCONFIRMED=3`, R5 strict requalification 미완료,
+  최종 OBSERVE smoke 미완료 때문에 `BLOCKED`다. append-only resolution의 effective
+  count가 `0`이어도 raw `UNCONFIRMED`를 FAST-0 PASS로 오인하지 않으며 FAST-1을 시작하지
+  않는다.
+
+### FAST-0R4 lifecycle qualification 계약
+
+FAST-0R4는 raw `live_sim_errors`와 mirrored `live_sim_lifecycle_events`를 합산하지 않고
+logical subject inventory로 분류한다. canonical count/status는 보존하고, 현재 승급 판단에는
+active lifecycle/reconcile blocker와 malformed/manual-review blocker만 사용하는 별도
+qualification을 제공한다.
+
+- API: `/api/operator/live-sim/execution-lifecycle/status`
+- strict tool: `python -B -m tools.ops_live_sim_execution_lifecycle_check --db <schema-62-db>`
+- `code` filter는 diagnostic-only이며 global verdict/count/digest를 축소하지 않는다.
+- endpoint 누락 또는 malformed payload는 market-open RCA에서 `BLOCK`이다.
+- strict tool은 sidecar 부재, immutable/query-only, `quick_check(1)`, schema/app identity,
+  전후 file fingerprint, full pagination과 inventory digest를 모두 검증한다.
+- report에는 raw 행, raw payload, error message, 계좌 식별자, token을 기록하지 않는다.
+
+세부 절차는 `docs/runbook_live_sim_execution_lifecycle_qualification_ko.md`를 따른다.
 
 ### 중단 조건
 
@@ -219,7 +247,7 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - CI failure를 테스트 약화로 우회
 - `LIVE_REAL` 허용값 발견
 - unresolved order command 또는 local/broker ambiguity
-- projection/lifecycle error/dead-letter
+- projection error/dead-letter 또는 lifecycle active/manual blocker
 
 ### Evidence
 

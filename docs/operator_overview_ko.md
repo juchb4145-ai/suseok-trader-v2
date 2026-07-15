@@ -38,7 +38,7 @@ Gateway
 | AI Sidecar | context/insight/RCA/review 보조 | 자동 판단 입력 | failed request, validated insight |
 | DRY_RUN OMS | 내부 모의 회계 | broker 주문 | dry-run status, paper position |
 | DRY_RUN Exit | simulated close accounting | 실제 매도 주문 | exit signal/evaluation |
-| LIVE_SIM | 키움 모의투자 전용 safety-gated path, PR-5 execution/cancel/exit/reconcile | 실계좌 주문, modify, 신규 SELL/short, scheduler 반복 | `/api/live-sim/status`, positions, lifecycle, reconcile |
+| LIVE_SIM | 키움 모의투자 전용 safety-gated path, PR-5 execution/cancel/exit/reconcile | 실계좌 주문, modify, 신규 SELL/short, scheduler 반복 | `/api/live-sim/status`, `/api/operator/live-sim/execution-lifecycle/status`, positions, reconcile |
 
 ## 주요 상태값
 
@@ -67,7 +67,7 @@ Gateway
 | Risk가 없음 | latest Strategy observation 존재 여부 확인 |
 | DRY_RUN intent가 안 생김 | DRY_RUN flags -> safety gate -> eligibility checks |
 | LIVE_SIM order가 안 생김 | kill switch -> account mode -> Gateway heartbeat -> rejections |
-| LIVE_SIM position/exit가 이상함 | `/api/live-sim/positions` -> lifecycle events -> reconcile latest |
+| LIVE_SIM position/exit가 이상함 | execution-lifecycle qualification -> `/api/live-sim/positions` -> reconcile latest |
 | 미체결이 남아 있음 | cancel flags -> broker order no -> `/api/live-sim/cancel-intents` |
 | AI Candidate Score가 없음 | `AI_CANDIDATE_SCORER_ENABLED` -> `/api/ai-advisory/status` -> latest errors |
 | External LLM이 호출되지 않음 | `AI_CANDIDATE_SCORER_PROVIDER` -> `AI_EXTERNAL_LLM_ENABLED` -> `AI_EXTERNAL_LLM_ALLOW_NETWORK` -> API/CLI `allow_external` |

@@ -39,6 +39,346 @@ def test_rca_classifies_gateway_token_failure_as_block() -> None:
     assert "GATEWAY_AUTH_FAILED" in gateway["reason_codes"]
 
 
+def test_rca_blocks_when_lifecycle_qualification_endpoint_is_missing() -> None:
+    results = _healthy_results()
+    results.pop("live_sim_execution_lifecycle_status")
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert summary["overall_status"] == "BLOCK"
+    assert live_sim["status"] == "BLOCK"
+    assert (
+        "LIVE_SIM_EXECUTION_LIFECYCLE_ENDPOINT_MISSING"
+        in live_sim["reason_codes"]
+    )
+
+
+def test_rca_blocks_malformed_lifecycle_qualification() -> None:
+    results = _healthy_results()
+    results["live_sim_execution_lifecycle_status"]["data"].pop(
+        "ending_inventory_digest"
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert summary["overall_status"] == "BLOCK"
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+        "reason_codes"
+    ]
+
+
+def test_rca_rejects_lowercase_pass_with_effective_blocker() -> None:
+    results = _healthy_results()
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "status": "pass",
+            "qualification_status": "pass",
+            "qualification_reason_codes": [
+                "LIVE_SIM_ACTIVE_LIFECYCLE_BLOCKERS_PRESENT"
+            ],
+            "canonical_status": "BLOCKED",
+            "classification_counts": {
+                "ACTIVE_LIFECYCLE_BLOCKER": 1,
+                "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+                "MANUAL_REVIEW_BLOCKER": 0,
+            },
+            "logical_subject_count": 1,
+            "active_lifecycle_blocker_count": 1,
+            "effective_blocker_count": 1,
+            "full_count": 1,
+            "returned_count": 1,
+            "items": [
+                _lifecycle_item(
+                    "a" * 64,
+                    classification="ACTIVE_LIFECYCLE_BLOCKER",
+                )
+            ],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 1,
+                "full_count": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert live_sim["status"] == "BLOCK"
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+        "reason_codes"
+    ]
+
+
+def test_rca_uses_lifecycle_qualification_not_historical_raw_error_rows() -> None:
+    results = _healthy_results()
+    results["live_sim_errors"]["data"] = {
+        "errors": [{"error_message": "historical audit row"}]
+    }
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "canonical_status": "BLOCKED",
+            "classification_counts": {
+                "ACTIVE_LIFECYCLE_BLOCKER": 0,
+                "HISTORICAL_RUNTIME_STATUS_AUDIT": 346,
+                "MANUAL_REVIEW_BLOCKER": 0,
+            },
+            "raw_error_count": 346,
+            "mirror_lifecycle_count": 346,
+            "logical_subject_count": 346,
+            "historical_runtime_status_audit_count": 346,
+            "full_count": 346,
+            "returned_count": 346,
+            "items": [
+                _lifecycle_item(f"{index:064x}") for index in range(346)
+            ],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 346,
+                "full_count": 346,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert live_sim["status"] == "PASS"
+    assert "historical=346" in live_sim["summary"]
+
+
+def test_rca_accepts_reconcile_counts_as_classification_subsets() -> None:
+    results = _healthy_results()
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "status": "BLOCKED",
+            "qualification_status": "BLOCKED",
+            "qualification_reason_codes": [
+                "LIVE_SIM_ACTIVE_LIFECYCLE_BLOCKERS_PRESENT"
+            ],
+            "canonical_status": "BLOCKED",
+            "classification_counts": {
+                "ACTIVE_LIFECYCLE_BLOCKER": 1,
+                "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+                "MANUAL_REVIEW_BLOCKER": 0,
+            },
+            "logical_subject_count": 1,
+            "active_lifecycle_blocker_count": 1,
+            "active_reconcile_blocker_count": 1,
+            "effective_blocker_count": 1,
+            "full_count": 1,
+            "returned_count": 1,
+            "has_more": False,
+            "next_offset": None,
+            "items": [
+                _lifecycle_item(
+                    "a" * 64,
+                    classification="ACTIVE_LIFECYCLE_BLOCKER",
+                    mirror_status="RECONCILE_EVIDENCE",
+                    event_metadata_consistent=False,
+                    identifier_free=False,
+                )
+            ],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 1,
+                "full_count": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert live_sim["status"] == "BLOCK"
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" not in live_sim[
+        "reason_codes"
+    ]
+
+
+def test_rca_rejects_reconcile_counts_outside_classification_subsets() -> None:
+    for reconcile_count_key in (
+        "active_reconcile_blocker_count",
+        "historical_reconcile_event_count",
+        "reconcile_manual_review_count",
+    ):
+        results = _healthy_results()
+        lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+        lifecycle[reconcile_count_key] = 1
+
+        summary = classify_market_open_rca(results, generated_at=_now())
+        live_sim = _stage(summary, "LiveSim")
+
+        assert live_sim["status"] == "BLOCK"
+        assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+            "reason_codes"
+        ]
+
+
+def test_rca_rejects_classification_count_alias_mismatch() -> None:
+    results = _healthy_results()
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "classification_counts": {
+                "ACTIVE_LIFECYCLE_BLOCKER": 1,
+                "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+                "MANUAL_REVIEW_BLOCKER": 0,
+            },
+            "logical_subject_count": 1,
+            "historical_runtime_status_audit_count": 1,
+            "full_count": 1,
+            "returned_count": 1,
+            "items": [_lifecycle_item("a" * 64)],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 1,
+                "full_count": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert summary["overall_status"] == "BLOCK"
+    assert live_sim["status"] == "BLOCK"
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+        "reason_codes"
+    ]
+
+
+def test_rca_rejects_effective_count_above_primary_classification_total() -> None:
+    results = _healthy_results()
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "status": "BLOCKED",
+            "qualification_status": "BLOCKED",
+            "qualification_reason_codes": [
+                "LIVE_SIM_ACTIVE_LIFECYCLE_BLOCKERS_PRESENT"
+            ],
+            "canonical_status": "BLOCKED",
+            "classification_counts": {
+                "ACTIVE_LIFECYCLE_BLOCKER": 1,
+                "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+                "MANUAL_REVIEW_BLOCKER": 0,
+            },
+            "logical_subject_count": 1,
+            "active_lifecycle_blocker_count": 1,
+            "effective_blocker_count": 2,
+            "full_count": 1,
+            "returned_count": 1,
+            "has_more": False,
+            "next_offset": None,
+            "items": [
+                _lifecycle_item(
+                    "a" * 64,
+                    classification="ACTIVE_LIFECYCLE_BLOCKER",
+                )
+            ],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 1,
+                "full_count": 1,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert live_sim["status"] == "BLOCK"
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+        "reason_codes"
+    ]
+
+
+def test_rca_rejects_malformed_or_raw_identifier_lifecycle_items() -> None:
+    raw_identifier_item = {
+        **_lifecycle_item("a" * 64),
+        "entity_id": "must-not-cross-public-boundary",
+    }
+    for malformed_item in ({}, raw_identifier_item):
+        results = _healthy_results()
+        lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+        lifecycle.update(
+            {
+                "classification_counts": {
+                    "ACTIVE_LIFECYCLE_BLOCKER": 0,
+                    "HISTORICAL_RUNTIME_STATUS_AUDIT": 1,
+                    "MANUAL_REVIEW_BLOCKER": 0,
+                },
+                "logical_subject_count": 1,
+                "historical_runtime_status_audit_count": 1,
+                "full_count": 1,
+                "returned_count": 1,
+                "items": [malformed_item],
+                "pagination": {
+                    "limit": 500,
+                    "offset": 0,
+                    "returned_count": 1,
+                    "full_count": 1,
+                    "has_more": False,
+                    "next_offset": None,
+                },
+            }
+        )
+
+        summary = classify_market_open_rca(results, generated_at=_now())
+        live_sim = _stage(summary, "LiveSim")
+
+        assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+            "reason_codes"
+        ]
+
+
+def test_rca_rejects_lifecycle_returned_count_above_full_count() -> None:
+    results = _healthy_results()
+    lifecycle = results["live_sim_execution_lifecycle_status"]["data"]
+    lifecycle.update(
+        {
+            "returned_count": 1,
+            "items": [_lifecycle_item("a" * 64)],
+            "pagination": {
+                "limit": 500,
+                "offset": 0,
+                "returned_count": 1,
+                "full_count": 0,
+                "has_more": False,
+                "next_offset": None,
+            },
+        }
+    )
+
+    summary = classify_market_open_rca(results, generated_at=_now())
+    live_sim = _stage(summary, "LiveSim")
+
+    assert "LIVE_SIM_EXECUTION_LIFECYCLE_STATUS_MALFORMED" in live_sim[
+        "reason_codes"
+    ]
+
+
 def test_rca_keeps_missing_endpoint_unknown_not_false_block() -> None:
     results = _healthy_results()
     results["themes_status"] = _fail(
@@ -498,6 +838,87 @@ def _healthy_results() -> dict[str, dict[str, object]]:
         "live_sim_rejections": _ok("LiveSim", {"rejections": []}),
         "live_sim_errors": _ok("LiveSim", {"errors": []}),
         "live_sim_reconcile_latest": _ok("LiveSim", {"reconcile": None}),
+        "live_sim_execution_lifecycle_status": _ok(
+            "LiveSim",
+            _healthy_lifecycle_qualification(),
+        ),
+    }
+
+
+def _healthy_lifecycle_qualification() -> dict[str, object]:
+    digest = "a" * 64
+    return {
+        "status": "PASS",
+        "qualification_status": "PASS",
+        "qualification_reason_codes": [],
+        "canonical_status": "PASS",
+        "canonical_reason_codes": [],
+        "classification_counts": {
+            "ACTIVE_LIFECYCLE_BLOCKER": 0,
+            "HISTORICAL_RUNTIME_STATUS_AUDIT": 0,
+            "MANUAL_REVIEW_BLOCKER": 0,
+        },
+        "raw_error_count": 0,
+        "mirror_lifecycle_count": 0,
+        "logical_subject_count": 0,
+        "active_lifecycle_blocker_count": 0,
+        "historical_runtime_status_audit_count": 0,
+        "manual_review_blocker_count": 0,
+        "active_reconcile_blocker_count": 0,
+        "historical_reconcile_event_count": 0,
+        "reconcile_manual_review_count": 0,
+        "effective_blocker_count": 0,
+        "mirror_consistent": True,
+        "code_filter": None,
+        "code_filter_diagnostic_only": True,
+        "limit": 500,
+        "offset": 0,
+        "returned_count": 0,
+        "full_count": 0,
+        "has_more": False,
+        "next_offset": None,
+        "pagination": {
+            "limit": 500,
+            "offset": 0,
+            "returned_count": 0,
+            "full_count": 0,
+            "has_more": False,
+            "next_offset": None,
+        },
+        "inventory_count_consistent": True,
+        "inventory_digest": digest,
+        "scanned_inventory_digest": digest,
+        "ending_inventory_digest": digest,
+        "read_only": True,
+        "observe_only": True,
+        "no_order_side_effects": True,
+        "real_order_allowed": False,
+        "items": [],
+    }
+
+
+def _lifecycle_item(
+    subject_id: str,
+    *,
+    classification: str = "HISTORICAL_RUNTIME_STATUS_AUDIT",
+    mirror_status: str = "EXACT_1_TO_1",
+    event_metadata_consistent: bool = True,
+    identifier_free: bool = True,
+) -> dict[str, object]:
+    return {
+        "subject_id": subject_id,
+        "subject_fingerprint": subject_id,
+        "classification": classification,
+        "reason_codes": ["SYNTHETIC_TEST_CLASSIFICATION"],
+        "mirror_status": mirror_status,
+        "error_surface_count": 1,
+        "lifecycle_surface_count": 1,
+        "created_at": "2026-07-16T00:00:00Z",
+        "code": "005930",
+        "inner_event_type": "heartbeat",
+        "payload_sha256": "e" * 64,
+        "event_metadata_consistent": event_metadata_consistent,
+        "identifier_free": identifier_free,
     }
 
 
