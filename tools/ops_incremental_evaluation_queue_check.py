@@ -31,8 +31,14 @@ def main() -> int:
         or os.environ.get("GATEWAY_CORE_TOKEN", ""),
     )
     parser.add_argument("--timeout-sec", type=float, default=30.0)
-    parser.add_argument("--sweep-retry-exhausted", action="store_true")
-    parser.add_argument("--reset-dead-letter-id")
+    parser.add_argument(
+        "--require-effective-clear",
+        action="store_true",
+        help=(
+            "Require the append-only effective dead-letter view to be clear. "
+            "Raw historical rows remain visible and are not reset."
+        ),
+    )
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "incremental_evaluation_queue"),
@@ -43,8 +49,7 @@ def main() -> int:
         token=args.token,
         timeout_sec=args.timeout_sec,
         out_dir=Path(args.out_dir),
-        sweep_retry_exhausted=args.sweep_retry_exhausted,
-        reset_dead_letter_id=args.reset_dead_letter_id,
+        require_effective_clear=args.require_effective_clear,
     )
     print(render_console_summary(report))
     return 0 if report["verdict"]["status"] in {"PASS", "WARN"} else 2
@@ -56,8 +61,7 @@ def run_report(
     token: str,
     timeout_sec: float,
     out_dir: Path,
-    sweep_retry_exhausted: bool = False,
-    reset_dead_letter_id: str | None = None,
+    require_effective_clear: bool = False,
 ) -> dict[str, Any]:
     base_url = core_url.rstrip("/")
     dashboard_query = urllib.parse.urlencode(
@@ -73,9 +77,8 @@ def run_report(
         .isoformat()
         .replace("+00:00", "Z"),
         "core_url": base_url,
-        "requested_actions": {
-            "sweep_retry_exhausted": bool(sweep_retry_exhausted),
-            "reset_dead_letter_id": reset_dead_letter_id,
+        "requested_contract": {
+            "require_effective_clear": bool(require_effective_clear),
         },
         "core_status": fetch_json(
             f"{base_url}/api/status",
@@ -102,21 +105,6 @@ def run_report(
             timeout_sec=timeout_sec,
         ),
     }
-    if sweep_retry_exhausted:
-        report["sweep_result"] = fetch_json(
-            f"{base_url}/api/operator/incremental-evaluation/dead-letters/sweep?limit=100",
-            token=token,
-            method="POST",
-            timeout_sec=timeout_sec,
-        )
-    if reset_dead_letter_id:
-        query = urllib.parse.urlencode({"dead_letter_id": reset_dead_letter_id})
-        report["reset_result"] = fetch_json(
-            f"{base_url}/api/operator/incremental-evaluation/dead-letters/reset?{query}",
-            token=token,
-            method="POST",
-            timeout_sec=timeout_sec,
-        )
     report.update(
         {
             "queue_status_after": fetch_json(
@@ -178,6 +166,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     dashboard = _data(report, "dashboard_snapshot")
     dashboard_status = dashboard.get("incremental_evaluation")
     dashboard_status = dashboard_status if isinstance(dashboard_status, Mapping) else {}
+    contract = _mapping(report.get("requested_contract"))
+    require_effective_clear = bool(contract.get("require_effective_clear"))
 
     if core.get("mode") != "OBSERVE":
         failures.append("CORE_NOT_OBSERVE")
@@ -197,16 +187,63 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("ORDER_COMMANDS_ALLOWED")
 
     final_status = str(after.get("status") or "")
-    if final_status == "FAIL":
-        failures.append("INCREMENTAL_QUEUE_STATUS_FAIL")
-    elif final_status == "WARN":
-        warnings.extend(str(code) for code in after.get("reason_codes") or [])
+    effective_fields = _effective_dead_letter_fields(after)
+    effective_contract_valid = effective_fields is not None
+    if require_effective_clear:
+        if not effective_contract_valid:
+            failures.append("INCREMENTAL_EFFECTIVE_STATUS_CONTRACT_MISSING")
+        else:
+            assert effective_fields is not None
+            if effective_fields["effective_status"] not in {"PASS", "WARN", "CLEAR"}:
+                failures.append("INCREMENTAL_EFFECTIVE_STATUS_FAIL")
+            if effective_fields["fast_0_status"] != "CLEAR":
+                failures.append("INCREMENTAL_FAST_0_NOT_CLEAR")
+            if effective_fields["effective_dead_letter_count"]:
+                failures.append("INCREMENTAL_EFFECTIVE_DEAD_LETTER_PRESENT")
+            if effective_fields["active_unresolved_dead_letter_count"]:
+                failures.append("INCREMENTAL_ACTIVE_DEAD_LETTER_PRESENT")
+            if effective_fields["historical_pending_disposition_count"]:
+                failures.append("INCREMENTAL_HISTORICAL_DISPOSITION_PENDING")
+            if effective_fields["manual_review_dead_letter_count"]:
+                failures.append("INCREMENTAL_DEAD_LETTER_MANUAL_REVIEW_REQUIRED")
+            if effective_fields["invalid_disposition_count"]:
+                failures.append("INCREMENTAL_INVALID_DISPOSITION_PRESENT")
+            if effective_fields["raw_dead_letter_count"]:
+                warnings.append("INCREMENTAL_HISTORICAL_DEAD_LETTER_PRESERVED")
+        reason_codes = {
+            str(code) for code in after.get("reason_codes") or [] if str(code)
+        }
+        non_raw_failure_codes = reason_codes - {
+            "INCREMENTAL_QUEUE_DEAD_LETTER_PRESENT",
+            "INCREMENTAL_HISTORICAL_DEAD_LETTER_PRESERVED",
+        }
+        if final_status == "FAIL" and (not reason_codes or non_raw_failure_codes):
+            failures.append("INCREMENTAL_QUEUE_STATUS_FAIL")
+        elif final_status == "WARN":
+            warnings.extend(sorted(reason_codes))
+    else:
+        if final_status == "FAIL":
+            failures.append("INCREMENTAL_QUEUE_STATUS_FAIL")
+        elif final_status == "WARN":
+            warnings.extend(str(code) for code in after.get("reason_codes") or [])
     if int(after.get("retry_exhausted_count") or 0):
         failures.append("INCREMENTAL_RETRY_EXHAUSTED_ACTIVE")
-    if int(after.get("dead_letter_count") or 0):
+    if not require_effective_clear and int(after.get("dead_letter_count") or 0):
         failures.append("INCREMENTAL_DEAD_LETTER_PRESENT")
     if int(dead_after.get("count") or 0) != int(after.get("dead_letter_count") or 0):
         failures.append("INCREMENTAL_DEAD_LETTER_LIST_MISMATCH")
+    if int(before.get("queued_count") or 0) != int(after.get("queued_count") or 0):
+        failures.append("INCREMENTAL_QUEUE_CHANGED_DURING_CHECK")
+    if int(before.get("dead_letter_count") or 0) != int(
+        after.get("dead_letter_count") or 0
+    ):
+        failures.append("INCREMENTAL_DEAD_LETTER_CHANGED_DURING_CHECK")
+    if require_effective_clear:
+        before_effective = _effective_dead_letter_fields(before)
+        if before_effective is None:
+            failures.append("INCREMENTAL_EFFECTIVE_STATUS_BEFORE_CONTRACT_MISSING")
+        elif effective_fields is not None and before_effective != effective_fields:
+            failures.append("INCREMENTAL_EFFECTIVE_STATUS_CHANGED_DURING_CHECK")
     if not dashboard_status:
         failures.append("DASHBOARD_INCREMENTAL_STATUS_MISSING")
     elif int(dashboard_status.get("queued_count") or 0) != int(
@@ -214,13 +251,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     ):
         failures.append("DASHBOARD_INCREMENTAL_STATUS_MISMATCH")
 
-    for action_key in ("sweep_result", "reset_result"):
-        if action_key in report:
-            payload = report.get(action_key)
-            if not isinstance(payload, Mapping) or not payload.get("ok", True):
-                failures.append(f"{action_key.upper()}_ERROR")
-
     verdict_status = "FAIL" if failures else "WARN" if warnings else "PASS"
+    effective_after = effective_fields or {}
     return {
         "status": verdict_status,
         "failures": sorted(set(failures)),
@@ -230,15 +262,32 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "queued_after": int(after.get("queued_count") or 0),
         "stale_after": int(after.get("stale_queue_count") or 0),
         "dead_letter_after": int(after.get("dead_letter_count") or 0),
+        "raw_dead_letter_after": int(
+            effective_after.get("raw_dead_letter_count")
+            or after.get("dead_letter_count")
+            or 0
+        ),
+        "effective_dead_letter_after": (
+            effective_after.get("effective_dead_letter_count")
+        ),
+        "historical_disposed_after": effective_after.get(
+            "historical_disposed_dead_letter_count"
+        ),
+        "historical_pending_after": effective_after.get(
+            "historical_pending_disposition_count"
+        ),
+        "manual_review_after": effective_after.get(
+            "manual_review_dead_letter_count"
+        ),
+        "invalid_disposition_after": effective_after.get(
+            "invalid_disposition_count"
+        ),
+        "fast_0_status": effective_after.get("fast_0_status"),
+        "require_effective_clear": require_effective_clear,
+        "effective_contract_valid": effective_contract_valid,
         "command_count_delta": command_delta,
         "order_command_count_delta": order_command_delta,
-        "read_only_by_default": not any(
-            bool(value)
-            for value in (
-                _mapping(report.get("requested_actions")).get("sweep_retry_exhausted"),
-                _mapping(report.get("requested_actions")).get("reset_dead_letter_id"),
-            )
-        ),
+        "read_only_by_default": True,
         "no_order_side_effects": True,
     }
 
@@ -270,6 +319,15 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             ),
             f"- stale_after: `{verdict.get('stale_after')}`",
             f"- dead_letter_after: `{verdict.get('dead_letter_after')}`",
+            (
+                "- effective_dead_letter_after: "
+                f"`{verdict.get('effective_dead_letter_after')}`"
+            ),
+            f"- fast_0_status: `{verdict.get('fast_0_status')}`",
+            (
+                "- require_effective_clear: "
+                f"`{verdict.get('require_effective_clear')}`"
+            ),
             f"- command_count_delta: `{verdict.get('command_count_delta')}`",
             f"- order_command_count_delta: `{verdict.get('order_command_count_delta')}`",
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",
@@ -305,6 +363,44 @@ def _command_count(status: Mapping[str, Any]) -> int:
     if not isinstance(counts, Mapping):
         return 0
     return sum(int(value or 0) for value in counts.values())
+
+
+def _effective_dead_letter_fields(status: Mapping[str, Any]) -> dict[str, Any] | None:
+    integer_fields = (
+        "raw_dead_letter_count",
+        "effective_dead_letter_count",
+        "active_unresolved_dead_letter_count",
+        "historical_pending_disposition_count",
+        "historical_disposed_dead_letter_count",
+        "manual_review_dead_letter_count",
+        "invalid_disposition_count",
+    )
+    parsed: dict[str, Any] = {}
+    for name in integer_fields:
+        value = status.get(name)
+        if not isinstance(value, int) or isinstance(value, bool):
+            return None
+        parsed[name] = value
+        if value < 0:
+            return None
+    for name in ("raw_status", "effective_status", "fast_0_status"):
+        value = status.get(name)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        parsed[name] = value.strip().upper()
+    raw_count = parsed["raw_dead_letter_count"]
+    legacy_raw_count = status.get("dead_letter_count")
+    if not isinstance(legacy_raw_count, int) or isinstance(legacy_raw_count, bool):
+        return None
+    if raw_count != legacy_raw_count:
+        return None
+    classified_count = (
+        parsed["effective_dead_letter_count"]
+        + parsed["historical_disposed_dead_letter_count"]
+    )
+    if classified_count != raw_count:
+        return None
+    return parsed
 
 
 if __name__ == "__main__":

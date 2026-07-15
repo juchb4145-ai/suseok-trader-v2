@@ -10,7 +10,7 @@ from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 60
+SCHEMA_VERSION = 61
 APP_NAME = "suseok-trader-v2"
 
 
@@ -895,17 +895,159 @@ def _create_operator_tables(connection: sqlite3.Connection) -> None:
         )
         """
     )
+    # Schema 61 freezes the raw dead-letter row.  Resolution, recovery, and
+    # correction state lives in the append-only disposition ledger below.
+    # The schema-58 partial unique index depended on mutating raw status to
+    # RESET, so it cannot represent multiple immutable failure generations.
+    connection.execute(
+        "DROP INDEX IF EXISTS uq_incremental_evaluation_dead_letter_active"
+    )
     connection.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_incremental_evaluation_dead_letter_active
-        ON incremental_evaluation_dead_letters (candidate_instance_id)
-        WHERE status = 'DEAD_LETTER'
+        CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_dead_letter_candidate_time
+        ON incremental_evaluation_dead_letters (
+            candidate_instance_id,
+            dead_lettered_at DESC,
+            dead_letter_id DESC
+        )
         """
     )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_incremental_evaluation_dead_letter_status_time
         ON incremental_evaluation_dead_letters (status, dead_lettered_at DESC)
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_incremental_evaluation_dead_letters_no_update
+        BEFORE UPDATE ON incremental_evaluation_dead_letters
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'incremental evaluation dead letters are immutable'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_incremental_evaluation_dead_letters_no_delete
+        BEFORE DELETE ON incremental_evaluation_dead_letters
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'incremental evaluation dead letters are immutable'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS incremental_evaluation_dead_letter_dispositions (
+            disposition_id TEXT PRIMARY KEY,
+            request_id TEXT NOT NULL UNIQUE,
+            request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+            dead_letter_id TEXT NOT NULL,
+            sequence_no INTEGER NOT NULL CHECK (sequence_no > 0),
+            action TEXT NOT NULL CHECK (
+                action IN (
+                    'DISPOSE_OBSOLETE_CLOSED_CANDIDATE',
+                    'RESET_CANARY',
+                    'VERIFY_CANARY',
+                    'RESET_BATCH',
+                    'REVOKE'
+                )
+            ),
+            supersedes_disposition_id TEXT,
+            reason_code TEXT NOT NULL,
+            operator_id TEXT NOT NULL,
+            expected_dead_letter_fingerprint TEXT NOT NULL
+                CHECK (length(expected_dead_letter_fingerprint) = 64),
+            expected_candidate_version TEXT NOT NULL
+                CHECK (length(expected_candidate_version) = 64),
+            evidence_ref TEXT NOT NULL,
+            evidence_sha256 TEXT NOT NULL CHECK (length(evidence_sha256) = 64),
+            evidence_json TEXT NOT NULL DEFAULT '{}',
+            recovery_session_id TEXT,
+            batch_size INTEGER,
+            fencing_token INTEGER,
+            safety_snapshot_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            observe_only INTEGER NOT NULL DEFAULT 1 CHECK (observe_only = 1),
+            live_sim_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (live_sim_allowed = 0),
+            live_real_allowed INTEGER NOT NULL DEFAULT 0
+                CHECK (live_real_allowed = 0),
+            auto_run_evaluation INTEGER NOT NULL DEFAULT 0
+                CHECK (auto_run_evaluation = 0),
+            CHECK (
+                action NOT IN ('RESET_CANARY', 'VERIFY_CANARY', 'RESET_BATCH')
+                OR (
+                    recovery_session_id IS NOT NULL
+                    AND batch_size IS NOT NULL
+                    AND fencing_token IS NOT NULL
+                    AND fencing_token > 0
+                )
+            ),
+            CHECK (action != 'RESET_CANARY' OR batch_size = 1),
+            CHECK (action != 'VERIFY_CANARY' OR batch_size = 1),
+            CHECK (
+                action != 'RESET_BATCH'
+                OR (batch_size BETWEEN 2 AND 5)
+            ),
+            UNIQUE (dead_letter_id, sequence_no),
+            FOREIGN KEY (dead_letter_id)
+                REFERENCES incremental_evaluation_dead_letters (dead_letter_id),
+            FOREIGN KEY (supersedes_disposition_id)
+                REFERENCES incremental_evaluation_dead_letter_dispositions (
+                    disposition_id
+                )
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_incremental_dead_letter_disposition_effective
+        ON incremental_evaluation_dead_letter_dispositions (
+            dead_letter_id,
+            sequence_no DESC
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_incremental_dead_letter_disposition_session
+        ON incremental_evaluation_dead_letter_dispositions (
+            recovery_session_id,
+            created_at,
+            disposition_id
+        )
+        WHERE recovery_session_id IS NOT NULL
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_incremental_dead_letter_dispositions_no_update
+        BEFORE UPDATE ON incremental_evaluation_dead_letter_dispositions
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'incremental evaluation dead-letter dispositions are append-only'
+            );
+        END
+        """
+    )
+    connection.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_incremental_dead_letter_dispositions_no_delete
+        BEFORE DELETE ON incremental_evaluation_dead_letter_dispositions
+        BEGIN
+            SELECT RAISE(
+                ABORT,
+                'incremental evaluation dead-letter dispositions are append-only'
+            );
+        END
         """
     )
     connection.execute(

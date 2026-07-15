@@ -27,7 +27,7 @@ workspace 하위 새 경로를 사용한다.
 $source = (Resolve-Path .\storage\suseok-trader-v2.sqlite3).Path
 $actualSchema = $actualSchemaFromStrictReadOnlyEvidence
 $clone = Join-Path (Get-Location) `
-  'storage\migration-preflight\suseok-trader-v2-schema60-preflight.sqlite3'
+  'storage\migration-preflight\suseok-trader-v2-schema61-preflight.sqlite3'
 
 & $python -B -m tools.ops_database_migration_preflight `
   --source-db $source `
@@ -36,16 +36,17 @@ $clone = Join-Path (Get-Location) `
   --out-dir reports/database_migration_preflight
 ```
 
-`$actualSchemaFromStrictReadOnlyEvidence`는 이 실행 직전에 별도 strict read-only 점검으로 확인한 실제 source schema다. `52` 같은 과거 값을 복사해 넣거나 `--require-source-schema`를 생략하지 않는다. source schema가 현재 코드 target보다 높으면 downgrade 위험으로 FAIL한다. 현재 코드 target은 `60`이다.
+`$actualSchemaFromStrictReadOnlyEvidence`는 이 실행 직전에 별도 strict read-only 점검으로 확인한 실제 source schema다. `52` 같은 과거 값을 복사해 넣거나 `--require-source-schema`를 생략하지 않는다. source schema가 현재 코드 target보다 높으면 downgrade 위험으로 FAIL한다. 현재 코드 target은 `61`이다.
 
 PASS 조건은 다음과 같다.
 
-- source/backup schema 일치, clone target schema `60`
-- resolution ledger를 포함한 target required table/column/index/append-only trigger 및 동작 probe 통과
+- source/backup schema 일치, clone target schema `61`
+- broker-boundary resolution ledger와 incremental dead-letter disposition ledger를 포함한 target required table/column/index/append-only trigger 및 동작 probe 통과
 - source/clone outbox status count 일치
 - source main/WAL/SHM 지문 불변, source와 clone `quick_check(1)=ok`
 - 전체 기존 table content, rowid와 `sqlite_sequence` 보존
-- source schema가 60 미만이면 선행 resolution table/row가 없어야 함
+- source schema가 60 미만이면 선행 broker-boundary resolution table/row가 없어야 함
+- source schema가 61 미만이면 선행 incremental dead-letter disposition table/row가 없어야 하며, migration 후 새 ledger는 비어 있어야 함
 - migration 재실행 성공
 
 결과는 `reports/database_migration_preflight/<UTC>/raw.json`과 `summary.md`에 저장된다.

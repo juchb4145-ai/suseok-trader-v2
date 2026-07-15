@@ -59,7 +59,7 @@ def test_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
         migrated.close()
         second.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "60"
+    assert schema_version == str(SCHEMA_VERSION) == "61"
     assert {"event_id", "event_rowid", "status", "attempts", "locked_by"} <= columns
     assert "idx_live_sim_lifecycle_inbox_status_sequence" in indexes
 
