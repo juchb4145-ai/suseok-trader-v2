@@ -26,7 +26,11 @@ from storage.projection_watermarks import (
     get_projection_watermark,
     get_projection_watermark_status,
 )
-from storage.sqlite import SCHEMA_VERSION, initialize_database
+from storage.sqlite import (
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 
 TS = datetime(2026, 6, 26, 9, 1, 2, tzinfo=UTC)
 
@@ -231,7 +235,7 @@ def test_schema_48_migrates_legacy_watermark_and_retention_tables(tmp_path) -> N
     legacy.commit()
     legacy.close()
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
     watermark_columns = {
         row["name"]
         for row in connection.execute("PRAGMA table_info(projection_watermarks)")
@@ -246,7 +250,7 @@ def test_schema_48_migrates_legacy_watermark_and_retention_tables(tmp_path) -> N
     connection.close()
     initialize_database(db_path).close()
 
-    assert metadata["value"] == str(SCHEMA_VERSION) == "61"
+    assert metadata["value"] == str(SCHEMA_VERSION) == "62"
     assert {"last_success_event_rowid", "last_error_event_rowid"}.issubset(
         watermark_columns
     )

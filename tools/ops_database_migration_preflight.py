@@ -17,7 +17,15 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from storage.sqlite import SCHEMA_VERSION, initialize_database  # noqa: E402
+from storage.sqlite import (  # noqa: E402
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+    migrate_schema_61_to_62,
+)
+
+PREFLIGHT_CONTRACT_VERSION = "exact-61-to-62-v2"
+EXACT_SCHEMA_61_TO_62_MIGRATION_METHOD = "exact_storage_migrate_schema_61_to_62"
 
 REQUIRED_TARGET_TABLES = (
     "gateway_order_broker_boundary_resolutions",
@@ -29,6 +37,7 @@ REQUIRED_TARGET_TABLES = (
     "live_sim_lifecycle_routing_decisions",
     "incremental_evaluation_dead_letters",
     "incremental_evaluation_dead_letter_dispositions",
+    "pipeline_coherency_dispositions",
 )
 REQUIRED_TARGET_COLUMNS = {
     "gateway_order_broker_boundary_resolutions": frozenset(
@@ -94,6 +103,41 @@ REQUIRED_TARGET_COLUMNS = {
             "auto_run_evaluation",
         }
     ),
+    "pipeline_coherency_dispositions": frozenset(
+        {
+            "disposition_id",
+            "request_id",
+            "request_hash",
+            "candidate_instance_id",
+            "subject_key",
+            "trade_date",
+            "order_plan_id",
+            "sequence_no",
+            "action",
+            "supersedes_disposition_id",
+            "reason_code",
+            "operator_id",
+            "expected_pipeline_fingerprint",
+            "expected_subject_version",
+            "expected_source_fingerprint",
+            "expected_candidate_fingerprint",
+            "expected_downstream_fingerprint",
+            "expected_boundary_fingerprint",
+            "evidence_type",
+            "evidence_ref",
+            "evidence_sha256",
+            "evidence_json",
+            "safety_snapshot_json",
+            "created_at",
+            "observe_only",
+            "live_sim_allowed",
+            "live_real_allowed",
+            "order_commands_allowed",
+            "not_order_intent",
+            "no_order_side_effects",
+            "auto_run_evaluation",
+        }
+    ),
 }
 REQUIRED_TARGET_TABLE_SQL_TOKENS = {
     "gateway_order_broker_boundary_resolutions": (
@@ -121,6 +165,20 @@ REQUIRED_TARGET_TABLE_SQL_TOKENS = {
         "OR (BATCH_SIZE BETWEEN 2 AND 5)",
         "UNIQUE (DEAD_LETTER_ID, SEQUENCE_NO)",
         "FOREIGN KEY (DEAD_LETTER_ID)",
+        "FOREIGN KEY (SUPERSEDES_DISPOSITION_ID)",
+    ),
+    "pipeline_coherency_dispositions": (
+        "DISPOSE_EXPIRED_PLAN_READY",
+        "DISPOSE_ORPHAN_PIPELINE_OBSERVATION",
+        "DISPOSE_STALE_OTHER_DATE",
+        "AND OBSERVE_ONLY = 1",
+        "AND LIVE_SIM_ALLOWED = 0",
+        "AND LIVE_REAL_ALLOWED = 0",
+        "AND ORDER_COMMANDS_ALLOWED = 0",
+        "AND NOT_ORDER_INTENT = 1",
+        "AND NO_ORDER_SIDE_EFFECTS = 1",
+        "AND AUTO_RUN_EVALUATION = 0",
+        "UNIQUE (SUBJECT_KEY, SEQUENCE_NO)",
         "FOREIGN KEY (SUPERSEDES_DISPOSITION_ID)",
     ),
 }
@@ -190,6 +248,20 @@ REQUIRED_TARGET_INDEX_CONTRACTS: dict[str, dict[str, Any]] = {
         "descending": (False, False, False),
         "where_sql": "WHERE RECOVERY_SESSION_ID IS NOT NULL",
     },
+    "idx_pipeline_coherency_disposition_effective": {
+        "table": "pipeline_coherency_dispositions",
+        "columns": ("subject_key", "sequence_no"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, True),
+    },
+    "idx_pipeline_coherency_disposition_action_created": {
+        "table": "pipeline_coherency_dispositions",
+        "columns": ("action", "created_at"),
+        "unique": False,
+        "partial": False,
+        "descending": (False, True),
+    },
 }
 REQUIRED_TARGET_TRIGGER_CONTRACTS: dict[str, dict[str, str]] = {
     "trg_gateway_order_boundary_resolutions_no_update": {
@@ -221,6 +293,16 @@ REQUIRED_TARGET_TRIGGER_CONTRACTS: dict[str, dict[str, str]] = {
         "table": "incremental_evaluation_dead_letter_dispositions",
         "operation": "DELETE",
         "error_message": ("incremental evaluation dead-letter dispositions are append-only"),
+    },
+    "trg_pipeline_coherency_dispositions_no_update": {
+        "table": "pipeline_coherency_dispositions",
+        "operation": "UPDATE",
+        "error_message": "pipeline coherency dispositions are append-only",
+    },
+    "trg_pipeline_coherency_dispositions_no_delete": {
+        "table": "pipeline_coherency_dispositions",
+        "operation": "DELETE",
+        "error_message": "pipeline coherency dispositions are append-only",
     },
 }
 FINGERPRINT_FILES = {
@@ -314,23 +396,38 @@ def run_preflight(
     clone_before = _snapshot_path(clone)
 
     migration_started = time.perf_counter()
-    migrated = initialize_database(clone)
-    migrated.close()
+    migration_method = _migrate_clone_to_current_schema(
+        clone,
+        source_schema=str(source_snapshot["schema_version"]),
+    )
     migration_elapsed_sec = time.perf_counter() - migration_started
+
+    exact_quick_check_started = time.perf_counter()
+    exact_quick_check = _quick_check(clone) if run_quick_check else ["SKIPPED"]
+    exact_quick_check_elapsed_sec = time.perf_counter() - exact_quick_check_started
+    clone_after_exact = _snapshot_path(clone)
+
+    contract_probe_error_type: str | None = None
+    try:
+        contract_probes = _probe_target_contracts(clone)
+    except sqlite3.Error as exc:
+        contract_probes = {}
+        contract_probe_error_type = type(exc).__name__
+    clone_after_probes = _snapshot_path(clone)
 
     idempotent_started = time.perf_counter()
     idempotent = initialize_database(clone)
     idempotent.close()
     idempotent_elapsed_sec = time.perf_counter() - idempotent_started
+    clone_after_idempotent = _snapshot_path(clone)
 
-    contract_probes = _probe_target_contracts(clone)
-    clone_after = _snapshot_path(clone)
     quick_check_started = time.perf_counter()
     quick_check = _quick_check(clone) if run_quick_check else ["SKIPPED"]
     quick_check_elapsed_sec = time.perf_counter() - quick_check_started
 
     report: dict[str, Any] = {
         "generated_at": _now(),
+        "preflight_contract_version": PREFLIGHT_CONTRACT_VERSION,
         "source": {
             "path": str(source),
             "files_before": source_files_before,
@@ -346,12 +443,19 @@ def run_preflight(
             "path": str(clone),
             "disk_space": disk_space,
             "backup_elapsed_sec": backup_elapsed_sec,
+            "migration_method": migration_method,
             "migration_elapsed_sec": migration_elapsed_sec,
+            "exact_quick_check_elapsed_sec": exact_quick_check_elapsed_sec,
             "idempotent_elapsed_sec": idempotent_elapsed_sec,
             "quick_check_elapsed_sec": quick_check_elapsed_sec,
             "before_migration": clone_before,
-            "after_migration": clone_after,
+            "after_migration": clone_after_exact,
+            "after_exact_migration": clone_after_exact,
+            "after_contract_probes": clone_after_probes,
+            "after_idempotent_rerun": clone_after_idempotent,
             "contract_probes": contract_probes,
+            "contract_probe_error_type": contract_probe_error_type,
+            "exact_quick_check": exact_quick_check,
             "quick_check": quick_check,
         },
         "target_schema_version": str(SCHEMA_VERSION),
@@ -363,13 +467,87 @@ def run_preflight(
     return report
 
 
+def _migrate_clone_to_current_schema(path: Path, *, source_schema: str) -> str:
+    if source_schema == "61" and SCHEMA_VERSION == 62:
+        connection = sqlite3.connect(path, timeout=60.0, isolation_level=None)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        try:
+            connection.execute("BEGIN EXCLUSIVE")
+            migrate_schema_61_to_62(connection)
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+        return EXACT_SCHEMA_61_TO_62_MIGRATION_METHOD
+
+    migrated = initialize_database_for_offline_migration(path)
+    migrated.close()
+    return "initialize_database_legacy_or_idempotent"
+
+
 def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     source = _mapping(report.get("source"))
     clone = _mapping(report.get("clone"))
     source_snapshot = _mapping(source.get("snapshot"))
     clone_before = _mapping(clone.get("before_migration"))
     clone_after = _mapping(clone.get("after_migration"))
+    clone_after_exact = _mapping(clone.get("after_exact_migration"))
+    clone_after_probes = _mapping(clone.get("after_contract_probes"))
+    clone_after_idempotent = _mapping(clone.get("after_idempotent_rerun"))
     failures: list[str] = []
+
+    if report.get("preflight_contract_version") != PREFLIGHT_CONTRACT_VERSION:
+        failures.append("PREFLIGHT_CONTRACT_VERSION_INVALID")
+
+    exact_snapshot_alias_valid = bool(
+        clone_after and clone_after_exact and clone_after == clone_after_exact
+    )
+    if not exact_snapshot_alias_valid:
+        failures.append("EXACT_SNAPSHOT_ALIAS_MISMATCH")
+
+    probe_rollback_no_change = bool(
+        clone_after_exact and clone_after_probes and clone_after_probes == clone_after_exact
+    )
+    if not probe_rollback_no_change:
+        failures.append("CONTRACT_PROBES_CHANGED_DATABASE")
+
+    idempotent_schema_unchanged = bool(
+        clone_after_probes
+        and clone_after_idempotent
+        and all(
+            clone_after_idempotent.get(key) == clone_after_probes.get(key)
+            for key in (
+                "schema_version",
+                "journal_mode",
+                "table_count",
+                "schema_objects",
+                "required_tables",
+                "required_columns",
+                "required_indexes",
+                "required_triggers",
+            )
+        )
+    )
+    idempotent_table_content_unchanged = bool(
+        clone_after_probes
+        and clone_after_idempotent
+        and clone_after_idempotent.get("table_content") == clone_after_probes.get("table_content")
+        and clone_after_idempotent.get("projection_outbox")
+        == clone_after_probes.get("projection_outbox")
+        and clone_after_idempotent.get("sqlite_sequence")
+        == clone_after_probes.get("sqlite_sequence")
+    )
+    idempotent_rerun_no_change = bool(
+        clone_after_probes
+        and clone_after_idempotent
+        and clone_after_idempotent == clone_after_probes
+    )
+    if not idempotent_rerun_no_change:
+        failures.append("IDEMPOTENT_RERUN_CHANGED_DATABASE")
 
     required_source_schema = report.get("required_source_schema")
     if not required_source_schema:
@@ -388,8 +566,23 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("TARGET_SCHEMA_INVALID")
     if source_schema_number > target_schema_number >= 0:
         failures.append("SOURCE_SCHEMA_NEWER_THAN_TARGET")
+    elif source_schema_number == target_schema_number >= 0:
+        failures.append("SOURCE_SCHEMA_NOT_OLDER_THAN_TARGET")
     if clone_before.get("schema_version") != source_snapshot.get("schema_version"):
         failures.append("BACKUP_SCHEMA_MISMATCH")
+    backup_schema_objects_preserved = bool(
+        clone_before.get("schema_objects")
+        and clone_before.get("schema_objects") == source_snapshot.get("schema_objects")
+    )
+    if not backup_schema_objects_preserved:
+        failures.append("BACKUP_SCHEMA_OBJECT_MISMATCH")
+    backup_schema_version_record_preserved = bool(
+        clone_before.get("schema_version_record")
+        and clone_before.get("schema_version_record")
+        == source_snapshot.get("schema_version_record")
+    )
+    if not backup_schema_version_record_preserved:
+        failures.append("BACKUP_SCHEMA_VERSION_RECORD_MISMATCH")
     if clone_after.get("schema_version") != str(report.get("target_schema_version")):
         failures.append("TARGET_SCHEMA_MISMATCH")
     if clone_before.get("projection_outbox") != source_snapshot.get("projection_outbox"):
@@ -413,6 +606,11 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     )
     if migration_table_changes:
         failures.append("MIGRATION_TABLE_CONTENT_MISMATCH")
+    exact_migration_table_changes = _changed_table_content(
+        before=_mapping(source_snapshot.get("table_content")),
+        after=_mapping(clone_after_exact.get("table_content")),
+        excluded=MIGRATION_MUTABLE_TABLES,
+    )
     contract_probes = _mapping(clone.get("contract_probes"))
     if not contract_probes or not all(value is True for value in contract_probes.values()):
         failures.append("TARGET_BEHAVIOR_CONTRACT_INVALID")
@@ -460,6 +658,35 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     if not target_disposition_ledger_empty:
         failures.append("TARGET_DEAD_LETTER_DISPOSITION_LEDGER_NOT_EMPTY")
 
+    pipeline_disposition_was_absent = "pipeline_coherency_dispositions" not in source_table_content
+    pretarget_pipeline_disposition_table_present = bool(
+        source_schema_number < 62 and not pipeline_disposition_was_absent
+    )
+    if pretarget_pipeline_disposition_table_present:
+        failures.append("SOURCE_PRETARGET_PIPELINE_DISPOSITION_TABLE_PRESENT")
+    target_pipeline_disposition = _mapping(
+        clone_table_content.get("pipeline_coherency_dispositions")
+    )
+    target_pipeline_disposition_ledger_empty = bool(
+        not pretarget_pipeline_disposition_table_present
+        and (
+            not pipeline_disposition_was_absent
+            or int(target_pipeline_disposition.get("row_count") or 0) == 0
+        )
+    )
+    if not target_pipeline_disposition_ledger_empty:
+        failures.append("TARGET_PIPELINE_DISPOSITION_LEDGER_NOT_EMPTY")
+
+    exact_migration_method = clone.get("migration_method") == EXACT_SCHEMA_61_TO_62_MIGRATION_METHOD
+    source_table_names = set(source_table_content)
+    exact_table_names = set(_mapping(clone_after_exact.get("table_content")))
+    expected_exact_table_names = source_table_names | {"pipeline_coherency_dispositions"}
+    exact_target_table_set_valid: bool | None = None
+    if exact_migration_method:
+        exact_target_table_set_valid = exact_table_names == expected_exact_table_names
+        if not exact_target_table_set_valid:
+            failures.append("EXACT_MIGRATION_TABLE_SET_INVALID")
+
     required_tables = _mapping(clone_after.get("required_tables"))
     if not all(bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES):
         failures.append("TARGET_TABLE_MISSING")
@@ -481,6 +708,10 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         for trigger_name in REQUIRED_TARGET_TRIGGER_CONTRACTS
     ):
         failures.append("TARGET_APPEND_ONLY_TRIGGER_CONTRACT_INVALID")
+    if clone.get("exact_quick_check") == ["SKIPPED"]:
+        failures.append("EXACT_CLONE_QUICK_CHECK_SKIPPED")
+    elif clone.get("exact_quick_check") != ["ok"]:
+        failures.append("EXACT_CLONE_QUICK_CHECK_FAILED")
     if clone.get("quick_check") == ["SKIPPED"]:
         failures.append("CLONE_QUICK_CHECK_SKIPPED")
     elif clone.get("quick_check") != ["ok"]:
@@ -496,6 +727,44 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     )
     if changed_source_files:
         failures.append("SOURCE_DATA_FILE_CHANGED")
+
+    required_tables_present = all(
+        bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES
+    )
+    required_columns_present = all(
+        bool(_mapping(required_columns.get(table)).get("valid"))
+        for table in REQUIRED_TARGET_COLUMNS
+    )
+    required_indexes_present = all(
+        bool(_mapping(required_indexes.get(index_name)).get("valid"))
+        for index_name in REQUIRED_TARGET_INDEX_CONTRACTS
+    )
+    required_append_only_triggers_present = all(
+        bool(_mapping(required_triggers.get(trigger_name)).get("valid"))
+        for trigger_name in REQUIRED_TARGET_TRIGGER_CONTRACTS
+    )
+    target_behavior_contract_valid = bool(
+        contract_probes and all(value is True for value in contract_probes.values())
+    )
+    exact_migration_target_valid: bool | None = None
+    if exact_migration_method:
+        exact_migration_target_valid = bool(
+            clone_after_exact.get("schema_version") == str(report.get("target_schema_version"))
+            and exact_target_table_set_valid
+            and not exact_migration_table_changes
+            and clone_after_exact.get("projection_outbox")
+            == source_snapshot.get("projection_outbox")
+            and clone_after_exact.get("sqlite_sequence") == source_snapshot.get("sqlite_sequence")
+            and target_pipeline_disposition_ledger_empty
+            and required_tables_present
+            and required_columns_present
+            and required_indexes_present
+            and required_append_only_triggers_present
+            and clone.get("exact_quick_check") == ["ok"]
+            and target_behavior_contract_valid
+        )
+        if not exact_migration_target_valid:
+            failures.append("EXACT_MIGRATION_TARGET_INVALID")
 
     return {
         "status": "FAIL" if failures else "PASS",
@@ -514,29 +783,28 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "backup_table_content_preserved": not backup_table_changes,
         "migration_table_content_preserved": not migration_table_changes,
+        "backup_schema_objects_preserved": backup_schema_objects_preserved,
+        "backup_schema_version_record_preserved": (backup_schema_version_record_preserved),
         "backup_table_content_changes": backup_table_changes,
         "migration_table_content_changes": migration_table_changes,
-        "target_behavior_contract_valid": bool(
-            contract_probes and all(value is True for value in contract_probes.values())
-        ),
+        "exact_migration_table_content_changes": exact_migration_table_changes,
+        "exact_snapshot_alias_valid": exact_snapshot_alias_valid,
+        "exact_target_table_set_valid": exact_target_table_set_valid,
+        "exact_migration_target_valid": exact_migration_target_valid,
+        "probe_rollback_no_change": probe_rollback_no_change,
+        "idempotent_rerun_no_change": idempotent_rerun_no_change,
+        "idempotent_schema_unchanged": idempotent_schema_unchanged,
+        "idempotent_table_content_unchanged": idempotent_table_content_unchanged,
+        "target_behavior_contract_valid": target_behavior_contract_valid,
         "clone_disk_space_sufficient": disk_space.get("sufficient") is True,
         "target_resolution_ledger_empty": target_resolution_ledger_empty,
         "target_dead_letter_disposition_ledger_empty": (target_disposition_ledger_empty),
-        "required_tables_present": all(
-            bool(required_tables.get(table)) for table in REQUIRED_TARGET_TABLES
-        ),
-        "required_columns_present": all(
-            bool(_mapping(required_columns.get(table)).get("valid"))
-            for table in REQUIRED_TARGET_COLUMNS
-        ),
-        "required_indexes_present": all(
-            bool(_mapping(required_indexes.get(index_name)).get("valid"))
-            for index_name in REQUIRED_TARGET_INDEX_CONTRACTS
-        ),
-        "required_append_only_triggers_present": all(
-            bool(_mapping(required_triggers.get(trigger_name)).get("valid"))
-            for trigger_name in REQUIRED_TARGET_TRIGGER_CONTRACTS
-        ),
+        "target_pipeline_disposition_ledger_empty": (target_pipeline_disposition_ledger_empty),
+        "required_tables_present": required_tables_present,
+        "required_columns_present": required_columns_present,
+        "required_indexes_present": required_indexes_present,
+        "required_append_only_triggers_present": required_append_only_triggers_present,
+        "exact_quick_check": clone.get("exact_quick_check"),
         "quick_check": clone.get("quick_check"),
         "operating_database_mutated": bool(changed_source_files),
     }
@@ -560,14 +828,13 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
         raise FileNotFoundError(f"source database was not found: {source}")
     if source == clone:
         raise ValueError("clone database must differ from source database")
-    source_sidecars = tuple(
-        Path(f"{source}{suffix}") for suffix in ("-wal", "-shm", "-journal")
-    )
+    source_sidecars = tuple(Path(f"{source}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
     if any(sidecar.exists() for sidecar in source_sidecars):
         raise RuntimeError(
             "source database must be quiescent with no WAL/SHM/rollback-journal sidecars"
         )
-    if clone.exists() or Path(f"{clone}-wal").exists() or Path(f"{clone}-shm").exists():
+    clone_artifacts = tuple(Path(f"{clone}{suffix}") for suffix in ("", "-wal", "-shm", "-journal"))
+    if any(artifact.exists() for artifact in clone_artifacts):
         raise FileExistsError(f"clone database artifacts already exist: {clone}")
 
 
@@ -648,8 +915,13 @@ def _database_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
         }
     return {
         "schema_version": schema_version,
+        "schema_version_record": _schema_version_record_fingerprint(
+            connection,
+            tables=tables,
+        ),
         "journal_mode": str(connection.execute("PRAGMA journal_mode").fetchone()[0]),
         "table_count": len(tables),
+        "schema_objects": _schema_object_fingerprint(connection),
         "projection_outbox": outbox,
         "sqlite_sequence": sqlite_sequence,
         "table_content": _table_content_fingerprints(
@@ -661,6 +933,98 @@ def _database_snapshot(connection: sqlite3.Connection) -> dict[str, Any]:
         "required_indexes": _required_index_contracts(connection),
         "required_triggers": _required_trigger_contracts(connection),
     }
+
+
+def _schema_version_record_fingerprint(
+    connection: sqlite3.Connection,
+    *,
+    tables: set[str],
+) -> dict[str, Any]:
+    """Hash the schema-version row while normalizing only its value.
+
+    Source and target legitimately contain different schema-version values. The
+    row identity, SQL storage type, updated_at, and any future columns must still
+    remain observable for exact-target no-op and post-commit comparisons.
+    """
+
+    digest = hashlib.sha256()
+    row_count = 0
+    if "app_metadata" not in tables:
+        return {"row_count": row_count, "sha256": digest.hexdigest()}
+
+    column_rows = connection.execute("PRAGMA table_info(app_metadata)").fetchall()
+    columns = [str(row["name"]) for row in column_rows]
+    digest.update(json.dumps(columns, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    if "key" not in columns or "value" not in columns:
+        return {"row_count": row_count, "sha256": digest.hexdigest()}
+
+    table_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'app_metadata'"
+    ).fetchone()
+    table_sql = "" if table_row is None else str(table_row["sql"] or "")
+    include_rowid = "WITHOUT ROWID" not in table_sql.upper()
+    column_sql = ", ".join(_quote_identifier(column) for column in columns)
+    select_sql = (
+        f"_rowid_ AS {_quote_identifier('__codex_rowid__')}, {column_sql}"
+        if include_rowid
+        else column_sql
+    )
+    for row in connection.execute(
+        f"SELECT {select_sql} FROM app_metadata WHERE key = ?",
+        ("schema_version",),
+    ):
+        values: list[dict[str, Any]] = []
+        for column in columns:
+            typed_value = _sql_value_for_hash(row[column])
+            if column == "value":
+                typed_value = {**typed_value, "value": "<normalized-schema-version>"}
+            values.append(typed_value)
+        if include_rowid:
+            values.insert(
+                0,
+                {
+                    "type": "rowid",
+                    "value": int(row["__codex_rowid__"]),
+                },
+            )
+        encoded = json.dumps(
+            values,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        row_count += 1
+    return {"row_count": row_count, "sha256": digest.hexdigest()}
+
+
+def _schema_object_fingerprint(connection: sqlite3.Connection) -> dict[str, Any]:
+    digest = hashlib.sha256()
+    object_count = 0
+    rows = connection.execute(
+        """
+        SELECT type, name, tbl_name, COALESCE(sql, '') AS sql
+        FROM sqlite_master
+        WHERE type IN ('table', 'index', 'trigger', 'view')
+        ORDER BY type, name, tbl_name
+        """
+    )
+    for row in rows:
+        encoded = json.dumps(
+            [
+                str(row["type"]),
+                str(row["name"]),
+                str(row["tbl_name"]),
+                str(row["sql"]),
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        object_count += 1
+    return {"object_count": object_count, "sha256": digest.hexdigest()}
 
 
 def _required_column_contracts(
@@ -1375,6 +1739,212 @@ def _probe_target_contracts(path: Path) -> dict[str, bool]:
             WHERE disposition_id = 'probe-disposition-one'
             """,
         )
+        pipeline_hashes = tuple(character * 64 for character in "01234567")
+        connection.execute(
+            """
+            INSERT INTO pipeline_coherency_dispositions (
+                disposition_id, request_id, request_hash,
+                candidate_instance_id, subject_key, trade_date, order_plan_id,
+                sequence_no, action, reason_code, operator_id,
+                expected_pipeline_fingerprint, expected_subject_version,
+                expected_source_fingerprint, expected_candidate_fingerprint,
+                expected_downstream_fingerprint, expected_boundary_fingerprint,
+                evidence_type, evidence_ref, evidence_sha256, evidence_json,
+                safety_snapshot_json, created_at
+            ) VALUES (
+                'probe-pipeline-disposition-one',
+                'probe-pipeline-disposition-request-one', ?,
+                'probe-pipeline-candidate', 'candidate:probe-pipeline-candidate',
+                '2026-01-01', 'probe-plan', 1,
+                'DISPOSE_EXPIRED_PLAN_READY', 'PROBE_EXPIRED',
+                'probe.operator', ?, ?, ?, ?, ?, ?, 'PROBE_EVIDENCE',
+                'probe-pipeline-evidence', ?, '{}', '{}',
+                '2026-01-01T00:00:00Z'
+            )
+            """,
+            pipeline_hashes,
+        )
+        results["pipeline_disposition_revoke_insert_supported"] = _expect_success(
+            connection,
+            """
+            INSERT INTO pipeline_coherency_dispositions (
+                disposition_id, request_id, request_hash,
+                candidate_instance_id, subject_key, trade_date, order_plan_id,
+                sequence_no, action, supersedes_disposition_id, reason_code,
+                operator_id, expected_pipeline_fingerprint,
+                expected_subject_version, expected_source_fingerprint,
+                expected_candidate_fingerprint,
+                expected_downstream_fingerprint,
+                expected_boundary_fingerprint, evidence_type, evidence_ref,
+                evidence_sha256, evidence_json, safety_snapshot_json, created_at
+            ) VALUES (
+                'probe-pipeline-disposition-revoke',
+                'probe-pipeline-disposition-request-revoke', ?,
+                'probe-pipeline-candidate', 'candidate:probe-pipeline-candidate',
+                '2026-01-01', 'probe-plan', 2, 'REVOKE',
+                'probe-pipeline-disposition-one', 'PROBE_REVOKE',
+                'probe.operator', ?, ?, ?, ?, ?, ?, 'PROBE_EVIDENCE',
+                'probe-pipeline-revoke-evidence', ?, '{}', '{}',
+                '2026-01-01T00:00:01Z'
+            )
+            """,
+            tuple(character * 64 for character in "89abcdef"),
+        )
+        pipeline_invalid_insert = """
+            INSERT INTO pipeline_coherency_dispositions (
+                disposition_id, request_id, request_hash,
+                candidate_instance_id, subject_key, sequence_no, action,
+                reason_code, operator_id, expected_pipeline_fingerprint,
+                expected_subject_version, expected_source_fingerprint,
+                expected_candidate_fingerprint,
+                expected_downstream_fingerprint,
+                expected_boundary_fingerprint, evidence_type, evidence_ref,
+                evidence_sha256, created_at{extra_columns}
+            ) VALUES (
+                ?, ?, ?, 'probe-pipeline-candidate',
+                'candidate:probe-pipeline-candidate', ?, ?, 'PROBE_INVALID',
+                'probe.operator', ?, ?, ?, ?, ?, ?, 'PROBE_EVIDENCE',
+                'probe-invalid-evidence', ?, '2026-01-01T00:00:02Z'{extra_values}
+            )
+        """
+        base_invalid_params: tuple[object, ...] = (
+            "probe-pipeline-invalid",
+            "probe-pipeline-invalid-request",
+            "0" * 64,
+            3,
+            "REVOKE",
+            "1" * 64,
+            "2" * 64,
+            "3" * 64,
+            "4" * 64,
+            "5" * 64,
+            "6" * 64,
+            "7" * 64,
+        )
+        results["pipeline_disposition_request_unique"] = _expect_integrity_error(
+            connection,
+            pipeline_invalid_insert.format(extra_columns="", extra_values=""),
+            (
+                "probe-pipeline-request-duplicate",
+                "probe-pipeline-disposition-request-one",
+                *base_invalid_params[2:],
+            ),
+        )
+        results["pipeline_disposition_sequence_unique"] = _expect_integrity_error(
+            connection,
+            pipeline_invalid_insert.format(extra_columns="", extra_values=""),
+            (
+                "probe-pipeline-sequence-duplicate",
+                "probe-pipeline-sequence-duplicate-request",
+                "0" * 64,
+                1,
+                *base_invalid_params[4:],
+            ),
+        )
+        results["pipeline_disposition_action_check"] = _expect_integrity_error(
+            connection,
+            pipeline_invalid_insert.format(extra_columns="", extra_values=""),
+            (
+                "probe-pipeline-invalid-action",
+                "probe-pipeline-invalid-action-request",
+                "0" * 64,
+                3,
+                "INVALID",
+                *base_invalid_params[5:],
+            ),
+        )
+        results["pipeline_disposition_sequence_positive"] = _expect_integrity_error(
+            connection,
+            pipeline_invalid_insert.format(extra_columns="", extra_values=""),
+            (
+                "probe-pipeline-invalid-sequence",
+                "probe-pipeline-invalid-sequence-request",
+                "0" * 64,
+                0,
+                *base_invalid_params[4:],
+            ),
+        )
+        pipeline_hash_parameter_indexes = {
+            "request_hash": 2,
+            "expected_pipeline_fingerprint": 5,
+            "expected_subject_version": 6,
+            "expected_source_fingerprint": 7,
+            "expected_candidate_fingerprint": 8,
+            "expected_downstream_fingerprint": 9,
+            "expected_boundary_fingerprint": 10,
+            "evidence_sha256": 11,
+        }
+        invalid_hash_values: tuple[tuple[str, object], ...] = (
+            ("lower_hex", "A" * 64),
+            ("length", "a" * 63),
+            ("text_type", sqlite3.Binary(b"\xab" * 32)),
+        )
+        for column, parameter_index in pipeline_hash_parameter_indexes.items():
+            for check_name, invalid_value in invalid_hash_values:
+                probe_params = list(base_invalid_params)
+                probe_key = f"{column}-{check_name}"
+                probe_params[0] = f"probe-pipeline-invalid-{probe_key}"
+                probe_params[1] = f"probe-pipeline-invalid-{probe_key}-request"
+                probe_params[parameter_index] = invalid_value
+                results[f"pipeline_disposition_{column}_{check_name}_check"] = (
+                    _expect_integrity_error(
+                        connection,
+                        pipeline_invalid_insert.format(extra_columns="", extra_values=""),
+                        tuple(probe_params),
+                    )
+                )
+        results["pipeline_disposition_lower_hex_hash_check"] = results[
+            "pipeline_disposition_request_hash_lower_hex_check"
+        ]
+        results["pipeline_disposition_supersedes_foreign_key"] = _expect_integrity_error(
+            connection,
+            pipeline_invalid_insert.format(
+                extra_columns=", supersedes_disposition_id",
+                extra_values=", 'probe-pipeline-disposition-missing'",
+            ),
+            (
+                "probe-pipeline-invalid-supersedes",
+                "probe-pipeline-invalid-supersedes-request",
+                *base_invalid_params[2:],
+            ),
+        )
+        for column, invalid_value in (
+            ("observe_only", 0),
+            ("live_sim_allowed", 1),
+            ("live_real_allowed", 1),
+            ("order_commands_allowed", 1),
+            ("not_order_intent", 0),
+            ("no_order_side_effects", 0),
+            ("auto_run_evaluation", 1),
+        ):
+            results[f"pipeline_disposition_{column}_check"] = _expect_integrity_error(
+                connection,
+                pipeline_invalid_insert.format(
+                    extra_columns=f", {column}",
+                    extra_values=", ?",
+                ),
+                (
+                    f"probe-pipeline-invalid-{column}",
+                    f"probe-pipeline-invalid-{column}-request",
+                    *base_invalid_params[2:],
+                    invalid_value,
+                ),
+            )
+        results["pipeline_disposition_update_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            UPDATE pipeline_coherency_dispositions
+            SET reason_code = 'MUTATED'
+            WHERE disposition_id = 'probe-pipeline-disposition-one'
+            """,
+        )
+        results["pipeline_disposition_delete_blocked"] = _expect_integrity_error(
+            connection,
+            """
+            DELETE FROM pipeline_coherency_dispositions
+            WHERE disposition_id = 'probe-pipeline-disposition-one'
+            """,
+        )
     finally:
         connection.execute("ROLLBACK TO target_contract_probe")
         connection.execute("RELEASE target_contract_probe")
@@ -1612,6 +2182,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             "# Database Migration Preflight",
             "",
             f"- generated_at: `{report.get('generated_at')}`",
+            f"- preflight_contract_version: `{report.get('preflight_contract_version')}`",
             f"- verdict: `{verdict.get('status')}`",
             f"- source_db: `{source.get('path')}`",
             f"- clone_db: `{clone.get('path')}`",
@@ -1620,6 +2191,8 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"{clone_after.get('schema_version')}`",
             f"- backup_elapsed_sec: `{float(clone.get('backup_elapsed_sec') or 0):.3f}`",
             f"- migration_elapsed_sec: `{float(clone.get('migration_elapsed_sec') or 0):.3f}`",
+            f"- migration_method: `{clone.get('migration_method')}`",
+            f"- exact_quick_check: `{json.dumps(clone.get('exact_quick_check'))}`",
             f"- idempotent_elapsed_sec: `{float(clone.get('idempotent_elapsed_sec') or 0):.3f}`",
             f"- quick_check_elapsed_sec: `{float(clone.get('quick_check_elapsed_sec') or 0):.3f}`",
             f"- quick_check: `{json.dumps(clone.get('quick_check'))}`",
@@ -1629,6 +2202,14 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"`{json.dumps(clone_after.get('projection_outbox'), sort_keys=True)}`",
             "- source_data_files_unchanged: "
             f"`{str(bool(verdict.get('source_data_files_unchanged'))).lower()}`",
+            "- exact_migration_target_valid: "
+            f"`{str(bool(verdict.get('exact_migration_target_valid'))).lower()}`",
+            "- exact_target_table_set_valid: "
+            f"`{str(bool(verdict.get('exact_target_table_set_valid'))).lower()}`",
+            "- probe_rollback_no_change: "
+            f"`{str(bool(verdict.get('probe_rollback_no_change'))).lower()}`",
+            "- idempotent_rerun_no_change: "
+            f"`{str(bool(verdict.get('idempotent_rerun_no_change'))).lower()}`",
             "- required_tables_present: "
             f"`{str(bool(verdict.get('required_tables_present'))).lower()}`",
             "- required_columns_present: "

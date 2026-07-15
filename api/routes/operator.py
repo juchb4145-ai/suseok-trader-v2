@@ -22,7 +22,16 @@ from services.operator.no_buy_sentinel import (
     rebuild_no_buy_sentinel_snapshot,
 )
 from services.operator.operator_status import build_operator_status
-from services.pipeline_coherency import build_pipeline_coherency_status
+from services.pipeline_coherency import (
+    build_pipeline_coherency_rca_status,
+    build_pipeline_coherency_status,
+)
+from services.pipeline_coherency_disposition import (
+    PipelineCoherencyDispositionError,
+    list_pipeline_coherency_dispositions,
+    preview_pipeline_coherency_disposition,
+    resolve_pipeline_coherency_dispositions,
+)
 from services.realtime_subscription import (
     build_realtime_subscription_plan,
     run_realtime_subscription_once,
@@ -323,7 +332,7 @@ def operator_pipeline_coherency_status(
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
     try:
         return build_pipeline_coherency_status(
             connection,
@@ -331,6 +340,103 @@ def operator_pipeline_coherency_status(
             max_age_sec=settings.entry_timing_stale_max_seconds,
             limit=limit,
         )
+    finally:
+        connection.close()
+
+
+@router.get("/pipeline-coherency/rca/status")
+def operator_pipeline_coherency_rca_status(
+    trade_date: str | None = Query(default=None),
+    candidate_instance_id: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=200,
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
+    try:
+        return build_pipeline_coherency_rca_status(
+            connection,
+            trade_date=trade_date,
+            max_age_sec=settings.entry_timing_stale_max_seconds,
+            limit=limit,
+            offset=offset,
+            candidate_instance_id=candidate_instance_id,
+            disposition_resolver=(
+                lambda resolved_trade_date, subjects: resolve_pipeline_coherency_dispositions(
+                    connection,
+                    resolved_trade_date,
+                    subjects,
+                )
+            ),
+        )
+    finally:
+        connection.close()
+
+
+@router.get("/pipeline-coherency/disposition-preview")
+def operator_pipeline_coherency_disposition_preview(
+    trade_date: str = Query(min_length=10, max_length=10),
+    candidate_instance_id: str = Query(min_length=1, max_length=200),
+    action: str = Query(min_length=1, max_length=64),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
+    try:
+        preview = preview_pipeline_coherency_disposition(
+            connection,
+            trade_date=trade_date,
+            candidate_instance_id=candidate_instance_id,
+            action=action,
+        )
+        if not bool(preview.get("eligible")):
+            raise HTTPException(
+                status_code=http_status.HTTP_409_CONFLICT,
+                detail=preview,
+            )
+        return preview
+    except PipelineCoherencyDispositionError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.to_dict(),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail={"status": "INVALID_PIPELINE_DISPOSITION_PREVIEW", "message": str(exc)},
+        ) from exc
+    finally:
+        connection.close()
+
+
+@router.get("/pipeline-coherency/dispositions")
+def operator_pipeline_coherency_dispositions(
+    subject_key: str | None = Query(default=None, min_length=1, max_length=500),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = _open_boundary_read_only_connection(settings.trading_db_path)
+    try:
+        items = list_pipeline_coherency_dispositions(
+            connection,
+            subject_key=subject_key,
+            limit=limit,
+        )
+        return {
+            "items": items,
+            "count": len(items),
+            "read_only": True,
+            "observe_only": True,
+            "no_order_side_effects": True,
+        }
+    except PipelineCoherencyDispositionError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=exc.to_dict(),
+        ) from exc
     finally:
         connection.close()
 
@@ -577,8 +683,16 @@ def operator_order_broker_boundaries(
 
 def _open_boundary_read_only_connection(db_path: str | Path) -> sqlite3.Connection:
     path = Path(db_path).expanduser().resolve()
+    wal_exists = Path(f"{path}-wal").exists()
+    shm_exists = Path(f"{path}-shm").exists()
+    journal_exists = Path(f"{path}-journal").exists()
+    if wal_exists != shm_exists or journal_exists:
+        raise sqlite3.OperationalError(
+            "read-only operator status requires a stable SQLite sidecar state"
+        )
+    immutable = "&immutable=1" if not wal_exists else ""
     connection = sqlite3.connect(
-        f"{path.as_uri()}?mode=ro",
+        f"{path.as_uri()}?mode=ro{immutable}",
         uri=True,
         timeout=15.0,
     )
@@ -918,9 +1032,8 @@ def operator_projection_outbox_drain_once(
             error_count += int(payload.get("error_count") or 0)
             dead_letter_count += int(payload.get("dead_letter_count") or 0)
             locked_retry_count += int(payload.get("locked_retry_count") or 0)
-            projection_side_effects_allowed = (
-                projection_side_effects_allowed
-                or bool(payload.get("projection_side_effects_allowed"))
+            projection_side_effects_allowed = projection_side_effects_allowed or bool(
+                payload.get("projection_side_effects_allowed")
             )
             result_statuses.append(str(payload.get("status") or "UNKNOWN"))
             if int(payload.get("claimed_count") or 0) == 0:
@@ -1821,8 +1934,7 @@ def operator_incremental_evaluation_dead_letter_reset(
             "status": "UNGUARDED_RESET_DISABLED",
             "dead_letter_id": dead_letter_id,
             "message": (
-                "Use the offline guarded recovery workflow; the legacy reset API "
-                "is disabled."
+                "Use the offline guarded recovery workflow; the legacy reset API is disabled."
             ),
             "no_order_side_effects": True,
         },

@@ -81,16 +81,37 @@ def evaluate_entry_timing(
     candidate_instance_id: str | None = None,
     limit: int | None = None,
     write_order_plan_drafts: bool | None = None,
+    persist_evaluations: bool | None = None,
     settings: Settings | None = None,
     manage_run_lock: bool = True,
     source_run_id: str | None = None,
+    commit: bool = True,
 ) -> EntryTimingEvaluationRunResult:
+    if not commit and manage_run_lock:
+        raise RuntimeError(
+            "commit=False requires manage_run_lock=False"
+        )
+    if not commit and not connection.in_transaction:
+        raise RuntimeError(
+            "commit=False requires an existing transaction"
+        )
     with runtime_execution_lock(
         connection,
         EVALUATION_PIPELINE_LOCK,
         details={"run_type": "entry_timing_evaluation", "trade_date": trade_date},
         manage_lock=manage_run_lock,
     ):
+        if not commit:
+            return _evaluate_entry_timing(
+                connection,
+                trade_date=trade_date,
+                candidate_instance_id=candidate_instance_id,
+                limit=limit,
+                write_order_plan_drafts=write_order_plan_drafts,
+                persist_evaluations=persist_evaluations,
+                settings=settings,
+                source_run_id=source_run_id,
+            )
         with immediate_transaction(connection):
             return _evaluate_entry_timing(
                 connection,
@@ -98,6 +119,7 @@ def evaluate_entry_timing(
                 candidate_instance_id=candidate_instance_id,
                 limit=limit,
                 write_order_plan_drafts=write_order_plan_drafts,
+                persist_evaluations=persist_evaluations,
                 settings=settings,
                 source_run_id=source_run_id,
             )
@@ -110,6 +132,7 @@ def _evaluate_entry_timing(
     candidate_instance_id: str | None = None,
     limit: int | None = None,
     write_order_plan_drafts: bool | None = None,
+    persist_evaluations: bool | None = None,
     settings: Settings | None = None,
     source_run_id: str | None = None,
 ) -> EntryTimingEvaluationRunResult:
@@ -119,10 +142,22 @@ def _evaluate_entry_timing(
 
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
     bounded_limit = _bounded_limit(limit or resolved_settings.entry_timing_max_plans_per_run)
-    should_write = (
+    should_write_order_plan_drafts = (
         resolved_settings.entry_timing_write_order_plan_drafts
         if write_order_plan_drafts is None
         else bool(write_order_plan_drafts)
+    )
+    should_persist_evaluations = (
+        should_write_order_plan_drafts
+        if persist_evaluations is None
+        else bool(persist_evaluations)
+    )
+    if should_write_order_plan_drafts and not should_persist_evaluations:
+        raise ValueError(
+            "order-plan draft persistence requires evaluation persistence"
+        )
+    suppress_order_plan_draft = (
+        should_persist_evaluations and not should_write_order_plan_drafts
     )
     rows = _candidate_rows_for_evaluation(
         connection,
@@ -170,7 +205,11 @@ def _evaluate_entry_timing(
                 },
             )
             final_status, status_reasons = builder.resolve_status(item, evaluation)
-            draft = builder.build(item, evaluation)
+            draft = (
+                None
+                if suppress_order_plan_draft
+                else builder.build(item, evaluation)
+            )
             if draft is not None:
                 evaluation = evaluation.with_status(
                     draft.status,
@@ -182,14 +221,17 @@ def _evaluate_entry_timing(
                     final_status,
                     reason_codes=_dedupe([*evaluation.reason_codes, *status_reasons]),
                 )
-            if should_write:
+            persisted_evaluation = evaluation
+            if should_persist_evaluations:
+                if not should_write_order_plan_drafts:
+                    persisted_evaluation = evaluation.with_order_plan_id(None)
                 lineage = lineage_for_entry_input(
                     item.raw_context,
                     generated_by="entry_timing_engine",
                 )
                 save_entry_timing_evaluation(
                     connection,
-                    evaluation,
+                    persisted_evaluation,
                     source_lineage=lineage,
                     strategy_observation_id=pipeline_coherency.get(
                         "strategy_observation_id"
@@ -198,7 +240,7 @@ def _evaluate_entry_timing(
                         "risk_observation_id"
                     ),
                 )
-                if draft is not None:
+                if should_write_order_plan_drafts and draft is not None:
                     save_order_plan_draft(
                         connection,
                         draft,
@@ -213,7 +255,7 @@ def _evaluate_entry_timing(
                             "risk_observation_id"
                         ),
                     )
-            evaluations.append(evaluation)
+            evaluations.append(persisted_evaluation)
             if draft is not None:
                 drafts.append(draft)
         except Exception as exc:
@@ -225,9 +267,6 @@ def _evaluate_entry_timing(
                 error_message=str(exc),
                 payload=item.to_dict(),
             )
-    if should_write:
-        connection.commit()
-
     return EntryTimingEvaluationRunResult(
         trade_date=target_trade_date,
         candidate_count=len(inputs),
@@ -1549,7 +1588,7 @@ def _first_number(*values: object) -> float | None:
         if value is None:
             continue
         try:
-            return float(value)
+            return float(value)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             continue
     return None
@@ -1560,7 +1599,7 @@ def _first_int(*values: object) -> int | None:
         if value is None:
             continue
         try:
-            return int(value)
+            return int(value)  # type: ignore[call-overload]
         except (TypeError, ValueError):
             continue
     return None

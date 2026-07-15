@@ -48,7 +48,7 @@ Post-Merge Qualification
 FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에서 다시 고정한다.
 
 - clean checkout에서 Ruff, mypy, 전체 pytest
-- 운영 SQLite schema version과 schema 59 migration 상태
+- 운영 SQLite 실제 schema와 현재 코드 target migration 상태
 - 운영 DB `quick_check(1)`
 - pipeline coherency, runtime lock, order-plan uniqueness, broker boundary 상태
 - projection/lifecycle `ERROR`, `DEAD_LETTER`, stale backlog
@@ -97,7 +97,7 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 
 | 단계 | 상태 | 의존성 | 핵심 산출물 |
 | --- | --- | --- | --- |
-| FAST-0 Post-Merge Qualification | `NEXT` | 구조 감사 병합 | 검증 report, 운영 baseline |
+| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1/R2 병합, R3/R4/R5 필요 | 검증 report, 운영 baseline |
 | FAST-1 Pure Preview | `BLOCKED_BY_FAST_0` | FAST-0 PASS | 무기록 preview API |
 | Operational Gate C1 | `BLOCKED_BY_FAST_1` | Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `BLOCKED_BY_FAST_0` | FAST-0 PASS | virtual-clock replay |
@@ -146,16 +146,16 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 5. `python -m pytest`
 6. 운영 DB read-only fingerprint 및 schema 확인
 7. clone migration preflight
-8. 승인된 절차로 운영 DB schema 59 적용 또는 이미 59임을 확인
+8. 승인된 절차로 운영 DB를 현재 코드 target schema까지 적용하거나 이미 target임을 확인
 9. OBSERVE Core/Gateway smoke
 10. 구조 status API/ops 도구 일괄 점검
 
 ### 필수 점검
 
 ```text
-/api/operator/runtime-execution-lock/status
-/api/operator/live-sim-order-plan-uniqueness/status
-/api/operator/order-broker-boundary/status
+/api/operator/runtime-execution-locks/status
+/api/operator/live-sim/order-plan-uniqueness/status
+/api/operator/gateway/order-broker-boundaries/status
 /api/operator/pipeline-coherency/status
 /api/operator/incremental-evaluation/status
 /api/operator/theme-coherency/status
@@ -172,12 +172,13 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - clone migration이 PASS하기 전 운영 DB를 변경하지 않는다.
 - Core/Gateway/theme/evidence process를 모두 종료한 뒤 migration한다.
 - backup, schema, outbox count, WAL/SHM, file fingerprint를 기록한다.
-- migration 재실행 멱등성과 `quick_check(1)=ok`를 확인한다.
+- exact migration은 재실행하지 않는다. clone이 target schema에 도달한 뒤 `initialize_database`
+  logical no-op와 `quick_check(1)=ok`를 확인한다.
 
 ### PASS 기준
 
 - Ruff, mypy, 전체 pytest PASS
-- 운영 DB target schema 59
+- 운영 DB가 현재 코드 target schema와 정확히 일치
 - `quick_check(1)=ok`
 - runtime active lock 이상 0
 - unresolved order-plan uniqueness conflict 0
@@ -192,6 +193,25 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
 - legacy non-ready row의 lineage 누락
 - append-only evidence `1/10` 등 기간 미충족
 - 기능 오류가 아닌 현재 장외 freshness
+
+### 2026-07-15 복원 기준 상태
+
+이 절은 최초 작성 당시의 schema 59 예시보다 우선하는 현재 실행 기록이다.
+
+- PR #10(FAST-0), #11(FAST-0R1), #12(FAST-0R2)은 `main`에 병합됐다.
+- 운영 DB는 strict read-only 점검 기준 schema `61`, `quick_check(1)=ok`다.
+- broker boundary raw `UNCONFIRMED=3`은 보존되고 검증된 append-only resolution 기준
+  effective `UNCONFIRMED=0`이다. raw count를 삭제하거나 성공으로 오인하지 않는다.
+- incremental dead-letter raw `38`은 보존돼 있고 disposition ledger가 비어 있어 effective
+  blocker도 `38`이다. 별도 승인 전에는 apply하지 않는다.
+- canonical pipeline `FAIL=159`는 그대로 유지한다. FAST-0R3는 historical closed `149`,
+  manual `10`, active/current `0`을 별도 RCA view에서 분류하되 canonical 결과를 낮추지 않는다.
+- lifecycle audit raw/mirrored `346/346`은 FAST-0R4 classifier 전까지 canonical blocker로
+  취급한다. raw audit row를 UPDATE/DELETE하지 않는다.
+- FAST-0R3 코드 target은 schema `62`이며 새 pipeline disposition ledger만 additive하게
+  추가한다. 운영 `61→62`는 clone preflight, backup, 무결성 검증과 별도 승인 뒤에만 적용한다.
+- FAST-0은 R2의 38건 disposition, R3의 required disposition, R4 classifier와 R5 strict
+  requalification이 끝나기 전까지 `IN_PROGRESS/BLOCKED`이며 FAST-1을 시작하지 않는다.
 
 ### 중단 조건
 
@@ -671,12 +691,12 @@ kill switch 유지
 ### Gate S0 — Code
 
 - Ruff/mypy/pytest PASS
-- migration idempotent
+- exact migration one-shot/CAS guard + target-schema `initialize_database` logical no-op
 - default-safe config
 
 ### Gate S1 — Operational Baseline
 
-- schema 59
+- 해당 단계의 코드가 요구하는 current target schema exact 일치 (현재 FAST-0R3: schema 62)
 - OBSERVE smoke PASS
 - 주문 delta 0
 - coherency/boundary/dead-letter blocker 0

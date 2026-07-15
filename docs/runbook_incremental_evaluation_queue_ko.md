@@ -202,7 +202,7 @@ FROM incremental_evaluation_dead_letter_dispositions
 GROUP BY action
 ORDER BY action;
 
-SELECT candidate_instance_id, code, attempts, last_error, dead_lettered_at
+SELECT dead_letter_id, candidate_instance_id, code, attempts, last_error, dead_lettered_at
 FROM incremental_evaluation_dead_letters
 WHERE status = 'DEAD_LETTER'
 ORDER BY dead_lettered_at, dead_letter_id;

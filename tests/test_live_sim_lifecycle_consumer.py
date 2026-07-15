@@ -8,7 +8,12 @@ from fastapi.testclient import TestClient
 from services.config import Settings
 from services.runtime import live_sim_lifecycle_consumer as consumer
 from storage.event_store import append_gateway_event
-from storage.sqlite import SCHEMA_VERSION, initialize_database, open_connection
+from storage.sqlite import (
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+    open_connection,
+)
 
 
 def _event(event_id: str, *, event_type: str = "command_started") -> GatewayEvent:
@@ -37,8 +42,8 @@ def test_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
-    second = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
+    second = initialize_database_for_offline_migration(db_path)
     try:
         schema_version = migrated.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
@@ -59,7 +64,7 @@ def test_lifecycle_inbox_migration_is_reentrant(tmp_path) -> None:
         migrated.close()
         second.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "61"
+    assert schema_version == str(SCHEMA_VERSION) == "62"
     assert {"event_id", "event_rowid", "status", "attempts", "locked_by"} <= columns
     assert "idx_live_sim_lifecycle_inbox_status_sequence" in indexes
 

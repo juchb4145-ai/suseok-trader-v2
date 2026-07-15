@@ -1,6 +1,11 @@
 import sqlite3
 
-from storage.sqlite import APP_NAME, SCHEMA_VERSION, initialize_database
+from storage.sqlite import (
+    APP_NAME,
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 
 
 def test_sqlite_initialization_creates_app_metadata_and_pragmas(tmp_path) -> None:
@@ -123,7 +128,7 @@ def test_sqlite_reinitialization_adds_market_reference_budget_state(tmp_path) ->
     legacy.commit()
     legacy.close()
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
     table = connection.execute(
         """
         SELECT name
@@ -172,7 +177,7 @@ def test_sqlite_reinitialization_upgrades_runtime_execution_lock_fencing(
     legacy.commit()
     legacy.close()
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
     columns = {
         row["name"]
         for row in connection.execute(
@@ -332,7 +337,7 @@ def test_sqlite_initialization_migrates_legacy_market_data_exchange_schema(tmp_p
     )
     legacy.close()
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
 
     latest_pk = [
         row["name"]
@@ -768,7 +773,7 @@ def test_sqlite_initialization_migrates_live_sim_lowest_price(tmp_path) -> None:
     legacy.commit()
     legacy.close()
 
-    connection = initialize_database(db_path)
+    connection = initialize_database_for_offline_migration(db_path)
     columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(live_sim_positions)")
     }

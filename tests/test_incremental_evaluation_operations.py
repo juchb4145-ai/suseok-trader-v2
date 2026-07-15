@@ -16,7 +16,12 @@ from services.runtime.incremental_evaluation import (
     reset_incremental_evaluation_dead_letter,
     sweep_incremental_evaluation_retry_exhausted,
 )
-from storage.sqlite import SCHEMA_VERSION, initialize_database, open_connection
+from storage.sqlite import (
+    SCHEMA_VERSION,
+    initialize_database,
+    initialize_database_for_offline_migration,
+    open_connection,
+)
 from tests.test_strategy_service import _insert_strategy_fixture
 
 
@@ -81,8 +86,8 @@ def test_schema_58_dead_letter_migration_is_reentrant(tmp_path) -> None:
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
-    rerun = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
+    rerun = initialize_database_for_offline_migration(db_path)
     try:
         schema_version = migrated.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
@@ -121,7 +126,7 @@ def test_schema_58_dead_letter_migration_is_reentrant(tmp_path) -> None:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "61"
+    assert schema_version == str(SCHEMA_VERSION) == "62"
     assert {"dead_letter_id", "candidate_instance_id", "attempts", "status"} <= columns
     assert "uq_incremental_evaluation_dead_letter_active" not in indexes
     assert "idx_incremental_evaluation_dead_letter_candidate_time" in indexes

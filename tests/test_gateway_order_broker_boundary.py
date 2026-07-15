@@ -20,7 +20,10 @@ from storage.gateway_order_broker_boundary import (
     get_order_broker_boundary_status,
     list_order_broker_boundaries,
 )
-from storage.sqlite import initialize_database
+from storage.sqlite import (
+    initialize_database,
+    initialize_database_for_offline_migration,
+)
 from tests.test_live_sim import _live_sim_settings, _mark_gateway_ready
 
 TS = datetime(2026, 7, 10, 9, 1, 2, tzinfo=UTC)
@@ -387,7 +390,7 @@ def test_legacy_order_boundary_migration_and_rerun_are_idempotent(tmp_path) -> N
     connection.commit()
     connection.close()
 
-    migrated = initialize_database(db_path)
+    migrated = initialize_database_for_offline_migration(db_path)
     boundary = get_order_broker_boundary(migrated, command.command_id)
     assert boundary is not None
     assert boundary["state"] == "BROKER_ACCEPTED"
