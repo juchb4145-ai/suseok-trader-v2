@@ -55,7 +55,7 @@ def test_database_migration_preflight_clones_and_preserves_outbox(tmp_path) -> N
     assert report["verdict"]["sqlite_sequence_preserved"] is True
     assert report["verdict"]["clone_disk_space_sufficient"] is True
     assert report["source"]["quick_check"] == ["ok"]
-    assert set(report["source"]["files_before"]) == {"main", "wal", "shm"}
+    assert set(report["source"]["files_before"]) == {"main", "wal", "shm", "journal"}
     assert report["clone"]["after_migration"]["schema_version"] == "61"
     assert report["clone"]["quick_check"] == ["ok"]
     assert report["clone"]["after_migration"]["projection_outbox"] == {
@@ -63,6 +63,18 @@ def test_database_migration_preflight_clones_and_preserves_outbox(tmp_path) -> N
         "PENDING": 1,
         "SKIPPED": 1,
     }
+
+    journal_appeared = copy.deepcopy(report)
+    journal_appeared["source"]["files_after"]["journal"] = {
+        "exists": True,
+        "size": 1,
+        "mtime_ns": 1,
+        "sha256": "0" * 64,
+    }
+    journal_verdict = evaluate_report(journal_appeared)
+    assert journal_verdict["status"] == "FAIL"
+    assert "SOURCE_DATA_FILE_CHANGED" in journal_verdict["failures"]
+    assert "-journal" in journal_verdict["changed_source_files"]
 
     migrated = sqlite3.connect(clone)
     tables = {
@@ -253,11 +265,12 @@ def test_database_migration_preflight_refuses_existing_clone(tmp_path) -> None:
         )
 
 
-def test_database_migration_preflight_refuses_source_sidecars(tmp_path) -> None:
-    source = tmp_path / "source-with-sidecar.sqlite3"
+@pytest.mark.parametrize("suffix", ("-wal", "-shm", "-journal"))
+def test_database_migration_preflight_refuses_source_sidecars(tmp_path, suffix: str) -> None:
+    source = tmp_path / f"source-with-sidecar{suffix}.sqlite3"
     clone = tmp_path / "clone.sqlite3"
     initialize_database(source).close()
-    sidecar = tmp_path / "source-with-sidecar.sqlite3-wal"
+    sidecar = source.parent / f"{source.name}{suffix}"
     sidecar.touch()
 
     with pytest.raises(RuntimeError, match="quiescent"):

@@ -227,6 +227,7 @@ FINGERPRINT_FILES = {
     "main": "",
     "wal": "-wal",
     "shm": "-shm",
+    "journal": "-journal",
 }
 MIGRATION_MUTABLE_TABLES: frozenset[str] = frozenset()
 
@@ -559,8 +560,13 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
         raise FileNotFoundError(f"source database was not found: {source}")
     if source == clone:
         raise ValueError("clone database must differ from source database")
-    if Path(f"{source}-wal").exists() or Path(f"{source}-shm").exists():
-        raise RuntimeError("source database must be quiescent with no WAL/SHM sidecars")
+    source_sidecars = tuple(
+        Path(f"{source}{suffix}") for suffix in ("-wal", "-shm", "-journal")
+    )
+    if any(sidecar.exists() for sidecar in source_sidecars):
+        raise RuntimeError(
+            "source database must be quiescent with no WAL/SHM/rollback-journal sidecars"
+        )
     if clone.exists() or Path(f"{clone}-wal").exists() or Path(f"{clone}-shm").exists():
         raise FileExistsError(f"clone database artifacts already exist: {clone}")
 
@@ -568,7 +574,12 @@ def _validate_paths(*, source: Path, clone: Path) -> None:
 def _disk_space_contract(*, source: Path, clone: Path) -> dict[str, Any]:
     source_bytes = sum(
         candidate.stat().st_size
-        for candidate in (source, Path(f"{source}-wal"), Path(f"{source}-shm"))
+        for candidate in (
+            source,
+            Path(f"{source}-wal"),
+            Path(f"{source}-shm"),
+            Path(f"{source}-journal"),
+        )
         if candidate.exists()
     )
     probe = clone.parent
@@ -1546,7 +1557,12 @@ def _changed_source_data_files(
     after: Mapping[str, Any],
 ) -> list[str]:
     changed: list[str] = []
-    for label, display_name in (("main", "<main>"), ("wal", "-wal"), ("shm", "-shm")):
+    for label, display_name in (
+        ("main", "<main>"),
+        ("wal", "-wal"),
+        ("shm", "-shm"),
+        ("journal", "-journal"),
+    ):
         if before.get(label) != after.get(label):
             changed.append(display_name)
     return changed
