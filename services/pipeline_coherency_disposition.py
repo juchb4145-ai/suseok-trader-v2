@@ -695,6 +695,24 @@ def _current_cas_snapshot(
     downstream = _downstream_snapshot(connection, subject=subject)
     boundary = _boundary_snapshot(connection, downstream["command_ids"])
     unexpired_plan_ids = _unexpired_plan_ids(connection, candidate_id, as_of=as_of)
+    historical_event_active_count = sum(1 for row in sources if int(row.get("active") or 0))
+    latest_active_count = sum(1 for row in latest_sources if int(row.get("active") or 0))
+    candidate_active_source_count = (
+        None if candidate is None else int(candidate["active_source_count"] or 0)
+    )
+    source_projection_consistent = (
+        None
+        if candidate_active_source_count is None and latest_active_count == 0
+        else latest_active_count == int(candidate_active_source_count or 0)
+    )
+    if source_projection_consistent is False:
+        source_state_classification = "SOURCE_PROJECTION_INCONSISTENT"
+    elif latest_active_count:
+        source_state_classification = "LATEST_ACTIVE_SOURCE_PRESENT"
+    elif historical_event_active_count:
+        source_state_classification = "HISTORICAL_EVENT_ACTIVE_ONLY"
+    else:
+        source_state_classification = "NO_ACTIVE_SOURCE_PRESENT"
     return {
         "source_fingerprint": _sha256_json(
             {
@@ -714,11 +732,15 @@ def _current_cas_snapshot(
         ),
         "source_public": {
             "row_count": len(sources),
-            "active_count": sum(1 for row in sources if int(row.get("active") or 0)),
+            # Deprecated audit alias retained for existing consumers. Event rows are
+            # append-only history and must not be confused with the latest projection.
+            "active_count": historical_event_active_count,
+            "historical_event_active_count": historical_event_active_count,
             "latest_row_count": len(latest_sources),
-            "latest_active_count": sum(
-                1 for row in latest_sources if int(row.get("active") or 0)
-            ),
+            "latest_active_count": latest_active_count,
+            "candidate_active_source_count": candidate_active_source_count,
+            "source_projection_consistent": source_projection_consistent,
+            "source_state_classification": source_state_classification,
         },
         "candidate_public": {
             "present": candidate is not None,
@@ -1449,8 +1471,16 @@ def _eligibility_reasons(
     candidate = _mapping(current.get("candidate_public"))
     source = _mapping(current.get("source_public"))
     downstream = _mapping(current.get("downstream_public"))
+    historical_event_active_count = int(
+        source.get("historical_event_active_count") or source.get("active_count") or 0
+    )
+    latest_active_count = int(source.get("latest_active_count") or 0)
     if str(subject.get("canonical_status") or "").upper() != "FAIL":
         reasons.append("CANONICAL_PIPELINE_SUBJECT_NOT_FAIL")
+    if latest_active_count:
+        reasons.append("LATEST_ACTIVE_SOURCE_PRESENT")
+    if source.get("source_projection_consistent") is False:
+        reasons.append("SOURCE_PROJECTION_INCONSISTENT")
     if downstream.get("unresolved_boundary_count"):
         reasons.append("EFFECTIVE_BROKER_BOUNDARY_UNCONFIRMED")
     if downstream.get("unknown_boundary_count"):
@@ -1488,14 +1518,14 @@ def _eligibility_reasons(
             reasons.append("CANDIDATE_TERMINAL_EVIDENCE_MISSING")
         if int(candidate.get("active_source_count") or 0):
             reasons.append("CANDIDATE_ACTIVE_SOURCE_COUNT_PRESENT")
-        if source.get("active_count") or source.get("latest_active_count"):
+        if historical_event_active_count or latest_active_count:
             reasons.append("HISTORICAL_ACTIVE_SOURCE_PRESENT")
     elif action == ACTION_DISPOSE_ORPHAN:
         if subject.get("classification") != "MISSING_CANDIDATE_MANUAL_REVIEW":
             reasons.append("PIPELINE_SUBJECT_NOT_ORPHAN")
         if candidate.get("present"):
             reasons.append("ORPHAN_CANDIDATE_PRESENT")
-        if source.get("active_count") or source.get("latest_active_count"):
+        if historical_event_active_count or latest_active_count:
             reasons.append("ORPHAN_ACTIVE_SOURCE_PRESENT")
     elif action == ACTION_DISPOSE_STALE_OTHER_DATE:
         if subject.get("classification") != "STALE_OTHER_DATE_MANUAL_REVIEW":
@@ -1504,7 +1534,7 @@ def _eligibility_reasons(
             reasons.append("STALE_SUBJECT_IS_CURRENT_ACTIVE")
         if int(candidate.get("active_source_count") or 0):
             reasons.append("CANDIDATE_ACTIVE_SOURCE_COUNT_PRESENT")
-        if source.get("active_count") or source.get("latest_active_count"):
+        if historical_event_active_count or latest_active_count:
             reasons.append("STALE_SUBJECT_ACTIVE_SOURCE_PRESENT")
     return _dedupe(reasons)
 

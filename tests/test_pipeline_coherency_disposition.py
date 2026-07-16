@@ -442,6 +442,109 @@ def test_historical_disposition_requires_candidate_active_source_count_zero(
     assert "CANDIDATE_ACTIVE_SOURCE_COUNT_PRESENT" in preview["reason_codes"]
 
 
+def test_source_snapshot_separates_historical_active_event_from_current_projection(
+    tmp_path,
+) -> None:
+    connection, candidate_id, trade_date, _ = _expired_closed_pipeline(
+        tmp_path / "historical-source-event.sqlite3"
+    )
+    _insert_candidate_source_projection(
+        connection,
+        candidate_id=candidate_id,
+        trade_date=trade_date,
+        latest_active=False,
+    )
+
+    preview = preview_pipeline_coherency_disposition(
+        connection,
+        trade_date=trade_date,
+        candidate_instance_id=candidate_id,
+        action=ACTION_DISPOSE_EXPIRED_PLAN_READY,
+    )
+    connection.close()
+
+    source = preview["source"]
+    assert source["active_count"] == 1
+    assert source["historical_event_active_count"] == 1
+    assert source["latest_active_count"] == 0
+    assert source["candidate_active_source_count"] == 0
+    assert source["source_projection_consistent"] is True
+    assert source["source_state_classification"] == "HISTORICAL_EVENT_ACTIVE_ONLY"
+    assert preview["eligible"] is False
+    assert "HISTORICAL_ACTIVE_SOURCE_PRESENT" in preview["reason_codes"]
+    assert "LATEST_ACTIVE_SOURCE_PRESENT" not in preview["reason_codes"]
+    assert "SOURCE_PROJECTION_INCONSISTENT" not in preview["reason_codes"]
+
+
+def test_source_snapshot_reports_latest_active_source_as_current_blocker(tmp_path) -> None:
+    connection, candidate_id, trade_date, _ = _expired_closed_pipeline(
+        tmp_path / "latest-active-source.sqlite3"
+    )
+    _insert_candidate_source_projection(
+        connection,
+        candidate_id=candidate_id,
+        trade_date=trade_date,
+        latest_active=True,
+    )
+    connection.execute(
+        "UPDATE candidates SET active_source_count = 1 WHERE candidate_instance_id = ?",
+        (candidate_id,),
+    )
+    connection.commit()
+
+    preview = preview_pipeline_coherency_disposition(
+        connection,
+        trade_date=trade_date,
+        candidate_instance_id=candidate_id,
+        action=ACTION_DISPOSE_EXPIRED_PLAN_READY,
+    )
+    connection.close()
+
+    source = preview["source"]
+    assert source["historical_event_active_count"] == 1
+    assert source["latest_active_count"] == 1
+    assert source["candidate_active_source_count"] == 1
+    assert source["source_projection_consistent"] is True
+    assert source["source_state_classification"] == "LATEST_ACTIVE_SOURCE_PRESENT"
+    assert preview["eligible"] is False
+    assert "LATEST_ACTIVE_SOURCE_PRESENT" in preview["reason_codes"]
+    assert "SOURCE_PROJECTION_INCONSISTENT" not in preview["reason_codes"]
+
+
+def test_source_snapshot_blocks_candidate_latest_projection_mismatch(tmp_path) -> None:
+    connection, candidate_id, trade_date, _ = _expired_closed_pipeline(
+        tmp_path / "source-projection-mismatch.sqlite3"
+    )
+    connection.execute(
+        "UPDATE candidates SET active_source_count = 1 WHERE candidate_instance_id = ?",
+        (candidate_id,),
+    )
+    _insert_candidate_source_projection(
+        connection,
+        candidate_id=candidate_id,
+        trade_date=trade_date,
+        latest_active=False,
+    )
+
+    preview = preview_pipeline_coherency_disposition(
+        connection,
+        trade_date=trade_date,
+        candidate_instance_id=candidate_id,
+        action=ACTION_DISPOSE_EXPIRED_PLAN_READY,
+    )
+    connection.close()
+
+    source = preview["source"]
+    assert source["historical_event_active_count"] == 1
+    assert source["latest_active_count"] == 0
+    assert source["candidate_active_source_count"] == 1
+    assert source["source_projection_consistent"] is False
+    assert source["source_state_classification"] == "SOURCE_PROJECTION_INCONSISTENT"
+    assert preview["eligible"] is False
+    assert "SOURCE_PROJECTION_INCONSISTENT" in preview["reason_codes"]
+    assert "LATEST_ACTIVE_SOURCE_PRESENT" not in preview["reason_codes"]
+
+
 def test_effective_stale_disposition_resolves_drift_and_tracks_candidate_date_downstream(
     tmp_path,
 ) -> None:
@@ -1178,6 +1281,84 @@ def _expired_closed_pipeline(
         )
     connection.commit()
     return connection, candidate_id, trade_date, order_plan_id
+
+
+def _insert_candidate_source_projection(
+    connection,
+    *,
+    candidate_id: str,
+    trade_date: str,
+    latest_active: bool,
+) -> None:
+    candidate = connection.execute(
+        "SELECT code, name FROM candidates WHERE candidate_instance_id = ?",
+        (candidate_id,),
+    ).fetchone()
+    source_events = [
+        (
+            "source-enter",
+            "ENTER",
+            "2026-06-27T00:00:00Z",
+            1,
+        )
+    ]
+    if not latest_active:
+        source_events.append(
+            (
+                "source-exit",
+                "EXIT",
+                "2026-06-27T00:01:00Z",
+                0,
+            )
+        )
+    connection.executemany(
+        """
+        INSERT INTO candidate_source_events (
+            source_event_id, candidate_instance_id, trade_date, code, name,
+            source_type, source_id, action, event_ts, observed_at, active,
+            reason_codes_json, payload_json
+        ) VALUES (
+            ?, ?, ?, ?, ?, 'TEST_SOURCE', 'source-fixture', ?, ?, ?, ?,
+            '[]', '{}'
+        )
+        """,
+        [
+            (
+                source_event_id,
+                candidate_id,
+                trade_date,
+                candidate["code"],
+                candidate["name"],
+                action,
+                event_ts,
+                event_ts,
+                active,
+            )
+            for source_event_id, action, event_ts, active in source_events
+        ],
+    )
+    connection.execute(
+        """
+        INSERT INTO candidate_sources_latest (
+            trade_date, code, source_type, source_id, candidate_instance_id,
+            name, active, first_seen_at, last_seen_at, last_event_id,
+            payload_json
+        ) VALUES (
+            ?, ?, 'TEST_SOURCE', 'source-fixture', ?, ?, ?,
+            '2026-06-27T00:00:00Z', ?, ?, '{}'
+        )
+        """,
+        (
+            trade_date,
+            candidate["code"],
+            candidate_id,
+            candidate["name"],
+            1 if latest_active else 0,
+            source_events[-1][2],
+            source_events[-1][0],
+        ),
+    )
+    connection.commit()
 
 
 def _resolved_status(connection, *, candidate_id: str, trade_date: str):
