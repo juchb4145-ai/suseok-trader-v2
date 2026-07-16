@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, TypedDict
 
@@ -12,6 +13,12 @@ from storage.gateway_command_store import canonical_json
 from storage.gateway_order_broker_boundary import get_effective_order_broker_boundary
 
 from services.pipeline_coherency import build_pipeline_coherency_rca_status
+from services.pipeline_orphan_manual_evidence import (
+    ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT,
+    OrphanManualEvidenceError,
+    parse_strict_json_mapping,
+    validate_orphan_apply_evidence_binding,
+)
 
 ACTION_DISPOSE_EXPIRED_PLAN_READY = "DISPOSE_EXPIRED_PLAN_READY"
 ACTION_DISPOSE_ORPHAN = "DISPOSE_ORPHAN_PIPELINE_OBSERVATION"
@@ -113,6 +120,8 @@ _EXPECTED_SCHEMA_SQL_SHA256 = {
         "7d900ca05a201d28d287b0dec108846586a0242a8e413d5cf61999d933ff08a4"
     ),
 }
+
+
 class _IndexContract(TypedDict):
     columns: tuple[str, ...]
     descending: tuple[bool, ...]
@@ -148,6 +157,82 @@ class PipelineCoherencyDispositionError(RuntimeError):
 
     def to_dict(self) -> dict[str, Any]:
         return {"code": self.code, "message": str(self), "details": self.details}
+
+
+_ORPHAN_APPROVAL_CONTEXT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _OrphanApplyApprovalContext:
+    """Process-local capability issued only after CLI file/DB verification."""
+
+    approval_binding_sha256: str
+    approved_preflight_report_sha256: str
+    approved_database_main_sha256: str
+    _seal: object
+
+
+def _issue_orphan_apply_approval_context(
+    evidence_json: Mapping[str, Any],
+    *,
+    verified_preflight_report_sha256: str,
+    verified_database_main_sha256: str,
+) -> _OrphanApplyApprovalContext:
+    """Mint the sealed append capability at the validated CLI boundary.
+
+    The caller must invoke this only after stable-reading every approved private
+    input, acquiring the SQLite writer lock, proving no committed WAL frames,
+    and exact-matching the approved main database fingerprint.  The public
+    record API cannot synthesize or replace this capability with plain hashes.
+    """
+
+    approval = _mapping(evidence_json.get("approval"))
+    approval_binding_sha256 = _require_sha256(
+        "approval_binding_sha256",
+        evidence_json.get("approval_binding_sha256"),
+    )
+    preflight_sha256 = _require_sha256(
+        "verified_preflight_report_sha256",
+        verified_preflight_report_sha256,
+    )
+    database_sha256 = _require_sha256(
+        "verified_database_main_sha256",
+        verified_database_main_sha256,
+    )
+    if approval.get("approved_preflight_report_sha256") != preflight_sha256:
+        raise PipelineCoherencyDispositionError(
+            "PIPELINE_ORPHAN_APPROVAL_CONTEXT_MISMATCH",
+            "verified preflight report does not match the durable approval binding",
+        )
+    if approval.get("approved_database_main_sha256") != database_sha256:
+        raise PipelineCoherencyDispositionError(
+            "PIPELINE_ORPHAN_APPROVAL_CONTEXT_MISMATCH",
+            "verified database does not match the durable approval binding",
+        )
+    return _OrphanApplyApprovalContext(
+        approval_binding_sha256=approval_binding_sha256,
+        approved_preflight_report_sha256=preflight_sha256,
+        approved_database_main_sha256=database_sha256,
+        _seal=_ORPHAN_APPROVAL_CONTEXT_SEAL,
+    )
+
+
+def _orphan_apply_approval_context_valid(
+    context: _OrphanApplyApprovalContext | None,
+    *,
+    evidence_json: Mapping[str, Any],
+) -> bool:
+    if not isinstance(context, _OrphanApplyApprovalContext):
+        return False
+    if context._seal is not _ORPHAN_APPROVAL_CONTEXT_SEAL:
+        return False
+    approval = _mapping(evidence_json.get("approval"))
+    return bool(
+        evidence_json.get("approval_binding_sha256") == context.approval_binding_sha256
+        and approval.get("approved_preflight_report_sha256")
+        == context.approved_preflight_report_sha256
+        and approval.get("approved_database_main_sha256") == context.approved_database_main_sha256
+    )
 
 
 def preview_pipeline_coherency_disposition(
@@ -265,6 +350,7 @@ def record_pipeline_coherency_disposition(
     evidence_json: Mapping[str, Any] | None = None,
     safety_snapshot: Mapping[str, Any] | None = None,
     as_of: datetime | None = None,
+    orphan_approval_context: _OrphanApplyApprovalContext | None = None,
 ) -> dict[str, Any]:
     normalized_action = _require_action(action)
     if normalized_action == ACTION_REVOKE:
@@ -289,6 +375,7 @@ def record_pipeline_coherency_disposition(
         evidence_json=evidence_json,
         safety_snapshot=safety_snapshot,
         as_of=as_of,
+        orphan_approval_context=orphan_approval_context,
     )
 
 
@@ -409,6 +496,65 @@ def list_pipeline_coherency_dispositions(
     return [_public_disposition(row) for row in rows]
 
 
+def audit_pipeline_orphan_disposition_rows(
+    connection: sqlite3.Connection,
+) -> dict[str, int | bool]:
+    """Return aggregate-only integrity counts for every stored orphan disposition."""
+    _assert_schema_ready(connection)
+    rows = connection.execute(
+        f"SELECT * FROM {DISPOSITION_TABLE} WHERE action = ? ORDER BY sequence_no",
+        (ACTION_DISPOSE_ORPHAN,),
+    ).fetchall()
+    valid_binding_row_count = 0
+    invalid_count = 0
+    legacy_generic_evidence_count = 0
+    invalid_json_row_count = 0
+    noncanonical_json_row_count = 0
+    for row in rows:
+        data = _row_dict(row)
+        evidence_json_raw = str(data.get("evidence_json") or "")
+        try:
+            evidence_json = parse_strict_json_mapping(
+                evidence_json_raw,
+                name="STORED_EVIDENCE",
+            )
+            canonical = canonical_json(evidence_json) == evidence_json_raw
+        except OrphanManualEvidenceError:
+            evidence_json = {}
+            canonical = False
+            invalid_json_row_count += 1
+        if evidence_json and not canonical:
+            noncanonical_json_row_count += 1
+        if evidence_json.get("contract") != ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT:
+            legacy_generic_evidence_count += 1
+        if _stored_disposition_safety_valid(row):
+            valid_binding_row_count += 1
+        else:
+            invalid_count += 1
+    subject_keys = {str(_row_dict(row).get("subject_key") or "") for row in rows}
+    invalid_chain_subject_count = sum(
+        1 for subject_key in subject_keys if not _project_chain(connection, subject_key)["valid"]
+    )
+    return {
+        "row_count": len(rows),
+        "subject_count": len(subject_keys),
+        "valid_binding_row_count": valid_binding_row_count,
+        "invalid_row_count": invalid_count,
+        "legacy_generic_row_count": legacy_generic_evidence_count,
+        "invalid_json_row_count": invalid_json_row_count,
+        "noncanonical_json_row_count": noncanonical_json_row_count,
+        "invalid_chain_subject_count": invalid_chain_subject_count,
+        "identifiers_recorded": False,
+        "raw_rows_recorded": False,
+        "read_only": True,
+        "ready": (
+            invalid_count == 0
+            and legacy_generic_evidence_count == 0
+            and invalid_chain_subject_count == 0
+        ),
+    }
+
+
 def is_pipeline_coherency_disposition_schema_ready(
     connection: sqlite3.Connection,
 ) -> bool:
@@ -437,6 +583,7 @@ def _append_pipeline_disposition(
     evidence_json: Mapping[str, Any] | None = None,
     safety_snapshot: Mapping[str, Any] | None = None,
     as_of: datetime | None = None,
+    orphan_approval_context: _OrphanApplyApprovalContext | None = None,
 ) -> dict[str, Any]:
     normalized_trade_date = _require_text("trade_date", trade_date)
     candidate_id = _require_text("candidate_instance_id", candidate_instance_id)
@@ -462,6 +609,33 @@ def _append_pipeline_disposition(
     }
     normalized_evidence_sha = _require_sha256("evidence_sha256", evidence_sha256)
     normalized_safety_snapshot = _require_safety_snapshot(safety_snapshot)
+    normalized_evidence_json = dict(evidence_json or {})
+    if normalized_action == ACTION_DISPOSE_ORPHAN:
+        try:
+            normalized_evidence_json = validate_orphan_apply_evidence_binding(
+                normalized_evidence_json,
+                evidence_sha256=normalized_evidence_sha,
+                candidate_instance_id=candidate_id,
+                trade_date=normalized_trade_date,
+                action=normalized_action,
+                pipeline_fingerprint=fingerprints["pipeline_fingerprint"],
+                subject_version=fingerprints["subject_version"],
+                source_fingerprint=fingerprints["source_fingerprint"],
+                candidate_fingerprint=fingerprints["candidate_fingerprint"],
+                downstream_fingerprint=fingerprints["downstream_fingerprint"],
+                boundary_fingerprint=fingerprints["boundary_fingerprint"],
+                # Approval freshness is a wall-clock safety boundary.  The
+                # caller-controlled preview ``as_of`` must never move it into
+                # the future and create a row that the stored-chain audit
+                # immediately rejects against its real ``created_at``.
+                not_after=utc_now(),
+            )
+        except OrphanManualEvidenceError as exc:
+            raise PipelineCoherencyDispositionError(
+                "PIPELINE_ORPHAN_EVIDENCE_INVALID",
+                "orphan disposition requires exact authoritative evidence binding",
+                details={"reason_codes": [exc.code]},
+            ) from exc
     request_payload = {
         "contract": "pipeline-coherency-disposition-request.v1",
         "trade_date": normalized_trade_date,
@@ -473,7 +647,7 @@ def _append_pipeline_disposition(
         "evidence_type": _require_text("evidence_type", evidence_type),
         "evidence_ref": _require_text("evidence_ref", evidence_ref),
         "evidence_sha256": normalized_evidence_sha,
-        "evidence_json": dict(evidence_json or {}),
+        "evidence_json": normalized_evidence_json,
         "safety_snapshot": normalized_safety_snapshot,
     }
     request_hash = _sha256_json(request_payload)
@@ -498,6 +672,20 @@ def _append_pipeline_disposition(
             as_of=as_of,
         )
         return _public_disposition(existing)
+
+    if normalized_action == ACTION_DISPOSE_ORPHAN and not _orphan_apply_approval_context_valid(
+        orphan_approval_context,
+        evidence_json=normalized_evidence_json,
+    ):
+        raise PipelineCoherencyDispositionError(
+            "PIPELINE_ORPHAN_APPROVAL_CONTEXT_REQUIRED",
+            "new orphan disposition append requires the sealed CLI approval context",
+        )
+    if normalized_action != ACTION_DISPOSE_ORPHAN and orphan_approval_context is not None:
+        raise PipelineCoherencyDispositionError(
+            "PIPELINE_ORPHAN_APPROVAL_CONTEXT_UNEXPECTED",
+            "orphan approval context is not valid for this disposition action",
+        )
 
     started = not connection.in_transaction
     if started:
@@ -772,9 +960,7 @@ def _downstream_snapshot(
     ).fetchone()
     subject_trade_date = str(subject.get("trade_date") or "")
     subject_code = str(subject.get("code") or "")
-    candidate_trade_date = str(
-        "" if candidate is None else candidate["trade_date"] or ""
-    )
+    candidate_trade_date = str("" if candidate is None else candidate["trade_date"] or "")
     candidate_code = str("" if candidate is None else candidate["code"] or "")
     trade_code_pairs = sorted(
         {
@@ -965,9 +1151,7 @@ def _downstream_snapshot(
         select_columns=("*",),
         order_by="evaluated_at, exit_evaluation_id",
     )
-    dry_exit_evaluation_ids = [
-        str(row["exit_evaluation_id"]) for row in dry_exit_evaluations
-    ]
+    dry_exit_evaluation_ids = [str(row["exit_evaluation_id"]) for row in dry_exit_evaluations]
     dry_exit_signals = _rows_for_ids(
         connection,
         table="dry_run_exit_signals",
@@ -1001,9 +1185,7 @@ def _downstream_snapshot(
         unbound_artifacts["dry_run_exit_intents"],
         key="dry_run_exit_intent_id",
     )
-    dry_exit_intent_ids = [
-        str(row["dry_run_exit_intent_id"]) for row in dry_exit_intents
-    ]
+    dry_exit_intent_ids = [str(row["dry_run_exit_intent_id"]) for row in dry_exit_intents]
     dry_exit_orders = _rows_for_ids(
         connection,
         table="dry_run_exit_orders",
@@ -1124,9 +1306,7 @@ def _downstream_snapshot(
     )
     live_exit_intent_ids = [str(row["exit_intent_id"]) for row in live_exit_intents]
     referenced_exit_order_ids = [
-        str(row["live_sim_order_id"])
-        for row in live_exit_intents
-        if row.get("live_sim_order_id")
+        str(row["live_sim_order_id"]) for row in live_exit_intents if row.get("live_sim_order_id")
     ]
     exit_orders = _merge_rows(
         _rows_for_ids(
@@ -1302,8 +1482,7 @@ def _downstream_snapshot(
     )
     hash_payload = {
         "trade_code_pairs": [
-            {"trade_date": trade_date, "code": code}
-            for trade_date, code in trade_code_pairs
+            {"trade_date": trade_date, "code": code} for trade_date, code in trade_code_pairs
         ],
         "live_sim_intents": intents,
         "live_sim_orders": orders,
@@ -1348,24 +1527,17 @@ def _downstream_snapshot(
             "active_other_downstream_count": active_other,
             "gateway_command_count": len(commands),
             "unsafe_gateway_command_count": unsafe_commands,
-            "malformed_gateway_command_payload_count": (
-                malformed_gateway_payload_count
-            ),
-            "malformed_unbound_order_command_count": (
-                malformed_unbound_order_command_count
-            ),
+            "malformed_gateway_command_payload_count": (malformed_gateway_payload_count),
+            "malformed_unbound_order_command_count": (malformed_unbound_order_command_count),
             "unbound_order_command_count": unbound_order_command_count,
             "unbound_active_order_artifact_count": sum(
                 1
                 for rows in unbound_artifacts.values()
                 for row in rows
                 if "status" in row
-                and str(row.get("status") or "").upper()
-                not in _TERMINAL_ORDER_STATUSES
+                and str(row.get("status") or "").upper() not in _TERMINAL_ORDER_STATUSES
             ),
-            "unbound_order_artifact_count": sum(
-                len(rows) for rows in unbound_artifacts.values()
-            ),
+            "unbound_order_artifact_count": sum(len(rows) for rows in unbound_artifacts.values()),
         },
     }
 
@@ -1406,9 +1578,7 @@ def _boundary_snapshot(
             rows.append({"command_id": command_id, "status": "ABSENT"})
             unknown += 1
             continue
-        state = str(
-            boundary.get("effective_state") or boundary.get("state") or "UNKNOWN"
-        ).upper()
+        state = str(boundary.get("effective_state") or boundary.get("state") or "UNKNOWN").upper()
         if state not in _KNOWN_BOUNDARY_STATES:
             state = "UNKNOWN"
         if command_id not in requested_ids and state not in {"UNCONFIRMED", "UNKNOWN"}:
@@ -1664,9 +1834,7 @@ def _schema_ready(connection: sqlite3.Connection) -> bool:
             object_name=DISPOSITION_TABLE,
         ):
             return False
-        table_info = connection.execute(
-            f"PRAGMA table_info({DISPOSITION_TABLE})"
-        ).fetchall()
+        table_info = connection.execute(f"PRAGMA table_info({DISPOSITION_TABLE})").fetchall()
         columns = {str(item["name"]) for item in table_info}
         if not _REQUIRED_COLUMNS <= columns:
             return False
@@ -1728,9 +1896,7 @@ def _index_contract_valid(
     index_row = next(
         (
             row
-            for row in connection.execute(
-                f"PRAGMA index_list({DISPOSITION_TABLE})"
-            ).fetchall()
+            for row in connection.execute(f"PRAGMA index_list({DISPOSITION_TABLE})").fetchall()
             if str(row["name"]) == index_name
         ),
         None,
@@ -1747,8 +1913,7 @@ def _index_contract_valid(
         and int(index_row["partial"] or 0) == 0
         and str(index_row["origin"]) == "c"
         and tuple(str(row["name"]) for row in key_rows) == tuple(expected_columns)
-        and tuple(bool(row["desc"]) for row in key_rows)
-        == tuple(expected_descending)
+        and tuple(bool(row["desc"]) for row in key_rows) == tuple(expected_descending)
     )
 
 
@@ -1897,16 +2062,14 @@ def _gateway_commands_for_subject(
             associated = any(token in payload_json for token in raw_tokens)
         globally_bound = bool(
             command_id in globally_linked_command_ids
-            or globally_known_candidate_ids.intersection(
-                references["candidate_instance_id"]
-            )
-            or globally_known_intent_ids.intersection(
-                references["live_sim_intent_id"]
-            )
+            or globally_known_candidate_ids.intersection(references["candidate_instance_id"])
+            or globally_known_intent_ids.intersection(references["live_sim_intent_id"])
             or globally_known_plan_ids.intersection(references["order_plan_id"])
         )
-        if not associated and not globally_bound and _is_order_command_type(
-            row.get("command_type")
+        if (
+            not associated
+            and not globally_bound
+            and _is_order_command_type(row.get("command_type"))
         ):
             associated = True
             unbound_order_count += 1
@@ -1936,10 +2099,7 @@ def _unbound_order_artifacts(
         }
 
     def rows(table: str) -> list[dict[str, Any]]:
-        return [
-            _row_dict(row)
-            for row in connection.execute(f"SELECT * FROM {table}").fetchall()
-        ]
+        return [_row_dict(row) for row in connection.execute(f"SELECT * FROM {table}").fetchall()]
 
     live_intent_ids = ids("live_sim_intents", "live_sim_intent_id")
     live_order_ids = ids("live_sim_orders", "live_sim_order_id")
@@ -1950,9 +2110,7 @@ def _unbound_order_artifacts(
         str(row["exit_intent_id"]) for row in live_exit_intents if row.get("exit_intent_id")
     }
     live_exit_order_ids = {
-        str(row["live_sim_order_id"])
-        for row in live_exit_intents
-        if row.get("live_sim_order_id")
+        str(row["live_sim_order_id"]) for row in live_exit_intents if row.get("live_sim_order_id")
     }
 
     dry_intent_ids = ids("dry_run_intents", "dry_run_intent_id")
@@ -1973,8 +2131,7 @@ def _unbound_order_artifacts(
             row
             for row in live_positions
             if str(row.get("source_live_sim_order_id") or "") not in live_order_ids
-            and str(row.get("source_live_sim_intent_id") or "")
-            not in live_intent_ids
+            and str(row.get("source_live_sim_intent_id") or "") not in live_intent_ids
         ],
         "live_sim_orders": [
             row
@@ -2035,8 +2192,7 @@ def _unbound_order_artifacts(
             row
             for row in rows("dry_run_exit_executions")
             if str(row.get("dry_run_exit_order_id") or "") not in dry_exit_order_ids
-            and str(row.get("dry_run_exit_intent_id") or "")
-            not in dry_exit_intent_ids
+            and str(row.get("dry_run_exit_intent_id") or "") not in dry_exit_intent_ids
             and str(row.get("dry_run_position_id") or "") not in dry_position_ids
         ],
     }
@@ -2216,13 +2372,41 @@ def _stored_disposition_safety_valid(
 ) -> bool:
     data = _row_dict(row)
     try:
-        evidence_json = json.loads(str(data.get("evidence_json") or ""))
-        safety_snapshot = json.loads(str(data.get("safety_snapshot_json") or ""))
-        if not isinstance(evidence_json, Mapping) or not isinstance(
-            safety_snapshot, Mapping
+        evidence_json_raw = str(data.get("evidence_json") or "")
+        safety_snapshot_raw = str(data.get("safety_snapshot_json") or "")
+        evidence_json = parse_strict_json_mapping(
+            evidence_json_raw,
+            name="STORED_EVIDENCE",
+        )
+        safety_snapshot = parse_strict_json_mapping(
+            safety_snapshot_raw,
+            name="STORED_SAFETY_SNAPSHOT",
+        )
+        if (
+            canonical_json(evidence_json) != evidence_json_raw
+            or canonical_json(safety_snapshot) != safety_snapshot_raw
         ):
             return False
         normalized_safety = _require_safety_snapshot(safety_snapshot)
+        normalized_evidence_json = dict(evidence_json)
+        if data.get("action") == ACTION_DISPOSE_ORPHAN:
+            normalized_evidence_json = validate_orphan_apply_evidence_binding(
+                normalized_evidence_json,
+                evidence_sha256=str(data.get("evidence_sha256") or ""),
+                candidate_instance_id=str(data.get("candidate_instance_id") or ""),
+                trade_date=str(data.get("trade_date") or ""),
+                action=str(data.get("action") or ""),
+                pipeline_fingerprint=str(data.get("expected_pipeline_fingerprint") or ""),
+                subject_version=str(data.get("expected_subject_version") or ""),
+                source_fingerprint=str(data.get("expected_source_fingerprint") or ""),
+                candidate_fingerprint=str(data.get("expected_candidate_fingerprint") or ""),
+                downstream_fingerprint=str(data.get("expected_downstream_fingerprint") or ""),
+                boundary_fingerprint=str(data.get("expected_boundary_fingerprint") or ""),
+                not_after=parse_timestamp(
+                    str(data.get("created_at") or ""),
+                    "created_at",
+                ),
+            )
         request_payload = {
             "contract": "pipeline-coherency-disposition-request.v1",
             "trade_date": data.get("trade_date"),
@@ -2239,15 +2423,13 @@ def _stored_disposition_safety_valid(
             "evidence_type": data.get("evidence_type"),
             "evidence_ref": data.get("evidence_ref"),
             "evidence_sha256": data.get("evidence_sha256"),
-            "evidence_json": dict(evidence_json),
+            "evidence_json": normalized_evidence_json,
             "safety_snapshot": normalized_safety,
         }
         request_hash = _sha256_json(request_payload)
         expected_disposition_id = (
             "pipeline_disposition_"
-            + hashlib.sha256(
-                f"{data.get('request_id')}:{request_hash}".encode()
-            ).hexdigest()[:32]
+            + hashlib.sha256(f"{data.get('request_id')}:{request_hash}".encode()).hexdigest()[:32]
         )
     except (TypeError, ValueError, PipelineCoherencyDispositionError):
         return False
