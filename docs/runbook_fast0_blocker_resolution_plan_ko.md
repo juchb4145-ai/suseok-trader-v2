@@ -271,6 +271,8 @@ Phase D는 운영 DB write 단계가 아니라 코드·계약 단계다.
 6. 병합된 코드로 strict read-only blocker plan을 다시 생성한다.
 
 새 plan에서 eligible로 판정된 exact 대상만 향후 별도 캠페인의 후보가 된다. legacy 138건을 일괄 disposition하거나 unknown drift를 no-drift로 간주하지 않는다.
+R11 private manifest, schema-59 cutover provenance, source event/latest projection 재검증과 공개 evidence
+privacy 계약은 `docs/runbook_pipeline_legacy_evidence_resolver_ko.md`를 따른다.
 
 ### Phase E — active-current 1건 targeted rebuild preview
 

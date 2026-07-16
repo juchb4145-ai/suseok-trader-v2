@@ -94,6 +94,9 @@ def test_pipeline_rca_exact_inventory_classification_and_pagination(tmp_path) ->
         "status": "PENDING_AUTHORITATIVE_EVIDENCE",
         "authoritative": False,
         "pre_schema59": False,
+        "terminal_closed": False,
+        "active_source_zero": False,
+        "current_source_no_drift": False,
         "cas_valid": False,
     }
 
@@ -126,11 +129,19 @@ def test_pipeline_rca_exact_inventory_classification_and_pagination(tmp_path) ->
             "status": "READY",
             "items": {
                 str(subject["candidate_instance_id"]): {
+                    "contract": "pipeline-legacy-evidence-item.v1",
                     "status": "AUTHORITATIVE",
                     "authoritative": True,
                     "pre_schema59": True,
+                    "terminal_closed": True,
+                    "active_source_zero": True,
+                    "current_source_no_drift": True,
                     "pipeline_fingerprint": subject["pipeline_fingerprint"],
                     "subject_version": subject["subject_version"],
+                    "source_fingerprint": "1" * 64,
+                    "closure_fingerprint": "2" * 64,
+                    "pipeline_stage_fingerprint": "3" * 64,
+                    "provenance_sha256": "4" * 64,
                 }
             },
         }

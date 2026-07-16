@@ -25,6 +25,23 @@ _PIPELINE_RCA_CLASSIFICATIONS = (
     "STALE_OTHER_DATE_MANUAL_REVIEW",
     "ACTIVE_CURRENT",
 )
+_PIPELINE_LEGACY_EVIDENCE_ITEM_KEYS = frozenset(
+    {
+        "contract",
+        "status",
+        "authoritative",
+        "pre_schema59",
+        "terminal_closed",
+        "active_source_zero",
+        "current_source_no_drift",
+        "pipeline_fingerprint",
+        "subject_version",
+        "source_fingerprint",
+        "closure_fingerprint",
+        "pipeline_stage_fingerprint",
+        "provenance_sha256",
+    }
+)
 
 
 def resolve_candidate_source_lineage(
@@ -1224,6 +1241,9 @@ def _pipeline_rca_item(
             "status": "PENDING_AUTHORITATIVE_EVIDENCE",
             "authoritative": False,
             "pre_schema59": False,
+            "terminal_closed": False,
+            "active_source_zero": False,
+            "current_source_no_drift": False,
             "cas_valid": False,
         },
         "manual_review_required": manual_review_required,
@@ -1640,7 +1660,10 @@ def _validated_pipeline_legacy_evidence_items(
         raw = raw_items.get(candidate_id)
         if not isinstance(raw, Mapping):
             continue
-        item = dict(raw)
+        item_contract_valid = set(raw) == _PIPELINE_LEGACY_EVIDENCE_ITEM_KEYS
+        item = {
+            key: raw.get(key) for key in _PIPELINE_LEGACY_EVIDENCE_ITEM_KEYS
+        }
         pipeline_fingerprint = item.get("pipeline_fingerprint")
         subject_version = item.get("subject_version")
         cas_valid = bool(
@@ -1652,13 +1675,32 @@ def _validated_pipeline_legacy_evidence_items(
         )
         authoritative = bool(
             cas_valid
+            and item_contract_valid
+            and item.get("contract") == "pipeline-legacy-evidence-item.v1"
             and item.get("status") == "AUTHORITATIVE"
             and item.get("authoritative") is True
             and item.get("pre_schema59") is True
+            and item.get("terminal_closed") is True
+            and item.get("active_source_zero") is True
+            and item.get("current_source_no_drift") is True
+            and all(
+                _is_canonical_sha256(item.get(key))
+                for key in (
+                    "source_fingerprint",
+                    "closure_fingerprint",
+                    "pipeline_stage_fingerprint",
+                    "provenance_sha256",
+                )
+            )
         )
         item["cas_valid"] = cas_valid
         item["authoritative"] = authoritative
         item["pre_schema59"] = bool(item.get("pre_schema59") is True)
+        item["terminal_closed"] = bool(item.get("terminal_closed") is True)
+        item["active_source_zero"] = bool(item.get("active_source_zero") is True)
+        item["current_source_no_drift"] = bool(
+            item.get("current_source_no_drift") is True
+        )
         if not cas_valid:
             item["status"] = "INVALID_CAS"
         elif not authoritative:
@@ -1676,6 +1718,9 @@ def _effective_pipeline_legacy_evidence(
             "status": "PENDING_AUTHORITATIVE_EVIDENCE",
             "authoritative": False,
             "pre_schema59": False,
+            "terminal_closed": False,
+            "active_source_zero": False,
+            "current_source_no_drift": False,
             "cas_valid": False,
         }
     items = evidence_state.get("items")
@@ -1685,6 +1730,9 @@ def _effective_pipeline_legacy_evidence(
             "status": "MISSING_AUTHORITATIVE_EVIDENCE",
             "authoritative": False,
             "pre_schema59": False,
+            "terminal_closed": False,
+            "active_source_zero": False,
+            "current_source_no_drift": False,
             "cas_valid": False,
         }
     return dict(item)
@@ -1705,13 +1753,27 @@ def _apply_pipeline_legacy_evidence(
             evidence_state,
             candidate_id,
         )
+        blockers = [str(value) for value in summary.get("legacy_warn_reason_codes") or []]
+        if evidence.get("authoritative") is True and evidence.get("cas_valid") is True:
+            if evidence.get("active_source_zero") is True:
+                blockers = [
+                    value for value in blockers if value != "ACTIVE_SOURCE_NOT_PROVEN_ZERO"
+                ]
+            if evidence.get("current_source_no_drift") is True:
+                blockers = [
+                    value for value in blockers if value != "CURRENT_SOURCE_DRIFT_UNKNOWN"
+                ]
         legacy_warn_candidate = bool(
-            summary.get("legacy_warn_eligible") is True
+            not blockers
             and evidence.get("authoritative") is True
             and evidence.get("pre_schema59") is True
+            and evidence.get("terminal_closed") is True
+            and evidence.get("active_source_zero") is True
+            and evidence.get("current_source_no_drift") is True
             and evidence.get("cas_valid") is True
         )
         summary["legacy_warn_candidate"] = legacy_warn_candidate
+        summary["legacy_warn_effective_reason_codes"] = blockers
         summary["legacy_warn_evidence"] = evidence
         summary["disposition_required"] = bool(
             summary.get("canonical_status") != "PASS"
@@ -1721,6 +1783,7 @@ def _apply_pipeline_legacy_evidence(
         page_item = page_by_candidate_id.get(candidate_id)
         if page_item is not None:
             page_item["legacy_warn_candidate"] = legacy_warn_candidate
+            page_item["legacy_warn_effective_reason_codes"] = blockers
             page_item["legacy_warn_evidence"] = evidence
             page_item["disposition_required"] = summary["disposition_required"]
 

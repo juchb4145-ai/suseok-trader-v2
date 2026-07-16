@@ -344,6 +344,13 @@ orphan 9건은 preview eligible 9지만 모두 외부 authoritative evidence가 
 projection 불일치 1은 별도 운영 처리 설계가 필요하다. 구현 계약은
 `docs/runbook_pipeline_blocker_reconciliation_ko.md`를 따른다.
 
+FAST-0R11은 Phase D의 코드 계약이다. 승인된 schema-59 migration provenance와 private target
+manifest를 pipeline/subject/source/closure/stage exact CAS에 결속하고, append-only source event의
+최신 상태와 latest projection이 모두 active 0일 때만 legacy blocker 두 개를 대체한다. manifest가
+없거나 하나라도 drift하면 기존 eligible 0 상태를 유지한다. 이 구현 자체는 운영 DB write나
+legacy disposition을 승인하지 않는다. 실행 계약은
+`docs/runbook_pipeline_legacy_evidence_resolver_ko.md`를 따른다.
+
 ### 중단 조건
 
 - 운영 DB migration 실패 또는 fingerprint 변화
