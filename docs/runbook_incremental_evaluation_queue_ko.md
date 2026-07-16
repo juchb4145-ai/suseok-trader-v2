@@ -145,6 +145,31 @@ Preview에서 다음을 확인한다.
 5. disposition chain이 유효함
 6. 모든 safety field가 안전값임
 
+### 2026-07-16 FAST-0 38건 campaign plan
+
+전체 대상은 건별 CLI를 수동 나열하기 전에 aggregate-only strict plan으로 고정한다.
+
+```powershell
+python -B -m tools.ops_fast0_blocker_resolution_plan `
+  --db $db `
+  --fast0-report $approvedFast0Report `
+  --fast0-report-sha256 $approvedFast0ReportSha256 `
+  --out-dir reports/fast_track/fast_0_blocker_resolution_plan
+```
+
+운영 evidence
+`reports/fast_track/fast_0_blocker_resolution_plan/20260715T232358.741099Z/raw.json`
+(SHA-256 `a51303b49062c0e7e3ab28cdfc2d4c414844384900a010df47c8023dfa75996e`)
+에서는 historical pending 38건 모두 preview 적격이고 blocked는 0이다. 승인 대상은 원 ID가 아니라
+`U01`~`U38` 순서와 campaign manifest SHA-256
+`845b5b9bf82f1a2cebdda9ddf262627f3eda1e91fa53d1b027983284be43f31d`로 고정한다.
+
+이 결과는 apply 승인이 아니다. 첫 write 전에 모든 writer 정지, WAL/SHM/journal 부재, runtime
+lease 0, pinned DB identity, byte-identical backup과 source/backup quick check, 동일 campaign SHA의
+fresh preview가 별도로 필요하다. 이후에도 한 건씩 preview -> append apply -> strict verify하며,
+CAS drift, 예상 밖 idempotent replay, `APPLIED_WITH_*`, commit outcome unknown 또는 order/command
+delta가 하나라도 나타나면 다음 alias로 진행하지 않는다.
+
 ## Disposition apply/revoke
 
 Apply/revoke는 코드 merge 및 DB migration과 분리된 승인 운영 단계다. 구체 옵션은

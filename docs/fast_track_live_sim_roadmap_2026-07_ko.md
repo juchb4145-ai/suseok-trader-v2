@@ -97,7 +97,7 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 
 | 단계 | 상태 | 의존성 | 핵심 산출물 |
 | --- | --- | --- | --- |
-| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1~R4 병합, R5 offline evidence 완료, blocker 6개 | 검증 report, 운영 baseline |
+| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1~R4 병합, R5 offline evidence·R6 blocker plan 완료, blocker 6개 | 검증 report, 운영 baseline·처리 manifest |
 | FAST-1 Pure Preview | `BLOCKED_BY_FAST_0` | FAST-0 PASS | 무기록 preview API |
 | Operational Gate C1 | `BLOCKED_BY_FAST_1` | Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `BLOCKED_BY_FAST_0` | FAST-0 PASS | virtual-clock replay |
@@ -231,6 +231,13 @@ Ruff 또는 실제 결함이 있으면 해당 결함만 최소 수정한다.
   `evidence_status=PASS`, `fast0_status=BLOCKED`, exit `2`다. pinned DB identity, DB 전후
   fingerprint와 sidecar 부재, quick check, schema manifest `50/50`, migration evidence
   chain이 모두 PASS다.
+- FAST-0R6 blocker resolution plan은 2026-07-16 strict read-only로 완료됐다. evidence는
+  `reports/fast_track/fast_0_blocker_resolution_plan/20260715T232358.741099Z/raw.json`, SHA-256은
+  `a51303b49062c0e7e3ab28cdfc2d4c414844384900a010df47c8023dfa75996e`다. evidence/plan은
+  `PASS/COMPLETE`이고 DB 전후 fingerprint가 같으며 이 도구가 수행한 write·프로세스 시작·주문/
+  broker operation은 0이다. 외부 process/broker 상태는 이 plan이 검증하지 않으며 Phase A에서
+  별도 확인한다.
+  이 결과는 처리 계획만 승인 가능한 상태이며 운영 apply를 승인하지 않는다.
 
 ### FAST-0R4 lifecycle qualification 계약
 
@@ -302,6 +309,30 @@ qualification blocker는 `BROKER_BOUNDARY_SEMANTIC_BLOCKER`,
 `BROKER_RAW_UNCONFIRMED_PRESENT`, `INCREMENTAL_EFFECTIVE_DEAD_LETTER_PRESENT`,
 `PIPELINE_QUALIFICATION_NOT_PASS`, `RUNTIME_LOG_COVERAGE_NOT_AUTHORITATIVE`,
 `FINAL_OBSERVE_SMOKE_NOT_RUN`의 6개다.
+
+### FAST-0R6 dead-letter / pipeline blocker 처리 계획
+
+R6는 승인된 R5 raw report와 같은 schema-62 DB fingerprint를 입력으로 고정하고, 한 번의 pinned
+strict read-only snapshot에서 전체 대상과 preview eligibility를 집계한다. 도구는 원 dead-letter
+ID, candidate ID, payload, error, 계좌·token 또는 실제 경로를 report에 기록하지 않는다.
+
+- incremental dead-letter: raw/effective/pending `38/38/38`, preview eligible/blocked `38/0`.
+  U01~U38 campaign manifest는
+  `845b5b9bf82f1a2cebdda9ddf262627f3eda1e91fa53d1b027983284be43f31d`다.
+- pipeline inventory: `159`, historical/missing/active `149/9/1`, current-source drift unknown `159`.
+- expected action은 expired `PLAN_READY` 11, orphan 9지만 실제 preview eligible은 orphan 9뿐이다.
+- expired-plan 11은 모두 candidate active-source blocker가 있고, 그중 unsafe gateway command 2와
+  broker boundary unknown 1이 중첩된다. 조정 증거 없이 disposition하지 않는다.
+- legacy non-ready 138은 현 계약상 eligible 0이다. active-source zero 미입증과 current-source
+  drift unknown이 각각 138이므로 authoritative evidence contract/resolver 보강이 먼저다.
+- active-current 1은 disposition하지 않고 audited OBSERVE environment의 targeted rebuild preview로
+  분리한다.
+
+운영 순서는 byte-identical backup/writer quiescence -> incremental 38건 건별 append -> orphan 9건
+수동 증거·건별 append -> expired-plan 11건 source/command/boundary 조정 -> legacy 138건 계약 구현·
+strict 재검증 -> active 1건 targeted rebuild preview -> 전체 FAST-0R5 재실행이다. 각 write 단계는
+별도 승인 전까지 시작하지 않는다. 자세한 절차는
+`docs/runbook_fast0_blocker_resolution_plan_ko.md`를 따른다.
 
 ### 중단 조건
 
