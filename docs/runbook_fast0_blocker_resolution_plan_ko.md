@@ -57,6 +57,18 @@
 
 이 기준선 중 하나라도 달라지면 최신 계획은 현재 운영 DB를 대표하지 못한다.
 
+### 2.4 FAST-0R7 pipeline blocker reconciliation
+
+R7은 R5 evidence를 결속한 승인 R6 report와 동일한 DB identity를 strict read-only로 대조해
+expired-plan/orphan blocker의 현재 source/downstream/outcome을 재현하는 evidence 단계다. R7은
+기존 preview/legacy eligibility 또는 effective 상태를 바꾸지 않고 apply를 승인하지 않는다.
+승인 evidence는
+`reports/fast_track/fast_0_pipeline_blocker_reconciliation/20260716T011001.053891Z/raw.json`,
+SHA-256은 `469e827cd586cc3550913afbdc3db5307c48188b71707cc58896fe68a6498849`다.
+결과는 `PASS/COMPLETE/PREPARATION_REQUIRED`, target 20, invalid 0이며 DB write와 apply 승인은 0이다.
+구현 및 실행 계약은
+`docs/runbook_pipeline_blocker_reconciliation_ko.md`를 따른다.
+
 ## 3. blocker inventory
 
 ### 3.1 Incremental dead-letter
@@ -210,6 +222,9 @@ Phase A의 backup은 파일시스템 write이지만 운영 DB write는 아니다
 - source lineage, plan 상태, current-source drift와 expected action
 
 active/unsafe/unknown 상태가 실제로 남아 있으면 중단한다. DB의 count나 상태를 수동 변경해 eligibility를 만들지 않는다. 데이터 불일치 또는 코드 계약 결함으로 판명되면 별도 repair 설계, 코드 검토, 승인 및 새 strict plan이 필요하다. fresh plan에서 eligible로 판정되기 전에는 이 11건에 대한 apply 승인이 성립하지 않는다.
+
+R7 strict read-only reconciliation은 이 분기의 현재 blocker를 aggregate evidence로 분류할 뿐이다.
+R7 `PASS` 또는 분류 완료만으로 11건의 eligibility/apply 상태가 달라지지 않는다.
 
 ### Phase D — pipeline legacy 138건 eligibility contract와 resolver
 
