@@ -15,10 +15,22 @@ from services.pipeline_coherency_disposition import (
     ACTION_DISPOSE_STALE_OTHER_DATE,
     resolve_pipeline_coherency_dispositions,
 )
+from services.pipeline_legacy_evidence import (
+    MANIFEST_CONTRACT,
+    _current_subject_evidence,
+    _sha256_json,
+    legacy_target_set_sha256,
+)
 from services.runtime.incremental_evaluation_dead_letter_resolution import (
     build_incremental_evaluation_dead_letter_effective_status,
 )
+from storage.sqlite import initialize_database
 from tests.test_pipeline_coherency_disposition import _expired_closed_pipeline
+from tests.test_pipeline_coherency_rca import (
+    TRADE_DATE,
+    _insert_candidate,
+    _insert_pipeline_observations,
+)
 from tests.test_resolve_incremental_evaluation_dead_letter_tool import (
     _seed_closed_dead_letter,
 )
@@ -136,6 +148,109 @@ def test_expired_pipeline_plan_separates_applyable_disposition(
     verdict = tool.evaluate_report(baseline_drift)
     assert verdict["evidence_status"] == "FAIL"
     assert "PIPELINE_INVENTORY_BASELINE_MISMATCH" in verdict["evidence_failures"]
+
+
+def test_legacy_manifest_qualifies_exact_targets_without_recording_identifiers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_path = tmp_path / "legacy-plan.sqlite3"
+    connection = initialize_database(db_path)
+    _insert_candidate(
+        connection,
+        "private-legacy-subject",
+        state="CLOSED",
+        closed_at="2026-07-10T01:00:00Z",
+    )
+    _insert_pipeline_observations(connection, "private-legacy-subject")
+    connection.execute(
+        "UPDATE candidates SET active_source_count = 1 WHERE candidate_instance_id = ?",
+        ("private-legacy-subject",),
+    )
+    connection.execute(
+        """
+        INSERT INTO candidate_source_events (
+            source_event_id, candidate_instance_id, trade_date, code, name,
+            source_type, source_id, action, event_ts, observed_at, active, payload_json
+        ) VALUES ('private-event-inactive', 'private-legacy-subject', ?, '005930', 'fixture',
+                  'TEST', 'private-source-1', 'CLOSED', '2026-07-10T00:00:00Z',
+                  '2026-07-10T00:00:00Z', 0, '{}')
+        """,
+        (TRADE_DATE,),
+    )
+    connection.execute(
+        """
+        INSERT INTO candidate_sources_latest (
+            trade_date, code, source_type, source_id, candidate_instance_id,
+            name, active, first_seen_at, last_seen_at, last_event_id, payload_json
+        ) VALUES (?, '005930', 'TEST', 'private-source-1', 'private-legacy-subject',
+                  'fixture', 0, '2026-07-10T00:00:00Z', '2026-07-10T00:00:00Z',
+                  'private-event-inactive', '{}')
+        """,
+        (TRADE_DATE,),
+    )
+    connection.commit()
+    item = build_pipeline_coherency_rca_status(
+        connection,
+        trade_date=TRADE_DATE,
+        max_age_sec=10**12,
+        candidate_instance_id="private-legacy-subject",
+        as_of=_OBSERVED_AT,
+    )["items"][0]
+    cutover = {
+        "completed_at": "2026-07-11T00:00:00Z",
+        "migration_report_sha256": "1" * 64,
+        "source_database_sha256": "2" * 64,
+        "migrated_database_sha256": "3" * 64,
+    }
+    evidence = _current_subject_evidence(
+        connection,
+        candidate_instance_id="private-legacy-subject",
+        trade_date=TRADE_DATE,
+        cutoff=datetime(2026, 7, 11, tzinfo=UTC),
+    )
+    approved = {
+        "alias": "L001",
+        "candidate_instance_id": "private-legacy-subject",
+        "pipeline_fingerprint": item["pipeline_fingerprint"],
+        "subject_version": item["subject_version"],
+        "source_fingerprint": evidence["source_fingerprint"],
+        "closure_fingerprint": evidence["closure_fingerprint"],
+        "pipeline_stage_fingerprint": evidence["pipeline_stage_fingerprint"],
+        "provenance_sha256": _sha256_json(cutover),
+    }
+    manifest_payload = {
+        "contract": MANIFEST_CONTRACT,
+        "trade_date": TRADE_DATE,
+        "target_set_sha256": legacy_target_set_sha256([approved]),
+        "schema59_cutover": cutover,
+        "items": [approved],
+    }
+    manifest_path = tmp_path / "private-legacy-manifest.json"
+    manifest_path.write_text(json.dumps(manifest_payload), encoding="utf-8")
+    connection.close()
+    baseline = _write_fast0_baseline(tmp_path, db_path)
+    monkeypatch.setattr(tool.fast0_tool, "_probe_no_other_open_handles", _passing_probe)
+
+    report = tool.run_report(
+        db_path=db_path,
+        fast0_report=baseline,
+        expected_fast0_report_sha256=_sha256_file(baseline),
+        legacy_evidence_manifest=manifest_path,
+        expected_legacy_evidence_manifest_sha256=_sha256_file(manifest_path),
+        out_dir=tmp_path / "evidence",
+        observed_at=_OBSERVED_AT,
+    )
+    raw = Path(report["report_paths"]["raw_json"]).read_text(encoding="utf-8")
+
+    assert report["verdict"]["evidence_status"] == "PASS"
+    assert report["pipeline"]["legacy_evidence_target_count"] == 1
+    assert report["pipeline"]["legacy_evidence_eligible_count"] == 1
+    assert report["pipeline"]["legacy_evidence_contract_blocked_count"] == 0
+    assert report["execution_phases"][3]["status"] == "COMPLETE"
+    assert report["legacy_evidence_input"]["configured"] is True
+    assert "private-legacy-subject" not in raw
+    assert str(tmp_path) not in raw
 
 
 def test_pipeline_pagination_fails_closed_on_inventory_contract_drift(

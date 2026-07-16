@@ -26,6 +26,12 @@ from services.pipeline_coherency_disposition import (  # noqa: E402
     preview_pipeline_coherency_disposition,
     resolve_pipeline_coherency_dispositions,
 )
+from services.pipeline_legacy_evidence import (  # noqa: E402
+    MANIFEST_CONTRACT as LEGACY_EVIDENCE_MANIFEST_CONTRACT,
+)
+from services.pipeline_legacy_evidence import (  # noqa: E402
+    resolve_pipeline_legacy_evidence,
+)
 from services.runtime.incremental_evaluation_dead_letter_resolution import (  # noqa: E402
     ACTION_DISPOSE_OBSOLETE_CLOSED_CANDIDATE,
     BUCKET_ACTIVE_UNRESOLVED,
@@ -116,6 +122,8 @@ def main() -> int:
     parser.add_argument("--db", required=True)
     parser.add_argument("--fast0-report", required=True)
     parser.add_argument("--fast0-report-sha256", required=True)
+    parser.add_argument("--legacy-evidence-manifest")
+    parser.add_argument("--legacy-evidence-manifest-sha256")
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "fast0_blocker_resolution_plan"),
@@ -127,6 +135,16 @@ def main() -> int:
             fast0_report=Path(args.fast0_report),
             expected_fast0_report_sha256=str(args.fast0_report_sha256).lower(),
             out_dir=Path(args.out_dir),
+            legacy_evidence_manifest=(
+                None
+                if args.legacy_evidence_manifest is None
+                else Path(args.legacy_evidence_manifest)
+            ),
+            expected_legacy_evidence_manifest_sha256=(
+                None
+                if args.legacy_evidence_manifest_sha256 is None
+                else str(args.legacy_evidence_manifest_sha256).lower()
+            ),
         )
     except Exception as exc:
         print(
@@ -146,6 +164,8 @@ def run_report(
     expected_fast0_report_sha256: str,
     out_dir: Path,
     observed_at: datetime | None = None,
+    legacy_evidence_manifest: Path | None = None,
+    expected_legacy_evidence_manifest_sha256: str | None = None,
 ) -> dict[str, Any]:
     if str(SCHEMA_VERSION) != _EXPECTED_SCHEMA_VERSION:
         raise Fast0BlockerResolutionPlanError("CODE_TARGET_SCHEMA_MISMATCH")
@@ -163,6 +183,22 @@ def run_report(
         baseline_payload,
         report_sha256=actual_report_sha256,
     )
+    if (legacy_evidence_manifest is None) is not (
+        expected_legacy_evidence_manifest_sha256 is None
+    ):
+        raise Fast0BlockerResolutionPlanError("LEGACY_EVIDENCE_ARGUMENTS_INCOMPLETE")
+    legacy_manifest_payload: Mapping[str, Any] | None = None
+    legacy_manifest_sha256: str | None = None
+    if legacy_evidence_manifest is not None:
+        if not _is_sha256(expected_legacy_evidence_manifest_sha256):
+            raise Fast0BlockerResolutionPlanError("LEGACY_EVIDENCE_SHA256_INVALID")
+        legacy_manifest_payload, legacy_manifest_sha256 = fast0_tool._read_stable_json(
+            legacy_evidence_manifest,
+            missing_reason="LEGACY_EVIDENCE_MANIFEST_NOT_FOUND",
+            invalid_reason="LEGACY_EVIDENCE_MANIFEST_INVALID",
+        )
+        if legacy_manifest_sha256 != expected_legacy_evidence_manifest_sha256:
+            raise Fast0BlockerResolutionPlanError("LEGACY_EVIDENCE_SHA256_MISMATCH")
 
     resolved_path = fast0_tool._validated_database_path(db_path)
     fast0_tool._assert_no_sidecars(resolved_path)
@@ -214,7 +250,11 @@ def run_report(
                 connection.execute("SELECT COUNT(*) FROM runtime_execution_locks").fetchone()[0]
             )
             incremental = _plan_incremental(connection)
-            pipeline = _plan_pipeline(connection, observed_at=collected_at)
+            pipeline = _plan_pipeline(
+                connection,
+                observed_at=collected_at,
+                legacy_evidence_manifest=legacy_manifest_payload,
+            )
         finally:
             connection.rollback()
             connection.close()
@@ -227,6 +267,14 @@ def run_report(
             pinned_main=identity_pin.fingerprint(),
         )
     writer_probe_after = fast0_tool._probe_no_other_open_handles(resolved_path)
+    if legacy_evidence_manifest is not None:
+        _, manifest_sha256_after = fast0_tool._read_stable_json(
+            legacy_evidence_manifest,
+            missing_reason="LEGACY_EVIDENCE_MANIFEST_NOT_FOUND",
+            invalid_reason="LEGACY_EVIDENCE_MANIFEST_INVALID",
+        )
+        if manifest_sha256_after != legacy_manifest_sha256:
+            raise Fast0BlockerResolutionPlanError("LEGACY_EVIDENCE_MANIFEST_CHANGED")
     whole_window_writer_absence_proven = bool(
         identity_pin.method == "WINDOWS_READ_HANDLE_DENY_WRITE_DELETE"
         and writer_probe_before.get("status") == "PASS"
@@ -271,6 +319,17 @@ def run_report(
         "schema_manifest": schema_manifest,
         "incremental_dead_letter": incremental,
         "pipeline": pipeline,
+        "legacy_evidence_input": {
+            "configured": legacy_manifest_payload is not None,
+            "contract": (
+                LEGACY_EVIDENCE_MANIFEST_CONTRACT
+                if legacy_manifest_payload is not None
+                else None
+            ),
+            "file_sha256": legacy_manifest_sha256,
+            "content_embedded": False,
+            "path_recorded": False,
+        },
         "execution_phases": _execution_phases(incremental, pipeline),
         "read_only": True,
         "observe_only": True,
@@ -478,8 +537,13 @@ def _plan_pipeline(
     connection: sqlite3.Connection,
     *,
     observed_at: datetime,
+    legacy_evidence_manifest: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    first, items, pages = _read_pipeline_pages(connection, observed_at=observed_at)
+    first, items, pages = _read_pipeline_pages(
+        connection,
+        observed_at=observed_at,
+        legacy_evidence_manifest=legacy_evidence_manifest,
+    )
     classifications: Counter[str] = Counter()
     plan_statuses: Counter[str] = Counter()
     drift_statuses: Counter[str] = Counter()
@@ -527,6 +591,24 @@ def _plan_pipeline(
             "pipeline_fingerprint": pipeline_fingerprint,
             "subject_version": subject_version,
         }
+        action = _expected_pipeline_action(item)
+        if (
+            classification == "HISTORICAL_CLOSED"
+            and item.get("canonical_status") != "PASS"
+            and action is None
+        ):
+            legacy_entries.append(
+                {
+                    **base_entry,
+                    "legacy_warn_eligible": item.get("legacy_warn_candidate") is True,
+                }
+            )
+            for reason in (
+                item.get("legacy_warn_effective_reason_codes")
+                or item.get("legacy_warn_reason_codes")
+                or []
+            ):
+                legacy_blocked_reasons[str(reason)] += 1
         if item.get("active_recovery_required") is True:
             active_entries.append(base_entry)
         if item.get("disposition_required") is not True:
@@ -537,19 +619,9 @@ def _plan_pipeline(
             "STALE_OTHER_DATE_MANUAL_REVIEW",
         }:
             manual_evidence_required_count += 1
-        action = _expected_pipeline_action(item)
         if action is None:
             unsupported_entries.append(base_entry)
             blocked_reasons["PIPELINE_EXPECTED_ACTION_UNAVAILABLE"] += 1
-            if classification == "HISTORICAL_CLOSED":
-                legacy_entries.append(
-                    {
-                        **base_entry,
-                        "legacy_warn_eligible": item.get("legacy_warn_eligible") is True,
-                    }
-                )
-                for reason in item.get("legacy_warn_reason_codes") or []:
-                    legacy_blocked_reasons[str(reason)] += 1
             continue
         action_counts[action] += 1
         preview = preview_pipeline_coherency_disposition(
@@ -681,6 +753,7 @@ def _read_pipeline_pages(
     connection: sqlite3.Connection,
     *,
     observed_at: datetime,
+    legacy_evidence_manifest: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     first: dict[str, Any] | None = None
     target_trade_date: str | None = None
@@ -701,6 +774,16 @@ def _read_pipeline_pages(
                     trade_date,
                     subjects,
                     as_of=observed_at,
+                )
+            ),
+            legacy_evidence_resolver=(
+                None
+                if legacy_evidence_manifest is None
+                else lambda trade_date, subjects: resolve_pipeline_legacy_evidence(
+                    connection,
+                    trade_date,
+                    subjects,
+                    manifest=legacy_evidence_manifest,
                 )
             ),
             as_of=observed_at,
@@ -878,9 +961,11 @@ def _execution_phases(
             "phase": "D",
             "name": "PIPELINE_LEGACY_EVIDENCE",
             "status": (
-                "CONTRACT_AND_AUTHORITATIVE_EVIDENCE_RESOLVER_REQUIRED"
-                if pipeline.get("legacy_evidence_contract_blocked_count")
-                else "AUTHORITATIVE_EVIDENCE_RESOLVER_REQUIRED"
+                "COMPLETE"
+                if pipeline.get("legacy_evidence_target_count")
+                == pipeline.get("legacy_evidence_eligible_count")
+                and pipeline.get("legacy_evidence_contract_blocked_count") == 0
+                else "CONTRACT_AND_AUTHORITATIVE_EVIDENCE_RESOLVER_REQUIRED"
             ),
             "target_count": pipeline.get("legacy_evidence_target_count"),
             "currently_eligible_count": pipeline.get("legacy_evidence_eligible_count"),
@@ -916,6 +1001,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     schema = _mapping(report.get("schema_manifest"))
     incremental = _mapping(report.get("incremental_dead_letter"))
     pipeline = _mapping(report.get("pipeline"))
+    legacy_input = _mapping(report.get("legacy_evidence_input"))
     before = database.get("files_before")
     after = database.get("files_after")
 
@@ -948,6 +1034,22 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("READ_ONLY_PLAN_CONTRACT_INVALID")
     if report.get("identifiers_recorded") is not False:
         failures.append("IDENTIFIER_PRIVACY_CONTRACT_INVALID")
+    if legacy_input.get("configured") is True:
+        if not (
+            legacy_input.get("contract") == LEGACY_EVIDENCE_MANIFEST_CONTRACT
+            and _is_sha256(legacy_input.get("file_sha256"))
+            and legacy_input.get("content_embedded") is False
+            and legacy_input.get("path_recorded") is False
+        ):
+            failures.append("LEGACY_EVIDENCE_INPUT_CONTRACT_INVALID")
+    elif legacy_input != {
+        "configured": False,
+        "contract": None,
+        "file_sha256": None,
+        "content_embedded": False,
+        "path_recorded": False,
+    }:
+        failures.append("LEGACY_EVIDENCE_INPUT_CONTRACT_INVALID")
 
     incremental_expected = _mapping(source.get("incremental_expected"))
     expected_buckets = _mapping(incremental_expected.get("bucket_counts"))
@@ -977,7 +1079,8 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         != pipeline_expected.get("inventory_digest")
         or pipeline.get("classification_counts")
         != pipeline_expected.get("classification_counts")
-        or pipeline.get("disposition_required_count")
+        or int(pipeline.get("disposition_required_count") or 0)
+        + int(pipeline.get("legacy_evidence_eligible_count") or 0)
         != pipeline_expected.get("disposition_required_count")
         or pipeline.get("active_current_target_count")
         != pipeline_expected.get("active_current_non_pass_count")
@@ -986,7 +1089,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         failures.append("PIPELINE_INVENTORY_BASELINE_MISMATCH")
     if pipeline.get("preview_blocked_count"):
         preparation.append("PIPELINE_PREVIEW_BLOCKED_OR_UNSUPPORTED_TARGETS_PRESENT")
-    if pipeline.get("legacy_evidence_target_count"):
+    if pipeline.get("legacy_evidence_contract_blocked_count"):
         preparation.append("PIPELINE_AUTHORITATIVE_LEGACY_EVIDENCE_REQUIRED")
     if pipeline.get("legacy_evidence_contract_blocked_count"):
         preparation.append("PIPELINE_LEGACY_ELIGIBILITY_CONTRACT_BLOCKED")
@@ -1037,7 +1140,10 @@ def write_report(report: Mapping[str, Any], *, out_dir: Path) -> dict[str, Path]
     commands_path.write_text(
         "plan: python -B -m tools.ops_fast0_blocker_resolution_plan "
         "--db <schema-62-db> --fast0-report <approved-raw.json> "
-        "--fast0-report-sha256 <approved-sha256> --out-dir <evidence-dir>\n"
+        "--fast0-report-sha256 <approved-sha256> "
+        "[--legacy-evidence-manifest <restricted-private-manifest.json> "
+        "--legacy-evidence-manifest-sha256 <approved-private-sha256>] "
+        "--out-dir <evidence-dir>\n"
         "apply: NOT AUTHORIZED; requires a separate campaign manifest and approval\n",
         encoding="utf-8",
     )
