@@ -343,3 +343,9 @@ strict read-only로 reconcile하고, 코드·데이터 결함이면 별도 repai
 위 조건을 만족해도 R7은 blocker를 해소하지 않는다. Manual evidence, repair, eligibility contract,
 preview/apply, legacy resolver, active-current rebuild와 최종 FAST-0 requalification은 각각 별도
 승인과 새 evidence가 필요하다.
+
+Orphan 9건의 다음 비파괴 단계는 R8이다. R8은 승인된 R6/R7 SHA, 접근 제한 private target
+manifest, 한 alias authoritative evidence와 실제 broker artifact를 current strict read-only preview에
+exact 결속하고 기존 orphan ledger 전체의 legacy/invalid row 및 chain 0건을 확인한다.
+R8 구현 또는 preflight `PASS`도 apply를 승인하지 않으며, 세부 계약은
+`docs/runbook_pipeline_orphan_evidence_preflight_ko.md`를 따른다.

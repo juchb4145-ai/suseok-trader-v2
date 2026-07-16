@@ -273,7 +273,7 @@ python -B -m tools.resolve_pipeline_coherency `
 ```
 
 Apply는 code merge와 schema 62 migration 후 별도로 승인된 운영 단계에서만 수행한다. `--apply`,
-exact six CAS hashes, non-empty evidence file/hash, safe label, request id와
+exact six CAS hashes, action별 evidence 계약, safe label, request id와
 `--acknowledge APPLY_APPEND_ONLY_PIPELINE_DISPOSITION`을 모두 요구한다. repository 기본 `.env`는
 금지하며 별도 `TRADING_ENV_FILE`에서 OBSERVE, 양쪽 live false, kill switch true, incremental
 worker와 모든 command producer false, `THEME_REFRESH_QUEUE_MARKET_SCAN_COMMANDS=false`, 정확한 DB
@@ -285,6 +285,20 @@ broker-boundary 및 resolution)의 digest가 전후 같지 않으면 rollback한
 입력에는 token/계좌번호를 넣지 않는다.
 CLI는 알려진 token·credential·계좌번호 값 패턴을 입력 단계에서 거부하고, raw.json과 summary를
 key 및 값 패턴 양쪽으로 다시 redaction한다. commands에는 실제 인자를 기록하지 않는다.
+
+`DISPOSE_ORPHAN_PIPELINE_OBSERVATION`은 generic non-empty evidence를 허용하지 않는다. R8
+`fast0-pipeline-orphan-manual-evidence.v1` exact JSON, 승인 evidence file SHA-256, 실제 broker
+artifact와 그 SHA-256, R6 private target-set SHA-256, private manifest file SHA-256, `Mnnn` alias,
+승인 R8 preflight report/SHA와 `evidence_preview_sha256`을 추가로 요구한다.
+Evidence의 target은 trade date/private candidate ID/classification/action/six-part CAS와 exact match해야
+하며 authoritative terminal-orphan, candidate/source/order-or-broker 부재 claim과 allowlisted
+broker provenance, 실제 artifact SHA/size, final trade-date coverage와 hashed account scope를 검증한다.
+CLI는 RW open 전과 `BEGIN EXCLUSIVE` 안에서 private file identity, current CAS와 신규 request의
+preflight DB main fingerprint를 재검증하고, service direct call과 저장된 effective projection도 safe
+binding을 검증한다. 기존 orphan ledger의 legacy generic/invalid/noncanonical row 또는 invalid chain이
+하나라도 있으면 preflight는 차단된다. 따라서 `{"redacted":true}`나 legacy generic orphan evidence는
+유효하지 않다. Strict read-only 준비 절차는
+`docs/runbook_pipeline_orphan_evidence_preflight_ko.md`를 따른다.
 
 정상 exit 0은 preview의 `ELIGIBLE`, apply의 `APPLIED` 또는 `IDEMPOTENT`뿐이다.
 `*_RECONCILED_WITH_WARNING`, `OUTCOME_UNKNOWN`, `COMMITTED_POSTCHECK_FAILED`,

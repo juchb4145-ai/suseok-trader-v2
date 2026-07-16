@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+from datetime import UTC, datetime
 
 import pytest
 from services.pipeline_coherency import build_pipeline_coherency_rca_status
@@ -10,10 +12,17 @@ from services.pipeline_coherency_disposition import (
     ACTION_DISPOSE_STALE_OTHER_DATE,
     ACTION_REVOKE,
     PipelineCoherencyDispositionError,
+    _issue_orphan_apply_approval_context,
     preview_pipeline_coherency_disposition,
     record_pipeline_coherency_disposition,
     resolve_pipeline_coherency_dispositions,
     revoke_pipeline_coherency_disposition,
+)
+from services.pipeline_orphan_manual_evidence import (
+    ORPHAN_EVIDENCE_CONTRACT,
+    StableJsonDocument,
+    build_orphan_apply_evidence_binding,
+    validate_orphan_manual_evidence_document,
 )
 from storage.sqlite import initialize_database
 from tests.test_live_sim_order_plan_pipeline import (
@@ -406,6 +415,103 @@ def test_orphan_and_stale_other_date_have_distinct_guarded_actions(tmp_path) -> 
     assert stale_preview["expected_action"] == ACTION_DISPOSE_STALE_OTHER_DATE
 
 
+def test_orphan_disposition_rejects_generic_evidence_binding(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "orphan-generic-evidence.sqlite3")
+    connection.execute(
+        """
+        INSERT INTO risk_observations_latest (
+            candidate_instance_id, risk_observation_id,
+            strategy_observation_id, trade_date, code, name, evaluated_at,
+            overall_status, max_severity, blocked_count, caution_count,
+            pass_count, reason_codes_json, config_version, observe_only
+        ) VALUES (
+            'orphan-generic', 'orphan-generic-risk', 'missing-strategy',
+            '2026-07-15', '005930', 'fixture', '2026-07-15T00:00:00Z',
+            'OBSERVE_BLOCK', 'BLOCK', 1, 0, 0, '[]', 'test', 1
+        )
+        """
+    )
+    connection.commit()
+    preview = preview_pipeline_coherency_disposition(
+        connection,
+        trade_date="2026-07-15",
+        candidate_instance_id="orphan-generic",
+        action=ACTION_DISPOSE_ORPHAN,
+    )
+
+    with pytest.raises(PipelineCoherencyDispositionError) as exc_info:
+        record_pipeline_coherency_disposition(
+            connection,
+            **_record_kwargs(preview, request_id="pipeline-request-orphan-generic"),
+        )
+    row_count = connection.execute(
+        "SELECT COUNT(*) FROM pipeline_coherency_dispositions"
+    ).fetchone()[0]
+    connection.close()
+
+    assert exc_info.value.code == "PIPELINE_ORPHAN_EVIDENCE_INVALID"
+    assert row_count == 0
+
+
+def test_orphan_disposition_rejects_new_append_without_cli_approval_context(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "orphan-no-approval-context.sqlite3")
+    preview = _insert_orphan_subject(connection, candidate_id="orphan-no-approval-context")
+    kwargs = _orphan_record_kwargs(
+        preview,
+        request_id="pipeline-request-orphan-no-approval-context",
+    )
+    kwargs.pop("orphan_approval_context")
+
+    with pytest.raises(PipelineCoherencyDispositionError) as exc_info:
+        record_pipeline_coherency_disposition(connection, **kwargs)
+
+    assert exc_info.value.code == "PIPELINE_ORPHAN_APPROVAL_CONTEXT_REQUIRED"
+    assert (
+        connection.execute("SELECT COUNT(*) FROM pipeline_coherency_dispositions").fetchone()[0]
+        == 0
+    )
+    connection.close()
+
+
+def test_orphan_disposition_future_as_of_cannot_move_approval_ceiling(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "orphan-future-approval.sqlite3")
+    preview = _insert_orphan_subject(connection, candidate_id="orphan-future-approval")
+    kwargs = _orphan_record_kwargs(
+        preview,
+        request_id="pipeline-request-orphan-future-approval",
+    )
+    binding = kwargs["evidence_json"]["evidence_binding"]
+    future_wrapper = build_orphan_apply_evidence_binding(
+        binding,
+        approved_preflight_report_sha256="3" * 64,
+        approved_private_manifest_sha256="4" * 64,
+        source_plan_report_sha256="5" * 64,
+        source_reconciliation_report_sha256="6" * 64,
+        approved_database_main_sha256="7" * 64,
+        approved_database_main_size=1,
+        broker_scope_sha256="2" * 64,
+        preflight_generated_at="2099-01-01T00:00:00Z",
+    )
+    kwargs["evidence_json"] = future_wrapper
+    kwargs["orphan_approval_context"] = _issue_orphan_apply_approval_context(
+        future_wrapper,
+        verified_preflight_report_sha256="3" * 64,
+        verified_database_main_sha256="7" * 64,
+    )
+    kwargs["as_of"] = datetime(2099, 1, 1, 1, 0, tzinfo=UTC)
+
+    with pytest.raises(PipelineCoherencyDispositionError) as exc_info:
+        record_pipeline_coherency_disposition(connection, **kwargs)
+
+    assert exc_info.value.code == "PIPELINE_ORPHAN_EVIDENCE_INVALID"
+    assert exc_info.value.details["reason_codes"] == ["ORPHAN_APPLY_APPROVAL_TIME_INVALID"]
+    assert (
+        connection.execute("SELECT COUNT(*) FROM pipeline_coherency_dispositions").fetchone()[0]
+        == 0
+    )
+    connection.close()
+
+
 @pytest.mark.parametrize(
     ("state", "candidate_trade_date", "action"),
     (
@@ -631,9 +737,7 @@ def test_candidate_metadata_gateway_commands_invalidate_disposition_and_malforme
         separators=(",", ":"),
         sort_keys=True,
     )
-    malformed_payload = (
-        '{"candidate_instance_id":' + json.dumps(candidate_id) + ',"metadata":'
-    )
+    malformed_payload = '{"candidate_instance_id":' + json.dumps(candidate_id) + ',"metadata":'
     unbound_payload = json.dumps(
         {
             "mode": "LIVE_SIM",
@@ -1117,7 +1221,7 @@ def test_effective_orphan_disposition_resolves_manual_blocker_and_late_position_
     )
     record_pipeline_coherency_disposition(
         connection,
-        **_record_kwargs(preview, request_id="pipeline-request-orphan-effective"),
+        **_orphan_record_kwargs(preview, request_id="pipeline-request-orphan-effective"),
     )
 
     effective = _resolved_status(
@@ -1154,6 +1258,78 @@ def test_effective_orphan_disposition_resolves_manual_blocker_and_late_position_
     assert invalidated["items"][0]["effective_disposition"]["status"] == "INVALID_CAS"
     assert invalidated["disposition_pending_count"] == 1
     assert invalidated["qualification_status"] == "BLOCKED"
+
+
+@pytest.mark.parametrize(
+    ("column", "duplicate_prefix"),
+    (
+        ("evidence_json", '"contract":"duplicate",'),
+        ("safety_snapshot_json", '"trading_profile":"OBSERVE",'),
+    ),
+)
+def test_stored_orphan_disposition_rejects_duplicate_json_keys(
+    tmp_path,
+    column: str,
+    duplicate_prefix: str,
+) -> None:
+    connection = initialize_database(tmp_path / f"orphan-duplicate-{column}.sqlite3")
+    preview = _insert_orphan_subject(connection, candidate_id=f"orphan-duplicate-{column}")
+    record_pipeline_coherency_disposition(
+        connection,
+        **_orphan_record_kwargs(
+            preview,
+            request_id=f"pipeline-request-orphan-duplicate-{column}",
+        ),
+    )
+    raw_json = str(
+        connection.execute(f"SELECT {column} FROM pipeline_coherency_dispositions").fetchone()[
+            column
+        ]
+    )
+    _replace_disposition_column(
+        connection,
+        column=column,
+        value="{" + duplicate_prefix + raw_json[1:],
+    )
+
+    status = _resolved_status(
+        connection,
+        candidate_id=preview["candidate_instance_id"],
+        trade_date=preview["trade_date"],
+    )
+    connection.close()
+
+    assert status["items"][0]["effective_disposition"]["status"] == "INVALID_CHAIN"
+    assert status["disposition_pending_count"] == 1
+    assert status["qualification_status"] == "BLOCKED"
+
+
+def test_stored_legacy_generic_orphan_evidence_is_not_effective(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "orphan-legacy-generic.sqlite3")
+    preview = _insert_orphan_subject(connection, candidate_id="orphan-legacy-generic")
+    record_pipeline_coherency_disposition(
+        connection,
+        **_orphan_record_kwargs(
+            preview,
+            request_id="pipeline-request-orphan-legacy-generic",
+        ),
+    )
+    _replace_disposition_column(
+        connection,
+        column="evidence_json",
+        value=json.dumps({"redacted": True}, separators=(",", ":"), sort_keys=True),
+    )
+
+    status = _resolved_status(
+        connection,
+        candidate_id=preview["candidate_instance_id"],
+        trade_date=preview["trade_date"],
+    )
+    connection.close()
+
+    assert status["items"][0]["effective_disposition"]["status"] == "INVALID_CHAIN"
+    assert status["disposition_pending_count"] == 1
+    assert status["qualification_status"] == "BLOCKED"
 
 
 def test_tampered_request_hash_or_safety_snapshot_invalidates_chain(tmp_path) -> None:
@@ -1408,3 +1584,126 @@ def _record_kwargs(preview, *, request_id: str):
             "order_commands_allowed": False,
         },
     }
+
+
+def _orphan_record_kwargs(preview, *, request_id: str):
+    target = {
+        "trade_date": preview["trade_date"],
+        "candidate_instance_id": preview["candidate_instance_id"],
+        "classification": preview["classification"],
+        "action": preview["action"],
+        "pipeline_fingerprint": preview["pipeline_fingerprint"],
+        "subject_version": preview["subject_version"],
+        "source_fingerprint": preview["source_fingerprint"],
+        "candidate_fingerprint": preview["candidate_fingerprint"],
+        "downstream_fingerprint": preview["downstream_fingerprint"],
+        "boundary_fingerprint": preview["boundary_fingerprint"],
+    }
+    payload = {
+        "contract": ORPHAN_EVIDENCE_CONTRACT,
+        "target_set_sha256": "f" * 64,
+        "alias": "M001",
+        "target": target,
+        "determination": {
+            "status": "AUTHORITATIVE",
+            "terminal_orphan_confirmed": True,
+            "candidate_present": False,
+            "current_source_present": False,
+            "order_or_broker_activity_present": False,
+        },
+        "provenance": {
+            "source_type": "BROKER_ORDER_HISTORY_EXPORT",
+            "source_ref": "broker/order-history/test-artifact",
+            "artifact_sha256": "1" * 64,
+            "artifact_size": 128,
+            "coverage_trade_date": target["trade_date"],
+            "coverage_status": "FINAL_COMPLETE",
+            "account_scope_sha256": "2" * 64,
+            "observed_at": "2026-07-15T15:00:00Z",
+            "reviewed_at": "2026-07-15T15:01:00Z",
+            "reviewer_id": "reviewer.safe",
+        },
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    document = StableJsonDocument(
+        payload=payload,
+        sha256=hashlib.sha256(raw).hexdigest(),
+        size=len(raw),
+        device=0,
+        inode=0,
+        mtime_ns=0,
+    )
+    binding = validate_orphan_manual_evidence_document(
+        document,
+        expected_target_set_sha256="f" * 64,
+        expected_alias="M001",
+        expected_target=target,
+        expected_artifact_sha256="1" * 64,
+        expected_artifact_size=128,
+        expected_account_scope_sha256="2" * 64,
+        not_after=datetime(2026, 7, 16, 2, 0, tzinfo=UTC),
+    )
+    apply_binding = build_orphan_apply_evidence_binding(
+        binding,
+        approved_preflight_report_sha256="3" * 64,
+        approved_private_manifest_sha256="4" * 64,
+        source_plan_report_sha256="5" * 64,
+        source_reconciliation_report_sha256="6" * 64,
+        approved_database_main_sha256="7" * 64,
+        approved_database_main_size=1,
+        broker_scope_sha256="2" * 64,
+        preflight_generated_at="2026-07-16T02:00:00Z",
+    )
+    result = _record_kwargs(preview, request_id=request_id)
+    result["evidence_sha256"] = document.sha256
+    result["evidence_json"] = apply_binding
+    result["orphan_approval_context"] = _issue_orphan_apply_approval_context(
+        apply_binding,
+        verified_preflight_report_sha256="3" * 64,
+        verified_database_main_sha256="7" * 64,
+    )
+    result["as_of"] = datetime(2026, 7, 16, 3, 0, tzinfo=UTC)
+    return result
+
+
+def _insert_orphan_subject(connection, *, candidate_id: str):
+    connection.execute(
+        """
+        INSERT INTO risk_observations_latest (
+            candidate_instance_id, risk_observation_id,
+            strategy_observation_id, trade_date, code, name, evaluated_at,
+            overall_status, max_severity, blocked_count, caution_count,
+            pass_count, reason_codes_json, config_version, observe_only
+        ) VALUES (
+            ?, ?, 'missing-strategy', '2026-07-15', '005930', 'fixture',
+            '2026-07-15T00:00:00Z', 'OBSERVE_BLOCK', 'BLOCK', 1, 0, 0,
+            '[]', 'test', 1
+        )
+        """,
+        (candidate_id, f"{candidate_id}-risk"),
+    )
+    connection.commit()
+    return preview_pipeline_coherency_disposition(
+        connection,
+        trade_date="2026-07-15",
+        candidate_instance_id=candidate_id,
+        action=ACTION_DISPOSE_ORPHAN,
+    )
+
+
+def _replace_disposition_column(connection, *, column: str, value: str) -> None:
+    assert column in {"evidence_json", "safety_snapshot_json"}
+    trigger_sql = connection.execute(
+        """
+        SELECT sql FROM sqlite_master
+        WHERE type = 'trigger'
+          AND name = 'trg_pipeline_coherency_dispositions_no_update'
+        """
+    ).fetchone()["sql"]
+    connection.execute("DROP TRIGGER trg_pipeline_coherency_dispositions_no_update")
+    connection.execute(
+        f"UPDATE pipeline_coherency_dispositions SET {column} = ?",
+        (value,),
+    )
+    connection.execute(trigger_sql)
+    connection.commit()

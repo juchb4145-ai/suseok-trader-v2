@@ -33,11 +33,24 @@ from services.pipeline_coherency_disposition import (  # noqa: E402
     ACTION_REVOKE,
     DISPOSITION_TABLE,
     PipelineCoherencyDispositionError,
+    _issue_orphan_apply_approval_context,
     is_pipeline_coherency_disposition_schema_ready,
     preview_pipeline_coherency_disposition,
     record_pipeline_coherency_disposition,
     revoke_pipeline_coherency_disposition,
 )
+from services.pipeline_orphan_manual_evidence import (  # noqa: E402
+    ORPHAN_CLASSIFICATION,
+    OrphanManualEvidenceError,
+    build_orphan_apply_evidence_binding,
+    read_stable_file_fingerprint,
+    read_stable_json_document,
+    validate_orphan_apply_evidence_binding,
+    validate_orphan_evidence_binding,
+    validate_orphan_manual_evidence_document,
+    validate_private_target_manifest,
+)
+from tools import ops_pipeline_orphan_evidence_preflight as orphan_preflight_tool  # noqa: E402
 
 ACTIONS = (
     ACTION_DISPOSE_EXPIRED_PLAN_READY,
@@ -58,9 +71,7 @@ _SENSITIVE_VALUE_PATTERNS = (
     re.compile(r"(?i)(?:acct|account|계좌)[_.:@/-]?\d{6,16}"),
     re.compile(r"(?<![A-Za-z0-9])\d{8,16}(?![A-Za-z0-9])"),
 )
-_HYPHENATED_ACCOUNT_PATTERN = re.compile(
-    r"(?<!\d)\d{3,6}-\d{2,6}(?:-\d{1,6})?(?!\d)"
-)
+_HYPHENATED_ACCOUNT_PATTERN = re.compile(r"(?<!\d)\d{3,6}-\d{2,6}(?:-\d{1,6})?(?!\d)")
 _ISO_DATE_PATTERN = re.compile(r"(?<!\d)\d{4}-\d{2}-\d{2}(?!\d)")
 _PRODUCER_SETTING_NAMES = (
     "realtime_subscription_queue_commands",
@@ -158,6 +169,28 @@ def main() -> int:
                 evidence_file=Path(args.evidence_file) if args.evidence_file else None,
                 acknowledge=args.acknowledge,
                 out_dir=Path(args.out_dir),
+                expected_evidence_sha256=args.expected_evidence_sha256,
+                expected_evidence_preview_sha256=args.expected_evidence_preview_sha256,
+                evidence_target_set_sha256=args.evidence_target_set_sha256,
+                evidence_alias=args.evidence_alias,
+                orphan_preflight_report=(
+                    Path(args.orphan_preflight_report) if args.orphan_preflight_report else None
+                ),
+                expected_orphan_preflight_report_sha256=(
+                    args.expected_orphan_preflight_report_sha256
+                ),
+                private_target_manifest=(
+                    Path(args.private_target_manifest) if args.private_target_manifest else None
+                ),
+                expected_private_target_manifest_sha256=(
+                    args.expected_private_target_manifest_sha256
+                ),
+                authoritative_artifact=(
+                    Path(args.authoritative_artifact) if args.authoritative_artifact else None
+                ),
+                expected_authoritative_artifact_sha256=(
+                    args.expected_authoritative_artifact_sha256
+                ),
             )
         else:
             report = preview_disposition(
@@ -210,6 +243,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--evidence-type")
     parser.add_argument("--evidence-ref")
     parser.add_argument("--evidence-file")
+    parser.add_argument("--expected-evidence-sha256")
+    parser.add_argument("--expected-evidence-preview-sha256")
+    parser.add_argument("--evidence-target-set-sha256")
+    parser.add_argument("--evidence-alias")
+    parser.add_argument("--orphan-preflight-report")
+    parser.add_argument("--expected-orphan-preflight-report-sha256")
+    parser.add_argument("--private-target-manifest")
+    parser.add_argument("--expected-private-target-manifest-sha256")
+    parser.add_argument("--authoritative-artifact")
+    parser.add_argument("--expected-authoritative-artifact-sha256")
     parser.add_argument("--acknowledge")
     parser.add_argument(
         "--out-dir",
@@ -243,17 +286,23 @@ def preview_disposition(
     failures = [] if before == after else ["DATABASE_DATA_FILE_CHANGED"]
     if not preview.get("eligible"):
         failures.extend(str(code) for code in preview.get("reason_codes") or [])
+    orphan_private_report = action == ACTION_DISPOSE_ORPHAN
+    public_preview = _privacy_safe_orphan_preview(preview) if orphan_private_report else preview
     report: dict[str, Any] = {
         "contract": "fast0-pipeline-disposition-preview.v1",
         "generated_at": _now(),
         "mode": "PREVIEW",
         "database": {
-            "filename": resolved_path.name,
+            **(
+                {"filename_sha256": hashlib.sha256(resolved_path.name.encode("utf-8")).hexdigest()}
+                if orphan_private_report
+                else {"filename": resolved_path.name}
+            ),
             "schema_version": schema_version,
             "files_before": before,
             "files_after": after,
         },
-        "preview": preview,
+        "preview": public_preview,
         "read_only": True,
         "observe_only": True,
         "no_order_side_effects": True,
@@ -263,8 +312,94 @@ def preview_disposition(
             "database_files_unchanged": before == after,
         },
     }
+    if orphan_private_report:
+        _assert_orphan_apply_report_private(
+            report,
+            forbidden_values=(
+                candidate_instance_id,
+                str(preview.get("candidate_instance_id") or ""),
+                str(preview.get("subject_key") or ""),
+            ),
+        )
     report["report_paths"] = _write_report(report, out_dir=out_dir)
     return report
+
+
+def _privacy_safe_orphan_preview(preview: Mapping[str, Any]) -> dict[str, Any]:
+    candidate_instance_id = str(preview.get("candidate_instance_id") or "")
+    subject_key = str(preview.get("subject_key") or "")
+    downstream_raw = preview.get("downstream")
+    source_raw = preview.get("source")
+    candidate_raw = preview.get("candidate")
+    effective_raw = preview.get("effective_disposition")
+    downstream = dict(downstream_raw) if isinstance(downstream_raw, Mapping) else {}
+    source = dict(source_raw) if isinstance(source_raw, Mapping) else {}
+    candidate = dict(candidate_raw) if isinstance(candidate_raw, Mapping) else {}
+    effective = dict(effective_raw) if isinstance(effective_raw, Mapping) else {}
+    safe_effective: dict[str, Any] = {
+        key: effective.get(key)
+        for key in ("status", "effective", "cas_valid", "chain_valid", "action", "sequence_no")
+        if key in effective
+    }
+    if effective:
+        safe_effective["binding_sha256"] = _json_sha256(effective)
+    return {
+        "status": preview.get("status"),
+        "eligible": preview.get("eligible") is True,
+        "reason_codes": [str(code) for code in preview.get("reason_codes") or []],
+        "action": preview.get("action"),
+        "expected_action": preview.get("expected_action"),
+        "trade_date": preview.get("trade_date"),
+        "candidate_instance_id_sha256": hashlib.sha256(
+            candidate_instance_id.encode("utf-8")
+        ).hexdigest(),
+        "subject_key_sha256": hashlib.sha256(subject_key.encode("utf-8")).hexdigest(),
+        "classification": preview.get("classification"),
+        "latest_plan_status": preview.get("latest_plan_status"),
+        "latest_plan_unexpired": preview.get("latest_plan_unexpired"),
+        **{
+            key: preview.get(key)
+            for key in (
+                "pipeline_fingerprint",
+                "subject_version",
+                "source_fingerprint",
+                "candidate_fingerprint",
+                "downstream_fingerprint",
+                "boundary_fingerprint",
+            )
+        },
+        "downstream": {
+            key: value
+            for key, value in downstream.items()
+            if key.endswith("_count") and type(value) is int
+        },
+        "source": {
+            key: source.get(key)
+            for key in (
+                "row_count",
+                "active_count",
+                "historical_event_active_count",
+                "latest_row_count",
+                "latest_active_count",
+                "candidate_active_source_count",
+                "source_projection_consistent",
+                "source_state_classification",
+            )
+        },
+        "candidate": {
+            key: candidate.get(key)
+            for key in ("present", "state", "trade_date", "closed_at", "active_source_count")
+        },
+        "effective_disposition": safe_effective,
+        "chain_valid": preview.get("chain_valid") is True,
+        "next_sequence_no": preview.get("next_sequence_no"),
+        "read_only": True,
+        "observe_only": True,
+        "no_order_side_effects": True,
+        "auto_run_evaluation": False,
+        "live_sim_allowed": False,
+        "live_real_allowed": False,
+    }
 
 
 def apply_disposition(
@@ -287,6 +422,16 @@ def apply_disposition(
     evidence_file: Path | None,
     acknowledge: str | None,
     out_dir: Path,
+    expected_evidence_sha256: str | None = None,
+    expected_evidence_preview_sha256: str | None = None,
+    evidence_target_set_sha256: str | None = None,
+    evidence_alias: str | None = None,
+    orphan_preflight_report: Path | None = None,
+    expected_orphan_preflight_report_sha256: str | None = None,
+    private_target_manifest: Path | None = None,
+    expected_private_target_manifest_sha256: str | None = None,
+    authoritative_artifact: Path | None = None,
+    expected_authoritative_artifact_sha256: str | None = None,
 ) -> dict[str, Any]:
     if acknowledge != APPLY_ACK:
         raise PipelineDispositionCliError("EXACT_APPLY_ACKNOWLEDGEMENT_REQUIRED")
@@ -306,6 +451,24 @@ def apply_disposition(
     missing = [key for key, value in required_text.items() if not str(value or "").strip()]
     if evidence_file is None:
         missing.append("evidence_file")
+    orphan_evidence_arguments = {
+        "expected_evidence_sha256": expected_evidence_sha256,
+        "expected_evidence_preview_sha256": expected_evidence_preview_sha256,
+        "evidence_target_set_sha256": evidence_target_set_sha256,
+        "evidence_alias": evidence_alias,
+        "orphan_preflight_report": orphan_preflight_report,
+        "expected_orphan_preflight_report_sha256": (expected_orphan_preflight_report_sha256),
+        "private_target_manifest": private_target_manifest,
+        "expected_private_target_manifest_sha256": (expected_private_target_manifest_sha256),
+        "authoritative_artifact": authoritative_artifact,
+        "expected_authoritative_artifact_sha256": (expected_authoritative_artifact_sha256),
+    }
+    if action == ACTION_DISPOSE_ORPHAN:
+        missing.extend(
+            key for key, value in orphan_evidence_arguments.items() if not str(value or "").strip()
+        )
+    elif any(str(value or "").strip() for value in orphan_evidence_arguments.values()):
+        raise PipelineDispositionCliError("ORPHAN_EVIDENCE_ARGUMENTS_REQUIRE_ORPHAN_ACTION")
     if missing:
         raise PipelineDispositionCliError(
             *(f"APPLY_ARGUMENT_REQUIRED:{key.upper()}" for key in missing)
@@ -321,7 +484,64 @@ def apply_disposition(
         if key.startswith("expected_")
     }
     assert evidence_file is not None
-    evidence_sha256, evidence_size = _sha256_file(evidence_file)
+    evidence_json: dict[str, Any]
+    orphan_input_identity: dict[str, tuple[Any, ...]] | None = None
+    orphan_preflight_contract: dict[str, Any] | None = None
+    if action == ACTION_DISPOSE_ORPHAN:
+        evidence_sha256 = _sha256_value("expected_evidence_sha256", expected_evidence_sha256)
+        expected_evidence_preview_sha256 = _sha256_value(
+            "expected_evidence_preview_sha256", expected_evidence_preview_sha256
+        )
+        evidence_target_set_sha256 = _sha256_value(
+            "evidence_target_set_sha256", evidence_target_set_sha256
+        )
+        normalized_preflight_sha256 = _sha256_value(
+            "expected_orphan_preflight_report_sha256",
+            expected_orphan_preflight_report_sha256,
+        )
+        normalized_manifest_sha256 = _sha256_value(
+            "expected_private_target_manifest_sha256",
+            expected_private_target_manifest_sha256,
+        )
+        normalized_artifact_sha256 = _sha256_value(
+            "expected_authoritative_artifact_sha256",
+            expected_authoritative_artifact_sha256,
+        )
+        assert orphan_preflight_report is not None
+        assert private_target_manifest is not None
+        assert authoritative_artifact is not None
+        (
+            evidence_json,
+            evidence_size,
+            orphan_input_identity,
+            orphan_preflight_contract,
+        ) = _validated_orphan_evidence(
+            evidence_file=evidence_file,
+            expected_evidence_sha256=evidence_sha256,
+            expected_evidence_preview_sha256=expected_evidence_preview_sha256,
+            evidence_target_set_sha256=evidence_target_set_sha256,
+            evidence_alias=str(evidence_alias or ""),
+            orphan_preflight_report=orphan_preflight_report,
+            expected_orphan_preflight_report_sha256=normalized_preflight_sha256,
+            private_target_manifest=private_target_manifest,
+            expected_private_target_manifest_sha256=normalized_manifest_sha256,
+            authoritative_artifact=authoritative_artifact,
+            expected_authoritative_artifact_sha256=normalized_artifact_sha256,
+            target=_orphan_target(
+                trade_date=trade_date,
+                candidate_instance_id=candidate_instance_id,
+                action=action,
+                expected_hashes=expected_hashes,
+            ),
+        )
+    else:
+        evidence_sha256, evidence_size = _sha256_file(evidence_file)
+        evidence_json = {
+            "contract": "fast0-pipeline-disposition-evidence.v1",
+            "file_sha256": evidence_sha256,
+            "file_size": evidence_size,
+            "content_embedded": False,
+        }
     resolved_path = _validated_database_path(db_path)
     settings, env_path = _load_and_assert_runtime_safe(resolved_path)
     safety_snapshot = _runtime_safety_snapshot(settings, env_path=env_path)
@@ -332,9 +552,13 @@ def apply_disposition(
     commit_error: Exception | None = None
     close_error: Exception | None = None
     rollback_error: Exception | None = None
+    orphan_approval_context = None
+    verified_orphan_database_main_sha256: str | None = None
     try:
         _assert_quiescent_sidecars(resolved_path)
         connection.execute("BEGIN EXCLUSIVE")
+        if action == ACTION_DISPOSE_ORPHAN:
+            _assert_orphan_apply_wal_quiescent(resolved_path)
         _validated_database_path(resolved_path)
         if [str(row[1]) for row in connection.execute("PRAGMA database_list")] != ["main"]:
             raise PipelineDispositionCliError("ATTACHED_DATABASE_NOT_ALLOWED")
@@ -346,20 +570,28 @@ def apply_disposition(
             raise PipelineDispositionCliError("RUNTIME_EXECUTION_LEASE_PRESENT")
         if _sha256_file(env_path)[0] != safety_snapshot["explicit_env_file_sha256"]:
             raise PipelineDispositionCliError("TRADING_ENV_FILE_CHANGED_DURING_APPLY")
-        artifact_before = _artifact_digest(connection)
-        ledger_before = _ledger_state(connection)
         existing = connection.execute(
             f"SELECT request_id FROM {DISPOSITION_TABLE} WHERE request_id = ?",
             (normalized_request_id,),
         ).fetchone()
-        if existing is None:
+        if action == ACTION_DISPOSE_ORPHAN and existing is None:
+            assert orphan_preflight_contract is not None
+            current_main = _main_database_fingerprint(resolved_path)
+            if current_main != orphan_preflight_contract["database_main"]:
+                raise PipelineDispositionCliError(
+                    "ORPHAN_PREFLIGHT_DATABASE_MAIN_FINGERPRINT_MISMATCH"
+                )
+            verified_orphan_database_main_sha256 = str(current_main["sha256"])
+        artifact_before = _artifact_digest(connection)
+        ledger_before = _ledger_state(connection)
+        if existing is None or action == ACTION_DISPOSE_ORPHAN:
             preview = preview_pipeline_coherency_disposition(
                 connection,
                 trade_date=trade_date,
                 candidate_instance_id=candidate_instance_id,
                 action=action,
             )
-            if not preview.get("eligible"):
+            if existing is None and not preview.get("eligible"):
                 raise PipelineDispositionCliError(
                     *(str(code) for code in preview.get("reason_codes") or ["NOT_ELIGIBLE"])
                 )
@@ -368,6 +600,59 @@ def apply_disposition(
                 if preview.get(preview_key) != expected:
                     raise PipelineDispositionCliError(
                         f"PIPELINE_DISPOSITION_CAS_MISMATCH:{key.upper()}"
+                    )
+            if action == ACTION_DISPOSE_ORPHAN:
+                (
+                    evidence_json,
+                    second_size,
+                    second_input_identity,
+                    second_preflight_contract,
+                ) = _validated_orphan_evidence(
+                    evidence_file=evidence_file,
+                    expected_evidence_sha256=evidence_sha256,
+                    expected_evidence_preview_sha256=(expected_evidence_preview_sha256 or ""),
+                    evidence_target_set_sha256=evidence_target_set_sha256 or "",
+                    evidence_alias=str(evidence_alias or ""),
+                    orphan_preflight_report=orphan_preflight_report,
+                    expected_orphan_preflight_report_sha256=(normalized_preflight_sha256),
+                    private_target_manifest=private_target_manifest,
+                    expected_private_target_manifest_sha256=(normalized_manifest_sha256),
+                    authoritative_artifact=authoritative_artifact,
+                    expected_authoritative_artifact_sha256=(normalized_artifact_sha256),
+                    target={
+                        "trade_date": preview.get("trade_date"),
+                        "candidate_instance_id": preview.get("candidate_instance_id"),
+                        "classification": preview.get("classification"),
+                        "action": preview.get("action"),
+                        **{
+                            key: preview.get(key)
+                            for key in (
+                                "pipeline_fingerprint",
+                                "subject_version",
+                                "source_fingerprint",
+                                "candidate_fingerprint",
+                                "downstream_fingerprint",
+                                "boundary_fingerprint",
+                            )
+                        },
+                    },
+                )
+                if second_size != evidence_size:
+                    raise PipelineDispositionCliError("ORPHAN_EVIDENCE_SIZE_CHANGED_DURING_APPLY")
+                if second_input_identity != orphan_input_identity:
+                    raise PipelineDispositionCliError(
+                        "ORPHAN_PRIVATE_INPUT_IDENTITY_CHANGED_DURING_APPLY"
+                    )
+                if second_preflight_contract != orphan_preflight_contract:
+                    raise PipelineDispositionCliError(
+                        "ORPHAN_PREFLIGHT_CONTRACT_CHANGED_DURING_APPLY"
+                    )
+                if existing is None:
+                    assert verified_orphan_database_main_sha256 is not None
+                    orphan_approval_context = _issue_orphan_apply_approval_context(
+                        evidence_json,
+                        verified_preflight_report_sha256=normalized_preflight_sha256,
+                        verified_database_main_sha256=verified_orphan_database_main_sha256,
                     )
         _install_write_authorizer(connection, violations=violations)
         kwargs: dict[str, Any] = {
@@ -381,13 +666,9 @@ def apply_disposition(
             "evidence_type": normalized_evidence_type,
             "evidence_ref": normalized_evidence_ref,
             "evidence_sha256": evidence_sha256,
-            "evidence_json": {
-                "contract": "fast0-pipeline-disposition-evidence.v1",
-                "file_sha256": evidence_sha256,
-                "file_size": evidence_size,
-                "content_embedded": False,
-            },
+            "evidence_json": evidence_json,
             "safety_snapshot": safety_snapshot,
+            "orphan_approval_context": orphan_approval_context,
         }
         if action == ACTION_REVOKE:
             applied = revoke_pipeline_coherency_disposition(connection, **kwargs)
@@ -473,24 +754,63 @@ def apply_disposition(
         status = f"{status}_RECONCILED_WITH_WARNING"
     if postcommit_failures and not commit_outcome_unknown:
         status = "COMMITTED_POSTCHECK_FAILED"
-    report: dict[str, Any] = {
-        "contract": "fast0-pipeline-disposition-apply.v1",
-        "generated_at": _now(),
-        "mode": "APPLY",
-        "database": {
-            "filename": resolved_path.name,
-            "schema_version": "62",
-            "files_before": files_before,
-            "files_after": files_after,
-        },
-        "result": applied,
-        "evidence": {
+    orphan_private_report = action == ACTION_DISPOSE_ORPHAN
+    if orphan_private_report:
+        assert orphan_preflight_contract is not None
+        orphan_evidence_binding = dict(evidence_json["evidence_binding"])
+        safe_result: Mapping[str, Any] = {
+            "action": ACTION_DISPOSE_ORPHAN,
+            "alias": str(evidence_alias),
+            "sequence_no": applied.get("sequence_no"),
+            "request_id_sha256": hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest(),
+            "disposition_id_sha256": hashlib.sha256(
+                str(applied.get("disposition_id") or "").encode("utf-8")
+            ).hexdigest(),
+            "evidence_preview_sha256": orphan_evidence_binding["evidence_preview_sha256"],
+        }
+        safe_evidence: Mapping[str, Any] = {
+            "type_sha256": hashlib.sha256(normalized_evidence_type.encode("utf-8")).hexdigest(),
+            "ref_sha256": hashlib.sha256(normalized_evidence_ref.encode("utf-8")).hexdigest(),
+            "sha256": evidence_sha256,
+            "size": evidence_size,
+            "artifact_sha256": orphan_evidence_binding["artifact_sha256"],
+            "artifact_size": orphan_evidence_binding["artifact_size"],
+            "target_set_sha256": orphan_evidence_binding["target_set_sha256"],
+            "alias": orphan_evidence_binding["alias"],
+            "approval_binding_sha256": evidence_json["approval_binding_sha256"],
+            "preflight_report_sha256": orphan_preflight_contract["report_sha256"],
+            "source_plan_report_sha256": orphan_preflight_contract["source_plan_report_sha256"],
+            "source_reconciliation_report_sha256": orphan_preflight_contract[
+                "source_reconciliation_report_sha256"
+            ],
+            "content_embedded": False,
+        }
+    else:
+        safe_result = applied
+        safe_evidence = {
             "type": normalized_evidence_type,
             "ref": normalized_evidence_ref,
             "sha256": evidence_sha256,
             "size": evidence_size,
             "content_embedded": False,
+        }
+    retry_required = bool(commit_outcome_unknown or postcommit_failures)
+    report: dict[str, Any] = {
+        "contract": "fast0-pipeline-disposition-apply.v1",
+        "generated_at": _now(),
+        "mode": "APPLY",
+        "database": {
+            **(
+                {"filename_sha256": hashlib.sha256(resolved_path.name.encode("utf-8")).hexdigest()}
+                if orphan_private_report
+                else {"filename": resolved_path.name}
+            ),
+            "schema_version": "62",
+            "files_before": files_before,
+            "files_after": files_after,
         },
+        "result": dict(safe_result),
+        "evidence": dict(safe_evidence),
         "safety": safety_snapshot,
         "invariants": {
             "order_artifact_digest_before": artifact_before,
@@ -500,15 +820,11 @@ def apply_disposition(
             "ledger_row_count_after": ledger_after["row_count"],
             "write_authorizer_violations": violations,
             "commit_reconciliation": reconciliation,
-            "commit_error_type": (
-                None if commit_error is None else type(commit_error).__name__
-            ),
+            "commit_error_type": (None if commit_error is None else type(commit_error).__name__),
             "rollback_error_type": (
                 None if rollback_error is None else type(rollback_error).__name__
             ),
-            "close_error_type": (
-                None if close_error is None else type(close_error).__name__
-            ),
+            "close_error_type": (None if close_error is None else type(close_error).__name__),
             "postcommit_warnings": postcommit_warnings,
         },
         "read_only": False,
@@ -521,12 +837,13 @@ def apply_disposition(
             "failures": failures,
             "committed": committed,
             "evidence_written": True,
-            "operator_action_required": bool(
-                commit_outcome_unknown or postcommit_failures
-            ),
+            "operator_action_required": retry_required,
             "retry_with_same_request_id": (
-                normalized_request_id
-                if commit_outcome_unknown or postcommit_failures
+                normalized_request_id if retry_required and not orphan_private_report else None
+            ),
+            "retry_request_id_sha256": (
+                hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest()
+                if retry_required and orphan_private_report
                 else None
             ),
             "error_type": (
@@ -536,12 +853,43 @@ def apply_disposition(
             ),
         },
     }
+    if orphan_private_report:
+        try:
+            _assert_orphan_apply_report_private(
+                report,
+                forbidden_values=(
+                    candidate_instance_id,
+                    normalized_request_id,
+                    normalized_operator,
+                    normalized_evidence_ref,
+                    str(applied.get("candidate_instance_id") or ""),
+                    str(applied.get("subject_key") or ""),
+                    str(applied.get("order_plan_id") or ""),
+                    str(applied.get("disposition_id") or ""),
+                ),
+            )
+        except PipelineDispositionCliError as exc:
+            report = _orphan_postcommit_privacy_failure_report(
+                generated_at=str(report["generated_at"]),
+                alias=str(evidence_alias),
+                request_id_sha256=hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest(),
+                disposition_id_sha256=hashlib.sha256(
+                    str(applied.get("disposition_id") or "").encode("utf-8")
+                ).hexdigest(),
+                approval_binding_sha256=str(evidence_json["approval_binding_sha256"]),
+                evidence_sha256=evidence_sha256,
+                committed=committed,
+                failures=failures,
+                ledger_row_count_before=int(ledger_before["row_count"]),
+                ledger_row_count_after=int(ledger_after["row_count"]),
+                error_type=type(exc).__name__,
+            )
     try:
         report["report_paths"] = _write_report(report, out_dir=out_dir)
     except (OSError, TypeError, ValueError) as exc:
         prior_failures = list(report["verdict"].get("failures") or [])
         unknown_outcome = report["verdict"].get("committed") is None
-        report["verdict"] = {
+        failed_verdict: dict[str, Any] = {
             "status": (
                 "OUTCOME_UNKNOWN_EVIDENCE_WRITE_FAILED"
                 if unknown_outcome
@@ -551,9 +899,16 @@ def apply_disposition(
             "committed": None if unknown_outcome else True,
             "evidence_written": False,
             "operator_action_required": True,
-            "retry_with_same_request_id": normalized_request_id,
+            "retry_with_same_request_id": (
+                None if orphan_private_report else normalized_request_id
+            ),
             "error_type": type(exc).__name__,
         }
+        if orphan_private_report:
+            failed_verdict["retry_request_id_sha256"] = hashlib.sha256(
+                normalized_request_id.encode("utf-8")
+            ).hexdigest()
+        report["verdict"] = failed_verdict
         report["report_paths"] = {}
     return report
 
@@ -684,8 +1039,7 @@ def _install_write_authorizer(
             ):
                 return sqlite3.SQLITE_OK
             violations.append(
-                "UNAUTHORIZED_DATABASE_WRITE:"
-                f"{database or 'UNKNOWN'}:{table or 'UNKNOWN'}"
+                f"UNAUTHORIZED_DATABASE_WRITE:{database or 'UNKNOWN'}:{table or 'UNKNOWN'}"
             )
             return sqlite3.SQLITE_DENY
         if action_code in schema_actions:
@@ -882,6 +1236,33 @@ def _assert_quiescent_sidecars(path: Path) -> None:
             raise PipelineDispositionCliError("QUIESCENT_DATABASE_REQUIRED")
 
 
+def _assert_orphan_apply_wal_quiescent(path: Path) -> None:
+    """Reject committed WAL frames after the orphan apply owns the writer lock.
+
+    Opening a pristine WAL database and acquiring ``BEGIN EXCLUSIVE`` may create
+    an empty WAL/SHM pair.  A non-empty WAL at this point, however, proves that a
+    writer committed after the approved no-sidecar preflight (or before this
+    transaction acquired the writer lock).  The lock prevents a new writer from
+    racing the checks that follow.
+    """
+
+    journal_path = Path(f"{path}-journal")
+    wal_path = Path(f"{path}-wal")
+    shm_path = Path(f"{path}-shm")
+    if journal_path.exists():
+        raise PipelineDispositionCliError("ORPHAN_APPLY_JOURNAL_NOT_QUIESCENT")
+    try:
+        wal_exists = wal_path.exists()
+        wal_size = int(wal_path.stat().st_size) if wal_exists else 0
+        shm_exists = shm_path.exists()
+    except OSError as exc:
+        raise PipelineDispositionCliError("ORPHAN_APPLY_WAL_STATE_UNAVAILABLE") from exc
+    if wal_size != 0:
+        raise PipelineDispositionCliError("ORPHAN_APPLY_COMMITTED_WAL_FRAMES_PRESENT")
+    if shm_exists and not wal_exists:
+        raise PipelineDispositionCliError("ORPHAN_APPLY_WAL_STATE_INCONSISTENT")
+
+
 def _file_state(path: Path) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     for suffix in ("", "-wal", "-shm", "-journal"):
@@ -917,6 +1298,186 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     if before.st_size != after.st_size or before.st_mtime_ns != after.st_mtime_ns:
         raise PipelineDispositionCliError("EVIDENCE_FILE_CHANGED_DURING_HASH")
     return digest.hexdigest(), size
+
+
+def _main_database_fingerprint(path: Path) -> dict[str, Any]:
+    try:
+        before = path.stat()
+        sha256, size = _sha256_file(path)
+        after = path.stat()
+    except OSError as exc:
+        raise PipelineDispositionCliError("DATABASE_MAIN_FINGERPRINT_UNAVAILABLE") from exc
+    before_identity = (int(before.st_size), int(before.st_mtime_ns))
+    after_identity = (int(after.st_size), int(after.st_mtime_ns))
+    if before_identity != after_identity or size != int(after.st_size):
+        raise PipelineDispositionCliError("DATABASE_MAIN_CHANGED_DURING_FINGERPRINT")
+    return {
+        "exists": True,
+        "size": size,
+        "mtime_ns": int(after.st_mtime_ns),
+        "sha256": sha256,
+    }
+
+
+def _validated_orphan_evidence(
+    *,
+    evidence_file: Path,
+    expected_evidence_sha256: str,
+    expected_evidence_preview_sha256: str,
+    evidence_target_set_sha256: str,
+    evidence_alias: str,
+    orphan_preflight_report: Path | None,
+    expected_orphan_preflight_report_sha256: str,
+    private_target_manifest: Path | None,
+    expected_private_target_manifest_sha256: str,
+    authoritative_artifact: Path | None,
+    expected_authoritative_artifact_sha256: str,
+    target: Mapping[str, Any],
+) -> tuple[
+    dict[str, Any],
+    int,
+    dict[str, tuple[Any, ...]],
+    dict[str, Any],
+]:
+    if (
+        orphan_preflight_report is None
+        or private_target_manifest is None
+        or authoritative_artifact is None
+    ):
+        raise PipelineDispositionCliError("ORPHAN_APPROVED_PRIVATE_INPUTS_REQUIRED")
+    try:
+        preflight_document = read_stable_json_document(
+            orphan_preflight_report,
+            expected_sha256=expected_orphan_preflight_report_sha256,
+        )
+        manifest_document = read_stable_json_document(
+            private_target_manifest,
+            expected_sha256=expected_private_target_manifest_sha256,
+        )
+        artifact_fingerprint = read_stable_file_fingerprint(
+            authoritative_artifact,
+            expected_sha256=expected_authoritative_artifact_sha256,
+        )
+        document = read_stable_json_document(
+            evidence_file,
+            expected_sha256=expected_evidence_sha256,
+        )
+        preflight_contract = orphan_preflight_tool.validate_apply_preflight_report(
+            preflight_document.payload,
+            report_sha256=preflight_document.sha256,
+            expected_private_manifest_sha256=manifest_document.sha256,
+            expected_evidence_sha256=document.sha256,
+            expected_artifact_sha256=artifact_fingerprint.sha256,
+            expected_artifact_size=artifact_fingerprint.size,
+            expected_target_set_sha256=evidence_target_set_sha256,
+            expected_alias=evidence_alias,
+            expected_evidence_preview_sha256=expected_evidence_preview_sha256,
+        )
+        manifest = validate_private_target_manifest(
+            manifest_document,
+            expected_target_set_sha256=evidence_target_set_sha256,
+            expected_count=preflight_contract["target_count"],
+        )
+        manifest_matches = [
+            dict(item) for item in manifest["items"] if item.get("alias") == evidence_alias
+        ]
+        if len(manifest_matches) != 1:
+            raise OrphanManualEvidenceError("ORPHAN_MANIFEST_ALIAS_NOT_FOUND")
+        manifest_target = manifest_matches[0]
+        manifest_target.pop("alias", None)
+        if manifest_target != dict(target):
+            raise OrphanManualEvidenceError("ORPHAN_MANIFEST_CURRENT_TARGET_MISMATCH")
+        binding = validate_orphan_manual_evidence_document(
+            document,
+            expected_target_set_sha256=evidence_target_set_sha256,
+            expected_alias=evidence_alias,
+            expected_target=target,
+            expected_artifact_sha256=artifact_fingerprint.sha256,
+            expected_artifact_size=artifact_fingerprint.size,
+            expected_account_scope_sha256=preflight_contract["broker_scope_sha256"],
+            not_after=preflight_contract["generated_at"],
+        )
+        binding = validate_orphan_evidence_binding(
+            binding,
+            evidence_sha256=expected_evidence_sha256,
+            candidate_instance_id=str(target.get("candidate_instance_id") or ""),
+            trade_date=str(target.get("trade_date") or ""),
+            action=str(target.get("action") or ""),
+            pipeline_fingerprint=str(target.get("pipeline_fingerprint") or ""),
+            subject_version=str(target.get("subject_version") or ""),
+            source_fingerprint=str(target.get("source_fingerprint") or ""),
+            candidate_fingerprint=str(target.get("candidate_fingerprint") or ""),
+            downstream_fingerprint=str(target.get("downstream_fingerprint") or ""),
+            boundary_fingerprint=str(target.get("boundary_fingerprint") or ""),
+            expected_preview_sha256=expected_evidence_preview_sha256,
+        )
+        database_main = preflight_contract["database_main"]
+        apply_binding = build_orphan_apply_evidence_binding(
+            binding,
+            approved_preflight_report_sha256=preflight_contract["report_sha256"],
+            approved_private_manifest_sha256=preflight_contract["private_manifest_sha256"],
+            source_plan_report_sha256=preflight_contract["source_plan_report_sha256"],
+            source_reconciliation_report_sha256=preflight_contract[
+                "source_reconciliation_report_sha256"
+            ],
+            approved_database_main_sha256=database_main["sha256"],
+            approved_database_main_size=database_main["size"],
+            broker_scope_sha256=preflight_contract["broker_scope_sha256"],
+            preflight_generated_at=preflight_contract["generated_at_wire"],
+        )
+        binding = validate_orphan_apply_evidence_binding(
+            apply_binding,
+            evidence_sha256=expected_evidence_sha256,
+            candidate_instance_id=str(target.get("candidate_instance_id") or ""),
+            trade_date=str(target.get("trade_date") or ""),
+            action=str(target.get("action") or ""),
+            pipeline_fingerprint=str(target.get("pipeline_fingerprint") or ""),
+            subject_version=str(target.get("subject_version") or ""),
+            source_fingerprint=str(target.get("source_fingerprint") or ""),
+            candidate_fingerprint=str(target.get("candidate_fingerprint") or ""),
+            downstream_fingerprint=str(target.get("downstream_fingerprint") or ""),
+            boundary_fingerprint=str(target.get("boundary_fingerprint") or ""),
+            not_after=preflight_contract["generated_at"],
+        )
+    except (
+        OrphanManualEvidenceError,
+        orphan_preflight_tool.PipelineOrphanEvidencePreflightError,
+    ) as exc:
+        code = getattr(exc, "code", str(exc))
+        raise PipelineDispositionCliError(code) from exc
+    input_identity = {
+        "preflight_report": _stable_input_identity(preflight_document),
+        "private_manifest": _stable_input_identity(manifest_document),
+        "evidence": _stable_input_identity(document),
+        "authoritative_artifact": _stable_input_identity(artifact_fingerprint),
+    }
+    return binding, document.size, input_identity, preflight_contract
+
+
+def _stable_input_identity(value: Any) -> tuple[Any, ...]:
+    return (
+        getattr(value, "sha256", None),
+        getattr(value, "size", None),
+        getattr(value, "device", None),
+        getattr(value, "inode", None),
+        getattr(value, "mtime_ns", None),
+    )
+
+
+def _orphan_target(
+    *,
+    trade_date: str,
+    candidate_instance_id: str,
+    action: str,
+    expected_hashes: Mapping[str, str],
+) -> dict[str, Any]:
+    return {
+        "trade_date": trade_date,
+        "candidate_instance_id": candidate_instance_id,
+        "classification": ORPHAN_CLASSIFICATION,
+        "action": action,
+        **{key.removeprefix("expected_"): value for key, value in expected_hashes.items()},
+    }
 
 
 def _safe_label(name: str, value: object) -> str:
@@ -1002,6 +1563,124 @@ def _redact(value: Any, *, key: str = "") -> Any:
     return value
 
 
+def _assert_orphan_apply_report_private(
+    value: Any,
+    *,
+    forbidden_values: tuple[str, ...],
+    key: str = "",
+) -> None:
+    forbidden_keys = {
+        "candidate_instance_id",
+        "subject_key",
+        "order_plan_id",
+        "operator_id",
+        "evidence_ref",
+        "request_id",
+        "disposition_id",
+    }
+    if isinstance(value, Mapping):
+        for child, item in value.items():
+            child_key = str(child)
+            if child_key in forbidden_keys:
+                raise PipelineDispositionCliError("ORPHAN_REPORT_PRIVATE_FIELD_PRESENT")
+            _assert_orphan_apply_report_private(
+                item,
+                forbidden_values=forbidden_values,
+                key=child_key,
+            )
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _assert_orphan_apply_report_private(
+                item,
+                forbidden_values=forbidden_values,
+                key=key,
+            )
+        return
+    if isinstance(value, str):
+        public_value_keys = {
+            "action",
+            "alias",
+            "commit_reconciliation",
+            "contract",
+            "error_type",
+            "failures",
+            "generated_at",
+            "mode",
+            "schema_version",
+            "status",
+            "trading_mode",
+            "trading_profile",
+            "type",
+        }
+        if key not in public_value_keys and any(
+            candidate and candidate == value for candidate in forbidden_values
+        ):
+            raise PipelineDispositionCliError("ORPHAN_REPORT_PRIVATE_VALUE_PRESENT")
+        if re.match(r"^(?:[A-Za-z]:[/\\]|/|\\\\)", value):
+            raise PipelineDispositionCliError("ORPHAN_REPORT_ABSOLUTE_PATH_PRESENT")
+
+
+def _orphan_postcommit_privacy_failure_report(
+    *,
+    generated_at: str,
+    alias: str,
+    request_id_sha256: str,
+    disposition_id_sha256: str,
+    approval_binding_sha256: str,
+    evidence_sha256: str,
+    committed: bool | None,
+    failures: list[str],
+    ledger_row_count_before: int,
+    ledger_row_count_after: int,
+    error_type: str,
+) -> dict[str, Any]:
+    status = (
+        "OUTCOME_UNKNOWN_POSTCHECK_FAILED" if committed is None else "COMMITTED_POSTCHECK_FAILED"
+    )
+    return {
+        "contract": "fast0-pipeline-disposition-apply.v1",
+        "generated_at": generated_at,
+        "mode": "APPLY",
+        "database": {"schema_version": "62"},
+        "result": {
+            "action": ACTION_DISPOSE_ORPHAN,
+            "alias": alias,
+            "request_id_sha256": request_id_sha256,
+            "disposition_id_sha256": disposition_id_sha256,
+        },
+        "evidence": {
+            "sha256": evidence_sha256,
+            "approval_binding_sha256": approval_binding_sha256,
+            "content_embedded": False,
+        },
+        "safety": {
+            "observe_only": True,
+            "not_order_intent": True,
+            "no_order_side_effects": True,
+        },
+        "invariants": {
+            "ledger_row_count_before": ledger_row_count_before,
+            "ledger_row_count_after": ledger_row_count_after,
+        },
+        "read_only": False,
+        "append_only": True,
+        "observe_only": True,
+        "not_order_intent": True,
+        "no_order_side_effects": True,
+        "verdict": {
+            "status": status,
+            "failures": [*failures, "ORPHAN_REPORT_PRIVACY_ASSERTION_FAILED"],
+            "committed": committed,
+            "evidence_written": True,
+            "operator_action_required": True,
+            "retry_with_same_request_id": None,
+            "retry_request_id_sha256": request_id_sha256,
+            "error_type": error_type,
+        },
+    }
+
+
 def _contains_sensitive_value(value: str) -> bool:
     if any(pattern.search(value) is not None for pattern in _SENSITIVE_VALUE_PATTERNS):
         return True
@@ -1013,6 +1692,16 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
     safe_report = dict(_redact(report))
     verdict = dict(safe_report.get("verdict") or {})
     subject = dict(safe_report.get("preview") or safe_report.get("result") or {})
+    if subject.get("action") == ACTION_DISPOSE_ORPHAN:
+        subject_line = (
+            f"- alias: `{subject.get('alias')}`"
+            if subject.get("alias")
+            else (
+                f"- candidate_instance_id_sha256: `{subject.get('candidate_instance_id_sha256')}`"
+            )
+        )
+    else:
+        subject_line = f"- candidate_instance_id: `{subject.get('candidate_instance_id')}`"
     return "\n".join(
         [
             "# FAST-0 Pipeline Disposition",
@@ -1020,7 +1709,7 @@ def render_markdown_summary(report: Mapping[str, Any]) -> str:
             f"- generated_at: `{safe_report.get('generated_at')}`",
             f"- mode: `{safe_report.get('mode')}`",
             f"- verdict: `{verdict.get('status')}`",
-            f"- candidate_instance_id: `{subject.get('candidate_instance_id')}`",
+            subject_line,
             f"- action: `{subject.get('action')}`",
             f"- failures: `{', '.join(verdict.get('failures') or []) or '-'}`",
             "",
