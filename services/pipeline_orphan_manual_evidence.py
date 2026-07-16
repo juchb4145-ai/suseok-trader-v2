@@ -11,12 +11,17 @@ from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from services.pipeline_orphan_campaign import (
+    build_orphan_campaign_link,
+    validate_orphan_campaign_link,
+)
+
 ORPHAN_ACTION = "DISPOSE_ORPHAN_PIPELINE_OBSERVATION"
 ORPHAN_CLASSIFICATION = "MISSING_CANDIDATE_MANUAL_REVIEW"
 ORPHAN_EVIDENCE_CONTRACT = "fast0-pipeline-orphan-manual-evidence.v1"
 ORPHAN_EVIDENCE_BINDING_CONTRACT = "fast0-pipeline-orphan-evidence-binding.v1"
-ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT = "fast0-pipeline-orphan-apply-binding.v1"
-ORPHAN_APPLY_APPROVAL_CONTRACT = "fast0-pipeline-orphan-apply-approval.v1"
+ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT = "fast0-pipeline-orphan-apply-binding.v2"
+ORPHAN_APPLY_APPROVAL_CONTRACT = "fast0-pipeline-orphan-apply-approval.v2"
 PRIVATE_TARGET_SET_CONTRACT = "fast0-private-target-set.v1"
 
 ORPHAN_EVIDENCE_SOURCE_TYPES = frozenset(
@@ -131,6 +136,7 @@ _APPLY_BINDING_KEYS = frozenset(
         "contract",
         "evidence_binding",
         "approval",
+        "campaign",
         "approval_binding_sha256",
     }
 )
@@ -618,6 +624,13 @@ def build_orphan_apply_evidence_binding(
     approved_database_main_size: int,
     broker_scope_sha256: str,
     preflight_generated_at: str,
+    root_handoff_report_sha256: str,
+    root_handoff_chain_sha256: str,
+    predecessor_kind: str,
+    predecessor_report_sha256: str,
+    predecessor_chain_sha256: str,
+    predecessor_database_main_sha256: str,
+    predecessor_database_main_size: int,
 ) -> dict[str, Any]:
     binding = dict(evidence_binding)
     approval = {
@@ -651,6 +664,16 @@ def build_orphan_apply_evidence_binding(
         "contract": ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT,
         "evidence_binding": binding,
         "approval": approval,
+        "campaign": build_orphan_campaign_link(
+            alias=str(binding["alias"]),
+            root_handoff_report_sha256=root_handoff_report_sha256,
+            root_handoff_chain_sha256=root_handoff_chain_sha256,
+            predecessor_kind=predecessor_kind,
+            predecessor_report_sha256=predecessor_report_sha256,
+            predecessor_chain_sha256=predecessor_chain_sha256,
+            predecessor_database_main_sha256=predecessor_database_main_sha256,
+            predecessor_database_main_size=predecessor_database_main_size,
+        ),
     }
     wrapper["approval_binding_sha256"] = canonical_sha256(wrapper)
     return wrapper
@@ -699,6 +722,12 @@ def validate_orphan_apply_evidence_binding(
     if raw_approval.get("contract") != ORPHAN_APPLY_APPROVAL_CONTRACT:
         raise OrphanManualEvidenceError("ORPHAN_APPLY_APPROVAL_CONTRACT_INVALID")
     approval = dict(raw_approval)
+    try:
+        campaign = validate_orphan_campaign_link(
+            wrapper.get("campaign") if isinstance(wrapper.get("campaign"), Mapping) else None
+        )
+    except ValueError as exc:
+        raise OrphanManualEvidenceError(str(exc)) from exc
     for key in (
         "approved_preflight_report_sha256",
         "approved_private_manifest_sha256",
@@ -721,6 +750,8 @@ def validate_orphan_apply_evidence_binding(
     for key in ("artifact_sha256", "target_set_sha256", "alias"):
         if approval[key] != binding[key]:
             raise OrphanManualEvidenceError(f"ORPHAN_APPLY_APPROVAL_MISMATCH:{key.upper()}")
+    if campaign["alias"] != binding["alias"]:
+        raise OrphanManualEvidenceError("ORPHAN_APPLY_CAMPAIGN_ALIAS_MISMATCH")
     preflight_generated_at = require_utc_z_timestamp(
         "PREFLIGHT_GENERATED_AT", approval.get("preflight_generated_at")
     )
@@ -738,6 +769,7 @@ def validate_orphan_apply_evidence_binding(
         "contract": ORPHAN_APPLY_EVIDENCE_BINDING_CONTRACT,
         "evidence_binding": binding,
         "approval": approval,
+        "campaign": campaign,
     }
     actual_digest = require_sha256(
         "APPROVAL_BINDING_SHA256", wrapper.get("approval_binding_sha256")

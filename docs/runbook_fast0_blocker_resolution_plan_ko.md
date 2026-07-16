@@ -207,13 +207,13 @@ Phase A의 backup은 파일시스템 write이지만 운영 DB write는 아니다
 
 Phase B의 append-only disposition은 DB main fingerprint를 바꾼다. 따라서 R6/R7 base에 직접 결속된
 R8 preflight를 Phase B 뒤에 그대로 재사용할 수 없다. Phase B 완료 report chain과 최종 post-state
-fingerprint를 R8에 전이 결속하는 R9 handoff 계약이 먼저 준비돼야 하며, 그 전에는 단계 순서를 임의로
+fingerprint를 R8에 전이 결속하는 R9 handoff와 R10 chain 계약을 사용해야 하며, 단계 순서를 임의로
 바꾸거나 stale R8 report로 신규 pipeline disposition을 적용하지 않는다.
 
 R9 handoff 생성 계약은 `fast0-incremental-dead-letter-campaign-handoff.v1`이다.
-handoff가 `PASS/COMPLETE`여도 pipeline apply 승인은 아니며, R8 preflight/apply가 이
-handoff와 각 orphan apply predecessor를 소비하는 계약이 main에 병합되기 전에는 C1 apply를
-시작하지 않는다.
+handoff가 `PASS/COMPLETE`여도 pipeline apply 승인은 아니다. R10에서 R8 preflight/apply는 M001의
+handoff와 M002 이후 각 orphan apply predecessor 및 checkpoint 완료 post-main을 소비한다. 실제 C1은
+여전히 alias 한 건마다 별도 승인과 authoritative broker evidence가 필요하다.
 
 #### C1. manual evidence 9건
 
