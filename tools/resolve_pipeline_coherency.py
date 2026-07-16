@@ -39,6 +39,9 @@ from services.pipeline_coherency_disposition import (  # noqa: E402
     record_pipeline_coherency_disposition,
     revoke_pipeline_coherency_disposition,
 )
+from services.pipeline_orphan_campaign import (  # noqa: E402
+    orphan_campaign_chain_sha256,
+)
 from services.pipeline_orphan_manual_evidence import (  # noqa: E402
     ORPHAN_CLASSIFICATION,
     OrphanManualEvidenceError,
@@ -546,6 +549,7 @@ def apply_disposition(
     settings, env_path = _load_and_assert_runtime_safe(resolved_path)
     safety_snapshot = _runtime_safety_snapshot(settings, env_path=env_path)
     files_before = _file_state(resolved_path)
+    main_before = _main_database_fingerprint(resolved_path)
     connection = _open_existing_read_write(resolved_path)
     violations: list[str] = []
     applied: dict[str, Any] | None = None
@@ -577,7 +581,10 @@ def apply_disposition(
         if action == ACTION_DISPOSE_ORPHAN and existing is None:
             assert orphan_preflight_contract is not None
             current_main = _main_database_fingerprint(resolved_path)
-            if current_main != orphan_preflight_contract["database_main"]:
+            if (
+                current_main != main_before
+                or current_main != orphan_preflight_contract["database_main"]
+            ):
                 raise PipelineDispositionCliError(
                     "ORPHAN_PREFLIGHT_DATABASE_MAIN_FINGERPRINT_MISMATCH"
                 )
@@ -736,12 +743,25 @@ def apply_disposition(
             postcommit_warnings.append("CLOSE_RAISED_AFTER_DURABLE_WRITE")
     postcommit_failures: list[str] = []
     postcommit_error_type: str | None = None
+    checkpoint_complete = False
+    main_after: dict[str, Any] = {"status": "UNAVAILABLE"}
     files_after: dict[str, Any]
     try:
+        if action == ACTION_DISPOSE_ORPHAN and not commit_outcome_unknown:
+            _checkpoint_committed_database(resolved_path)
+            _assert_quiescent_sidecars(resolved_path)
+            checkpoint_complete = True
+            main_after = _main_database_fingerprint(resolved_path)
+        elif action != ACTION_DISPOSE_ORPHAN:
+            main_after = _main_database_fingerprint(resolved_path)
         files_after = _file_state(resolved_path)
-    except (OSError, sqlite3.Error, ValueError) as exc:
+    except (OSError, sqlite3.Error, ValueError, PipelineDispositionCliError) as exc:
         files_after = {"status": "UNAVAILABLE"}
-        postcommit_failures.append("POSTCOMMIT_DATABASE_FILE_STATE_UNAVAILABLE")
+        postcommit_failures.append(
+            "ORPHAN_POSTCOMMIT_CHECKPOINT_OR_FINGERPRINT_FAILED"
+            if action == ACTION_DISPOSE_ORPHAN
+            else "POSTCOMMIT_DATABASE_FILE_STATE_UNAVAILABLE"
+        )
         postcommit_error_type = type(exc).__name__
     status = "IDEMPOTENT" if existing is not None else "APPLIED"
     committed: bool | None = True
@@ -755,17 +775,20 @@ def apply_disposition(
     if postcommit_failures and not commit_outcome_unknown:
         status = "COMMITTED_POSTCHECK_FAILED"
     orphan_private_report = action == ACTION_DISPOSE_ORPHAN
+    safe_campaign: Mapping[str, Any] | None = None
     if orphan_private_report:
         assert orphan_preflight_contract is not None
         orphan_evidence_binding = dict(evidence_json["evidence_binding"])
+        request_id_sha256 = hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest()
+        disposition_id_sha256 = hashlib.sha256(
+            str(applied.get("disposition_id") or "").encode("utf-8")
+        ).hexdigest()
         safe_result: Mapping[str, Any] = {
             "action": ACTION_DISPOSE_ORPHAN,
             "alias": str(evidence_alias),
             "sequence_no": applied.get("sequence_no"),
-            "request_id_sha256": hashlib.sha256(normalized_request_id.encode("utf-8")).hexdigest(),
-            "disposition_id_sha256": hashlib.sha256(
-                str(applied.get("disposition_id") or "").encode("utf-8")
-            ).hexdigest(),
+            "request_id_sha256": request_id_sha256,
+            "disposition_id_sha256": disposition_id_sha256,
             "evidence_preview_sha256": orphan_evidence_binding["evidence_preview_sha256"],
         }
         safe_evidence: Mapping[str, Any] = {
@@ -785,6 +808,27 @@ def apply_disposition(
             ],
             "content_embedded": False,
         }
+        campaign_link = dict(evidence_json["campaign"])
+        safe_campaign = {
+            "source_plan_report_sha256": orphan_preflight_contract["source_plan_report_sha256"],
+            "source_reconciliation_report_sha256": orphan_preflight_contract[
+                "source_reconciliation_report_sha256"
+            ],
+            "target_set_sha256": orphan_evidence_binding["target_set_sha256"],
+            "link": campaign_link,
+            "chain_sha256": orphan_campaign_chain_sha256(
+                source_plan_report_sha256=orphan_preflight_contract["source_plan_report_sha256"],
+                source_reconciliation_report_sha256=orphan_preflight_contract[
+                    "source_reconciliation_report_sha256"
+                ],
+                target_set_sha256=orphan_evidence_binding["target_set_sha256"],
+                campaign_link=campaign_link,
+                approval_binding_sha256=str(evidence_json["approval_binding_sha256"]),
+                request_id_sha256=request_id_sha256,
+                disposition_id_sha256=disposition_id_sha256,
+            ),
+            "identifiers_recorded": False,
+        }
     else:
         safe_result = applied
         safe_evidence = {
@@ -799,6 +843,7 @@ def apply_disposition(
         "contract": "fast0-pipeline-disposition-apply.v1",
         "generated_at": _now(),
         "mode": "APPLY",
+        **({"campaign": dict(safe_campaign)} if safe_campaign is not None else {}),
         "database": {
             **(
                 {"filename_sha256": hashlib.sha256(resolved_path.name.encode("utf-8")).hexdigest()}
@@ -808,6 +853,15 @@ def apply_disposition(
             "schema_version": "62",
             "files_before": files_before,
             "files_after": files_after,
+            **(
+                {
+                    "main_before": main_before,
+                    "main_after": main_after,
+                    "checkpoint_complete": checkpoint_complete,
+                }
+                if orphan_private_report
+                else {}
+            ),
         },
         "result": dict(safe_result),
         "evidence": dict(safe_evidence),
@@ -1229,6 +1283,25 @@ def _reconcile_committed_disposition(
                 pass
 
 
+def _checkpoint_committed_database(path: Path) -> None:
+    uri_path = quote(path.as_posix(), safe="/:")
+    connection = sqlite3.connect(
+        f"file:{uri_path}?mode=rw",
+        uri=True,
+        timeout=30.0,
+        isolation_level=None,
+    )
+    try:
+        journal_mode = str(connection.execute("PRAGMA journal_mode").fetchone()[0]).lower()
+        if journal_mode != "wal":
+            return
+        result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if result is None or int(result[0]) != 0 or int(result[1]) != int(result[2]):
+            raise PipelineDispositionCliError("ORPHAN_POSTCOMMIT_WAL_CHECKPOINT_FAILED")
+    finally:
+        connection.close()
+
+
 def _assert_quiescent_sidecars(path: Path) -> None:
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{path}{suffix}")
@@ -1378,6 +1451,10 @@ def _validated_orphan_evidence(
             expected_target_set_sha256=evidence_target_set_sha256,
             expected_count=preflight_contract["target_count"],
         )
+        preflight_contract = {
+            **preflight_contract,
+            "campaign_targets": [dict(item) for item in manifest["items"]],
+        }
         manifest_matches = [
             dict(item) for item in manifest["items"] if item.get("alias") == evidence_alias
         ]
@@ -1424,6 +1501,13 @@ def _validated_orphan_evidence(
             approved_database_main_size=database_main["size"],
             broker_scope_sha256=preflight_contract["broker_scope_sha256"],
             preflight_generated_at=preflight_contract["generated_at_wire"],
+            root_handoff_report_sha256=preflight_contract["root_handoff_report_sha256"],
+            root_handoff_chain_sha256=preflight_contract["root_handoff_chain_sha256"],
+            predecessor_kind=preflight_contract["predecessor_kind"],
+            predecessor_report_sha256=preflight_contract["predecessor_report_sha256"],
+            predecessor_chain_sha256=preflight_contract["predecessor_chain_sha256"],
+            predecessor_database_main_sha256=database_main["sha256"],
+            predecessor_database_main_size=database_main["size"],
         )
         binding = validate_orphan_apply_evidence_binding(
             apply_binding,

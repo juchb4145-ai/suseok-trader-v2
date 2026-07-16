@@ -4,9 +4,14 @@ import hashlib
 import json
 import os
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from services.pipeline_orphan_campaign import (
+    PipelineOrphanCampaignError,
+    validate_orphan_campaign_apply_report,
+)
 from storage.sqlite import initialize_database
 from tests.test_ops_pipeline_orphan_evidence_preflight import (
     _OBSERVED_AT as _ORPHAN_OBSERVED_AT,
@@ -308,7 +313,22 @@ def test_pipeline_disposition_cli_orphan_apply_binds_evidence_and_is_idempotent(
     assert first["verdict"]["status"] == "APPLIED"
     assert second["verdict"]["status"] == "IDEMPOTENT"
     assert row_count == 1
-    assert stored["contract"] == "fast0-pipeline-orphan-apply-binding.v1"
+    assert stored["contract"] == "fast0-pipeline-orphan-apply-binding.v2"
+    assert stored["campaign"]["predecessor_kind"] == ("INCREMENTAL_DEAD_LETTER_CAMPAIGN_HANDOFF")
+    assert first["campaign"]["chain_sha256"] == second["campaign"]["chain_sha256"]
+    assert first["database"]["checkpoint_complete"] is True
+    assert len(first["database"]["main_after"]["sha256"]) == 64
+    first_raw = Path(first["report_paths"]["raw_json"])
+    validate_orphan_campaign_apply_report(
+        first,
+        report_sha256=hashlib.sha256(first_raw.read_bytes()).hexdigest(),
+        expected_alias="M001",
+        source_plan_report_sha256=first["campaign"]["source_plan_report_sha256"],
+        source_reconciliation_report_sha256=first["campaign"][
+            "source_reconciliation_report_sha256"
+        ],
+        target_set_sha256=first["campaign"]["target_set_sha256"],
+    )
     assert stored["evidence_binding"]["contract"] == ("fast0-pipeline-orphan-evidence-binding.v1")
     assert stored["evidence_binding"]["determination_status"] == "AUTHORITATIVE"
     assert stored["evidence_binding"]["content_embedded"] is False
@@ -335,6 +355,103 @@ def test_pipeline_disposition_cli_orphan_apply_binds_evidence_and_is_idempotent(
         str(tmp_path),
     ):
         assert private_value not in public_artifacts
+
+
+def test_orphan_campaign_m001_to_m002_requires_exact_predecessor_chain(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    case = _build_orphan_preflight_case(
+        tmp_path,
+        monkeypatch=monkeypatch,
+        target_count=2,
+        selected_alias="M001",
+    )
+    first_preflight = tool.orphan_preflight_tool.run_report(
+        **case,
+        out_dir=tmp_path / "m001-preflight",
+        observed_at=_ORPHAN_OBSERVED_AT,
+    )
+    _, first_kwargs, _ = _orphan_apply_kwargs(
+        tmp_path,
+        monkeypatch,
+        request_id="fast0r10.pipeline.m001",
+        preflight_case=case,
+        preflight=first_preflight,
+    )
+    first_apply = tool.apply_disposition(
+        **first_kwargs,
+        out_dir=tmp_path / "m001-apply",
+    )
+    first_apply_path = Path(first_apply["report_paths"]["raw_json"])
+
+    manifest = json.loads(case["private_target_manifest"].read_text(encoding="utf-8"))
+    second_item = dict(manifest["items"][1])
+    second_target = dict(second_item)
+    second_target.pop("alias")
+    second_evidence = json.loads(case["evidence_file"].read_text(encoding="utf-8"))
+    second_evidence["alias"] = "M002"
+    second_evidence["target"] = second_target
+    second_evidence_path = tmp_path / "m002-private-evidence.json"
+    second_evidence_path.write_text(
+        json.dumps(second_evidence, sort_keys=True),
+        encoding="utf-8",
+    )
+    second_case = {
+        **case,
+        "alias": "M002",
+        "evidence_file": second_evidence_path,
+        "expected_evidence_file_sha256": hashlib.sha256(
+            second_evidence_path.read_bytes()
+        ).hexdigest(),
+        "predecessor_report": first_apply_path,
+        "expected_predecessor_report_sha256": hashlib.sha256(
+            first_apply_path.read_bytes()
+        ).hexdigest(),
+    }
+    observed_at = datetime.now(UTC)
+
+    skipped = {**second_case, "predecessor_report": case["predecessor_report"]}
+    skipped["expected_predecessor_report_sha256"] = hashlib.sha256(
+        skipped["predecessor_report"].read_bytes()
+    ).hexdigest()
+    with pytest.raises(tool.orphan_preflight_tool.PipelineOrphanEvidencePreflightError):
+        tool.orphan_preflight_tool.run_report(
+            **skipped,
+            out_dir=tmp_path / "m002-skipped-predecessor",
+            observed_at=observed_at,
+        )
+
+    second_preflight = tool.orphan_preflight_tool.run_report(
+        **second_case,
+        out_dir=tmp_path / "m002-preflight",
+        observed_at=observed_at,
+    )
+    assert second_preflight["verdict"]["evidence_status"] == "PASS"
+    assert second_preflight["campaign_predecessor"]["kind"] == ("PIPELINE_ORPHAN_APPLY_REPORT")
+    assert second_preflight["orphan_campaign_audit"]["ledger_row_count"] == 1
+    assert second_preflight["orphan_campaign_audit"]["chain_matches_predecessor"] is True
+
+    _, second_kwargs, _ = _orphan_apply_kwargs(
+        tmp_path,
+        monkeypatch,
+        request_id="fast0r10.pipeline.m002",
+        preflight_case=second_case,
+        preflight=second_preflight,
+    )
+    second_apply = tool.apply_disposition(
+        **second_kwargs,
+        out_dir=tmp_path / "m002-apply",
+    )
+    assert second_apply["verdict"]["status"] == "APPLIED"
+    assert (
+        second_apply["campaign"]["link"]["predecessor_report_sha256"]
+        == (second_case["expected_predecessor_report_sha256"])
+    )
+    assert (
+        second_apply["campaign"]["link"]["predecessor_chain_sha256"]
+        == (first_apply["campaign"]["chain_sha256"])
+    )
 
 
 @pytest.mark.parametrize("private_evidence_ref", ["fast0", "M001"])
@@ -397,6 +514,42 @@ def test_pipeline_disposition_cli_orphan_postcommit_privacy_failure_returns_safe
         )
     finally:
         check.close()
+
+
+def test_pipeline_disposition_cli_orphan_checkpoint_failure_blocks_next_predecessor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, kwargs, _ = _orphan_apply_case(
+        tmp_path,
+        monkeypatch,
+        request_id="fast0r10.pipeline.checkpoint-failure",
+    )
+
+    def fail_checkpoint(_path) -> None:
+        raise sqlite3.OperationalError("checkpoint-fault")
+
+    monkeypatch.setattr(tool, "_checkpoint_committed_database", fail_checkpoint)
+    report = tool.apply_disposition(
+        **kwargs,
+        out_dir=tmp_path / "checkpoint-failure-report",
+    )
+
+    assert report["verdict"]["status"] == "COMMITTED_POSTCHECK_FAILED"
+    assert report["verdict"]["committed"] is True
+    assert report["verdict"]["operator_action_required"] is True
+    assert report["database"]["checkpoint_complete"] is False
+    with pytest.raises(PipelineOrphanCampaignError):
+        validate_orphan_campaign_apply_report(
+            report,
+            report_sha256="f" * 64,
+            expected_alias="M001",
+            source_plan_report_sha256=report["campaign"]["source_plan_report_sha256"],
+            source_reconciliation_report_sha256=report["campaign"][
+                "source_reconciliation_report_sha256"
+            ],
+            target_set_sha256=report["campaign"]["target_set_sha256"],
+        )
 
 
 def test_pipeline_disposition_cli_orphan_rechecks_evidence_under_exclusive_lock(
@@ -1094,12 +1247,32 @@ def _orphan_apply_case(tmp_path, monkeypatch, *, request_id: str):
         out_dir=tmp_path / f"{request_id.rsplit('.', 1)[-1]}-orphan-preflight",
         observed_at=_ORPHAN_OBSERVED_AT,
     )
+    return _orphan_apply_kwargs(
+        tmp_path,
+        monkeypatch,
+        request_id=request_id,
+        preflight_case=preflight_case,
+        preflight=preflight,
+    )
+
+
+def _orphan_apply_kwargs(
+    tmp_path,
+    monkeypatch,
+    *,
+    request_id: str,
+    preflight_case: dict,
+    preflight: dict,
+):
     preflight_path = Path(preflight["report_paths"]["raw_json"])
     db_path = preflight_case["db_path"]
     manifest_payload = json.loads(
         preflight_case["private_target_manifest"].read_text(encoding="utf-8")
     )
-    manifest_item = dict(manifest_payload["items"][0])
+    selected_alias = str(preflight_case["alias"])
+    manifest_item = next(
+        dict(item) for item in manifest_payload["items"] if item["alias"] == selected_alias
+    )
     alias = str(manifest_item.pop("alias"))
     target_set_sha256 = str(preflight["private_target_manifest"]["target_set_sha256"])
     preview = manifest_item
@@ -1154,7 +1327,7 @@ def _orphan_apply_case(tmp_path, monkeypatch, *, request_id: str):
             "reason_code": "FAST0R8_AUTHORITATIVE_ORPHAN_EVIDENCE",
             "operator_id": "fast0.operator",
             "evidence_type": "FAST0R8_ORPHAN_EVIDENCE",
-            "evidence_ref": "fast0r8/orphan-evidence-M001",
+            "evidence_ref": f"fast0r8/orphan-evidence-{alias}",
             "evidence_file": evidence_file,
             "acknowledge": tool.APPLY_ACK,
             "expected_evidence_sha256": evidence_sha256,

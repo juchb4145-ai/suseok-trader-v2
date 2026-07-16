@@ -158,7 +158,7 @@ U38이 `VERIFIED` 또는 exact `REPLAY_VERIFIED`로 끝난 뒤, U01~U38 apply re
 - final DB main fingerprint가 U38 report와 일치
 - strict read-only snapshot, quick check `ok`, runtime lock 0, sidecar/writer 없음
 
-handoff 자체도 pipeline disposition apply를 승인하지 않는다. R9 write 이후 R6/R7 base에 직접 결속된 기존 R8 preflight는 stale이므로 재사용 금지다. R8 consumer가 이 handoff와 이후 orphan predecessor chain을 검증하는 코드가 main에 병합되기 전에는 Phase C1 apply로 넘어가지 않는다.
+handoff 자체도 pipeline disposition apply를 승인하지 않는다. R9 write 이후 R6/R7 base에 직접 결속된 기존 R8 preflight는 stale이므로 재사용 금지다. R10 consumer는 M001에서 이 handoff를, M002 이후에는 직전 orphan apply report와 checkpoint 완료 post-main을 predecessor로 검증한다. R10이 main에 병합되고 별도 운영 write 승인이 있기 전에는 Phase C1 apply로 넘어가지 않는다.
 
 ## 7. 즉시 중단 조건
 

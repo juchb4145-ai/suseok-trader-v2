@@ -491,6 +491,13 @@ def test_orphan_disposition_future_as_of_cannot_move_approval_ceiling(tmp_path) 
         approved_database_main_size=1,
         broker_scope_sha256="2" * 64,
         preflight_generated_at="2099-01-01T00:00:00Z",
+        root_handoff_report_sha256="8" * 64,
+        root_handoff_chain_sha256="9" * 64,
+        predecessor_kind="INCREMENTAL_DEAD_LETTER_CAMPAIGN_HANDOFF",
+        predecessor_report_sha256="8" * 64,
+        predecessor_chain_sha256="9" * 64,
+        predecessor_database_main_sha256="7" * 64,
+        predecessor_database_main_size=1,
     )
     kwargs["evidence_json"] = future_wrapper
     kwargs["orphan_approval_context"] = _issue_orphan_apply_approval_context(
@@ -1653,6 +1660,13 @@ def _orphan_record_kwargs(preview, *, request_id: str):
         approved_database_main_size=1,
         broker_scope_sha256="2" * 64,
         preflight_generated_at="2026-07-16T02:00:00Z",
+        root_handoff_report_sha256="8" * 64,
+        root_handoff_chain_sha256="9" * 64,
+        predecessor_kind="INCREMENTAL_DEAD_LETTER_CAMPAIGN_HANDOFF",
+        predecessor_report_sha256="8" * 64,
+        predecessor_chain_sha256="9" * 64,
+        predecessor_database_main_sha256="7" * 64,
+        predecessor_database_main_size=1,
     )
     result = _record_kwargs(preview, request_id=request_id)
     result["evidence_sha256"] = document.sha256

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -15,8 +16,17 @@ if str(ROOT_DIR) not in sys.path:
 
 from services.pipeline_coherency_disposition import (  # noqa: E402
     ACTION_DISPOSE_ORPHAN,
+    DISPOSITION_TABLE,
     audit_pipeline_orphan_disposition_rows,
     preview_pipeline_coherency_disposition,
+)
+from services.pipeline_orphan_campaign import (  # noqa: E402
+    ORPHAN_APPLY_PREDECESSOR,
+    R9_HANDOFF_PREDECESSOR,
+    PipelineOrphanCampaignError,
+    alias_ordinal,
+    orphan_campaign_chain_sha256,
+    validate_orphan_campaign_apply_report,
 )
 from services.pipeline_orphan_manual_evidence import (  # noqa: E402
     ORPHAN_CLASSIFICATION,
@@ -27,6 +37,7 @@ from services.pipeline_orphan_manual_evidence import (  # noqa: E402
     read_stable_file_fingerprint,
     read_stable_json_document,
     require_utc_z_timestamp,
+    validate_orphan_apply_evidence_binding,
     validate_orphan_evidence_binding,
     validate_orphan_manual_evidence_document,
     validate_private_target_manifest,
@@ -34,9 +45,10 @@ from services.pipeline_orphan_manual_evidence import (  # noqa: E402
 from storage.sqlite import APP_NAME, SCHEMA_VERSION  # noqa: E402
 from tools import ops_fast0_blocker_resolution_plan as plan_tool  # noqa: E402
 from tools import ops_fast0_strict_requalification as fast0_tool  # noqa: E402
+from tools import ops_incremental_dead_letter_campaign_handoff as r9_handoff_tool  # noqa: E402
 from tools import ops_pipeline_blocker_reconciliation as reconciliation_tool  # noqa: E402
 
-_CONTRACT = "fast0-pipeline-orphan-evidence-preflight.v1"
+_CONTRACT = "fast0-pipeline-orphan-evidence-preflight.v2"
 _EXPECTED_PLAN_CONTRACT = "fast0-blocker-resolution-plan.v1"
 _EXPECTED_RECONCILIATION_CONTRACT = "fast0-pipeline-blocker-reconciliation.v1"
 _EXPECTED_SCHEMA_VERSION = "62"
@@ -75,6 +87,8 @@ def main() -> int:
     parser.add_argument("--authoritative-artifact-sha256", required=True)
     parser.add_argument("--account-scope-sha256", required=True)
     parser.add_argument("--alias", required=True)
+    parser.add_argument("--predecessor-report", required=True)
+    parser.add_argument("--predecessor-report-sha256", required=True)
     parser.add_argument(
         "--out-dir",
         default=str(ROOT_DIR / "reports" / "pipeline_orphan_evidence_preflight"),
@@ -97,6 +111,8 @@ def main() -> int:
             expected_authoritative_artifact_sha256=str(args.authoritative_artifact_sha256).lower(),
             expected_account_scope_sha256=str(args.account_scope_sha256).lower(),
             alias=str(args.alias),
+            predecessor_report=Path(args.predecessor_report),
+            expected_predecessor_report_sha256=str(args.predecessor_report_sha256).lower(),
             out_dir=Path(args.out_dir),
         )
     except Exception as exc:
@@ -124,6 +140,8 @@ def run_report(
     expected_authoritative_artifact_sha256: str,
     expected_account_scope_sha256: str,
     alias: str,
+    predecessor_report: Path,
+    expected_predecessor_report_sha256: str,
     out_dir: Path,
     observed_at: datetime | None = None,
 ) -> dict[str, Any]:
@@ -140,6 +158,7 @@ def run_report(
         ("EVIDENCE_FILE_SHA256", expected_evidence_file_sha256),
         ("AUTHORITATIVE_ARTIFACT_SHA256", expected_authoritative_artifact_sha256),
         ("ACCOUNT_SCOPE_SHA256", expected_account_scope_sha256),
+        ("PREDECESSOR_REPORT_SHA256", expected_predecessor_report_sha256),
     ):
         if not plan_tool._is_sha256(value):
             raise PipelineOrphanEvidencePreflightError(f"{name}_INVALID")
@@ -167,6 +186,14 @@ def run_report(
     )
     if reconciliation["generated_at"] > collected_at:
         raise PipelineOrphanEvidencePreflightError("SOURCE_REPORT_TIME_ORDER_INVALID")
+    predecessor = _load_campaign_predecessor(
+        alias=alias,
+        report_path=predecessor_report,
+        expected_report_sha256=expected_predecessor_report_sha256,
+        plan=plan,
+        reconciliation=reconciliation,
+        not_after=collected_at,
+    )
     try:
         manifest_document = read_stable_json_document(
             private_target_manifest,
@@ -178,6 +205,7 @@ def run_report(
             expected_count=plan["target_count"],
         )
         target = _select_target(manifest, alias=alias)
+        ordinal = alias_ordinal(alias)
         evidence_document = read_stable_json_document(
             evidence_file,
             expected_sha256=expected_evidence_file_sha256,
@@ -214,6 +242,9 @@ def run_report(
         reconciliation_main_matches = fast0_tool._fingerprints_exact(
             reconciliation["database_main"], files_before["main"]
         )
+        predecessor_main_matches = fast0_tool._fingerprints_exact(
+            predecessor["database_main"], files_before["main"]
+        )
         connection = fast0_tool._open_strict_read_only(
             resolved_path,
             sqlite_source=identity_pin.sqlite_source,
@@ -248,6 +279,15 @@ def run_report(
                 connection.execute("SELECT COUNT(*) FROM runtime_execution_locks").fetchone()[0]
             )
             orphan_ledger_audit = audit_pipeline_orphan_disposition_rows(connection)
+            orphan_campaign_audit = _audit_orphan_campaign_rows(
+                connection,
+                manifest=manifest,
+                expected_completed=ordinal - 1,
+                predecessor=predecessor,
+                source_plan_report_sha256=plan_report_sha256,
+                source_reconciliation_report_sha256=reconciliation_report_sha256,
+                not_after=collected_at,
+            )
             preview = preview_pipeline_coherency_disposition(
                 connection,
                 trade_date=target["trade_date"],
@@ -287,12 +327,18 @@ def run_report(
             authoritative_artifact,
             expected_sha256=expected_authoritative_artifact_sha256,
         )
+        predecessor_after = read_stable_json_document(
+            predecessor_report,
+            expected_sha256=expected_predecessor_report_sha256,
+        )
     except OrphanManualEvidenceError as exc:
         raise PipelineOrphanEvidencePreflightError(exc.code) from exc
     private_files_unchanged = bool(
         _stable_file_identity(manifest_after) == _stable_file_identity(manifest_document)
         and _stable_file_identity(evidence_after) == _stable_file_identity(evidence_document)
         and _stable_file_identity(artifact_after) == _stable_file_identity(artifact_fingerprint)
+        and _stable_file_identity(predecessor_after)
+        == _stable_file_identity(predecessor["_document"])
     )
     whole_window_writer_absence_proven = bool(
         identity_pin.method == "WINDOWS_READ_HANDLE_DENY_WRITE_DELETE"
@@ -321,6 +367,18 @@ def run_report(
             "reconciliation_status": reconciliation["reconciliation_status"],
             "orphan_target_sha256": reconciliation["orphan_target_sha256"],
             "target_count": reconciliation["target_count"],
+            "path_recorded": False,
+        },
+        "campaign_predecessor": {
+            "kind": predecessor["kind"],
+            "report_sha256": predecessor["report_sha256"],
+            "chain_sha256": predecessor["chain_sha256"],
+            "database_main": predecessor["database_main"],
+            "root_handoff_report_sha256": predecessor["root_handoff_report_sha256"],
+            "root_handoff_chain_sha256": predecessor["root_handoff_chain_sha256"],
+            "completed_count": predecessor["completed_count"],
+            "validated": True,
+            "content_embedded": False,
             "path_recorded": False,
         },
         "private_target_manifest": {
@@ -371,6 +429,7 @@ def run_report(
             "files_after": files_after,
             "plan_main_matches": plan_main_matches,
             "reconciliation_main_matches": reconciliation_main_matches,
+            "predecessor_main_matches": predecessor_main_matches,
             "sidecars_absent_before": True,
             "sidecars_absent_after": True,
             "writer_probe_before": writer_probe_before,
@@ -380,6 +439,7 @@ def run_report(
         },
         "schema_manifest": schema_manifest,
         "orphan_ledger_audit": orphan_ledger_audit,
+        "orphan_campaign_audit": orphan_campaign_audit,
         "preview_binding": preview_binding,
         "private_files_unchanged": private_files_unchanged,
         "external_broker_artifact_bound": True,
@@ -404,6 +464,198 @@ def run_report(
     return report
 
 
+def _load_campaign_predecessor(
+    *,
+    alias: str,
+    report_path: Path,
+    expected_report_sha256: str,
+    plan: Mapping[str, Any],
+    reconciliation: Mapping[str, Any],
+    not_after: datetime,
+) -> dict[str, Any]:
+    try:
+        document = read_stable_json_document(
+            report_path,
+            expected_sha256=expected_report_sha256,
+        )
+        ordinal = alias_ordinal(alias)
+        if ordinal == 1:
+            validated = r9_handoff_tool.validate_handoff_report(
+                document.payload,
+                report_sha256=document.sha256,
+                expected_source_plan_report_sha256=str(plan["report_sha256"]),
+                expected_source_database_main=_mapping(plan["database_main"]),
+                expected_target_set_sha256=str(plan["incremental_target_set_sha256"]),
+                expected_target_count=int(plan["incremental_target_count"]),
+            )
+            generated_at = require_utc_z_timestamp(
+                "R9_HANDOFF_GENERATED_AT", validated.get("generated_at")
+            )
+            result = {
+                "kind": R9_HANDOFF_PREDECESSOR,
+                "report_sha256": document.sha256,
+                "chain_sha256": validated["apply_chain_sha256"],
+                "database_main": dict(validated["final_database_main"]),
+                "root_handoff_report_sha256": document.sha256,
+                "root_handoff_chain_sha256": validated["apply_chain_sha256"],
+                "completed_count": 0,
+                "generated_at": generated_at,
+                "_document": document,
+            }
+        else:
+            previous_alias = f"M{ordinal - 1:03d}"
+            validated = validate_orphan_campaign_apply_report(
+                document.payload,
+                report_sha256=document.sha256,
+                expected_alias=previous_alias,
+                source_plan_report_sha256=str(plan["report_sha256"]),
+                source_reconciliation_report_sha256=str(reconciliation["report_sha256"]),
+                target_set_sha256=str(plan["target_set_sha256"]),
+            )
+            generated_at = require_utc_z_timestamp(
+                "ORPHAN_APPLY_GENERATED_AT", validated.get("generated_at")
+            )
+            result = {
+                "kind": ORPHAN_APPLY_PREDECESSOR,
+                "report_sha256": document.sha256,
+                "chain_sha256": validated["chain_sha256"],
+                "database_main": dict(validated["database_main_after"]),
+                "root_handoff_report_sha256": validated["root_handoff_report_sha256"],
+                "root_handoff_chain_sha256": validated["root_handoff_chain_sha256"],
+                "completed_count": ordinal - 1,
+                "generated_at": generated_at,
+                "_document": document,
+            }
+    except (
+        OrphanManualEvidenceError,
+        PipelineOrphanCampaignError,
+        r9_handoff_tool.IncrementalDeadLetterCampaignHandoffError,
+        ValueError,
+    ) as exc:
+        raise PipelineOrphanEvidencePreflightError(
+            str(getattr(exc, "code", "CAMPAIGN_PREDECESSOR_INVALID"))
+        ) from exc
+    if result["generated_at"] > not_after.astimezone(UTC):
+        raise PipelineOrphanEvidencePreflightError("CAMPAIGN_PREDECESSOR_TIME_INVALID")
+    return result
+
+
+def _audit_orphan_campaign_rows(
+    connection: Any,
+    *,
+    manifest: Mapping[str, Any],
+    expected_completed: int,
+    predecessor: Mapping[str, Any],
+    source_plan_report_sha256: str,
+    source_reconciliation_report_sha256: str,
+    not_after: datetime,
+) -> dict[str, Any]:
+    items = [dict(item) for item in manifest.get("items") or []]
+    rows = connection.execute(
+        f"SELECT * FROM {DISPOSITION_TABLE} WHERE action = ? ORDER BY created_at, disposition_id",
+        (ACTION_DISPOSE_ORPHAN,),
+    ).fetchall()
+    invalid_row_count = 0
+    unexpected_target_count = 0
+    previous_chain = str(predecessor["root_handoff_chain_sha256"])
+    completed_ids = {str(item["candidate_instance_id"]) for item in items[:expected_completed]}
+    row_ids = [str(row["candidate_instance_id"]) for row in rows]
+    if len(rows) != expected_completed or set(row_ids) != completed_ids:
+        unexpected_target_count = abs(len(rows) - expected_completed) + len(
+            set(row_ids).symmetric_difference(completed_ids)
+        )
+    for index, target_with_alias in enumerate(items[:expected_completed], start=1):
+        matching = [
+            row
+            for row in rows
+            if str(row["candidate_instance_id"]) == str(target_with_alias["candidate_instance_id"])
+        ]
+        if len(matching) != 1:
+            invalid_row_count += 1
+            continue
+        row = matching[0]
+        target = dict(target_with_alias)
+        alias = str(target.pop("alias"))
+        try:
+            evidence = json.loads(str(row["evidence_json"] or "{}"))
+            normalized = validate_orphan_apply_evidence_binding(
+                evidence,
+                evidence_sha256=str(row["evidence_sha256"]),
+                candidate_instance_id=str(row["candidate_instance_id"]),
+                trade_date=str(row["trade_date"]),
+                action=str(row["action"]),
+                pipeline_fingerprint=str(row["expected_pipeline_fingerprint"]),
+                subject_version=str(row["expected_subject_version"]),
+                source_fingerprint=str(row["expected_source_fingerprint"]),
+                candidate_fingerprint=str(row["expected_candidate_fingerprint"]),
+                downstream_fingerprint=str(row["expected_downstream_fingerprint"]),
+                boundary_fingerprint=str(row["expected_boundary_fingerprint"]),
+                not_after=not_after,
+            )
+            link = _mapping(normalized.get("campaign"))
+            expected_kind = R9_HANDOFF_PREDECESSOR if index == 1 else ORPHAN_APPLY_PREDECESSOR
+            valid = bool(
+                alias == f"M{index:03d}"
+                and link.get("alias") == alias
+                and link.get("ordinal") == index
+                and link.get("root_handoff_report_sha256")
+                == predecessor["root_handoff_report_sha256"]
+                and link.get("root_handoff_chain_sha256")
+                == predecessor["root_handoff_chain_sha256"]
+                and link.get("predecessor_kind") == expected_kind
+                and link.get("predecessor_chain_sha256") == previous_chain
+                and all(
+                    str(row[column]) == str(target[key])
+                    for key, column in (
+                        ("trade_date", "trade_date"),
+                        ("pipeline_fingerprint", "expected_pipeline_fingerprint"),
+                        ("subject_version", "expected_subject_version"),
+                        ("source_fingerprint", "expected_source_fingerprint"),
+                        ("candidate_fingerprint", "expected_candidate_fingerprint"),
+                        ("downstream_fingerprint", "expected_downstream_fingerprint"),
+                        ("boundary_fingerprint", "expected_boundary_fingerprint"),
+                    )
+                )
+            )
+            if not valid:
+                invalid_row_count += 1
+                continue
+            previous_chain = orphan_campaign_chain_sha256(
+                source_plan_report_sha256=source_plan_report_sha256,
+                source_reconciliation_report_sha256=source_reconciliation_report_sha256,
+                target_set_sha256=str(manifest["target_set_sha256"]),
+                campaign_link=link,
+                approval_binding_sha256=str(normalized["approval_binding_sha256"]),
+                request_id_sha256=hashlib.sha256(
+                    str(row["request_id"]).encode("utf-8")
+                ).hexdigest(),
+                disposition_id_sha256=hashlib.sha256(
+                    str(row["disposition_id"]).encode("utf-8")
+                ).hexdigest(),
+            )
+        except (KeyError, TypeError, ValueError, OrphanManualEvidenceError):
+            invalid_row_count += 1
+    chain_matches_predecessor = previous_chain == predecessor["chain_sha256"]
+    ready = bool(
+        len(rows) == expected_completed
+        and invalid_row_count == 0
+        and unexpected_target_count == 0
+        and chain_matches_predecessor
+    )
+    return {
+        "target_count": len(items),
+        "expected_completed_count": expected_completed,
+        "ledger_row_count": len(rows),
+        "invalid_row_count": invalid_row_count,
+        "unexpected_target_count": unexpected_target_count,
+        "chain_matches_predecessor": chain_matches_predecessor,
+        "chain_sha256": previous_chain,
+        "identifiers_recorded": False,
+        "raw_rows_recorded": False,
+        "ready": ready,
+    }
+
+
 def _validate_plan(payload: Mapping[str, Any], *, report_sha256: str) -> dict[str, Any]:
     verdict = _mapping(payload.get("verdict"))
     recomputed_verdict = plan_tool.evaluate_report(payload)
@@ -416,6 +668,7 @@ def _validate_plan(payload: Mapping[str, Any], *, report_sha256: str) -> dict[st
     identity = _mapping(database.get("identity"))
     identity_pin = _mapping(database.get("identity_pin"))
     pipeline = _mapping(payload.get("pipeline"))
+    incremental = _mapping(payload.get("incremental_dead_letter"))
     action_counts = _mapping(pipeline.get("expected_action_counts"))
     target_count = pipeline.get("manual_evidence_disposition_count")
     normalized_target_count = target_count if type(target_count) is int else -1
@@ -486,6 +739,8 @@ def _validate_plan(payload: Mapping[str, Any], *, report_sha256: str) -> dict[st
         and plan_tool._is_nonnegative_int(pipeline.get("invalid_item_count"))
         and pipeline.get("invalid_item_count") == 0
         and plan_tool._is_sha256(target_set_sha256)
+        and plan_tool._is_nonnegative_int(incremental.get("disposition_target_count"))
+        and plan_tool._is_sha256(incremental.get("campaign_manifest_sha256"))
         and _tool_actions_safe(payload.get("tool_actions"))
     )
     if not valid:
@@ -499,6 +754,8 @@ def _validate_plan(payload: Mapping[str, Any], *, report_sha256: str) -> dict[st
         "generated_at": generated_at,
         "target_count": normalized_target_count,
         "target_set_sha256": str(target_set_sha256),
+        "incremental_target_count": int(incremental["disposition_target_count"]),
+        "incremental_target_set_sha256": str(incremental["campaign_manifest_sha256"]),
     }
 
 
@@ -658,6 +915,9 @@ def validate_apply_preflight_report(
     database_main = _mapping(files_after.get("main"))
     source_plan = _mapping(payload.get("source_blocker_plan"))
     source_reconciliation = _mapping(payload.get("source_reconciliation"))
+    predecessor = _mapping(payload.get("campaign_predecessor"))
+    campaign_audit = _mapping(payload.get("orphan_campaign_audit"))
+    expected_ordinal = alias_ordinal(expected_alias)
     valid = bool(
         payload.get("contract") == _CONTRACT
         and stored_verdict == verdict
@@ -682,6 +942,17 @@ def validate_apply_preflight_report(
         and plan_tool._fingerprint_valid(database_main)
         and plan_tool._is_sha256(source_plan.get("report_sha256"))
         and plan_tool._is_sha256(source_reconciliation.get("report_sha256"))
+        and predecessor.get("kind") in {R9_HANDOFF_PREDECESSOR, ORPHAN_APPLY_PREDECESSOR}
+        and plan_tool._is_sha256(predecessor.get("report_sha256"))
+        and plan_tool._is_sha256(predecessor.get("chain_sha256"))
+        and plan_tool._is_sha256(predecessor.get("root_handoff_report_sha256"))
+        and plan_tool._is_sha256(predecessor.get("root_handoff_chain_sha256"))
+        and predecessor.get("validated") is True
+        and predecessor.get("completed_count") == expected_ordinal - 1
+        and predecessor.get("kind")
+        == (R9_HANDOFF_PREDECESSOR if expected_ordinal == 1 else ORPHAN_APPLY_PREDECESSOR)
+        and campaign_audit.get("ready") is True
+        and campaign_audit.get("chain_sha256") == predecessor.get("chain_sha256")
     )
     if not valid:
         raise PipelineOrphanEvidencePreflightError("APPROVED_ORPHAN_PREFLIGHT_CONTRACT_INVALID")
@@ -705,6 +976,12 @@ def validate_apply_preflight_report(
         "private_manifest_sha256": manifest["file_sha256"],
         "source_plan_report_sha256": source_plan["report_sha256"],
         "source_reconciliation_report_sha256": source_reconciliation["report_sha256"],
+        "predecessor_kind": predecessor["kind"],
+        "predecessor_report_sha256": predecessor["report_sha256"],
+        "predecessor_chain_sha256": predecessor["chain_sha256"],
+        "root_handoff_report_sha256": predecessor["root_handoff_report_sha256"],
+        "root_handoff_chain_sha256": predecessor["root_handoff_chain_sha256"],
+        "completed_count": predecessor["completed_count"],
     }
 
 
@@ -791,6 +1068,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     failures: list[str] = []
     source_plan = _mapping(report.get("source_blocker_plan"))
     source_reconciliation = _mapping(report.get("source_reconciliation"))
+    predecessor = _mapping(report.get("campaign_predecessor"))
     manifest = _mapping(report.get("private_target_manifest"))
     evidence = _mapping(report.get("evidence"))
     database = _mapping(report.get("database"))
@@ -799,10 +1077,15 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
     connection = _mapping(database.get("connection"))
     schema = _mapping(report.get("schema_manifest"))
     orphan_ledger = _mapping(report.get("orphan_ledger_audit"))
+    orphan_campaign = _mapping(report.get("orphan_campaign_audit"))
     preview = _mapping(report.get("preview_binding"))
     before = _mapping(database.get("files_before"))
     after = _mapping(database.get("files_after"))
     actions = _mapping(report.get("tool_actions"))
+    selected_alias = str(manifest.get("selected_alias") or "")
+    selected_ordinal = (
+        int(selected_alias[1:]) if _ALIAS_RE.fullmatch(selected_alias) is not None else -1
+    )
 
     if not (
         report.get("contract") == _CONTRACT
@@ -822,6 +1105,22 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         and source_reconciliation.get("path_recorded") is False
     ):
         failures.append("SOURCE_EVIDENCE_CONTRACT_INVALID")
+    if not (
+        predecessor.get("kind") in {R9_HANDOFF_PREDECESSOR, ORPHAN_APPLY_PREDECESSOR}
+        and plan_tool._is_sha256(predecessor.get("report_sha256"))
+        and plan_tool._is_sha256(predecessor.get("chain_sha256"))
+        and plan_tool._fingerprint_valid(_mapping(predecessor.get("database_main")))
+        and plan_tool._is_sha256(predecessor.get("root_handoff_report_sha256"))
+        and plan_tool._is_sha256(predecessor.get("root_handoff_chain_sha256"))
+        and plan_tool._is_nonnegative_int(predecessor.get("completed_count"))
+        and predecessor.get("validated") is True
+        and predecessor.get("content_embedded") is False
+        and predecessor.get("path_recorded") is False
+        and predecessor.get("completed_count") == selected_ordinal - 1
+        and predecessor.get("kind")
+        == (R9_HANDOFF_PREDECESSOR if selected_ordinal == 1 else ORPHAN_APPLY_PREDECESSOR)
+    ):
+        failures.append("CAMPAIGN_PREDECESSOR_INVALID")
     if not (
         manifest.get("contract") == PRIVATE_TARGET_SET_CONTRACT
         and plan_tool._is_sha256(manifest.get("file_sha256"))
@@ -893,8 +1192,7 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         and database.get("sidecars_absent_after") is True
         and plan_tool._is_nonnegative_int(database.get("runtime_lock_count"))
         and database.get("runtime_lock_count") == 0
-        and database.get("plan_main_matches") is True
-        and database.get("reconciliation_main_matches") is True
+        and database.get("predecessor_main_matches") is True
         and _writer_probes_pass(database)
         and plan_tool._fingerprint_valid(_mapping(before.get("main")))
         and plan_tool._fingerprint_valid(_mapping(after.get("main")))
@@ -929,6 +1227,19 @@ def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:
         and orphan_ledger.get("ready") is True
     ):
         failures.append("ORPHAN_LEDGER_GLOBAL_AUDIT_INVALID")
+    if not (
+        orphan_campaign.get("target_count") == manifest.get("target_count")
+        and orphan_campaign.get("expected_completed_count") == predecessor.get("completed_count")
+        and orphan_campaign.get("ledger_row_count") == predecessor.get("completed_count")
+        and orphan_campaign.get("invalid_row_count") == 0
+        and orphan_campaign.get("unexpected_target_count") == 0
+        and orphan_campaign.get("chain_matches_predecessor") is True
+        and orphan_campaign.get("chain_sha256") == predecessor.get("chain_sha256")
+        and orphan_campaign.get("identifiers_recorded") is False
+        and orphan_campaign.get("raw_rows_recorded") is False
+        and orphan_campaign.get("ready") is True
+    ):
+        failures.append("ORPHAN_CAMPAIGN_AUDIT_INVALID")
     if not (
         preview.get("status") == "ELIGIBLE"
         and preview.get("eligible") is True

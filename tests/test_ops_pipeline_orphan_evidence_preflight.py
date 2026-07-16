@@ -107,6 +107,29 @@ def test_orphan_evidence_preflight_rejects_manifest_semantic_drift(
         )
 
 
+def test_orphan_preflight_requires_exact_r9_handoff_before_database_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    case = _case(tmp_path, monkeypatch=monkeypatch)
+    case["predecessor_report"] = tmp_path / "missing-r9-handoff.json"
+    opened = False
+
+    def forbidden_database_open(*_args, **_kwargs):
+        nonlocal opened
+        opened = True
+        raise AssertionError("database must not open before predecessor validation")
+
+    monkeypatch.setattr(tool.fast0_tool, "_validated_database_path", forbidden_database_open)
+    with pytest.raises(tool.PipelineOrphanEvidencePreflightError):
+        tool.run_report(
+            **case,
+            out_dir=tmp_path / "missing-predecessor",
+            observed_at=_OBSERVED_AT,
+        )
+    assert opened is False
+
+
 def test_orphan_evidence_preflight_blocks_unrelated_legacy_orphan_ledger_row(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -140,6 +163,7 @@ def test_orphan_evidence_preflight_verdict_tamper_fails_closed(
     )
 
     for mutation in (
+        lambda value: value.__setitem__("contract", "fast0-pipeline-orphan-evidence-preflight.v1"),
         lambda value: value.__setitem__("apply_authorized", True),
         lambda value: value.__setitem__("database_write_performed", True),
         lambda value: value.__setitem__("identifiers_recorded", True),
@@ -160,6 +184,8 @@ def test_orphan_evidence_preflight_verdict_tamper_fails_closed(
         lambda value: value.__setitem__("external_process_state_verified", True),
         lambda value: value.__setitem__("external_broker_state_verified", True),
         lambda value: value.pop("orphan_ledger_audit"),
+        lambda value: value.pop("orphan_campaign_audit"),
+        lambda value: value["campaign_predecessor"].__setitem__("validated", False),
     ):
         tampered = copy.deepcopy(report)
         mutation(tampered)
@@ -266,6 +292,8 @@ def _case(
     *,
     monkeypatch: pytest.MonkeyPatch,
     legacy_orphan_row: bool = False,
+    target_count: int = 1,
+    selected_alias: str = "M001",
 ) -> dict:
     monkeypatch.setattr(
         tool.fast0_tool,
@@ -274,32 +302,40 @@ def _case(
     )
     db_path = tmp_path / "orphan.sqlite3"
     connection = initialize_database(db_path)
-    private_id = "orphan-private-id"
-    connection.execute(
-        """
-        INSERT INTO risk_observations_latest (
-            candidate_instance_id, risk_observation_id,
-            strategy_observation_id, trade_date, code, name, evaluated_at,
-            overall_status, max_severity, blocked_count, caution_count,
-            pass_count, reason_codes_json, config_version, observe_only
-        ) VALUES (
-            ?, 'orphan-risk', 'missing-strategy',
-            '2026-07-15', '005930', 'fixture', '2026-07-15T00:00:00Z',
-            'OBSERVE_BLOCK', 'BLOCK', 1, 0, 0, '[]', 'test', 1
+    private_ids = [
+        "orphan-private-id" if target_count == 1 else f"orphan-private-id-{ordinal:03d}"
+        for ordinal in range(1, target_count + 1)
+    ]
+    previews = []
+    for ordinal, private_id in enumerate(private_ids, start=1):
+        connection.execute(
+            """
+            INSERT INTO risk_observations_latest (
+                candidate_instance_id, risk_observation_id,
+                strategy_observation_id, trade_date, code, name, evaluated_at,
+                overall_status, max_severity, blocked_count, caution_count,
+                pass_count, reason_codes_json, config_version, observe_only
+            ) VALUES (
+                ?, ?, 'missing-strategy',
+                '2026-07-15', '005930', 'fixture', '2026-07-15T00:00:00Z',
+                'OBSERVE_BLOCK', 'BLOCK', 1, 0, 0, '[]', 'test', 1
+            )
+            """,
+            (private_id, f"orphan-risk-{ordinal:03d}"),
         )
-        """,
-        (private_id,),
-    )
     if legacy_orphan_row:
         _insert_legacy_orphan_row(connection)
     connection.commit()
-    preview = preview_pipeline_coherency_disposition(
-        connection,
-        trade_date="2026-07-15",
-        candidate_instance_id=private_id,
-        action=ACTION_DISPOSE_ORPHAN,
-        as_of=_OBSERVED_AT,
-    )
+    for private_id in private_ids:
+        previews.append(
+            preview_pipeline_coherency_disposition(
+                connection,
+                trade_date="2026-07-15",
+                candidate_instance_id=private_id,
+                action=ACTION_DISPOSE_ORPHAN,
+                as_of=_OBSERVED_AT,
+            )
+        )
     connection.close()
 
     plan_path = _build_plan_report(tmp_path, db_path, monkeypatch=monkeypatch)
@@ -317,19 +353,25 @@ def _case(
     )
     reconciliation_path = Path(reconciliation["report_paths"]["raw_json"])
 
-    target = {
-        "trade_date": preview["trade_date"],
-        "candidate_instance_id": preview["candidate_instance_id"],
-        "classification": preview["classification"],
-        "action": preview["action"],
-        "pipeline_fingerprint": preview["pipeline_fingerprint"],
-        "subject_version": preview["subject_version"],
-        "source_fingerprint": preview["source_fingerprint"],
-        "candidate_fingerprint": preview["candidate_fingerprint"],
-        "downstream_fingerprint": preview["downstream_fingerprint"],
-        "boundary_fingerprint": preview["boundary_fingerprint"],
-    }
-    items = [{**target, "alias": "M001"}]
+    targets = [
+        {
+            "trade_date": preview["trade_date"],
+            "candidate_instance_id": preview["candidate_instance_id"],
+            "classification": preview["classification"],
+            "action": preview["action"],
+            "pipeline_fingerprint": preview["pipeline_fingerprint"],
+            "subject_version": preview["subject_version"],
+            "source_fingerprint": preview["source_fingerprint"],
+            "candidate_fingerprint": preview["candidate_fingerprint"],
+            "downstream_fingerprint": preview["downstream_fingerprint"],
+            "boundary_fingerprint": preview["boundary_fingerprint"],
+        }
+        for preview in previews
+    ]
+    items = [
+        {**target, "alias": f"M{ordinal:03d}"} for ordinal, target in enumerate(targets, start=1)
+    ]
+    target = targets[int(selected_alias[1:]) - 1]
     manifest_path = _write_json(
         tmp_path / "private-manifest.json",
         {"contract": PRIVATE_TARGET_SET_CONTRACT, "items": items},
@@ -337,6 +379,23 @@ def _case(
     plan_payload = json.loads(plan_path.read_text(encoding="utf-8"))
     assert plan_payload["pipeline"]["manual_evidence_campaign_sha256"] == (
         private_target_set_sha256(items)
+    )
+    predecessor_path = _write_json(
+        tmp_path / "r9-handoff.json",
+        {"contract": "fixture-r9-handoff"},
+    )
+
+    def validate_fixture_handoff(_payload, **kwargs):
+        return {
+            "apply_chain_sha256": "a" * 64,
+            "final_database_main": dict(kwargs["expected_source_database_main"]),
+            "generated_at": "2026-07-16T01:00:00Z",
+        }
+
+    monkeypatch.setattr(
+        tool.r9_handoff_tool,
+        "validate_handoff_report",
+        validate_fixture_handoff,
     )
 
     artifact_path = tmp_path / "private-broker-order-history.csv"
@@ -346,7 +405,7 @@ def _case(
         {
             "contract": ORPHAN_EVIDENCE_CONTRACT,
             "target_set_sha256": private_target_set_sha256(items),
-            "alias": "M001",
+            "alias": selected_alias,
             "target": target,
             "determination": {
                 "status": "AUTHORITATIVE",
@@ -383,7 +442,9 @@ def _case(
         "authoritative_artifact": artifact_path,
         "expected_authoritative_artifact_sha256": _sha256_file(artifact_path),
         "expected_account_scope_sha256": "2" * 64,
-        "alias": "M001",
+        "alias": selected_alias,
+        "predecessor_report": predecessor_path,
+        "expected_predecessor_report_sha256": _sha256_file(predecessor_path),
     }
 
 
