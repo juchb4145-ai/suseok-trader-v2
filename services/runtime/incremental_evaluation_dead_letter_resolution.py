@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,10 @@ from services.config import (
     TradingMode,
     TradingProfile,
 )
+from services.incremental_dead_letter_campaign import (
+    IncrementalDeadLetterCampaignError,
+    validate_campaign_apply_evidence_binding,
+)
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     runtime_execution_lock,
@@ -34,6 +39,9 @@ ACTION_RESET_CANARY = "RESET_CANARY"
 ACTION_VERIFY_CANARY = "VERIFY_CANARY"
 ACTION_RESET_BATCH = "RESET_BATCH"
 ACTION_REVOKE = "REVOKE"
+
+CAMPAIGN_REASON_CODE = "OPERATOR_DISPOSED_OBSOLETE_CLOSED_CANDIDATE"
+CAMPAIGN_EVIDENCE_TYPE = "FAST0R9_INCREMENTAL_DEAD_LETTER_CAMPAIGN"
 
 DISPOSITION_TABLE = "incremental_evaluation_dead_letter_dispositions"
 RAW_DEAD_LETTER_TABLE = "incremental_evaluation_dead_letters"
@@ -147,6 +155,159 @@ class IncrementalEvaluationDeadLetterResolutionError(RuntimeError):
             "no_broker_calls": True,
             "live_real_allowed": False,
         }
+
+
+_CAMPAIGN_APPROVAL_CONTEXT_SEAL = object()
+
+
+@dataclass(frozen=True)
+class _IncrementalCampaignApplyApprovalContext:
+    approval_binding_sha256: str
+    approved_preflight_report_sha256: str
+    approved_database_main_sha256: str
+    alias: str
+    dead_letter_id_sha256: str
+    _seal: object
+
+
+def _issue_incremental_campaign_apply_approval_context(
+    evidence_json: Mapping[str, Any],
+    *,
+    verified_preflight_report_sha256: str,
+    verified_database_main_sha256: str,
+    expected_alias: str,
+    dead_letter_id: str,
+    expected_dead_letter_fingerprint: str,
+    expected_candidate_version: str,
+    evidence_sha256: str,
+) -> _IncrementalCampaignApplyApprovalContext:
+    """Mint a process-local capability after the CLI owns the writer lock."""
+
+    try:
+        normalized = validate_campaign_apply_evidence_binding(
+            evidence_json,
+            expected_alias=expected_alias,
+            dead_letter_id=dead_letter_id,
+            expected_dead_letter_fingerprint=expected_dead_letter_fingerprint,
+            expected_candidate_version=expected_candidate_version,
+            evidence_sha256=evidence_sha256,
+            not_after=utc_now(),
+        )
+    except IncrementalDeadLetterCampaignError as exc:
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_APPROVAL_BINDING_INVALID",
+            "campaign apply binding is invalid",
+            details={"reason_codes": [exc.code]},
+        ) from exc
+    preflight_sha256 = _require_sha256(
+        "verified_preflight_report_sha256", verified_preflight_report_sha256
+    )
+    database_sha256 = _require_sha256(
+        "verified_database_main_sha256", verified_database_main_sha256
+    )
+    if (
+        normalized["approved_preflight_report_sha256"] != preflight_sha256
+        or normalized["approved_database_main_sha256"] != database_sha256
+    ):
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_APPROVAL_CONTEXT_MISMATCH",
+            "verified preflight or database does not match campaign approval binding",
+        )
+    return _IncrementalCampaignApplyApprovalContext(
+        approval_binding_sha256=str(normalized["approval_binding_sha256"]),
+        approved_preflight_report_sha256=preflight_sha256,
+        approved_database_main_sha256=database_sha256,
+        alias=str(normalized["alias"]),
+        dead_letter_id_sha256=str(normalized["dead_letter_id_sha256"]),
+        _seal=_CAMPAIGN_APPROVAL_CONTEXT_SEAL,
+    )
+
+
+def append_incremental_dead_letter_campaign_disposition_in_transaction(
+    connection: sqlite3.Connection,
+    *,
+    dead_letter_id: str,
+    request_id: str,
+    expected_dead_letter_fingerprint: str,
+    expected_candidate_version: str,
+    operator_id: str,
+    evidence_ref: str,
+    evidence_sha256: str,
+    evidence_json: Mapping[str, Any],
+    safety_snapshot: Mapping[str, Any],
+    campaign_approval_context: _IncrementalCampaignApplyApprovalContext | None,
+) -> dict[str, Any]:
+    """Append one R9 disposition without owning or committing the transaction."""
+
+    if not connection.in_transaction:
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_ACTIVE_TRANSACTION_REQUIRED",
+            "campaign append requires a caller-owned active transaction",
+        )
+    _assert_disposition_schema_ready(connection)
+    if _runtime_lock_count(connection):
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "RUNTIME_EXECUTION_LOCK_PRESENT",
+            "campaign append requires every runtime execution lease to be free",
+        )
+    if not (
+        isinstance(campaign_approval_context, _IncrementalCampaignApplyApprovalContext)
+        and campaign_approval_context._seal is _CAMPAIGN_APPROVAL_CONTEXT_SEAL
+    ):
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_APPROVAL_CONTEXT_REQUIRED",
+            "new R9 campaign append requires the sealed CLI approval context",
+        )
+    try:
+        normalized = validate_campaign_apply_evidence_binding(
+            evidence_json,
+            expected_alias=campaign_approval_context.alias,
+            dead_letter_id=dead_letter_id,
+            expected_dead_letter_fingerprint=expected_dead_letter_fingerprint,
+            expected_candidate_version=expected_candidate_version,
+            evidence_sha256=evidence_sha256,
+            not_after=utc_now(),
+        )
+    except IncrementalDeadLetterCampaignError as exc:
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_APPROVAL_BINDING_INVALID",
+            "campaign append requires an exact R9 approval binding",
+            details={"reason_codes": [exc.code]},
+        ) from exc
+    context_valid = bool(
+        normalized["approval_binding_sha256"] == campaign_approval_context.approval_binding_sha256
+        and normalized["approved_preflight_report_sha256"]
+        == campaign_approval_context.approved_preflight_report_sha256
+        and normalized["approved_database_main_sha256"]
+        == campaign_approval_context.approved_database_main_sha256
+        and normalized["alias"] == campaign_approval_context.alias
+        and normalized["dead_letter_id_sha256"] == campaign_approval_context.dead_letter_id_sha256
+    )
+    if not context_valid:
+        raise IncrementalEvaluationDeadLetterResolutionError(
+            "CAMPAIGN_APPROVAL_CONTEXT_REQUIRED",
+            "new R9 campaign append requires the sealed CLI approval context",
+        )
+    return _append_disposition_in_transaction(
+        connection,
+        action=ACTION_DISPOSE_OBSOLETE_CLOSED_CANDIDATE,
+        dead_letter_id=dead_letter_id,
+        request_id=request_id,
+        expected_dead_letter_fingerprint=expected_dead_letter_fingerprint,
+        expected_candidate_version=expected_candidate_version,
+        reason_code=CAMPAIGN_REASON_CODE,
+        operator_id=operator_id,
+        evidence_type=CAMPAIGN_EVIDENCE_TYPE,
+        evidence_ref=evidence_ref,
+        evidence_sha256=evidence_sha256,
+        evidence_json=normalized,
+        requested_supersedes_id=None,
+        recovery_session_id=None,
+        batch_size=None,
+        fencing_token=None,
+        safety_snapshot=safety_snapshot,
+        exact_evidence_json=True,
+    )
 
 
 def preview_incremental_evaluation_dead_letter_disposition(
@@ -899,6 +1060,7 @@ def _append_disposition_in_transaction(
     fencing_token: int | None,
     safety_snapshot: Mapping[str, Any],
     authorization_disposition_id: str | None = None,
+    exact_evidence_json: bool = False,
 ) -> dict[str, Any]:
     raw_row = connection.execute(
         f"SELECT * FROM {RAW_DEAD_LETTER_TABLE} WHERE dead_letter_id = ?",
@@ -910,6 +1072,10 @@ def _append_disposition_in_transaction(
             "incremental evaluation dead-letter row was not found",
         )
     projection = _disposition_projection(connection, raw_row)
+    normalized_exact_evidence = dict(evidence_json or {}) if exact_evidence_json else None
+    evidence_binding_sha256 = (
+        _sha256_json(normalized_exact_evidence) if normalized_exact_evidence is not None else None
+    )
     existing = connection.execute(
         f"SELECT * FROM {DISPOSITION_TABLE} WHERE request_id = ?",
         (request_id,),
@@ -931,11 +1097,28 @@ def _append_disposition_in_transaction(
             "batch_size": batch_size,
             "authorization_disposition_id": authorization_disposition_id,
         }
+        if exact_evidence_json:
+            replay_payload["campaign_evidence_json_sha256"] = evidence_binding_sha256
         if str(existing["request_hash"]) != _sha256_json(replay_payload):
             raise IncrementalEvaluationDeadLetterResolutionError(
                 "REQUEST_CONFLICT",
                 "request_id was already used for a different request",
             )
+        if exact_evidence_json:
+            try:
+                stored_exact_evidence = json.loads(str(existing["evidence_json"] or "{}"))
+            except (TypeError, ValueError) as exc:
+                raise IncrementalEvaluationDeadLetterResolutionError(
+                    "REQUEST_CONFLICT",
+                    "request_id has noncanonical stored campaign evidence",
+                ) from exc
+            if not isinstance(stored_exact_evidence, dict) or _canonical_json(
+                stored_exact_evidence
+            ) != _canonical_json(normalized_exact_evidence):
+                raise IncrementalEvaluationDeadLetterResolutionError(
+                    "REQUEST_CONFLICT",
+                    "request_id was already used with different campaign evidence",
+                )
         return {
             **_public_disposition(existing),
             "idempotent_replay": True,
@@ -967,6 +1150,8 @@ def _append_disposition_in_transaction(
         "batch_size": batch_size,
         "authorization_disposition_id": authorization_disposition_id,
     }
+    if exact_evidence_json:
+        request_payload["campaign_evidence_json_sha256"] = evidence_binding_sha256
     request_hash = _sha256_json(request_payload)
     if not projection["chain_valid"]:
         raise IncrementalEvaluationDeadLetterResolutionError(
@@ -1038,15 +1223,18 @@ def _append_disposition_in_transaction(
     sequence_no = len(projection["rows"]) + 1
     disposition_id = new_message_id("incremental_disposition")
     created_at = datetime_to_wire(utc_now())
-    stored_evidence = dict(evidence_json or {})
-    stored_evidence.update(
-        {
-            "evidence_type": evidence_type,
-            "request_payload": request_payload,
-            "candidate_state": None if candidate is None else str(candidate["state"]),
-            "authorization_disposition_id": authorization_disposition_id,
-        }
-    )
+    if exact_evidence_json:
+        stored_evidence = dict(normalized_exact_evidence or {})
+    else:
+        stored_evidence = dict(evidence_json or {})
+        stored_evidence.update(
+            {
+                "evidence_type": evidence_type,
+                "request_payload": request_payload,
+                "candidate_state": None if candidate is None else str(candidate["state"]),
+                "authorization_disposition_id": authorization_disposition_id,
+            }
+        )
     connection.execute(
         f"""
         INSERT INTO {DISPOSITION_TABLE} (
