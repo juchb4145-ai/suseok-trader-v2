@@ -97,9 +97,9 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 
 | 단계 | 상태 | 의존성 | 핵심 산출물 |
 | --- | --- | --- | --- |
-| FAST-0 Post-Merge Qualification | `IN_PROGRESS` | R1~R7 병합/evidence 완료, blocker 6개 | 검증 report, 운영 baseline·처리 manifest |
-| FAST-1 Pure Preview | `BLOCKED_BY_FAST_0` | FAST-0 PASS | 무기록 preview API |
-| Operational Gate C1 | `BLOCKED_BY_FAST_1` | Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
+| FAST-0 Post-Merge Qualification | `DEFERRED_HISTORICAL` | 과거 blocker는 미해결 상태로 보존 | 운영 baseline·처리 manifest 보존, PASS 주장 금지 |
+| FAST-1 Pure Preview | `DONE` | current-trade-date-only 예외, 운영 승격 비승인 | strict read-only 무기록 preview API |
+| Operational Gate C1 | `BLOCKED_BY_FAST_0` | FAST-0 PASS와 Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `BLOCKED_BY_FAST_0` | FAST-0 PASS | virtual-clock replay |
 | FAST-2B Profit Lab | `BLOCKED_BY_FAST_2A` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
 | FAST-3 Parallel Shadow | `BLOCKED_BY_FAST_2B` | Profit Lab model 고정 | shadow/live comparison |
@@ -115,10 +115,16 @@ NEXT
 IN_PROGRESS
 BLOCKED
 BLOCKED_BY_<STAGE>
+DEFERRED_HISTORICAL
 READY_FOR_REVIEW
 DONE
 ROLLED_BACK
 ```
+
+`DEFERRED_HISTORICAL`은 과거 blocker를 해결·삭제·면제했다는 뜻이 아니다. 사용자는 2026-07-20
+과거 pipeline 증거 campaign을 더 진행하지 않고 current-trade-date-only FAST-1 코드 개발로 전환했다.
+이 예외는 `POST /api/live-sim/pilot/preview`의 strict read-only 계산에만 적용한다. Operational Gate C1,
+실제 LIVE_SIM 활성화, 주문·broker 호출과 FAST-0 `PASS`에는 적용하지 않는다.
 
 ## 5. FAST-0 — Post-Merge Qualification
 
@@ -375,8 +381,9 @@ reports/fast_track/fast_0_post_merge_qualification/<timestamp>/
 
 ### 목표
 
-기존 `PLAN_READY`와 현재 eligibility/safety 상태를 조회하되 어떠한 run, rejection,
-intent, order, command도 저장하지 않는 통합 Preview를 추가한다.
+현재 KRX 거래일의 기존 `PLAN_READY`와 현재 eligibility/safety 상태를 조회하되 어떠한 run,
+rejection, intent, order, command도 저장하지 않는 통합 Preview를 추가한다. 과거 거래일 입력은
+`FAST1_CURRENT_TRADE_DATE_ONLY`로 거부한다.
 
 ### 권장 브랜치/PR
 
@@ -390,6 +397,9 @@ PR: FAST-1: Add side-effect-free LIVE_SIM canary preview
 ```text
 POST /api/live-sim/pilot/preview
 ```
+
+POST이지만 local token을 요구하며 request body나 실행 action은 없다. DB는 일반 RW helper가 아니라
+SQLite URI `mode=ro`와 `PRAGMA query_only=ON`으로 열고 단일 deferred snapshot에서만 계산한다.
 
 ### 반환 항목
 
@@ -438,11 +448,16 @@ dry_run_*
 ### PASS 기준
 
 - Preview 금지 테이블 delta 0
+- `mode=ro`, `query_only=ON`, 단일 snapshot 확인
 - 기존 eligibility와 preview 결과 일치
 - lineage FAIL, duplicate intent, reconcile mismatch, UNCONFIRMED plan 선택 불가
 - stable tie-breaker로 동일 입력의 top candidate 동일
 - AI advisory 변경이 selection에 영향 없음
 - 기존 `queue_commands=false` 호환 동작을 변경하지 않고 의미 차이를 문서화
+
+FAST-1 `DONE`은 이 코드·fixture 계약의 완료를 뜻한다. 실제 응답의 `canary_ready`는 현재 plan과
+safety/reconcile/broker-boundary 상태에 따라 `false`일 수 있으며, `true`여도 Operational Gate C1이나
+주문 실행을 승인하지 않는다.
 
 ### Evidence
 
