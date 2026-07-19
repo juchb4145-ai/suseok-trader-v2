@@ -38,6 +38,11 @@ from services.live_sim.order_plan_intent import (
     create_live_sim_intent_from_order_plan,
     queue_live_sim_order_command_from_order_plan,
 )
+from services.live_sim.pure_preview import (
+    Fast1PreviewError,
+    build_fast1_pure_preview,
+    open_fast1_preview_connection,
+)
 from services.runtime.live_sim_operating_orchestrator import (
     OperatingMode,
     build_live_sim_operator_status,
@@ -339,6 +344,35 @@ def live_sim_pilot_runs(
     finally:
         connection.close()
     return {"runs": runs, **_live_sim_response_flags()}
+
+
+@router.post("/pilot/preview", dependencies=[Depends(require_local_token)])
+def live_sim_pilot_preview(
+    trade_date: str | None = Query(default=None),
+    limit: int = Query(default=5, ge=1, le=20),
+) -> dict[str, Any]:
+    settings = load_settings()
+    try:
+        connection = open_fast1_preview_connection(settings.trading_db_path)
+        try:
+            return build_fast1_pure_preview(
+                connection,
+                settings=settings,
+                trade_date=trade_date,
+                limit=limit,
+            )
+        finally:
+            connection.close()
+    except Fast1PreviewError as exc:
+        status_code = (
+            http_status.HTTP_422_UNPROCESSABLE_CONTENT
+            if exc.reason_code == "FAST1_CURRENT_TRADE_DATE_ONLY"
+            else http_status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail={"reason_code": exc.reason_code, "message": str(exc)},
+        ) from exc
 
 
 @router.get("/operator/runs")

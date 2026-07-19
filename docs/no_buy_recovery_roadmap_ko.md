@@ -25,8 +25,9 @@
 | PR-NB9 | `DONE` | `ea6670b2` | profile-first 문서, deprecated flag warning과 operator 노출 |
 
 후속 변경은 이 표의 완료 범위를 다시 여는 방식이 아니라 별도 로드맵/PR로 관리한다. 특히
-FAST-1 Pure Preview는 FAST-0 `PASS` 전 시작하지 않으며, 운영 승격은
-`docs/fast_track_live_sim_roadmap_2026-07_ko.md`의 승인 경계를 따른다.
+FAST-1 Pure Preview의 current-trade-date-only strict read-only 개발 예외는 허용하지만, 운영 승격은
+FAST-0 `PASS` 없이 허용하지 않는다. 자세한 경계는
+`docs/fast_track_live_sim_roadmap_2026-07_ko.md`를 따른다.
 
 이 문서는 현재 `suseok-trader-v2`에서 무매수가 구조적으로 확정되는 지점을 작은 PR로
 나누어 고치기 위한 기준 문서다. 목표는 한 번에 trading pipeline 전체를 뒤엎는 것이 아니라,
