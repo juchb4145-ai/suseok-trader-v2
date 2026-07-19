@@ -2,6 +2,32 @@
 
 작성일: 2026-07-02
 
+상태: **개발 완료** (2026-07-19 현재 `main` 기준)
+
+이 문서의 PR-NB0~PR-NB9 범위는 모두 구현됐다. 아래의 "현재 확인된 구조적 문제"는
+로드맵 작성 당시의 기준선이며, 현재 결함 목록으로 해석하지 않는다. 완료는 비운영 코드·계약과
+테스트가 병합됐다는 뜻이다. FAST-0 자격, 운영 DB 정리, LIVE_SIM/LIVE_REAL 활성화 또는 주문 실행을
+승인하지 않는다.
+
+## 구현 완료 기록
+
+| 단계 | 상태 | main 근거 | 완료된 핵심 범위 |
+| --- | --- | --- | --- |
+| PR-NB0 | `DONE` | `11ebcb40` | No-Buy recovery 로드맵과 후속 PR 경계 |
+| PR-NB1 | `DONE` | `a11eb522` | stage funnel, role summary, inspect/rebuild 출력 |
+| PR-NB2 | `DONE` | `b5835ebe` | LIVE_SIM_PILOT shadow dry-run evidence와 MARKET/LIMIT 조건 수정 |
+| PR-NB3 | `DONE` | `20f90b93` | immutable `TradingCapabilities`와 profile capability matrix |
+| PR-NB4 | `DONE` | `4a3621dc` | observation model의 입력 `observe_only` 보존과 검증 |
+| PR-NB5 | `DONE` | `c81f5006` | 공통 trade admission evaluator와 일관된 admission trace |
+| PR-NB6 | `DONE` | `6c718c86` | condition role별 promotion/not-buy 의미와 discovery 대기 상태 |
+| PR-NB7 | `DONE` | `cc23017e` | momentum continuation entry route와 보수적 plan 제약 |
+| PR-NB8 | `DONE` | `8d56f566` | BLOCKING/WAITING/INFO reason channel과 명시적 classifier |
+| PR-NB9 | `DONE` | `ea6670b2` | profile-first 문서, deprecated flag warning과 operator 노출 |
+
+후속 변경은 이 표의 완료 범위를 다시 여는 방식이 아니라 별도 로드맵/PR로 관리한다. 특히
+FAST-1 Pure Preview는 FAST-0 `PASS` 전 시작하지 않으며, 운영 승격은
+`docs/fast_track_live_sim_roadmap_2026-07_ko.md`의 승인 경계를 따른다.
+
 이 문서는 현재 `suseok-trader-v2`에서 무매수가 구조적으로 확정되는 지점을 작은 PR로
 나누어 고치기 위한 기준 문서다. 목표는 한 번에 trading pipeline 전체를 뒤엎는 것이 아니라,
 각 PR이 독립적으로 검증 가능한 증거와 완료 조건을 남기면서 `condition hit -> fusion ->
@@ -17,7 +43,7 @@ candidate -> strategy -> risk -> order plan -> LIVE_SIM intent` 흐름의 생존
 - reason code는 차단, 대기, 정보성 신호를 한 리스트에 섞지 않는다.
 - 각 PR은 dashboard 문구보다 저장된 데이터와 테스트가 먼저 바뀌어야 한다.
 
-## 현재 확인된 구조적 문제
+## 작성 당시 확인된 구조적 문제
 
 ### 1. observe_only가 모델 불변식으로 고정됨
 
