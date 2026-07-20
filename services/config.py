@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import timedelta, timezone, tzinfo
+from datetime import date, timedelta, timezone, tzinfo
 from enum import StrEnum
 from functools import lru_cache
 from pathlib import Path
@@ -655,8 +655,11 @@ class Settings:
     live_sim_operating_loop_market_close_time: str = "15:20:00"
     live_sim_fast5_automatic_canary_enabled: bool = False
     live_sim_fast5_auto_queue_enabled: bool = False
-    live_sim_fast5_manual_c1_status: str = "BLOCKED"
-    live_sim_fast5_manual_c1_evidence_sha256: str = ""
+    live_sim_fast5_bootstrap_status: str = "BLOCKED"
+    live_sim_fast5_bootstrap_trade_date: str = ""
+    live_sim_fast5_bootstrap_approval_id: str = ""
+    live_sim_fast5_bootstrap_approval_sha256: str = ""
+    live_sim_fast5_bootstrap_evidence_sha256: str = ""
     live_sim_fast5_alpha_status: str = "BLOCKED"
     live_sim_fast5_alpha_evidence_sha256: str = ""
     live_sim_fast5_shadow_status: str = "BLOCKED"
@@ -1599,7 +1602,7 @@ class Settings:
             ),
         )
         fast5_status_contracts = {
-            "live_sim_fast5_manual_c1_status": {"BLOCKED", "PASS"},
+            "live_sim_fast5_bootstrap_status": {"BLOCKED", "PENDING", "PASS"},
             "live_sim_fast5_alpha_status": {"BLOCKED", "ALPHA_QUALIFIED"},
             "live_sim_fast5_shadow_status": {"BLOCKED", "PASS"},
         }
@@ -1609,12 +1612,74 @@ class Settings:
                 values = ", ".join(sorted(allowed))
                 raise ValueError(f"{field_name.upper()} must be one of {values}")
             object.__setattr__(self, field_name, normalized)
+        bootstrap_trade_date = str(self.live_sim_fast5_bootstrap_trade_date or "").strip()
+        if bootstrap_trade_date:
+            try:
+                parsed_bootstrap_trade_date = date.fromisoformat(bootstrap_trade_date)
+            except ValueError as exc:
+                raise ValueError(
+                    "LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE must be YYYY-MM-DD"
+                ) from exc
+            if parsed_bootstrap_trade_date.isoformat() != bootstrap_trade_date:
+                raise ValueError(
+                    "LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE must be YYYY-MM-DD"
+                )
+        bootstrap_approval_id = str(
+            self.live_sim_fast5_bootstrap_approval_id or ""
+        ).strip()
+        bootstrap_approval_sha256 = str(
+            self.live_sim_fast5_bootstrap_approval_sha256 or ""
+        ).strip()
+        bootstrap_evidence_sha256 = str(
+            self.live_sim_fast5_bootstrap_evidence_sha256 or ""
+        ).strip()
+        for field_name, sha256 in (
+            ("LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_SHA256", bootstrap_approval_sha256),
+            ("LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256", bootstrap_evidence_sha256),
+        ):
+            if sha256 and not _is_lower_sha256(sha256):
+                raise ValueError(f"{field_name} must be lowercase SHA-256")
+        if self.live_sim_fast5_bootstrap_status == "PENDING":
+            if not bootstrap_trade_date:
+                raise ValueError(
+                    "LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE is required when "
+                    "LIVE_SIM_FAST5_BOOTSTRAP_STATUS=PENDING"
+                )
+            if not bootstrap_approval_id:
+                raise ValueError(
+                    "LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_ID is required when "
+                    "LIVE_SIM_FAST5_BOOTSTRAP_STATUS=PENDING"
+                )
+            if not bootstrap_approval_sha256:
+                raise ValueError(
+                    "LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_SHA256 is required when "
+                    "LIVE_SIM_FAST5_BOOTSTRAP_STATUS=PENDING"
+                )
+        if (
+            self.live_sim_fast5_bootstrap_status == "PASS"
+            and not bootstrap_evidence_sha256
+        ):
+            raise ValueError(
+                "LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256 is required when "
+                "LIVE_SIM_FAST5_BOOTSTRAP_STATUS=PASS"
+            )
+        object.__setattr__(
+            self, "live_sim_fast5_bootstrap_trade_date", bootstrap_trade_date
+        )
+        object.__setattr__(
+            self, "live_sim_fast5_bootstrap_approval_id", bootstrap_approval_id
+        )
+        object.__setattr__(
+            self,
+            "live_sim_fast5_bootstrap_approval_sha256",
+            bootstrap_approval_sha256,
+        )
+        object.__setattr__(
+            self,
+            "live_sim_fast5_bootstrap_evidence_sha256",
+            bootstrap_evidence_sha256,
+        )
         fast5_evidence_contracts = (
-            (
-                "live_sim_fast5_manual_c1_status",
-                "PASS",
-                "live_sim_fast5_manual_c1_evidence_sha256",
-            ),
             (
                 "live_sim_fast5_alpha_status",
                 "ALPHA_QUALIFIED",
@@ -4161,12 +4226,24 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
         live_sim_fast5_auto_queue_enabled=_parse_bool(
             env.get("LIVE_SIM_FAST5_AUTO_QUEUE_ENABLED", "false")
         ),
-        live_sim_fast5_manual_c1_status=env.get(
-            "LIVE_SIM_FAST5_MANUAL_C1_STATUS",
+        live_sim_fast5_bootstrap_status=env.get(
+            "LIVE_SIM_FAST5_BOOTSTRAP_STATUS",
             "BLOCKED",
         ),
-        live_sim_fast5_manual_c1_evidence_sha256=env.get(
-            "LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256",
+        live_sim_fast5_bootstrap_trade_date=env.get(
+            "LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE",
+            "",
+        ),
+        live_sim_fast5_bootstrap_approval_id=env.get(
+            "LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_ID",
+            "",
+        ),
+        live_sim_fast5_bootstrap_approval_sha256=env.get(
+            "LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_SHA256",
+            "",
+        ),
+        live_sim_fast5_bootstrap_evidence_sha256=env.get(
+            "LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256",
             "",
         ),
         live_sim_fast5_alpha_status=env.get(

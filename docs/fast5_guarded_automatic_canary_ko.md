@@ -2,12 +2,13 @@
 
 ## 목적
 
-FAST-5는 검증된 `OrderPlanDraft`를 기존 LIVE_SIM 주문 경로로 cycle당 최대 한 건만
-자동 전달한다. 이 단계는 새로운 주문 구현이 아니라 FAST-1~4와 기존 safety gate를 한 번 더
-결속하는 최종 자동화 경계다.
+FAST-5는 검증된 `OrderPlanDraft`를 기존 LIVE_SIM 주문 경로로 자동 전달한다. 최초 브로커
+lifecycle 검증은 수동 주문 대신 **운영자가 당일 계약 해시에 승인한 자동 1회 bootstrap**으로
+수행한다. 새로운 주문 구현이 아니라 FAST-1~4와 기존 safety gate를 실제 모의투자 경계에서
+결속하는 단계다.
 
-현재 구현 완료는 운영 활성화를 뜻하지 않는다. 기본 설정은 자동 canary와 자동 queue를 모두
-끄며, 별도 운영 승인 전에는 Gateway command, 브로커 호출, LIVE_SIM 주문이 발생하지 않는다.
+기본 설정은 모두 꺼져 있다. 이 문서와 코드의 구현만으로 Gateway command, 브로커 호출,
+LIVE_SIM 주문이 발생하지 않으며 LIVE_REAL은 항상 금지된다.
 
 ## API
 
@@ -19,113 +20,140 @@ POST /api/live-sim/automation/canary/run-once?queue_commands=true
 
 - status와 `queue_commands=false`는 read-only preview다.
 - run-once는 local token을 요구한다.
-- `queue_commands=true`여도 모든 gate가 `PASS`가 아니면 command를 만들지 않고
-  `PROTECT_ONLY` rollback run만 기록한다.
-- 기존 rollback latch가 미확인 상태면 반복 호출은 새 run이나 command를 만들지 않는다.
+- gate non-PASS는 command와 운영 run을 만들지 않고 `PROTECT_ONLY`로 거절한다.
+- bootstrap 1회가 이미 예약됐으면 신규 BUY는 만들지 않고 `PROTECT_ONLY` 취소·청산
+  lifecycle만 허용한다.
+- 실제 실행 오류나 BUY budget 불변식 위반만 rollback latch를 기록한다.
 
-## 외부 evidence 결속
+## 1회 bootstrap 승인 계약
 
-다음 세 증거는 상태 문자열만으로 통과하지 않는다. PASS 상태와 정확한 lowercase SHA-256을
-함께 설정해야 한다.
+bootstrap은 종목을 임의로 지정하는 승인이 아니다. 현재 pipeline에서 모든 동적 gate를 통과한
+plan 하나를 선택하되, 운영자가 다음 공개 payload 전체의 SHA-256에 승인한다.
 
 ```text
-LIVE_SIM_FAST5_MANUAL_C1_STATUS=PASS
-LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256=<64 hex>
+contract/policy version
+approval id + trade date
+LIVE_SIM only, LIVE_REAL false
+KRX LIMIT BUY only
+BUY command/day 1
+order notional <= 100,000 KRW
+active order/position 1
+scale-in/reprice/AI routing false
+```
 
+권장 절차는 다음과 같다.
+
+1. `BOOTSTRAP_STATUS=BLOCKED` 상태에서 거래일과 새로운 approval ID를 설정한다.
+2. status API의 `bootstrap_approval.payload`, `canonical_json`, `expected_sha256`을 검토한다.
+3. 별도 운영 승인 후 정확한 SHA를 설정하고 `BOOTSTRAP_STATUS=PENDING`으로 전환한다.
+4. 장중 status가 `phase=BOOTSTRAP`, `ready=true`일 때 queue run-once를 한 번 실행한다.
+5. complete lifecycle과 reconcile evidence를 검토한 후 evidence 파일 SHA를 결속하여
+   `BOOTSTRAP_STATUS=PASS`로 승격한다.
+
+```text
+LIVE_SIM_FAST5_BOOTSTRAP_STATUS=BLOCKED|PENDING|PASS
+LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE=2026-07-20
+LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_ID=<unique operator approval id>
+LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_SHA256=<status가 계산한 64 hex>
+LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256=<complete lifecycle evidence 64 hex>
+```
+
+`PENDING`은 거래일, approval ID, lowercase approval SHA가 필수다. 설정 SHA가 현재 payload와
+다르거나 요청 거래일이 다르면 차단된다. queue 전에 같은 SHA의 예약 run을 SQLite
+`BEGIN IMMEDIATE`로 먼저 append하므로 동시 요청도 한 건만 신규 BUY 단계에 진입한다. 주문이
+만들어지지 않았더라도 승인은 소비되며, 재시도에는 새 approval ID와 새 SHA가 필요하다.
+기존 `LIVE_SIM_FAST5_MANUAL_C1_*` 변수는 더 이상 gate 입력이 아니며 bootstrap 변수로 명시적으로
+전환하지 않으면 기본 `BLOCKED` 상태가 유지된다.
+
+## bootstrap과 정규 자동화의 차이
+
+최초 bootstrap의 목적은 수익성 재증명이 아니라 실제 SIM broker lifecycle 확인이다. 따라서
+`PENDING` 단계에서는 Alpha와 Parallel Shadow가 `WARN`인 채로도 동적 안전 gate가 모두 PASS면
+1회 실행할 수 있다.
+
+bootstrap lifecycle이 PASS로 결속된 뒤의 정규 자동화는 다음 증거를 모두 요구한다.
+
+```text
+LIVE_SIM_FAST5_BOOTSTRAP_STATUS=PASS
+LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256=<64 hex>
 LIVE_SIM_FAST5_ALPHA_STATUS=ALPHA_QUALIFIED
 LIVE_SIM_FAST5_ALPHA_EVIDENCE_SHA256=<64 hex>
-
 LIVE_SIM_FAST5_SHADOW_STATUS=PASS
 LIVE_SIM_FAST5_SHADOW_EVIDENCE_SHA256=<64 hex>
 ```
 
-SHA가 없거나 형식이 잘못되면 설정 로딩 또는 FAST-5 gate가 fail-closed한다.
-
 ## 동적 gate
 
-매 cycle 직전에 다음 상태를 다시 계산한다.
+신규 BUY 직전에 다음 상태를 매번 다시 계산한다.
 
-- LIVE_SIM preflight `PASS`
-- KRX, LIMIT BUY 전용, scale-in false
-- AI order tool·AI order-plan attachment 비활성: routing 영향 `0`
-- 현재 거래일 pipeline 전체 inventory가 500행 이하이고 조회 결과가 전체 inventory와 일치
-- pipeline `PASS`, mismatch/missing-lineage/stale `0`
+- LIVE_SIM preflight `PASS`, Kiwoom simulation mode와 orderable heartbeat
+- KRX, LIMIT BUY 전용, scale-in/market order false
+- AI order tool·order-plan attachment 비활성: routing 영향 `0`
+- 현재 거래일 pipeline 전체 inventory가 500행 이하이며 조회 결과와 전체 count 일치
+- pipeline mismatch/missing-lineage/stale `0`
 - broker-boundary effective `UNCONFIRMED=0`, maintenance fence 없음
 - lifecycle qualification `PASS`, effective blocker `0`
 - 최신 broker snapshot `COMPLETE`, fresh, 현재 거래일, local mismatch `0`
-- Gateway heartbeat/orderable/simulation mode, kill switch, daily loss, 중복·한도 gate `PASS`
+- kill switch, daily loss, 중복, active order/position, notional gate `PASS`
 
-500행 제한을 전체 검증으로 오인하지 않는다. 실제 current inventory가 500행을 초과하거나
-조회 수와 inventory count가 다르면 `FAST5_PIPELINE_NON_PASS`로 차단한다.
+500행 제한을 전체 검증으로 오인하지 않는다. current inventory가 500행을 초과하거나 조회 수와
+inventory count가 다르면 `FAST5_PIPELINE_NON_PASS`로 차단한다.
 
 ## 강제 한도
 
-FAST-5 실행기는 일반 LIVE_SIM 설정이 더 넓어도 다음 값으로 낮춰 실행한다.
+| 한도 | bootstrap | bootstrap PASS 이후 |
+| --- | ---: | ---: |
+| cycle당 신규 BUY | 1 | 1 |
+| 일 신규 BUY | 1 | 최대 2 |
+| 주문당 금액 | 최대 100,000원 | 최대 100,000원 |
+| active order / position | 1 / 1 | 1 / 1 |
 
-```text
-exchange                   KRX
-side                       BUY
-order type                 LIMIT
-BUY commands per cycle     1
-BUY orders per day         <= 2
-notional per order         <= 100,000 KRW
-active orders              1
-active positions           1
-scale-in                   false
-reprice                    false
-AI routing effect          0
-```
+두 단계 모두 KRX LIMIT BUY, 시장가·scale-in·자동 reprice·AI routing 금지다. 기존 OrderPlan
+eligibility와 Gateway enqueue boundary도 safety/reconcile/lifecycle를 다시 검사한다.
+`LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED=true`가 필수다.
 
-기존 OrderPlan eligibility와 실제 Gateway enqueue boundary도 다시 safety/reconcile/lifecycle를
-검사하므로 FAST-5 gate 결과만으로 우회할 수 없다.
+## rollback과 보호 동작
 
-FAST-5 cycle 내부에서는 일반 local-only reconcile을 새로 기록하지 않는다. gate에서 결속한 최신
-broker reconcile을 보존하고, 시간이 경과해 snapshot이 stale해지면 실제 enqueue boundary의
-동적 freshness 검사가 신규 BUY를 다시 차단한다. 따라서
-`LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED=true`도 필수다.
+준비되지 않은 설정, stale 데이터, evidence 미결속 같은 gate 거절은 DB에 rollback latch를
+남기지 않는다. 설정이나 시장 입력을 고친 뒤 새 preview로 다시 판단할 수 있다.
 
-## 자동 rollback과 latch
-
-gate non-PASS, 운영 cycle 오류, preflight 역전, command budget 위반이 발생하면 결과를
-`PROTECT_ONLY`로 전환하고 `live_sim_operating_runs.reason_summary_json`에
-`rollback_latched=true`를 기록한다. 이 상태에서는 신규 BUY가 계속 차단되고 cancel/close-only
-보호 경로의 기존 계약은 유지된다.
-
-자동 해제는 없다. 운영자가 원인과 해당 run을 확인한 뒤 정확한 run ID를 설정해야 한다.
+실제 queue 단계에 진입한 뒤 운영 cycle 오류나 command budget 위반이 발생하면
+`rollback_latched=true`를 기록하고 신규 BUY를 차단한다. 자동 해제는 없으며 운영자가 원인과
+run을 확인한 뒤 정확한 ID를 설정한다. queue 호출 중 예외는 command count가 0으로 보이더라도
+`side_effects_unknown=true`, `no_order_side_effects=false`로 기록한다. 이전 v1 latch도 v2에서
+그대로 유효하다.
 
 ```text
 LIVE_SIM_FAST5_ROLLBACK_ACK_RUN_ID=<exact latched run id>
 ```
 
-다른 ID, 빈 값 또는 이후 새 rollback run은 latch를 해제하지 않는다.
+bootstrap 예약 후 반복 cycle은 BUY 없이 `PROTECT_ONLY`로 기존 주문의 cancel/close-only
+lifecycle을 진행할 수 있다. 보호 cycle 자체도 preflight를 우회하지 않는다.
 
 ## 기본 설정
 
 ```text
 LIVE_SIM_FAST5_AUTOMATIC_CANARY_ENABLED=false
 LIVE_SIM_FAST5_AUTO_QUEUE_ENABLED=false
+LIVE_SIM_FAST5_BOOTSTRAP_STATUS=BLOCKED
 LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE=1
 LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT=2
 LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL=100000
 LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC=60
 ```
 
-실제 queue에는 기존 `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`도 함께 필요하다. 어느 하나라도
-false이면 `FAST5_AUTO_QUEUE_DISABLED`로 차단한다.
-
-Core의 기존 operating loop는 FAST-5가 비활성일 때 `LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS=true`
-만으로 command를 만들 수 없다. 자동 queue 요청은 FAST-5 실행기로만 라우팅되며, FAST-5가
-꺼져 있으면 기존 loop는 `queue_commands=false` 관측 cycle로 강제된다.
+실제 queue에는 `LIVE_SIM_PILOT_AUTO_QUEUE_COMMAND=true`와 운영 run persistence도 필요하다.
+Core loop는 FAST-5가 꺼져 있으면 기존 loop를 `queue_commands=false` 관측 cycle로 강제한다.
 
 ## 개발 검증 범위
 
-- 기본 설정에서 `PROTECT_ONLY`, command `0`
-- 외부 evidence SHA 미결속 차단
-- 동적 gate 한 건이라도 non-PASS이면 BUY `0`
-- blocked queue 요청은 rollback run 한 건만 append
-- 동일 latch 반복 호출은 새 run/command `0`
-- hard cap 강제와 AI/reprice/scale-in 비활성
+- 기본 설정과 gate non-PASS에서 command/run/latch `0`
+- 당일 payload SHA 불일치와 날짜 불일치 차단
+- bootstrap에서 Alpha·Shadow advisory, 일 BUY 1건 강제
+- approval SHA 선예약과 중복 예약 차단
+- 소비된 bootstrap은 신규 BUY 0, 보호 lifecycle만 허용
+- 정규 자동화에서 bootstrap/Alpha/Shadow evidence SHA 필수
 - REAL 허용 `false`, broker path `LIVE_SIM_ONLY`
 
-이번 개발 검증은 fixture DB에서만 수행한다. 운영 DB migration, Core/Gateway 시작, 모의·실제
-브로커 요청 및 주문은 범위 밖이다.
+개발 검증은 fixture DB에서만 수행한다. 운영 DB, Core/Gateway, 모의·실제 브로커 요청 및 주문은
+별도 운영 승인 범위다.

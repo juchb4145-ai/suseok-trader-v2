@@ -269,9 +269,10 @@ POST /api/live-sim/automation/canary/run-once?queue_commands=false
 POST /api/live-sim/automation/canary/run-once?queue_commands=true
 ```
 
-외부 C1·Alpha·Shadow 증거의 SHA-256 결속과 current pipeline, broker snapshot,
-broker-boundary, lifecycle, preflight가 모두 PASS여야 cycle당 LIMIT BUY 한 건을 queue할 수 있다.
-non-PASS는 `PROTECT_ONLY` rollback latch를 남기며 자동 해제되지 않는다. 자세한 계약은
+최초 실행은 당일 공개 payload의 승인 SHA와 current pipeline, broker snapshot,
+broker-boundary, lifecycle, preflight가 모두 PASS일 때 LIMIT BUY 한 건만 queue한다. 같은 SHA는
+선예약으로 재사용되지 않는다. 이후 정규 자동화에는 bootstrap·Alpha·Shadow evidence SHA도
+필요하다. 준비 미완료 non-PASS는 무기록 차단하고 실제 실행 오류만 rollback latch를 남긴다. 자세한 계약은
 `docs/fast5_guarded_automatic_canary_ko.md`를 따른다.
 
 ## Rollback

@@ -465,8 +465,11 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_operating_loop_market_close_time == "15:20:00"
     assert settings.live_sim_fast5_automatic_canary_enabled is False
     assert settings.live_sim_fast5_auto_queue_enabled is False
-    assert settings.live_sim_fast5_manual_c1_status == "BLOCKED"
-    assert settings.live_sim_fast5_manual_c1_evidence_sha256 == ""
+    assert settings.live_sim_fast5_bootstrap_status == "BLOCKED"
+    assert settings.live_sim_fast5_bootstrap_trade_date == ""
+    assert settings.live_sim_fast5_bootstrap_approval_id == ""
+    assert settings.live_sim_fast5_bootstrap_approval_sha256 == ""
+    assert settings.live_sim_fast5_bootstrap_evidence_sha256 == ""
     assert settings.live_sim_fast5_alpha_status == "BLOCKED"
     assert settings.live_sim_fast5_alpha_evidence_sha256 == ""
     assert settings.live_sim_fast5_shadow_status == "BLOCKED"
@@ -1552,8 +1555,8 @@ def test_fast5_automatic_canary_settings_require_bound_evidence_and_hard_caps() 
         {
             "LIVE_SIM_FAST5_AUTOMATIC_CANARY_ENABLED": "true",
             "LIVE_SIM_FAST5_AUTO_QUEUE_ENABLED": "true",
-            "LIVE_SIM_FAST5_MANUAL_C1_STATUS": "PASS",
-            "LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256": sha256,
+            "LIVE_SIM_FAST5_BOOTSTRAP_STATUS": "PASS",
+            "LIVE_SIM_FAST5_BOOTSTRAP_EVIDENCE_SHA256": sha256,
             "LIVE_SIM_FAST5_ALPHA_STATUS": "ALPHA_QUALIFIED",
             "LIVE_SIM_FAST5_ALPHA_EVIDENCE_SHA256": sha256,
             "LIVE_SIM_FAST5_SHADOW_STATUS": "PASS",
@@ -1568,15 +1571,22 @@ def test_fast5_automatic_canary_settings_require_bound_evidence_and_hard_caps() 
 
     assert settings.live_sim_fast5_automatic_canary_enabled is True
     assert settings.live_sim_fast5_auto_queue_enabled is True
-    assert settings.live_sim_fast5_manual_c1_evidence_sha256 == sha256
+    assert settings.live_sim_fast5_bootstrap_status == "PASS"
+    assert settings.live_sim_fast5_bootstrap_evidence_sha256 == sha256
     assert settings.live_sim_fast5_alpha_status == "ALPHA_QUALIFIED"
     assert settings.live_sim_fast5_shadow_status == "PASS"
     assert settings.live_sim_fast5_rollback_ack_run_id == "fast5-run-reviewed"
     assert settings.live_sim_fast5_pipeline_max_age_sec == 30
 
     invalid_cases = (
-        {"LIVE_SIM_FAST5_MANUAL_C1_STATUS": "PASS"},
-        {"LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256": "B" * 64},
+        {"LIVE_SIM_FAST5_BOOTSTRAP_STATUS": "PASS"},
+        {"LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_SHA256": "B" * 64},
+        {
+            "LIVE_SIM_FAST5_BOOTSTRAP_STATUS": "PENDING",
+            "LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE": "2026-07-20",
+            "LIVE_SIM_FAST5_BOOTSTRAP_APPROVAL_ID": "approval-1",
+        },
+        {"LIVE_SIM_FAST5_BOOTSTRAP_TRADE_DATE": "20260720"},
         {"LIVE_SIM_FAST5_ALPHA_STATUS": "PASS"},
         {"LIVE_SIM_FAST5_SHADOW_STATUS": "READY"},
         {"LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE": "2"},

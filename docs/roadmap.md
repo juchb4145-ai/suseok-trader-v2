@@ -24,19 +24,19 @@ Master tracking issue는 GitHub Issue `#7`이다.
 | ---: | --- | --- | --- |
 | 0 | FAST-0 Post-Merge Qualification | RETIRED_HISTORICAL | 과거 개발단계 evidence는 보존하되 현재 gate에서 재검증하지 않음 |
 | 1 | FAST-1 Pure Preview | DONE | 현재 거래일의 시장 입력과 통합 LIVE_SIM 자격을 strict read-only로 계산 |
-| 2 | Operational Gate C1 | BLOCKED_BY_CURRENT_MARKET_DATA | 오늘 tick/index/context와 canary가 준비된 뒤 수동 1건 lifecycle 검증 |
+| 2 | Operational Bootstrap Canary | BLOCKED_BY_CURRENT_MARKET_DATA | 오늘 입력과 승인 SHA가 준비된 뒤 자동 1회 LIVE_SIM lifecycle 검증 |
 | 3 | FAST-2A/2B Alpha Replay + Profit Lab | DONE | 미래 데이터 누수 없는 비용 후 수익성 검증 |
 | 4 | FAST-3 Parallel Shadow | DONE | shadow와 모의체결 괴리 측정 |
 | 5 | FAST-4 Broker Snapshot Reconcile | DONE | 키움 모의계좌와 Core local truth 대사 |
-| 6 | FAST-5 Automatic Canary | BLOCKED_BY_C1_ALPHA_BROKER | default-off 자동화 구현 완료, 운영 evidence 대기 |
+| 6 | FAST-5 Automatic Canary | BLOCKED_BY_BOOTSTRAP | default-off 1회 bootstrap·정규 자동화 구현 완료, 운영 evidence 대기 |
 | 7 | FAST-6 Champion/Challenger | BLOCKED_BY_FAST_5 | file-only 비교·검토 코드 완료, FAST-5 운영 증거 대기 |
 
 Append-only 연속 10거래일 evidence는 inline 제거를 위한 장기 병렬 트랙이며,
-수동 LIVE_SIM 1건과 Alpha Replay 개발을 자동으로 차단하지 않는다.
+승인 결속 bootstrap 1건과 Alpha Replay 개발을 자동으로 차단하지 않는다.
 
 FAST-1의 `DONE`은 무기록 Preview 코드와 fixture 검증 완료를 뜻한다. 과거 FAST-0 evidence는
 `PASS`로 바꾸지 않고 감사 이력으로만 보존한다. 현재 거래일 tick/index/context가 없거나 canary가
-false이면 Operational Gate C1과 주문 실행은 계속 차단한다.
+false이면 Operational Bootstrap Canary와 주문 실행은 계속 차단한다.
 
 ## 완료된 PR
 
