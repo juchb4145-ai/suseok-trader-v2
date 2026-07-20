@@ -25,9 +25,9 @@ Master tracking issue는 GitHub Issue `#7`이다.
 | 0 | FAST-0 Post-Merge Qualification | RETIRED_HISTORICAL | 과거 개발단계 evidence는 보존하되 현재 gate에서 재검증하지 않음 |
 | 1 | FAST-1 Pure Preview | DONE | 현재 거래일의 시장 입력과 통합 LIVE_SIM 자격을 strict read-only로 계산 |
 | 2 | Operational Gate C1 | BLOCKED_BY_CURRENT_MARKET_DATA | 오늘 tick/index/context와 canary가 준비된 뒤 수동 1건 lifecycle 검증 |
-| 3 | FAST-2A/2B Alpha Replay + Profit Lab | NEXT | 미래 데이터 누수 없는 비용 후 수익성 검증 |
-| 4 | FAST-3 Parallel Shadow | BLOCKED | shadow와 모의체결 괴리 측정 |
-| 5 | FAST-4 Broker Snapshot Reconcile | BLOCKED | 키움 모의계좌와 Core local truth 대사 |
+| 3 | FAST-2A/2B Alpha Replay + Profit Lab | DONE | 미래 데이터 누수 없는 비용 후 수익성 검증 |
+| 4 | FAST-3 Parallel Shadow | DONE | shadow와 모의체결 괴리 측정 |
+| 5 | FAST-4 Broker Snapshot Reconcile | NEXT | 키움 모의계좌와 Core local truth 대사 |
 | 6 | FAST-5 Automatic Canary | BLOCKED | 일 1~2건 제한 자동 LIVE_SIM |
 | 7 | FAST-6 Champion/Challenger | BLOCKED | 검증된 전략 1개와 challenger 운영 |
 

@@ -11,7 +11,12 @@ from pathlib import Path
 from typing import Any, cast
 
 from domain.broker.events import GatewayEvent
-from domain.broker.utils import datetime_to_wire, parse_timestamp
+from domain.broker.utils import (
+    datetime_to_wire,
+    parse_timestamp,
+    require_non_empty_str,
+    validate_stock_code,
+)
 from domain.exit.policy import (
     ExitOrderStyle,
     ExitTrigger,
@@ -53,7 +58,7 @@ class AlphaReplayEvidence:
 
 
 @dataclass(frozen=True, kw_only=True)
-class _ReplayTick:
+class ExecutionTick:
     sequence: int
     event_id: str
     code: str
@@ -61,6 +66,42 @@ class _ReplayTick:
     price: int
     event_at: datetime
     available_at: datetime
+
+    def __post_init__(self) -> None:
+        if self.sequence < 1:
+            raise ValueError("sequence must be >= 1")
+        object.__setattr__(self, "event_id", require_non_empty_str(self.event_id, "event_id"))
+        object.__setattr__(self, "code", validate_stock_code(self.code))
+        exchange = require_non_empty_str(self.exchange, "exchange").upper()
+        if exchange not in {"KRX", "NXT"}:
+            raise ValueError("exchange must be KRX or NXT")
+        object.__setattr__(self, "exchange", exchange)
+        if int(self.price) <= 0:
+            raise ValueError("price must be > 0")
+        object.__setattr__(self, "price", int(self.price))
+        event_at = parse_timestamp(self.event_at, "event_at")
+        available_at = parse_timestamp(self.available_at, "available_at")
+        if event_at > available_at:
+            raise ValueError("event_at must not be after available_at")
+        object.__setattr__(self, "event_at", event_at)
+        object.__setattr__(self, "available_at", available_at)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sequence": self.sequence,
+            "event_id": self.event_id,
+            "code": self.code,
+            "exchange": self.exchange,
+            "price": self.price,
+            "event_at": datetime_to_wire(parse_timestamp(self.event_at, "event_at")),
+            "available_at": datetime_to_wire(
+                parse_timestamp(self.available_at, "available_at")
+            ),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> ExecutionTick:
+        return cls(**dict(value))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -238,7 +279,7 @@ def run_profit_lab(
         validation_ratio=resolved_config.validation_ratio,
     )
     trades = tuple(
-        _simulate(
+        simulate_conservative_execution(
             manifest.signals,
             ticks,
             config=resolved_config,
@@ -296,8 +337,8 @@ def run_profit_lab(
     )
 
 
-def _load_replay_ticks(events_path: Path) -> tuple[_ReplayTick, ...]:
-    ticks: list[_ReplayTick] = []
+def _load_replay_ticks(events_path: Path) -> tuple[ExecutionTick, ...]:
+    ticks: list[ExecutionTick] = []
     previous_available: datetime | None = None
     with events_path.open("r", encoding="utf-8") as stream:
         for line in stream:
@@ -320,7 +361,7 @@ def _load_replay_ticks(events_path: Path) -> tuple[_ReplayTick, ...]:
             if price <= 0:
                 continue
             ticks.append(
-                _ReplayTick(
+                ExecutionTick(
                     sequence=int(record["sequence"]),
                     event_id=event.event_id,
                     code=str(event.payload.get("code") or ""),
@@ -333,14 +374,14 @@ def _load_replay_ticks(events_path: Path) -> tuple[_ReplayTick, ...]:
     return tuple(ticks)
 
 
-def _simulate(
+def simulate_conservative_execution(
     signals: Sequence[ProfitLabSignal],
-    ticks: Sequence[_ReplayTick],
+    ticks: Sequence[ExecutionTick],
     *,
     config: ProfitLabConfig,
     split_by_date: Mapping[str, str],
 ) -> list[ProfitLabTrade]:
-    by_instrument: dict[tuple[str, str], list[_ReplayTick]] = defaultdict(list)
+    by_instrument: dict[tuple[str, str], list[ExecutionTick]] = defaultdict(list)
     for tick in ticks:
         by_instrument[(tick.code, tick.exchange)].append(tick)
     ordered_signals = sorted(
@@ -360,7 +401,7 @@ def _simulate(
 
 def _simulate_signal(
     signal: ProfitLabSignal,
-    ticks: Sequence[_ReplayTick],
+    ticks: Sequence[ExecutionTick],
     *,
     config: ProfitLabConfig,
     dataset_split: str,
@@ -523,12 +564,12 @@ def _simulate_signal(
 
 
 def _find_exit_fill(
-    ticks: Sequence[_ReplayTick],
+    ticks: Sequence[ExecutionTick],
     *,
     trigger_index: int,
     trigger: ExitTrigger,
     config: ProfitLabConfig,
-) -> tuple[_ReplayTick, int] | None:
+) -> tuple[ExecutionTick, int] | None:
     trigger_tick = ticks[trigger_index]
     eligible_at = trigger_tick.available_at + timedelta(milliseconds=config.exit_latency_ms)
     expires_at = trigger_tick.available_at + timedelta(seconds=config.exit_ttl_sec)
@@ -629,7 +670,7 @@ def _compact_group_metrics(trades: Sequence[ProfitLabTrade]) -> dict[str, Any]:
 
 def _stress_matrix(
     signals: Sequence[ProfitLabSignal],
-    ticks: Sequence[_ReplayTick],
+    ticks: Sequence[ExecutionTick],
     *,
     config: ProfitLabConfig,
     split_by_date: Mapping[str, str],
@@ -666,7 +707,7 @@ def _stress_matrix(
     result: list[dict[str, Any]] = []
     eligible = _eligible_count(signals)
     for scenario, scenario_config in scenarios:
-        trades = _simulate(
+        trades = simulate_conservative_execution(
             signals,
             ticks,
             config=scenario_config,

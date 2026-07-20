@@ -1,0 +1,92 @@
+{
+  "format": "parallel-shadow-input/v1",
+  "snapshot_id": "fixture-shadow-snapshot-1",
+  "generated_at": "2026-07-20T00:00:02Z",
+  "trade_date": "2026-07-20",
+  "plan_coverage_complete": true,
+  "source_plan_count": 1,
+  "source_plan_ids_sha256": "507cd605cae533d8acb7aa795e827b8495e95a879c89e7305d73125fc8eb4b1a",
+  "plans": [
+    {
+      "order_plan_id": "plan-fixture-1",
+      "trade_date": "2026-07-20",
+      "code": "005930",
+      "created_at": "2026-07-20T00:00:00Z",
+      "limit_price": 100,
+      "quantity": 1,
+      "entry_timing_evaluation_id": "entry-fixture-1",
+      "strategy_observation_id": "strategy-fixture-1",
+      "risk_observation_id": "risk-fixture-1",
+      "source_run_id": "source-run-fixture-1",
+      "source_watermark": {
+        "market_data": {
+          "event_id": "tick-0",
+          "rowid": 10
+        }
+      },
+      "source_watermark_hash": "c19ae792d7ee50316cadb11c93f8b09ca7833d4e201280f6e44c1a07b8d8880a",
+      "status": "PLAN_READY",
+      "coherent": true,
+      "exchange": "KRX",
+      "setup_type": "BREAKOUT",
+      "regime": "RISK_ON",
+      "theme": "SEMICONDUCTOR",
+      "ai_influenced": false
+    }
+  ],
+  "ticks": [
+    {
+      "sequence": 1,
+      "event_id": "tick-1",
+      "code": "005930",
+      "exchange": "KRX",
+      "price": 99,
+      "event_at": "2026-07-20T00:00:00.290000Z",
+      "available_at": "2026-07-20T00:00:00.300000Z"
+    },
+    {
+      "sequence": 2,
+      "event_id": "tick-2",
+      "code": "005930",
+      "exchange": "KRX",
+      "price": 110,
+      "event_at": "2026-07-20T00:00:00.590000Z",
+      "available_at": "2026-07-20T00:00:00.600000Z"
+    },
+    {
+      "sequence": 3,
+      "event_id": "tick-3",
+      "code": "005930",
+      "exchange": "KRX",
+      "price": 110,
+      "event_at": "2026-07-20T00:00:00.890000Z",
+      "available_at": "2026-07-20T00:00:00.900000Z"
+    }
+  ],
+  "preflight": {
+    "status": "PASS",
+    "kill_switch_active": false,
+    "live_buy_allowed": true,
+    "reason_codes": []
+  },
+  "live_sim_observations": [
+    {
+      "order_plan_id": "plan-fixture-1",
+      "live_sim_intent_id": "live-intent-fixture-1",
+      "live_sim_order_id": "live-order-fixture-1",
+      "requested_quantity": 1,
+      "filled_quantity": 1,
+      "execution_ids": ["live-execution-fixture-1"],
+      "position_id": "live-position-fixture-1",
+      "avg_fill_price": 100,
+      "first_filled_at": "2026-07-20T00:00:00.300000Z",
+      "exit_reason": "TAKE_PROFIT",
+      "closed_at": "2026-07-20T00:00:00.900000Z",
+      "holding_sec": 0.6,
+      "gross_pnl": 5.0,
+      "net_pnl": 2.69
+    }
+  ],
+  "ai_advisory_only": true,
+  "live_real_allowed": false
+}
