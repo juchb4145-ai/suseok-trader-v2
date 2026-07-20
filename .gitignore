@@ -22,6 +22,7 @@ dist/
 
 reports/
 logs/
+storage/replay/
 
 *.sqlite
 *.sqlite3
