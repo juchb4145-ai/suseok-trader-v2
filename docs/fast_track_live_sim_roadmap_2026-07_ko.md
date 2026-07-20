@@ -97,10 +97,10 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 
 | 단계 | 상태 | 의존성 | 핵심 산출물 |
 | --- | --- | --- | --- |
-| FAST-0 Post-Merge Qualification | `DEFERRED_HISTORICAL` | 과거 blocker는 미해결 상태로 보존 | 운영 baseline·처리 manifest 보존, PASS 주장 금지 |
-| FAST-1 Pure Preview | `DONE` | current-trade-date-only 예외, 운영 승격 비승인 | strict read-only 무기록 preview API |
-| Operational Gate C1 | `BLOCKED_BY_FAST_0` | FAST-0 PASS와 Preview PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
-| FAST-2A Point-in-Time Replay | `BLOCKED_BY_FAST_0` | FAST-0 PASS | virtual-clock replay |
+| FAST-0 Post-Merge Qualification | `RETIRED_HISTORICAL` | 과거 개발단계 evidence는 현재 gate에 재사용하지 않음 | 원 evidence 보존, PASS 주장·재검증 금지 |
+| FAST-1 Pure Preview | `DONE` | current-trade-date-only, 운영 승격 비승인 | strict read-only 무기록 preview API와 현재 시장 입력 guard |
+| Operational Gate C1 | `BLOCKED_BY_CURRENT_MARKET_DATA` | 현재 시장 입력 READY, Preview canary PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
+| FAST-2A Point-in-Time Replay | `NEXT` | 현재 코드·격리 replay 입력 | virtual-clock replay |
 | FAST-2B Profit Lab | `BLOCKED_BY_FAST_2A` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
 | FAST-3 Parallel Shadow | `BLOCKED_BY_FAST_2B` | Profit Lab model 고정 | shadow/live comparison |
 | FAST-4 Broker Snapshot Reconcile | `BLOCKED_BY_FAST_1` | Gateway query contract | broker/local reconcile |
@@ -115,16 +115,18 @@ NEXT
 IN_PROGRESS
 BLOCKED
 BLOCKED_BY_<STAGE>
-DEFERRED_HISTORICAL
+RETIRED_HISTORICAL
+BLOCKED_BY_CURRENT_MARKET_DATA
 READY_FOR_REVIEW
 DONE
 ROLLED_BACK
 ```
 
-`DEFERRED_HISTORICAL`은 과거 blocker를 해결·삭제·면제했다는 뜻이 아니다. 사용자는 2026-07-20
-과거 pipeline 증거 campaign을 더 진행하지 않고 current-trade-date-only FAST-1 코드 개발로 전환했다.
-이 예외는 `POST /api/live-sim/pilot/preview`의 strict read-only 계산에만 적용한다. Operational Gate C1,
-실제 LIVE_SIM 활성화, 주문·broker 호출과 FAST-0 `PASS`에는 적용하지 않는다.
+`RETIRED_HISTORICAL`은 과거 blocker를 해결·삭제하거나 `PASS`로 바꾼다는 뜻이 아니다. 사용자는
+2026-07-20 과거 개발단계 pipeline evidence를 현재 gate에서 재검증하지 않기로 결정했다. 원본은
+감사 이력으로 보존하되 현재 진입 판단은 `POST /api/live-sim/pilot/preview`가 같은 snapshot에서 확인한
+현재 거래일 시장 입력과 canary 결과만 사용한다. 이 결정 자체가 LIVE_SIM 활성화, 주문 또는 broker
+호출을 승인하지는 않는다.
 
 ## 5. FAST-0 — Post-Merge Qualification
 
@@ -411,6 +413,7 @@ SQLite URI `mode=ro`와 `PRAGMA query_only=ON`으로 열고 단일 deferred snap
 - broker-boundary blocker
 - duplicate intent 여부
 - active order/position
+- 현재 거래일 KRX tick, KOSPI/KOSDAQ index/context의 fresh count와 pipeline 단계별 count
 - deterministic top candidate
 - `canary_ready`
 - `preview_only=true`
@@ -449,6 +452,7 @@ dry_run_*
 
 - Preview 금지 테이블 delta 0
 - `mode=ro`, `query_only=ON`, 단일 snapshot 확인
+- 현재 거래일 fresh stock tick 1건 이상, fresh KOSPI/KOSDAQ index/context 각 2건
 - 기존 eligibility와 preview 결과 일치
 - lineage FAIL, duplicate intent, reconcile mismatch, UNCONFIRMED plan 선택 불가
 - stable tie-breaker로 동일 입력의 top candidate 동일
@@ -473,7 +477,7 @@ reports/fast_track/fast_1_preview/<timestamp>/
 
 ### 선행 조건
 
-- FAST-0 PASS
+- current market readiness `READY`
 - FAST-1 Preview `canary_ready=true`
 - KRX regular session
 - Kiwoom `server_mode=SIMULATION`

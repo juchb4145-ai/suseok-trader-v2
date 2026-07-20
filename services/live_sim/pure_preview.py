@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any
 
-from domain.broker.utils import datetime_to_wire, market_today, utc_now
+from domain.broker.utils import (
+    MARKET_TIMEZONE,
+    datetime_to_wire,
+    market_today,
+    utc_now,
+)
 from domain.live_sim.reasons import LiveSimReasonCode
 
 from services.config import Settings
@@ -16,8 +22,8 @@ from services.live_sim.order_plan_eligibility import (
     select_live_sim_order_plan_candidates,
 )
 
-FAST1_PREVIEW_CONTRACT = "fast1-pure-live-sim-preview.v1"
-FAST0_TRANSITION_STATUS = "DEFERRED_HISTORICAL"
+FAST1_PREVIEW_CONTRACT = "fast1-pure-live-sim-preview.v2"
+FAST0_TRANSITION_STATUS = "RETIRED_HISTORICAL"
 _DEFAULT_LIMIT = 5
 _MAX_LIMIT = 20
 _FORBIDDEN_SIDE_EFFECT_TABLES = (
@@ -110,6 +116,11 @@ def build_fast1_pure_preview(
         ]
         status = get_live_sim_status(connection, settings=settings)
         reconcile = _latest_reconcile_state(connection)
+        current_market = _current_market_state(
+            connection,
+            trade_date=selected_trade_date,
+            settings=settings,
+        )
         plans = [
             _preview_plan(rank=index, source=row, eligibility=eligibility)
             for index, (row, eligibility) in enumerate(
@@ -129,7 +140,11 @@ def build_fast1_pure_preview(
                 "FAST-1 preview changed a forbidden table",
             )
 
-        blocker_reason_codes = _blocker_reason_codes(plans, reconcile=reconcile)
+        blocker_reason_codes = _blocker_reason_codes(
+            plans,
+            reconcile=reconcile,
+            current_market=current_market,
+        )
         canary_ready = top_candidate is not None and not blocker_reason_codes
         return {
             "contract": FAST1_PREVIEW_CONTRACT,
@@ -139,7 +154,9 @@ def build_fast1_pure_preview(
                 "fast0_status": FAST0_TRANSITION_STATUS,
                 "historical_blockers_resolved": False,
                 "historical_data_mutated": False,
+                "historical_qualification_required": False,
                 "scope": "CURRENT_TRADE_DATE_ONLY",
+                "current_gate_dependency": "CURRENT_MARKET_AND_CANARY",
                 "operational_activation_authorized": False,
             },
             "selection": {
@@ -161,6 +178,7 @@ def build_fast1_pure_preview(
                 "active_position_count": int(status.get("open_position_count") or 0),
                 "reconcile": reconcile,
             },
+            "current_market": current_market,
             "side_effect_guard": {
                 "opened_read_only": True,
                 "query_only": True,
@@ -264,8 +282,9 @@ def _blocker_reason_codes(
     plans: Sequence[Mapping[str, Any]],
     *,
     reconcile: Mapping[str, Any],
+    current_market: Mapping[str, Any],
 ) -> list[str]:
-    reasons: list[str] = []
+    reasons = [str(value).upper() for value in current_market.get("reason_codes") or []]
     selectable = [plan for plan in plans if plan.get("selectable") is True]
     if not plans:
         reasons.append("NO_CURRENT_PLAN_READY")
@@ -277,6 +296,173 @@ def _blocker_reason_codes(
     if reconcile.get("blocking_new_buy") is True:
         reasons.append(LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value)
     return list(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def _current_market_state(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str,
+    settings: Settings,
+) -> dict[str, Any]:
+    start_at, end_at = _market_day_utc_bounds(trade_date)
+    now = utc_now()
+    now_at = datetime_to_wire(now)
+    stock_fresh_at = datetime_to_wire(
+        now - timedelta(seconds=settings.market_data_tick_stale_sec)
+    )
+    index_fresh_at = datetime_to_wire(
+        now - timedelta(seconds=settings.market_index_stale_sec)
+    )
+    context_fresh_at = datetime_to_wire(
+        now - timedelta(seconds=settings.market_context_snapshot_stale_sec)
+    )
+    stock_tick = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN event_ts >= ? AND event_ts < ? THEN 1 ELSE 0 END)
+                AS count,
+            SUM(CASE WHEN event_ts >= ? AND event_ts <= ? THEN 1 ELSE 0 END)
+                AS fresh_count,
+            MAX(CASE WHEN event_ts >= ? AND event_ts < ? THEN event_ts END)
+                AS latest_current_at,
+            MAX(event_ts) AS latest_available_at,
+            MAX(received_at) AS latest_received_at
+        FROM market_ticks_latest
+        WHERE exchange = 'KRX'
+        """,
+        (start_at, end_at, stock_fresh_at, now_at, start_at, end_at),
+    ).fetchone()
+    index_tick = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN event_ts >= ? AND event_ts < ? THEN 1 ELSE 0 END)
+                AS count,
+            SUM(CASE WHEN event_ts >= ? AND event_ts <= ? THEN 1 ELSE 0 END)
+                AS fresh_count,
+            MAX(CASE WHEN event_ts >= ? AND event_ts < ? THEN event_ts END)
+                AS latest_current_at,
+            MAX(event_ts) AS latest_available_at,
+            MAX(received_at) AS latest_received_at
+        FROM market_index_ticks_latest
+        WHERE index_code IN ('KOSPI', 'KOSDAQ')
+        """,
+        (start_at, end_at, index_fresh_at, now_at, start_at, end_at),
+    ).fetchone()
+    market_context = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN trade_date = ? THEN 1 ELSE 0 END) AS count,
+            SUM(CASE WHEN trade_date = ? AND snapshot_at >= ? AND snapshot_at <= ?
+                THEN 1 ELSE 0 END) AS fresh_count,
+            MAX(CASE WHEN trade_date = ? THEN snapshot_at END) AS latest_current_at,
+            MAX(snapshot_at) AS latest_available_at
+        FROM market_context_latest
+        WHERE market IN ('KOSPI', 'KOSDAQ')
+        """,
+        (trade_date, trade_date, context_fresh_at, now_at, trade_date),
+    ).fetchone()
+    market_scan = connection.execute(
+        """
+        SELECT
+            SUM(CASE WHEN scanned_at >= ? AND scanned_at < ? THEN 1 ELSE 0 END)
+                AS count,
+            MAX(CASE WHEN scanned_at >= ? AND scanned_at < ? THEN scanned_at END)
+                AS latest_current_at,
+            MAX(scanned_at) AS latest_available_at
+        FROM market_scan_latest
+        """,
+        (start_at, end_at, start_at, end_at),
+    ).fetchone()
+
+    stock_tick_count = int(stock_tick["count"] or 0)
+    fresh_stock_tick_count = int(stock_tick["fresh_count"] or 0)
+    index_tick_count = int(index_tick["count"] or 0)
+    fresh_index_tick_count = int(index_tick["fresh_count"] or 0)
+    market_context_count = int(market_context["count"] or 0)
+    fresh_market_context_count = int(market_context["fresh_count"] or 0)
+    reason_codes: list[str] = []
+    if stock_tick_count == 0:
+        reason_codes.append("NO_CURRENT_MARKET_TICK")
+    elif fresh_stock_tick_count == 0:
+        reason_codes.append("CURRENT_MARKET_TICK_STALE")
+    if index_tick_count < 2:
+        reason_codes.append("NO_CURRENT_MARKET_INDEX")
+    elif fresh_index_tick_count < 2:
+        reason_codes.append("CURRENT_MARKET_INDEX_STALE")
+    if market_context_count < 2:
+        reason_codes.append("NO_CURRENT_MARKET_CONTEXT")
+    elif fresh_market_context_count < 2:
+        reason_codes.append("CURRENT_MARKET_CONTEXT_STALE")
+
+    return {
+        "status": "READY" if not reason_codes else "BLOCKED",
+        "reason_codes": reason_codes,
+        "trade_date": trade_date,
+        "utc_window": {"start_at": start_at, "end_at": end_at},
+        "evaluated_at": now_at,
+        "stock_ticks": {
+            "count": stock_tick_count,
+            "fresh_count": fresh_stock_tick_count,
+            "stale_after_sec": settings.market_data_tick_stale_sec,
+            "latest_current_at": stock_tick["latest_current_at"],
+            "latest_available_at": stock_tick["latest_available_at"],
+            "latest_received_at": stock_tick["latest_received_at"],
+        },
+        "market_indexes": {
+            "required": ["KOSPI", "KOSDAQ"],
+            "count": index_tick_count,
+            "fresh_count": fresh_index_tick_count,
+            "stale_after_sec": settings.market_index_stale_sec,
+            "latest_current_at": index_tick["latest_current_at"],
+            "latest_available_at": index_tick["latest_available_at"],
+            "latest_received_at": index_tick["latest_received_at"],
+        },
+        "market_contexts": {
+            "required": ["KOSPI", "KOSDAQ"],
+            "count": market_context_count,
+            "fresh_count": fresh_market_context_count,
+            "stale_after_sec": settings.market_context_snapshot_stale_sec,
+            "latest_current_at": market_context["latest_current_at"],
+            "latest_available_at": market_context["latest_available_at"],
+        },
+        "market_scan": {
+            "required": False,
+            "count": int(market_scan["count"] or 0),
+            "latest_current_at": market_scan["latest_current_at"],
+            "latest_available_at": market_scan["latest_available_at"],
+        },
+        "pipeline": _current_pipeline_counts(connection, trade_date=trade_date),
+    }
+
+
+def _current_pipeline_counts(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str,
+) -> dict[str, int]:
+    tables = (
+        "candidates",
+        "candidate_sources_latest",
+        "strategy_observations_latest",
+        "risk_observations_latest",
+        "entry_timing_evaluations",
+        "order_plan_drafts_latest",
+    )
+    return {
+        table: int(
+            connection.execute(
+                f'SELECT COUNT(*) AS count FROM "{table}" WHERE trade_date = ?',
+                (trade_date,),
+            ).fetchone()["count"]
+        )
+        for table in tables
+    }
+
+
+def _market_day_utc_bounds(trade_date: str) -> tuple[str, str]:
+    parsed_date = date.fromisoformat(trade_date)
+    start = datetime.combine(parsed_date, time.min, tzinfo=MARKET_TIMEZONE)
+    return datetime_to_wire(start), datetime_to_wire(start + timedelta(days=1))
 
 
 def _latest_reconcile_state(connection: sqlite3.Connection) -> dict[str, Any]:

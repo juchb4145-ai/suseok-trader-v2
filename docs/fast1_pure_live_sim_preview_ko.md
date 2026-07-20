@@ -8,10 +8,11 @@ active order/position 상태와 함께 계산한다. 기존 Strategy/Risk/EntryT
 
 ## FAST-0 전환 경계
 
-- 과거 FAST-0 pipeline blocker는 `DEFERRED_HISTORICAL`로 보존한다.
+- 과거 FAST-0 pipeline evidence는 `RETIRED_HISTORICAL`로 보존한다.
 - 과거 row를 해결·삭제·수정하거나 `PASS`로 바꾸지 않는다.
-- FAST-1 예외는 current-trade-date-only 무기록 계산에만 적용한다.
-- Operational Gate C1, LIVE_SIM/LIVE_REAL 활성화, 주문 또는 broker 호출은 승인하지 않는다.
+- 과거 개발단계 evidence는 현재 gate에서 다시 검증하거나 진입 조건으로 사용하지 않는다.
+- 현재 gate는 current-trade-date-only 시장 입력과 canary 결과만 사용한다.
+- 이 전환 자체는 LIVE_SIM/LIVE_REAL 활성화, 주문 또는 broker 호출을 승인하지 않는다.
 
 ## 호출
 
@@ -30,6 +31,7 @@ X-Local-Token: <local operator token>
 - `PRAGMA query_only=ON`
 - 단일 `BEGIN DEFERRED` snapshot
 - 기존 `evaluate_live_sim_order_plan_eligibility()` 재사용
+- 현재 거래일 fresh KRX stock tick 1건 이상과 fresh KOSPI/KOSDAQ index/context 각 2건 요구
 - selection 순서: `priority_score DESC`, `created_at DESC`, `order_plan_id ASC`
 - AI advisory는 import하거나 selection input으로 사용하지 않음
 - raw account ID는 응답에 포함하지 않음
@@ -60,6 +62,13 @@ Preview는 조회한 plan을 deterministic 순서로 반환한다. 기존 eligib
 `selectable=true`이며 첫 selectable plan을 `top_candidate`로 정한다. Lineage FAIL, duplicate intent,
 reconcile mismatch, effective broker-boundary blocker 또는 기존 safety reason이 있는 plan은 선택하지
 않는다.
+
+`current_market`은 같은 snapshot에서 오늘 KRX stock tick, KOSPI/KOSDAQ index/context, 선택적
+market scan과 후보→전략→리스크→진입→주문계획 count를 반환한다. 필수 입력이 없으면 각각
+`NO_CURRENT_MARKET_TICK`, `NO_CURRENT_MARKET_INDEX`, `NO_CURRENT_MARKET_CONTEXT`를 반환하고
+오늘 입력이 있지만 설정된 stale 기준을 넘으면 각각 `CURRENT_MARKET_TICK_STALE`,
+`CURRENT_MARKET_INDEX_STALE`, `CURRENT_MARKET_CONTEXT_STALE`를 반환한다. 어느 경우든 selectable
+plan이 있더라도 `canary_ready=false`로 판정한다.
 
 `canary_ready=true`는 현재 입력에 대해 선택 가능한 Preview plan이 있다는 뜻일 뿐이다. 다음을
 승인하지 않는다.
