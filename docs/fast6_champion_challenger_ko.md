@@ -116,6 +116,6 @@ broker_call_count=0
 ## 다음 운영 조건
 
 코드 병합은 FAST-6 운영 승급을 뜻하지 않는다. 실제 Champion 교체를 검토하려면 먼저
-FAST-5의 C1, Alpha, Shadow, broker reconcile과 자동 rollback 증거가 모두 PASS여야 한다.
+FAST-5의 bootstrap lifecycle, Alpha, Shadow, broker reconcile과 자동 rollback 증거가 모두 PASS여야 한다.
 그 뒤에도 이 보고서는 검토 자료일 뿐이며 설정 변경과 LIVE_SIM 활성화는 별도 승인된 운영
 절차에서만 수행한다.

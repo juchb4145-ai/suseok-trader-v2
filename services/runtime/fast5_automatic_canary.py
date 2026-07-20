@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -25,7 +27,6 @@ from services.live_sim.live_sim_service import get_latest_live_sim_reconcile
 from services.pipeline_coherency import build_pipeline_coherency_status
 from services.runtime.live_sim_operating_orchestrator import (
     LiveSimOperatingRunResult,
-    list_live_sim_operating_runs,
     run_live_sim_operating_cycle_once,
     save_live_sim_operating_run,
 )
@@ -36,7 +37,12 @@ from services.runtime.preflight import (
     run_live_sim_preflight,
 )
 
-FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v1"
+FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v2"
+FAST5_ROLLBACK_POLICY_VERSIONS = {
+    "fast5-guarded-automatic-canary.v1",
+    FAST5_POLICY_VERSION,
+}
+FAST5_BOOTSTRAP_APPROVAL_CONTRACT = "fast5-bootstrap-automatic-canary-approval.v1"
 
 
 class Fast5CanaryMode(StrEnum):
@@ -44,15 +50,23 @@ class Fast5CanaryMode(StrEnum):
     PROTECT_ONLY = "PROTECT_ONLY"
 
 
+class Fast5CanaryPhase(StrEnum):
+    BLOCKED = "BLOCKED"
+    BOOTSTRAP = "BOOTSTRAP"
+    QUALIFIED = "QUALIFIED"
+
+
 @dataclass(frozen=True, kw_only=True)
 class Fast5AutomaticCanaryGate:
     status: Fast5CanaryMode
     trade_date: str
     queue_commands_requested: bool
+    phase: Fast5CanaryPhase = Fast5CanaryPhase.BLOCKED
     reason_codes: Sequence[str] = field(default_factory=tuple)
     checks: Mapping[str, Any] = field(default_factory=dict)
     effective_limits: Mapping[str, Any] = field(default_factory=dict)
     rollback_latch: Mapping[str, Any] = field(default_factory=dict)
+    bootstrap_approval: Mapping[str, Any] = field(default_factory=dict)
     evaluated_at: str = field(default_factory=lambda: datetime_to_wire(utc_now()))
 
     @property
@@ -63,6 +77,7 @@ class Fast5AutomaticCanaryGate:
         return {
             "policy_version": FAST5_POLICY_VERSION,
             "status": self.status.value,
+            "phase": self.phase.value,
             "ready": self.ready,
             "trade_date": self.trade_date,
             "queue_commands_requested": self.queue_commands_requested,
@@ -70,6 +85,7 @@ class Fast5AutomaticCanaryGate:
             "checks": normalize_value(dict(self.checks)),
             "effective_limits": normalize_value(dict(self.effective_limits)),
             "rollback_latch": normalize_value(dict(self.rollback_latch)),
+            "bootstrap_approval": normalize_value(dict(self.bootstrap_approval)),
             "evaluated_at": self.evaluated_at,
             "live_sim_only": True,
             "live_real_allowed": False,
@@ -90,6 +106,7 @@ class Fast5AutomaticCanaryRunResult:
     gate: Fast5AutomaticCanaryGate
     operating_run: Mapping[str, Any] | None = None
     rollback_latched: bool = False
+    side_effects_unknown: bool = False
     created_at: str = field(default_factory=lambda: datetime_to_wire(utc_now()))
 
     def to_dict(self) -> dict[str, Any]:
@@ -116,14 +133,63 @@ class Fast5AutomaticCanaryRunResult:
             "gate": self.gate.to_dict(),
             "operating_run": normalize_value(self.operating_run),
             "rollback_latched": self.rollback_latched,
+            "side_effects_unknown": self.side_effects_unknown,
             "created_at": self.created_at,
             "live_sim_only": True,
             "live_real_allowed": False,
             "broker_order_path": "LIVE_SIM_ONLY",
             "ai_routing_effect": 0,
             "automatic_local_repair": False,
-            "no_order_side_effects": command_count == 0,
+            "no_order_side_effects": command_count == 0
+            and not self.side_effects_unknown,
         }
+
+
+def build_fast5_bootstrap_approval(
+    settings: Settings,
+    *,
+    trade_date: str,
+) -> dict[str, Any]:
+    """Build the public, deterministic approval contract for one SIM bootstrap BUY."""
+
+    strict = _strict_fast5_settings(settings, bootstrap=True)
+    payload = {
+        "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+        "policy_version": FAST5_POLICY_VERSION,
+        "approval_id": settings.live_sim_fast5_bootstrap_approval_id,
+        "trade_date": str(trade_date),
+        "one_shot": True,
+        "mode": OperatingMode.PILOT_BUY_ONLY.value,
+        "trading_mode": "LIVE_SIM",
+        "live_real_allowed": False,
+        "exchange": "KRX",
+        "allowed_side": "BUY",
+        "order_type": "LIMIT",
+        "max_buy_commands": 1,
+        "max_daily_buy_count": 1,
+        "max_order_notional": strict.live_sim_max_order_notional,
+        "max_active_orders": 1,
+        "max_active_positions": 1,
+        "scale_in_allowed": False,
+        "ai_routing_effect": 0,
+        "automatic_reprice": False,
+    }
+    canonical_json = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    expected_sha256 = hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
+    configured_sha256 = settings.live_sim_fast5_bootstrap_approval_sha256
+    return {
+        "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+        "payload": payload,
+        "canonical_json": canonical_json,
+        "expected_sha256": expected_sha256,
+        "configured_sha256": configured_sha256 or None,
+        "matches": bool(configured_sha256 == expected_sha256),
+    }
 
 
 def evaluate_fast5_automatic_canary_gate(
@@ -184,14 +250,21 @@ def run_fast5_automatic_canary_once(
                 gate=gate,
                 rollback_latched=True,
             )
-        operating = _protect_only_operating_run(
-            run_id=run_id,
-            trade_date=gate.trade_date,
-            preflight=preflight,
-            gate=gate,
-            rollback_latched=True,
-        )
-        _save_fast5_operating_run(connection, operating, resolved_settings)
+        if (
+            gate.phase is Fast5CanaryPhase.BOOTSTRAP
+            and "FAST5_BOOTSTRAP_ALREADY_CONSUMED" in gate.reason_codes
+            and resolved_settings.live_sim_fast5_automatic_canary_enabled
+            and resolved_settings.live_sim_fast5_auto_queue_enabled
+            and resolved_settings.live_sim_pilot_auto_queue_command
+            and resolved_settings.live_sim_operating_write_runs
+        ):
+            return _run_consumed_bootstrap_protection(
+                connection,
+                settings=resolved_settings,
+                gate=gate,
+                run_id=run_id,
+                limit=limit,
+            )
         return Fast5AutomaticCanaryRunResult(
             run_id=run_id,
             status="PROTECT_ONLY",
@@ -199,21 +272,99 @@ def run_fast5_automatic_canary_once(
             queue_commands_requested=True,
             queue_commands_effective=False,
             gate=gate,
-            operating_run=operating.to_dict(),
-            rollback_latched=True,
+            rollback_latched=False,
         )
 
-    strict_settings = _strict_fast5_settings(resolved_settings)
-    operating = run_live_sim_operating_cycle_once(
-        connection,
-        settings=replace(strict_settings, live_sim_operating_write_runs=False),
-        mode=OperatingMode.PILOT_BUY_ONLY,
-        queue_commands=True,
-        trade_date=gate.trade_date,
-        limit=limit,
-        include_ai=False,
-        include_no_buy=True,
-    )
+    bootstrap = gate.phase is Fast5CanaryPhase.BOOTSTRAP
+    bootstrap_reservation_run_id: str | None = None
+    if bootstrap:
+        reserved, bootstrap_reservation_run_id = _reserve_bootstrap_once(
+            connection,
+            settings=resolved_settings,
+            gate=gate,
+            preflight=preflight,
+        )
+        if not reserved:
+            refreshed_gate, _ = _evaluate_gate(
+                connection,
+                settings=resolved_settings,
+                trade_date=gate.trade_date,
+                queue_commands=True,
+            )
+            return Fast5AutomaticCanaryRunResult(
+                run_id=run_id,
+                status="PROTECT_ONLY",
+                mode=OperatingMode.PROTECT_ONLY,
+                queue_commands_requested=True,
+                queue_commands_effective=False,
+                gate=refreshed_gate,
+                operating_run={
+                    "bootstrap_reservation_run_id": bootstrap_reservation_run_id
+                },
+            )
+
+    strict_settings = _strict_fast5_settings(resolved_settings, bootstrap=bootstrap)
+    try:
+        operating = run_live_sim_operating_cycle_once(
+            connection,
+            settings=replace(strict_settings, live_sim_operating_write_runs=False),
+            mode=OperatingMode.PILOT_BUY_ONLY,
+            queue_commands=True,
+            trade_date=gate.trade_date,
+            limit=limit,
+            include_ai=False,
+            include_no_buy=True,
+        )
+    except Exception as exc:
+        failed = LiveSimOperatingRunResult(
+            run_id=run_id,
+            trade_date=gate.trade_date,
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands=True,
+            preflight=preflight,
+            status="PROTECT_ONLY",
+            errors=(
+                {
+                    "stage": "fast5_operating_cycle",
+                    "error_type": type(exc).__name__,
+                },
+            ),
+            reason_summary={
+                "policy": FAST5_POLICY_VERSION,
+                "fast5_automatic_canary": gate.to_dict(),
+                "fast5_bootstrap": (
+                    {
+                        "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+                        "approval_id": resolved_settings.live_sim_fast5_bootstrap_approval_id,
+                        "approval_sha256": (
+                            resolved_settings.live_sim_fast5_bootstrap_approval_sha256
+                        ),
+                        "trade_date": gate.trade_date,
+                        "reservation_run_id": bootstrap_reservation_run_id,
+                        "one_shot_consumed": True,
+                    }
+                    if bootstrap
+                    else None
+                ),
+                "rollback_latched": True,
+            },
+        )
+        _save_fast5_operating_run(connection, failed, resolved_settings)
+        return Fast5AutomaticCanaryRunResult(
+            run_id=run_id,
+            status="PROTECT_ONLY",
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands_requested=True,
+            queue_commands_effective=True,
+            gate=gate,
+            operating_run={
+                **failed.to_dict(),
+                "no_order_side_effects": False,
+                "side_effects_unknown": True,
+            },
+            rollback_latched=True,
+            side_effects_unknown=True,
+        )
     invariant_errors: list[dict[str, Any]] = []
     if operating.buy_command_count > 1:
         invariant_errors.append(
@@ -235,16 +386,35 @@ def run_fast5_automatic_canary_once(
         or operating.preflight.status is not PreflightStatus.PASS
         or operating.status not in {"COMPLETED", "READY"}
     )
+    successful_status = operating.status
+    if bootstrap and not rollback_latched:
+        successful_status = (
+            "BOOTSTRAP_QUEUED"
+            if operating.buy_command_count == 1
+            else "BOOTSTRAP_NO_COMMAND"
+        )
     enriched = replace(
         operating,
         run_id=run_id,
-        status="PROTECT_ONLY" if rollback_latched else operating.status,
+        status="PROTECT_ONLY" if rollback_latched else successful_status,
         errors=tuple([*operating.errors, *invariant_errors]),
         reason_summary={
             **dict(operating.reason_summary),
             "fast5_automatic_canary": gate.to_dict(),
             "policy": FAST5_POLICY_VERSION,
             "rollback_latched": rollback_latched,
+            "fast5_bootstrap": (
+                {
+                    "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+                    "approval_id": resolved_settings.live_sim_fast5_bootstrap_approval_id,
+                    "approval_sha256": resolved_settings.live_sim_fast5_bootstrap_approval_sha256,
+                    "trade_date": gate.trade_date,
+                    "reservation_run_id": bootstrap_reservation_run_id,
+                    "one_shot_consumed": True,
+                }
+                if bootstrap
+                else None
+            ),
         },
     )
     _save_fast5_operating_run(connection, enriched, resolved_settings)
@@ -264,6 +434,15 @@ def run_fast5_automatic_canary_once(
     )
 
 
+def _fast5_phase(settings: Settings) -> Fast5CanaryPhase:
+    status = settings.live_sim_fast5_bootstrap_status
+    if status == "PENDING":
+        return Fast5CanaryPhase.BOOTSTRAP
+    if status == "PASS":
+        return Fast5CanaryPhase.QUALIFIED
+    return Fast5CanaryPhase.BLOCKED
+
+
 def _evaluate_gate(
     connection: sqlite3.Connection,
     *,
@@ -272,6 +451,11 @@ def _evaluate_gate(
     queue_commands: bool,
 ) -> tuple[Fast5AutomaticCanaryGate, LiveSimPreflightResult]:
     resolved_trade_date = str(trade_date or market_today())
+    phase = _fast5_phase(settings)
+    bootstrap_approval = build_fast5_bootstrap_approval(
+        settings,
+        trade_date=resolved_trade_date,
+    )
     checks: dict[str, Any] = {}
     reasons: list[str] = []
 
@@ -280,13 +464,16 @@ def _evaluate_gate(
         passed: bool,
         reason_code: str,
         details: Mapping[str, Any],
+        *,
+        required: bool = True,
     ) -> None:
         checks[name] = {
-            "status": "PASS" if passed else "BLOCK",
+            "status": "PASS" if passed else ("BLOCK" if required else "WARN"),
             "reason_code": None if passed else reason_code,
+            "required": required,
             **normalize_value(dict(details)),
         }
-        if not passed:
+        if not passed and required:
             reasons.append(reason_code)
 
     add(
@@ -309,7 +496,36 @@ def _evaluate_gate(
             "pilot_auto_queue_enabled": settings.live_sim_pilot_auto_queue_command,
         },
     )
-    _add_external_evidence_checks(add, settings)
+    _add_external_evidence_checks(
+        add,
+        settings,
+        phase=phase,
+        trade_date=resolved_trade_date,
+        bootstrap_approval=bootstrap_approval,
+    )
+    bootstrap_usage = _bootstrap_usage(
+        connection,
+        str(settings.live_sim_fast5_bootstrap_approval_sha256 or ""),
+    )
+    if phase is Fast5CanaryPhase.BOOTSTRAP:
+        add(
+            "bootstrap_one_shot",
+            not bool(bootstrap_usage.get("consumed")),
+            "FAST5_BOOTSTRAP_ALREADY_CONSUMED",
+            bootstrap_usage,
+        )
+        add(
+            "audit_persistence",
+            settings.live_sim_operating_write_runs,
+            "FAST5_BOOTSTRAP_AUDIT_PERSISTENCE_DISABLED",
+            {"live_sim_operating_write_runs": settings.live_sim_operating_write_runs},
+        )
+    else:
+        checks["bootstrap_one_shot"] = {
+            "status": "NOT_APPLICABLE",
+            "required": False,
+            **normalize_value(bootstrap_usage),
+        }
 
     ai_routing_disabled = bool(
         not settings.ai_sidecar_order_tools_enabled
@@ -359,7 +575,10 @@ def _evaluate_gate(
 
     preflight = run_live_sim_preflight(
         connection,
-        settings=_strict_fast5_settings(settings),
+        settings=_strict_fast5_settings(
+            settings,
+            bootstrap=phase is Fast5CanaryPhase.BOOTSTRAP,
+        ),
         mode=OperatingMode.PILOT_BUY_ONLY,
         queue_commands=True,
         trade_date=resolved_trade_date,
@@ -395,25 +614,64 @@ def _evaluate_gate(
             if not reason_codes
             else Fast5CanaryMode.PROTECT_ONLY
         ),
+        phase=phase,
         trade_date=resolved_trade_date,
         queue_commands_requested=queue_commands,
         reason_codes=reason_codes,
         checks=checks,
-        effective_limits=_effective_limits(settings),
+        effective_limits=_effective_limits(
+            settings,
+            bootstrap=phase is Fast5CanaryPhase.BOOTSTRAP,
+        ),
         rollback_latch=latch,
+        bootstrap_approval=bootstrap_approval,
     )
     return gate, preflight
 
 
-def _add_external_evidence_checks(add: Any, settings: Settings) -> None:
+def _add_external_evidence_checks(
+    add: Any,
+    settings: Settings,
+    *,
+    phase: Fast5CanaryPhase,
+    trade_date: str,
+    bootstrap_approval: Mapping[str, Any],
+) -> None:
+    bootstrap_passed = False
+    bootstrap_reason = "FAST5_BOOTSTRAP_NOT_AUTHORIZED"
+    if phase is Fast5CanaryPhase.BOOTSTRAP:
+        bootstrap_passed = bool(
+            settings.live_sim_fast5_bootstrap_trade_date == trade_date
+            and bootstrap_approval.get("matches") is True
+        )
+        bootstrap_reason = "FAST5_BOOTSTRAP_APPROVAL_MISMATCH"
+    elif phase is Fast5CanaryPhase.QUALIFIED:
+        bootstrap_passed = _is_sha256(
+            settings.live_sim_fast5_bootstrap_evidence_sha256
+        )
+        bootstrap_reason = "FAST5_BOOTSTRAP_EVIDENCE_MISSING"
+    add(
+        "bootstrap",
+        bootstrap_passed,
+        bootstrap_reason,
+        {
+            "qualification_status": settings.live_sim_fast5_bootstrap_status,
+            "configured_trade_date": (
+                settings.live_sim_fast5_bootstrap_trade_date or None
+            ),
+            "expected_trade_date": trade_date,
+            "approval_id": settings.live_sim_fast5_bootstrap_approval_id or None,
+            "approval_sha256": (
+                settings.live_sim_fast5_bootstrap_approval_sha256 or None
+            ),
+            "expected_approval_sha256": bootstrap_approval.get("expected_sha256"),
+            "approval_matches": bootstrap_approval.get("matches"),
+            "evidence_sha256": (
+                settings.live_sim_fast5_bootstrap_evidence_sha256 or None
+            ),
+        },
+    )
     contracts = (
-        (
-            "manual_c1",
-            settings.live_sim_fast5_manual_c1_status,
-            "PASS",
-            settings.live_sim_fast5_manual_c1_evidence_sha256,
-            "FAST5_MANUAL_C1_NOT_QUALIFIED",
-        ),
         (
             "alpha",
             settings.live_sim_fast5_alpha_status,
@@ -441,6 +699,7 @@ def _add_external_evidence_checks(add: Any, settings: Settings) -> None:
                 "evidence_sha256": evidence_sha256 or None,
                 "evidence_bound": _is_sha256(evidence_sha256),
             },
+            required=phase is Fast5CanaryPhase.QUALIFIED,
         )
 
 
@@ -610,17 +869,227 @@ def _add_broker_reconcile_check(
     )
 
 
+def _bootstrap_usage(
+    connection: sqlite3.Connection,
+    approval_sha256: str,
+) -> dict[str, Any]:
+    if not _is_sha256(approval_sha256):
+        return {
+            "consumed": False,
+            "approval_sha256": approval_sha256 or None,
+            "reservation_run_id": None,
+            "reserved_at": None,
+        }
+    rows = connection.execute(
+        """
+        SELECT run_id, reason_summary_json, created_at
+        FROM live_sim_operating_runs
+        WHERE status = 'BOOTSTRAP_RESERVED'
+        ORDER BY created_at DESC, run_id DESC
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            summary = json.loads(str(row["reason_summary_json"] or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        bootstrap = _mapping(_mapping(summary).get("fast5_bootstrap"))
+        if bootstrap.get("approval_sha256") != approval_sha256:
+            continue
+        return {
+            "consumed": True,
+            "approval_sha256": approval_sha256,
+            "reservation_run_id": str(row["run_id"]),
+            "reserved_at": str(row["created_at"]),
+        }
+    return {
+        "consumed": False,
+        "approval_sha256": approval_sha256,
+        "reservation_run_id": None,
+        "reserved_at": None,
+    }
+
+
+def _reserve_bootstrap_once(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+    gate: Fast5AutomaticCanaryGate,
+    preflight: LiveSimPreflightResult,
+) -> tuple[bool, str | None]:
+    if connection.in_transaction:
+        raise RuntimeError("FAST-5 bootstrap reservation requires a clean transaction")
+    approval_sha256 = settings.live_sim_fast5_bootstrap_approval_sha256
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        usage = _bootstrap_usage(connection, approval_sha256)
+        if usage.get("consumed"):
+            connection.rollback()
+            return False, str(usage.get("reservation_run_id") or "") or None
+        reservation_run_id = new_message_id("fast5_bootstrap_reservation")
+        reservation = LiveSimOperatingRunResult(
+            run_id=reservation_run_id,
+            trade_date=gate.trade_date,
+            mode=OperatingMode.PILOT_BUY_ONLY,
+            queue_commands=False,
+            preflight=preflight,
+            status="BOOTSTRAP_RESERVED",
+            reason_summary={
+                "policy": FAST5_POLICY_VERSION,
+                "rollback_latched": False,
+                "fast5_bootstrap": {
+                    "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+                    "approval_id": settings.live_sim_fast5_bootstrap_approval_id,
+                    "approval_sha256": approval_sha256,
+                    "trade_date": gate.trade_date,
+                    "one_shot_reserved": True,
+                },
+            },
+        )
+        save_live_sim_operating_run(connection, reservation)
+        connection.commit()
+        return True, reservation_run_id
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
+def _run_consumed_bootstrap_protection(
+    connection: sqlite3.Connection,
+    *,
+    settings: Settings,
+    gate: Fast5AutomaticCanaryGate,
+    run_id: str,
+    limit: int | None,
+) -> Fast5AutomaticCanaryRunResult:
+    strict = _strict_fast5_settings(settings, bootstrap=True)
+    try:
+        operating = run_live_sim_operating_cycle_once(
+            connection,
+            settings=replace(strict, live_sim_operating_write_runs=False),
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands=True,
+            trade_date=gate.trade_date,
+            limit=limit,
+            include_ai=False,
+            include_no_buy=False,
+        )
+    except Exception as exc:
+        failed = LiveSimOperatingRunResult(
+            run_id=run_id,
+            trade_date=gate.trade_date,
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands=True,
+            preflight=LiveSimPreflightResult(
+                status=PreflightStatus.BLOCK,
+                mode=OperatingMode.PROTECT_ONLY,
+                queue_commands=True,
+                blocking_reasons=("FAST5_PROTECT_ONLY_CYCLE_ERROR",),
+            ),
+            status="PROTECT_ONLY",
+            errors=(
+                {
+                    "stage": "fast5_bootstrap_protect_only_cycle",
+                    "error_type": type(exc).__name__,
+                },
+            ),
+            reason_summary={
+                "policy": FAST5_POLICY_VERSION,
+                "fast5_automatic_canary": gate.to_dict(),
+                "fast5_bootstrap": {
+                    "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+                    "approval_id": settings.live_sim_fast5_bootstrap_approval_id,
+                    "approval_sha256": settings.live_sim_fast5_bootstrap_approval_sha256,
+                    "trade_date": gate.trade_date,
+                    "one_shot_consumed": True,
+                    "protect_only_lifecycle": True,
+                },
+                "rollback_latched": True,
+            },
+        )
+        _save_fast5_operating_run(connection, failed, settings)
+        return Fast5AutomaticCanaryRunResult(
+            run_id=run_id,
+            status="PROTECT_ONLY",
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands_requested=True,
+            queue_commands_effective=True,
+            gate=gate,
+            operating_run={
+                **failed.to_dict(),
+                "no_order_side_effects": False,
+                "side_effects_unknown": True,
+            },
+            rollback_latched=True,
+            side_effects_unknown=True,
+        )
+    invariant_errors: list[dict[str, Any]] = []
+    if operating.buy_command_count:
+        invariant_errors.append(
+            {
+                "stage": "fast5_bootstrap_protect_only",
+                "error": "Protect-only lifecycle created a BUY command.",
+            }
+        )
+    rollback_latched = bool(operating.errors or invariant_errors)
+    enriched = replace(
+        operating,
+        run_id=run_id,
+        status="PROTECT_ONLY",
+        errors=tuple([*operating.errors, *invariant_errors]),
+        reason_summary={
+            **dict(operating.reason_summary),
+            "policy": FAST5_POLICY_VERSION,
+            "fast5_automatic_canary": gate.to_dict(),
+            "fast5_bootstrap": {
+                "contract": FAST5_BOOTSTRAP_APPROVAL_CONTRACT,
+                "approval_id": settings.live_sim_fast5_bootstrap_approval_id,
+                "approval_sha256": settings.live_sim_fast5_bootstrap_approval_sha256,
+                "trade_date": gate.trade_date,
+                "one_shot_consumed": True,
+                "protect_only_lifecycle": True,
+            },
+            "rollback_latched": rollback_latched,
+        },
+    )
+    _save_fast5_operating_run(connection, enriched, settings)
+    return Fast5AutomaticCanaryRunResult(
+        run_id=run_id,
+        status="PROTECT_ONLY",
+        mode=OperatingMode.PROTECT_ONLY,
+        queue_commands_requested=True,
+        queue_commands_effective=(
+            operating.preflight.status is PreflightStatus.PASS
+        ),
+        gate=gate,
+        operating_run=enriched.to_dict(),
+        rollback_latched=rollback_latched,
+    )
+
+
 def _latest_unacknowledged_rollback(
     connection: sqlite3.Connection,
     settings: Settings,
 ) -> dict[str, Any]:
-    for run in list_live_sim_operating_runs(connection, limit=100):
-        summary = _mapping(run.get("reason_summary"))
-        if summary.get("policy") != FAST5_POLICY_VERSION:
+    rows = connection.execute(
+        """
+        SELECT run_id, reason_summary_json
+        FROM live_sim_operating_runs
+        WHERE status = 'PROTECT_ONLY'
+        ORDER BY created_at DESC, run_id DESC
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            summary = _mapping(json.loads(str(row["reason_summary_json"] or "{}")))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if summary.get("policy") not in FAST5_ROLLBACK_POLICY_VERSIONS:
             continue
         if summary.get("rollback_latched") is not True:
             continue
-        run_id = str(run.get("run_id") or "")
+        run_id = str(row["run_id"] or "")
         acknowledged = settings.live_sim_fast5_rollback_ack_run_id == run_id
         return {
             "latched_run_id": None if acknowledged else run_id,
@@ -636,7 +1105,11 @@ def _latest_unacknowledged_rollback(
     }
 
 
-def _strict_fast5_settings(settings: Settings) -> Settings:
+def _strict_fast5_settings(
+    settings: Settings,
+    *,
+    bootstrap: bool = False,
+) -> Settings:
     max_order_notional = min(
         settings.live_sim_max_order_notional,
         settings.live_sim_order_plan_max_notional,
@@ -644,7 +1117,7 @@ def _strict_fast5_settings(settings: Settings) -> Settings:
     )
     max_daily_count = min(
         settings.live_sim_max_daily_order_count,
-        settings.live_sim_fast5_max_daily_buy_count,
+        1 if bootstrap else settings.live_sim_fast5_max_daily_buy_count,
     )
     return replace(
         settings,
@@ -669,8 +1142,12 @@ def _strict_fast5_settings(settings: Settings) -> Settings:
     )
 
 
-def _effective_limits(settings: Settings) -> dict[str, Any]:
-    strict = _strict_fast5_settings(settings)
+def _effective_limits(
+    settings: Settings,
+    *,
+    bootstrap: bool = False,
+) -> dict[str, Any]:
+    strict = _strict_fast5_settings(settings, bootstrap=bootstrap)
     return {
         "exchange": "KRX",
         "allowed_side": "BUY",
@@ -684,38 +1161,6 @@ def _effective_limits(settings: Settings) -> dict[str, Any]:
         "scale_in_allowed": False,
         "ai_routing_effect": 0,
     }
-
-
-def _protect_only_operating_run(
-    *,
-    run_id: str,
-    trade_date: str,
-    preflight: LiveSimPreflightResult,
-    gate: Fast5AutomaticCanaryGate,
-    rollback_latched: bool,
-) -> LiveSimOperatingRunResult:
-    return LiveSimOperatingRunResult(
-        run_id=run_id,
-        trade_date=trade_date,
-        mode=OperatingMode.PROTECT_ONLY,
-        queue_commands=False,
-        preflight=preflight,
-        status="PROTECT_ONLY",
-        reason_summary={
-            "policy": FAST5_POLICY_VERSION,
-            "fast5_automatic_canary": gate.to_dict(),
-            "rollback_latched": rollback_latched,
-            "blocking_reasons": list(gate.reason_codes),
-        },
-        stages={
-            "fast5_gate": gate.to_dict(),
-            "buy": {
-                "status": "SKIPPED",
-                "reason": "protect_only",
-                "command_count": 0,
-            },
-        },
-    )
 
 
 def _save_fast5_operating_run(
