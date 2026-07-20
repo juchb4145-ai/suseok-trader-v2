@@ -82,8 +82,9 @@ PR-4는 `OrderPlanDraft(PLAN_READY)`를 기존 candidate 기반 manual LIVE_SIM 
 평가한다. 이 endpoint는 intent, rejection, run, order 또는 Gateway command를 만들지 않으며 broker를
 호출하지 않는다. `queue_commands=false`인 pilot run과 달리 run/intent 자체도 저장하지 않는다.
 
-과거 FAST-0 blocker는 `DEFERRED_HISTORICAL`로 남아 있으며 Preview가 이를 해결하거나 FAST-0
-`PASS`로 승격하지 않는다. 자세한 계약은
+과거 FAST-0 evidence는 `RETIRED_HISTORICAL`로 보존하며 Preview가 이를 해결하거나 FAST-0
+`PASS`로 승격하지 않는다. 현재 거래일 tick/index/context readiness가 `BLOCKED`이면 selectable
+plan이 있더라도 `canary_ready=false`다. 자세한 계약은
 [FAST-1 Pure LIVE_SIM Preview](fast1_pure_live_sim_preview_ko.md)를 따른다.
 
 ## PR-6 AI Candidate Scorer Advisory

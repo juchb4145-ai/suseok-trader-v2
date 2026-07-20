@@ -4,6 +4,7 @@ import ast
 import inspect
 import json
 import sqlite3
+from datetime import UTC, datetime
 
 import pytest
 from apps.core_api import app
@@ -30,12 +31,21 @@ from tests.test_live_sim_order_plan_pipeline import (
 TRADE_DATE = "2026-06-27"
 
 
+@pytest.fixture(autouse=True)
+def _fixed_preview_clock(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pure_preview,
+        "utc_now",
+        lambda: datetime(2026, 6, 27, 0, 1, 1, tzinfo=UTC),
+    )
+
+
 def test_fast1_preview_is_current_day_deterministic_and_strict_read_only(
     tmp_path,
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "fast1-preview.sqlite3"
-    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    connection, order_plan_id = _prepared_fast1_connection(db_path)
     expected = evaluate_live_sim_order_plan_eligibility(
         connection,
         order_plan_id,
@@ -66,9 +76,20 @@ def test_fast1_preview_is_current_day_deterministic_and_strict_read_only(
         "fast0_status": FAST0_TRANSITION_STATUS,
         "historical_blockers_resolved": False,
         "historical_data_mutated": False,
+        "historical_qualification_required": False,
         "scope": "CURRENT_TRADE_DATE_ONLY",
+        "current_gate_dependency": "CURRENT_MARKET_AND_CANARY",
         "operational_activation_authorized": False,
     }
+    assert first["current_market"]["status"] == "READY"
+    assert first["current_market"]["reason_codes"] == []
+    assert first["current_market"]["stock_ticks"]["count"] == 1
+    assert first["current_market"]["stock_ticks"]["fresh_count"] == 1
+    assert first["current_market"]["market_indexes"]["count"] == 2
+    assert first["current_market"]["market_indexes"]["fresh_count"] == 2
+    assert first["current_market"]["market_contexts"]["count"] == 2
+    assert first["current_market"]["market_contexts"]["fresh_count"] == 2
+    assert first["current_market"]["pipeline"]["order_plan_drafts_latest"] == 1
     assert first["selection"]["canary_ready"] is True
     assert first["selection"]["candidate_count"] == 1
     assert first["selection"]["top_candidate"]["order_plan_id"] == order_plan_id
@@ -100,7 +121,7 @@ def test_fast1_preview_api_requires_token_preserves_all_forbidden_tables(
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "fast1-preview-api.sqlite3"
-    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    connection, order_plan_id = _prepared_fast1_connection(db_path)
     connection.close()
     _set_pilot_api_env(monkeypatch, db_path)
     monkeypatch.setattr("services.live_sim.pure_preview.market_today", lambda: TRADE_DATE)
@@ -138,7 +159,7 @@ def test_fast1_preview_does_not_select_duplicate_intent(
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "fast1-preview-duplicate.sqlite3"
-    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    connection, order_plan_id = _prepared_fast1_connection(db_path)
     create_live_sim_intent_from_order_plan(
         connection,
         order_plan_id,
@@ -170,7 +191,7 @@ def test_fast1_preview_selection_ignores_ai_advisory_metadata(
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "fast1-preview-ai.sqlite3"
-    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    connection, order_plan_id = _prepared_fast1_connection(db_path)
     connection.close()
     monkeypatch.setattr("services.live_sim.pure_preview.market_today", lambda: TRADE_DATE)
 
@@ -217,6 +238,93 @@ def test_fast1_preview_rejects_non_query_only_connections(tmp_path) -> None:
     connection.close()
 
     assert exc_info.value.reason_code == "PREVIEW_QUERY_ONLY_REQUIRED"
+
+
+def test_fast1_preview_blocks_when_current_market_inputs_are_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "fast1-preview-market-blocked.sqlite3"
+    connection, order_plan_id = _prepared_fast1_connection(db_path)
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET event_ts = '2026-06-26T00:01:00Z',
+            received_at = '2026-06-26T00:01:00Z'
+        """
+    )
+    connection.execute("DELETE FROM market_index_ticks_latest")
+    connection.execute("DELETE FROM market_context_latest")
+    connection.commit()
+    connection.close()
+    monkeypatch.setattr("services.live_sim.pure_preview.market_today", lambda: TRADE_DATE)
+
+    read_only = open_fast1_preview_connection(db_path)
+    result = build_fast1_pure_preview(
+        read_only,
+        settings=_pilot_settings(),
+        trade_date=TRADE_DATE,
+    )
+    read_only.close()
+
+    assert result["selection"]["top_candidate"]["order_plan_id"] == order_plan_id
+    assert result["selection"]["canary_ready"] is False
+    assert result["current_market"]["status"] == "BLOCKED"
+    assert result["current_market"]["reason_codes"] == [
+        "NO_CURRENT_MARKET_TICK",
+        "NO_CURRENT_MARKET_INDEX",
+        "NO_CURRENT_MARKET_CONTEXT",
+    ]
+    assert result["current_market"]["stock_ticks"]["latest_current_at"] is None
+    assert result["current_market"]["stock_ticks"]["latest_available_at"] == (
+        "2026-06-26T00:01:00Z"
+    )
+    assert result["selection"]["blocker_reason_codes"][:3] == result[
+        "current_market"
+    ]["reason_codes"]
+    assert result["side_effect_guard"]["total_absolute_delta"] == 0
+
+
+def test_fast1_preview_blocks_when_current_market_inputs_are_stale(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "fast1-preview-market-stale.sqlite3"
+    connection, _ = _prepared_fast1_connection(db_path)
+    connection.close()
+    monkeypatch.setattr("services.live_sim.pure_preview.market_today", lambda: TRADE_DATE)
+    monkeypatch.setattr(
+        pure_preview,
+        "utc_now",
+        lambda: datetime(2026, 6, 27, 0, 2, tzinfo=UTC),
+    )
+
+    read_only = open_fast1_preview_connection(db_path)
+    result = build_fast1_pure_preview(
+        read_only,
+        settings=_pilot_settings(
+            market_data_tick_stale_sec=10,
+            market_data_degraded_tick_stale_sec=30,
+            market_index_stale_sec=30,
+            market_context_snapshot_stale_sec=30,
+        ),
+        trade_date=TRADE_DATE,
+    )
+    read_only.close()
+
+    assert result["selection"]["canary_ready"] is False
+    assert result["current_market"]["status"] == "BLOCKED"
+    assert result["current_market"]["reason_codes"] == [
+        "CURRENT_MARKET_TICK_STALE",
+        "CURRENT_MARKET_INDEX_STALE",
+        "CURRENT_MARKET_CONTEXT_STALE",
+    ]
+    assert result["current_market"]["stock_ticks"]["count"] == 1
+    assert result["current_market"]["stock_ticks"]["fresh_count"] == 0
+    assert result["current_market"]["market_indexes"]["count"] == 2
+    assert result["current_market"]["market_indexes"]["fresh_count"] == 0
+    assert result["current_market"]["market_contexts"]["count"] == 2
+    assert result["current_market"]["market_contexts"]["fresh_count"] == 0
 
 
 def test_fast1_preview_route_is_explicit_and_has_no_generic_order_alias() -> None:
@@ -279,6 +387,56 @@ def _forbidden_counts(db_path) -> dict[str, int]:
     }
     connection.close()
     return counts
+
+
+def _prepared_fast1_connection(path):
+    connection, order_plan_id = _prepared_order_plan_connection(path)
+    current_at = f"{TRADE_DATE}T00:01:00Z"
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET event_ts = ?, received_at = ?, updated_at = ?
+        """,
+        (current_at, current_at, current_at),
+    )
+    for index_code, index_name in (("KOSPI", "KOSPI"), ("KOSDAQ", "KOSDAQ")):
+        connection.execute(
+            """
+            INSERT INTO market_index_ticks_latest (
+                index_code, index_name, price, change_rate, change_value,
+                trade_time, event_ts, received_at, source, event_id,
+                quality_status, metadata_json, updated_at
+            )
+            VALUES (?, ?, 1000, 0, 0, '090100', ?, ?, 'test', ?, 'FRESH', '{}', ?)
+            """,
+            (
+                index_code,
+                index_name,
+                current_at,
+                current_at,
+                f"evt-{index_code}",
+                current_at,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO market_context_latest (
+                market, snapshot_id, trade_date, source_watermark_hash,
+                snapshot_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                index_code,
+                f"snapshot-{index_code}",
+                TRADE_DATE,
+                f"watermark-{index_code}",
+                current_at,
+                current_at,
+            ),
+        )
+    connection.commit()
+    return connection, order_plan_id
 
 
 def _clone_plan_as_historical(connection, order_plan_id: str) -> None:
