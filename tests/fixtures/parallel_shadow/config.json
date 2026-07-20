@@ -1,0 +1,16 @@
+{
+  "cost_model_version": "fixture-cost/v1",
+  "cost_model_confirmed": true,
+  "buy_commission_rate": 0.001,
+  "sell_commission_rate": 0.001,
+  "sell_tax_rate": 0.001,
+  "buy_slippage_ticks": 1,
+  "sell_slippage_ticks": 1,
+  "entry_latency_ms": 250,
+  "exit_latency_ms": 250,
+  "entry_ttl_sec": 2,
+  "exit_ttl_sec": 2,
+  "minimum_filled_trades": 1,
+  "minimum_distinct_trade_dates": 1,
+  "eod_flatten_enabled": false
+}

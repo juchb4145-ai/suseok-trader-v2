@@ -6,7 +6,7 @@ from domain.exit.policy import (
     LongPositionSnapshot,
     evaluate_long_exit_policy,
 )
-from services.entry_timing.tick_size import subtract_ticks
+from services.entry_timing.tick_size import price_tick_distance, subtract_ticks
 
 
 def test_shared_exit_policy_covers_stop_take_trailing_max_hold_and_eod() -> None:
@@ -48,6 +48,9 @@ def test_tick_subtraction_handles_krx_price_band_boundaries() -> None:
     assert subtract_ticks(20_000, 1) == 19_990
     assert subtract_ticks(500_000, 1) == 499_500
     assert subtract_ticks(100, 2) == 98
+    assert price_tick_distance(1_999, 2_000) == 1
+    assert price_tick_distance(5_000, 4_995) == -1
+    assert price_tick_distance(100, 105) == 5
 
 
 def _decision(*, current: float, highest: float, observed: str, policy: ExitPolicyConfig):

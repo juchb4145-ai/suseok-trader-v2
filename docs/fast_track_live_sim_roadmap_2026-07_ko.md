@@ -57,7 +57,6 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 ### 1.3 알려진 미완료 항목
 
 - 완전 무기록 LIVE_SIM 통합 Preview API
-- Profit Lab과 동일 모델을 사용하는 장중 Parallel Shadow
 - Kiwoom 모의계좌 미체결/보유/체결 broker snapshot 요청과 reconcile
 - Alpha gate와 broker reconcile을 통과한 제한적 자동 BUY canary
 
@@ -101,8 +100,8 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 | Operational Gate C1 | `BLOCKED_BY_CURRENT_MARKET_DATA` | 현재 시장 입력 READY, Preview canary PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `DONE` | 현재 코드·격리 replay 입력 | virtual-clock replay와 입력 coverage |
 | FAST-2B Profit Lab | `DONE` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
-| FAST-3 Parallel Shadow | `NEXT` | Profit Lab model 고정 | shadow/live comparison |
-| FAST-4 Broker Snapshot Reconcile | `BLOCKED_BY_FAST_1` | Gateway query contract | broker/local reconcile |
+| FAST-3 Parallel Shadow | `DONE` | Profit Lab model 고정 | shadow/live comparison |
+| FAST-4 Broker Snapshot Reconcile | `NEXT` | Gateway query contract | broker/local reconcile |
 | FAST-5 Automatic Canary | `BLOCKED` | C1 + Alpha + Broker reconcile | 일 1~2건 자동 canary |
 | FAST-6 Champion/Challenger | `BLOCKED_BY_FAST_5` | canary evidence | 모델 운영 체계 |
 
@@ -748,6 +747,10 @@ stable top 1 → 수동 LIVE_SIM canary
 - preflight BLOCK/kill switch에서 shadow는 유지하고 live BUY는 0
 - AI 영향 0
 - comparison linkage gap 0
+
+구현·실행 계약은 `docs/fast3_parallel_shadow_ko.md`를 따른다. FAST-2B의 동일 pure
+execution/exit/cost model을 재사용하며 plan/tick/LIVE_SIM evidence가 결속된 파일만 읽는다.
+운영 DB·GatewayCommand·LIVE_SIM write와 broker 호출은 제공하지 않는다.
 
 ## 11. FAST-4 — Kiwoom Simulation Broker Snapshot Reconcile
 
