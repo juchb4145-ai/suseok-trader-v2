@@ -508,9 +508,15 @@ def _add_reconcile_check(
     mode: OperatingMode,
 ) -> None:
     if latest_reconcile is None:
+        missing_status = (
+            PreflightStatus.BLOCK
+            if settings.live_sim_reconcile_request_broker_snapshot_enabled
+            and mode.includes_buy
+            else PreflightStatus.WARN
+        )
         add(
             "reconcile_latest_status",
-            PreflightStatus.WARN,
+            missing_status,
             "No LIVE_SIM reconcile snapshot exists yet.",
         )
         return
@@ -518,6 +524,26 @@ def _add_reconcile_check(
     status = str(latest_reconcile.get("status") or "UNKNOWN")
     snapshot = _json_object(latest_reconcile.get("snapshot_json"))
     broker_snapshot_available = bool(snapshot.get("broker_snapshot_available"))
+    broker_snapshot = _json_object(snapshot.get("broker_snapshot"))
+    broker_snapshot_status = str(
+        broker_snapshot.get("snapshot_status") or ""
+    ).upper()
+    broker_snapshot_age_sec = _age_seconds(broker_snapshot.get("snapshot_at"))
+    broker_snapshot_stale_sec = int(
+        broker_snapshot.get("stale_after_sec")
+        or settings.live_sim_broker_snapshot_stale_sec
+    )
+    broker_snapshot_fresh = bool(
+        broker_snapshot_available
+        and broker_snapshot_status == "COMPLETE"
+        and broker_snapshot.get("complete") is True
+        and broker_snapshot_age_sec <= broker_snapshot_stale_sec
+    )
+    if (
+        settings.live_sim_reconcile_request_broker_snapshot_enabled
+        and not broker_snapshot_fresh
+    ):
+        blocking_new_buy = True
     if blocking_new_buy and mode.includes_buy:
         check_status = PreflightStatus.BLOCK
         message = "Latest reconcile blocks new BUY."
@@ -537,7 +563,14 @@ def _add_reconcile_check(
         "reconcile_latest_status",
         check_status,
         message,
-        {"status": status, "blocking_new_buy": blocking_new_buy, **dict(latest_reconcile)},
+        {
+            "status": status,
+            "blocking_new_buy": blocking_new_buy,
+            "broker_snapshot_status": broker_snapshot_status or None,
+            "broker_snapshot_age_sec": broker_snapshot_age_sec,
+            "broker_snapshot_stale_sec": broker_snapshot_stale_sec,
+            **dict(latest_reconcile),
+        },
     )
 
 

@@ -103,7 +103,7 @@ Polling은 만료된 `QUEUED` command를 먼저 `EXPIRED`로 정리한 뒤 ready
 우선순위:
 
 1. `send_order`, `cancel_order`
-2. `heartbeat_request`, `load_conditions`, `send_condition`, `stop_condition`, 기타 control command
+2. `heartbeat_request`, `broker_snapshot_request`, `load_conditions`, `send_condition`, `stop_condition`, 기타 control command
 3. `register_realtime`, `request_tr`
 
 ### Delivery Semantics

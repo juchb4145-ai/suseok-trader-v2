@@ -1079,7 +1079,7 @@ def _reconcile_snapshot_payload_valid(
 
 
 def _normalized_broker_snapshot_valid(value: Any) -> bool:
-    if not isinstance(value, Mapping) or set(value) != {
+    legacy_keys = {
         "account_id",
         "trade_date",
         "snapshot_at",
@@ -1090,28 +1090,90 @@ def _normalized_broker_snapshot_valid(value: Any) -> bool:
         "live_sim_only",
         "live_real_allowed",
         "broker_order_path",
-    }:
+    }
+    if isinstance(value, Mapping) and set(value) == legacy_keys:
+        open_orders = value.get("open_orders")
+        positions = value.get("positions")
+        return bool(
+            isinstance(value.get("account_id"), str)
+            and isinstance(value.get("trade_date"), str)
+            and isinstance(value.get("snapshot_at"), str)
+            and isinstance(value.get("source"), str)
+            and isinstance(value.get("complete"), bool)
+            and value.get("live_sim_only") is True
+            and value.get("live_real_allowed") is False
+            and value.get("broker_order_path") == "LIVE_SIM_ONLY"
+            and isinstance(open_orders, list)
+            and all(_normalized_broker_open_order_valid(item) for item in open_orders)
+            and isinstance(positions, list)
+            and all(_normalized_broker_position_valid(item) for item in positions)
+        )
+    required_keys = {
+        "snapshot_id",
+        "snapshot_status",
+        "account_id_masked",
+        "trade_date",
+        "snapshot_at",
+        "snapshot_age_sec",
+        "stale_after_sec",
+        "fresh",
+        "open_orders",
+        "positions",
+        "executions",
+        "page_lineage",
+        "requested_sections",
+        "completed_sections",
+        "errors",
+        "source",
+        "complete",
+        "live_sim_only",
+        "live_real_allowed",
+        "broker_order_path",
+        "automatic_local_repair",
+    }
+    if not isinstance(value, Mapping) or set(value) != required_keys:
         return False
     open_orders = value.get("open_orders")
     positions = value.get("positions")
+    executions = value.get("executions")
+    status = value.get("snapshot_status")
     return bool(
-        isinstance(value.get("account_id"), str)
+        isinstance(value.get("snapshot_id"), str)
+        and status
+        in {"REQUESTED", "COLLECTING", "COMPLETE", "INCOMPLETE", "FAILED", "STALE"}
+        and isinstance(value.get("account_id_masked"), str)
         and isinstance(value.get("trade_date"), str)
         and isinstance(value.get("snapshot_at"), str)
+        and (
+            value.get("snapshot_age_sec") is None
+            or isinstance(value.get("snapshot_age_sec"), (int, float))
+        )
+        and _is_exact_int(value.get("stale_after_sec"))
+        and isinstance(value.get("fresh"), bool)
         and isinstance(value.get("source"), str)
         and isinstance(value.get("complete"), bool)
+        and (value.get("complete") is (status == "COMPLETE"))
+        and isinstance(value.get("page_lineage"), list)
+        and isinstance(value.get("requested_sections"), list)
+        and isinstance(value.get("completed_sections"), list)
+        and isinstance(value.get("errors"), list)
         and value.get("live_sim_only") is True
         and value.get("live_real_allowed") is False
         and value.get("broker_order_path") == "LIVE_SIM_ONLY"
+        and value.get("automatic_local_repair") is False
         and isinstance(open_orders, list)
         and all(_normalized_broker_open_order_valid(item) for item in open_orders)
         and isinstance(positions, list)
         and all(_normalized_broker_position_valid(item) for item in positions)
+        and isinstance(executions, list)
+        and all(_normalized_broker_execution_valid(item) for item in executions)
     )
 
 
 def _normalized_broker_open_order_valid(value: Any) -> bool:
-    if not isinstance(value, Mapping) or set(value) != {
+    if not isinstance(value, Mapping):
+        return False
+    legacy_keys = {
         "broker_order_no",
         "code",
         "side",
@@ -1119,7 +1181,9 @@ def _normalized_broker_open_order_valid(value: Any) -> bool:
         "remaining_quantity",
         "price",
         "raw",
-    }:
+    }
+    current_keys = legacy_keys | {"order_status", "filled_quantity"}
+    if frozenset(value) not in {frozenset(legacy_keys), frozenset(current_keys)}:
         return False
     broker_order_no = value.get("broker_order_no")
     code = value.get("code")
@@ -1132,11 +1196,48 @@ def _normalized_broker_open_order_valid(value: Any) -> bool:
         and (broker_order_no is not None or code is not None)
         and isinstance(side, str)
         and side == side.upper()
+        and (
+            "order_status" not in value or isinstance(value.get("order_status"), str)
+        )
         and _is_exact_int(value.get("quantity"))
+        and (
+            "filled_quantity" not in value
+            or _is_exact_int(value.get("filled_quantity"))
+        )
         and _is_exact_int(value.get("remaining_quantity"))
         and (price is None or isinstance(price, float))
         and isinstance(raw, Mapping)
         and len(raw) > 0
+    )
+
+
+def _normalized_broker_execution_valid(value: Any) -> bool:
+    if not isinstance(value, Mapping) or set(value) != {
+        "broker_execution_id",
+        "broker_order_no",
+        "code",
+        "side",
+        "quantity",
+        "price",
+        "executed_at",
+        "raw",
+    }:
+        return False
+    broker_execution_id = value.get("broker_execution_id")
+    broker_order_no = value.get("broker_order_no")
+    code = value.get("code")
+    price = value.get("price")
+    return bool(
+        (broker_execution_id is None or _nonempty_string(broker_execution_id))
+        and (broker_order_no is None or _nonempty_string(broker_order_no))
+        and _optional_stock_code_valid(code)
+        and any(item is not None for item in (broker_execution_id, broker_order_no, code))
+        and isinstance(value.get("side"), str)
+        and _is_exact_int(value.get("quantity"))
+        and (price is None or isinstance(price, float))
+        and isinstance(value.get("executed_at"), str)
+        and isinstance(value.get("raw"), Mapping)
+        and len(value.get("raw")) > 0
     )
 
 

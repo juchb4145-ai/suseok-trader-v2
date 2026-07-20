@@ -41,6 +41,7 @@ class GatewayCommandStatus(StrEnum):
 ALLOWED_COMMAND_TYPES: frozenset[str] = frozenset(
     {
         "heartbeat_request",
+        "broker_snapshot_request",
         "request_tr",
         "register_realtime",
         "remove_realtime",
@@ -542,12 +543,44 @@ def validate_command_type_allowed(
         return _validate_live_sim_send_order_allowed(command)
     if normalized == "cancel_order":
         return _validate_live_sim_cancel_order_allowed(command)
+    if normalized == "broker_snapshot_request":
+        return _validate_live_sim_broker_snapshot_allowed(command)
     if normalized == "modify_order":
         return "modify_order is disabled for LIVE_SIM"
     if normalized in FORBIDDEN_ORDER_COMMAND_TYPES or "order" in normalized:
         return f"Order command_type is disabled for PR 2B: {command_type}"
     if normalized not in ALLOWED_COMMAND_TYPES:
         return f"Unsupported gateway command_type for PR 2B: {command_type}"
+    return None
+
+
+def _validate_live_sim_broker_snapshot_allowed(
+    command: GatewayCommand | None,
+) -> str | None:
+    if command is None:
+        return "broker_snapshot_request requires LIVE_SIM command envelope validation"
+    if command.source.strip().lower() != "live_sim":
+        return "broker_snapshot_request disabled except live_sim source"
+    if not command.idempotency_key:
+        return "broker_snapshot_request requires idempotency_key"
+    payload = command.payload
+    if not str(payload.get("account_id") or "").strip():
+        return "broker_snapshot_request requires account_id"
+    if payload.get("idempotency_key") != command.idempotency_key:
+        return "broker_snapshot_request payload idempotency_key mismatch"
+    if payload.get("live_sim_only") is not True:
+        return "broker_snapshot_request requires live_sim_only=true"
+    if payload.get("live_real_allowed") is not False:
+        return "broker_snapshot_request requires live_real_allowed=false"
+    if payload.get("read_only") is not True:
+        return "broker_snapshot_request requires read_only=true"
+    if payload.get("automatic_local_repair") is not False:
+        return "broker_snapshot_request requires automatic_local_repair=false"
+    if str(payload.get("broker_order_path") or "").upper() != "LIVE_SIM_ONLY":
+        return "broker_snapshot_request requires broker_order_path=LIVE_SIM_ONLY"
+    for key in ("account_mode", "broker_env", "server_mode"):
+        if not _is_simulation_like(payload.get(key)):
+            return f"broker_snapshot_request {key} must be simulation-like"
     return None
 
 
