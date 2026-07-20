@@ -856,6 +856,19 @@ kill switch 유지
 
 ## 13. FAST-6 — Champion / Challenger 운영
 
+### 구현 상태
+
+```text
+branch: codex/fast-6-champion-challenger
+code: implemented as file-only REVIEW_ONLY evaluation
+activation: BLOCKED_BY_FAST_5
+```
+
+구현·실행 계약은 `docs/fast6_champion_challenger_ko.md`를 따른다. 입력 artifact 전체
+SHA-256과 commit/config/data split/model identity를 결속하고 한 축만 다른 candidate를
+비교한다. 결과는 검토안만 생성하며 전략 승급, LIVE_SIM 활성화, 주문, 브로커 호출 또는
+운영 DB 접근 기능을 제공하지 않는다.
+
 | 역할 | 개수 | 실행 경로 |
 | --- | ---: | --- |
 | Champion | 1 | Replay + Shadow + LIVE_SIM |

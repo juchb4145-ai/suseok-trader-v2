@@ -29,7 +29,7 @@ Master tracking issue는 GitHub Issue `#7`이다.
 | 4 | FAST-3 Parallel Shadow | DONE | shadow와 모의체결 괴리 측정 |
 | 5 | FAST-4 Broker Snapshot Reconcile | DONE | 키움 모의계좌와 Core local truth 대사 |
 | 6 | FAST-5 Automatic Canary | BLOCKED_BY_C1_ALPHA_BROKER | default-off 자동화 구현 완료, 운영 evidence 대기 |
-| 7 | FAST-6 Champion/Challenger | BLOCKED | 검증된 전략 1개와 challenger 운영 |
+| 7 | FAST-6 Champion/Challenger | BLOCKED_BY_FAST_5 | file-only 비교·검토 코드 완료, FAST-5 운영 증거 대기 |
 
 Append-only 연속 10거래일 evidence는 inline 제거를 위한 장기 병렬 트랙이며,
 수동 LIVE_SIM 1건과 Alpha Replay 개발을 자동으로 차단하지 않는다.
