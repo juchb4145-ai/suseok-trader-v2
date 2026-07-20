@@ -44,6 +44,10 @@ from services.live_sim.pure_preview import (
     build_fast1_pure_preview,
     open_fast1_preview_connection,
 )
+from services.runtime.fast5_automatic_canary import (
+    evaluate_fast5_automatic_canary_gate,
+    run_fast5_automatic_canary_once,
+)
 from services.runtime.live_sim_operating_orchestrator import (
     OperatingMode,
     build_live_sim_operator_status,
@@ -597,6 +601,53 @@ def live_sim_pilot_run_once(
     finally:
         connection.close()
     return result.to_dict() | _live_sim_response_flags()
+
+
+@router.get("/automation/canary/status")
+def live_sim_automatic_canary_status(
+    trade_date: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        gate = evaluate_fast5_automatic_canary_gate(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+            queue_commands=False,
+        )
+    finally:
+        connection.close()
+    return {
+        "automatic_canary": gate.to_dict(),
+        "read_only": True,
+        "no_order_side_effects": True,
+        **_live_sim_response_flags(),
+    }
+
+
+@router.post(
+    "/automation/canary/run-once",
+    dependencies=[Depends(require_local_token)],
+)
+def live_sim_automatic_canary_run_once(
+    trade_date: str | None = Query(default=None),
+    queue_commands: bool = Query(default=False),
+    limit: int | None = Query(default=None, ge=1, le=500),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        result = run_fast5_automatic_canary_once(
+            connection,
+            settings=settings,
+            trade_date=trade_date,
+            queue_commands=queue_commands,
+            limit=limit,
+        )
+    finally:
+        connection.close()
+    return {"automatic_canary_run": result.to_dict(), **_live_sim_response_flags()}
 
 
 @router.post("/operator/run-once", dependencies=[Depends(require_local_token)])

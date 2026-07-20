@@ -116,7 +116,7 @@ def test_live_sim_operating_cycle_uses_default_mode_and_never_upgrades_queue(
     assert connection.closed is True
 
 
-def test_live_sim_operating_cycle_uses_fresh_queue_command_setting(
+def test_live_sim_operating_cycle_does_not_queue_without_fast5_gate(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -146,6 +146,43 @@ def test_live_sim_operating_cycle_uses_fresh_queue_command_setting(
     assert captured["args"] == (connection,)
     assert captured["kwargs"]["settings"] is fresh_settings
     assert captured["kwargs"]["mode"] is None
+    assert captured["kwargs"]["queue_commands"] is False
+    assert connection.closed is True
+
+
+def test_live_sim_operating_cycle_routes_queue_through_fast5_gate(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    settings = Settings(
+        trading_db_path=tmp_path / "fast5-loop.sqlite3",
+        live_sim_operating_loop_queue_commands=True,
+        live_sim_fast5_automatic_canary_enabled=True,
+    )
+    captured: dict[str, Any] = {}
+    connection = _FakeConnection()
+    monkeypatch.setattr(core_api, "load_settings", lambda: settings)
+    monkeypatch.setattr(core_api, "market_is_weekday", lambda: True)
+    monkeypatch.setattr(core_api, "market_time_str", lambda: "10:00:00")
+    monkeypatch.setattr(core_api, "_open_runtime_database_connection", lambda path: connection)
+    monkeypatch.setattr(
+        core_api,
+        "run_live_sim_operating_cycle_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("FAST-5 enabled loop must not use the raw operating queue path")
+        ),
+    )
+
+    def fast5_cycle(*args: Any, **kwargs: Any) -> None:
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(core_api, "run_fast5_automatic_canary_once", fast5_cycle)
+
+    core_api._run_live_sim_operating_cycle_once(settings)
+
+    assert captured["args"] == (connection,)
+    assert captured["kwargs"]["settings"] is settings
     assert captured["kwargs"]["queue_commands"] is True
     assert connection.closed is True
 
@@ -183,7 +220,7 @@ def test_live_sim_operating_cycle_reloads_settings_each_tick(
     core_api._run_live_sim_operating_cycle_once(startup_settings)
 
     assert [settings.live_sim_kill_switch for settings in captured_settings] == [False, True]
-    assert captured_queue_commands == [True, False]
+    assert captured_queue_commands == [False, False]
     assert opened_paths == [tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"]
     assert all(connection.closed for connection in connections)
 
@@ -233,7 +270,7 @@ def test_live_sim_operating_cycle_reloads_dotenv_each_tick(
     core_api._run_live_sim_operating_cycle_once(startup_settings)
 
     assert captured_order_limits == [100_000, 3_000_000]
-    assert captured_queue_commands == [False, True]
+    assert captured_queue_commands == [False, False]
     assert opened_paths == [tmp_path / "first.sqlite3", tmp_path / "second.sqlite3"]
     assert all(connection.closed for connection in connections)
 

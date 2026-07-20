@@ -39,6 +39,7 @@ from services.runtime.evaluation_run_guard import (
     EvaluationRunLockError,
     clear_runtime_execution_locks,
 )
+from services.runtime.fast5_automatic_canary import run_fast5_automatic_canary_once
 from services.runtime.incremental_evaluation import process_incremental_evaluation_batch
 from services.runtime.live_sim_lifecycle_consumer import process_live_sim_lifecycle_batch
 from services.runtime.live_sim_operating_orchestrator import run_live_sim_operating_cycle_once
@@ -203,12 +204,19 @@ def _run_live_sim_operating_cycle_once(_startup_settings: Settings) -> None:
 
     connection = _open_runtime_database_connection(fresh_settings.trading_db_path)
     try:
-        run_live_sim_operating_cycle_once(
-            connection,
-            settings=fresh_settings,
-            mode=None,
-            queue_commands=fresh_settings.live_sim_operating_loop_queue_commands,
-        )
+        if fresh_settings.live_sim_fast5_automatic_canary_enabled:
+            run_fast5_automatic_canary_once(
+                connection,
+                settings=fresh_settings,
+                queue_commands=fresh_settings.live_sim_operating_loop_queue_commands,
+            )
+        else:
+            run_live_sim_operating_cycle_once(
+                connection,
+                settings=fresh_settings,
+                mode=None,
+                queue_commands=False,
+            )
     finally:
         connection.close()
 
