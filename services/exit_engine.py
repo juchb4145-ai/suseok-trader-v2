@@ -23,6 +23,12 @@ from domain.exit.models import (
     DryRunExitOrder,
     DryRunExitSignal,
 )
+from domain.exit.policy import (
+    ExitPolicyConfig,
+    ExitTriggerType,
+    LongPositionSnapshot,
+    evaluate_long_exit_policy,
+)
 from domain.exit.reasons import DryRunExitReasonCode
 from domain.exit.rules import (
     CAUTION_SIGNAL_TYPES,
@@ -205,60 +211,50 @@ def evaluate_dry_run_exit_for_position(
         )
         reason_codes.append(DryRunExitReasonCode.LATEST_TICK_STALE.value)
 
-    stop_threshold = avg_price * (1 - resolved_settings.dry_run_exit_stop_loss_pct / 100)
-    if avg_price > 0 and last_price <= stop_threshold:
+    shared_exit = evaluate_long_exit_policy(
+        LongPositionSnapshot(
+            entry_price=avg_price,
+            current_price=last_price,
+            highest_price=high_watermark or max(avg_price, last_price),
+            quantity=quantity,
+            opened_at=position["opened_at"] or now,
+            observed_at=now,
+        ),
+        ExitPolicyConfig(
+            stop_loss_pct=resolved_settings.dry_run_exit_stop_loss_pct,
+            take_profit_pct=resolved_settings.dry_run_exit_take_profit_pct,
+            trailing_activation_pct=0.0,
+            trailing_stop_pct=resolved_settings.dry_run_exit_trailing_stop_pct,
+            minimum_hold_sec=resolved_settings.dry_run_exit_min_hold_sec,
+            maximum_hold_sec=resolved_settings.dry_run_exit_max_hold_sec,
+            eod_flatten_enabled=False,
+            eod_flatten_time="23:59:59",
+            policy_version=resolved_settings.dry_run_exit_config_version,
+        ),
+    )
+    threshold_by_type = {
+        ExitTriggerType.STOP_LOSS: resolved_settings.dry_run_exit_stop_loss_pct,
+        ExitTriggerType.TAKE_PROFIT: resolved_settings.dry_run_exit_take_profit_pct,
+        ExitTriggerType.TRAILING_STOP: resolved_settings.dry_run_exit_trailing_stop_pct,
+        ExitTriggerType.MAX_HOLD: float(resolved_settings.dry_run_exit_max_hold_sec),
+    }
+    for trigger in shared_exit.triggers:
+        if trigger.trigger_type is ExitTriggerType.EOD_FLATTEN:
+            continue
         _append_signal(
             signals,
             position_id=position_id,
-            signal_type=DryRunExitSignalType.STOP_LOSS,
-            trigger_price=stop_threshold,
+            signal_type=DryRunExitSignalType(trigger.trigger_type.value),
+            trigger_price=trigger.trigger_price,
             current_price=last_price,
-            threshold_value=resolved_settings.dry_run_exit_stop_loss_pct,
-            evidence={"unrealized_pnl_pct": unrealized_pnl_pct},
-            observed_at=observed_at,
-        )
-
-    take_threshold = avg_price * (1 + resolved_settings.dry_run_exit_take_profit_pct / 100)
-    if avg_price > 0 and last_price >= take_threshold:
-        _append_signal(
-            signals,
-            position_id=position_id,
-            signal_type=DryRunExitSignalType.TAKE_PROFIT,
-            trigger_price=take_threshold,
-            current_price=last_price,
-            threshold_value=resolved_settings.dry_run_exit_take_profit_pct,
-            evidence={"unrealized_pnl_pct": unrealized_pnl_pct},
-            observed_at=observed_at,
-        )
-
-    if (
-        high_watermark
-        and high_watermark > 0
-        and drawdown_from_high_pct >= resolved_settings.dry_run_exit_trailing_stop_pct
-    ):
-        _append_signal(
-            signals,
-            position_id=position_id,
-            signal_type=DryRunExitSignalType.TRAILING_STOP,
-            trigger_price=high_watermark,
-            current_price=last_price,
-            threshold_value=resolved_settings.dry_run_exit_trailing_stop_pct,
-            evidence={"drawdown_from_high_pct": drawdown_from_high_pct},
-            observed_at=observed_at,
-        )
-
-    if (
-        hold_sec is not None
-        and hold_sec >= resolved_settings.dry_run_exit_max_hold_sec
-        and hold_sec >= resolved_settings.dry_run_exit_min_hold_sec
-    ):
-        _append_signal(
-            signals,
-            position_id=position_id,
-            signal_type=DryRunExitSignalType.MAX_HOLD,
-            current_price=last_price,
-            threshold_value=float(resolved_settings.dry_run_exit_max_hold_sec),
-            evidence={"hold_sec": hold_sec},
+            threshold_value=threshold_by_type[trigger.trigger_type],
+            evidence={
+                **trigger.evidence,
+                "unrealized_pnl_pct": unrealized_pnl_pct,
+                "drawdown_from_high_pct": drawdown_from_high_pct,
+                "hold_sec": trigger.hold_sec,
+                "shared_exit_policy": True,
+            },
             observed_at=observed_at,
         )
 
