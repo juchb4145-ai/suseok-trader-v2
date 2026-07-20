@@ -61,8 +61,9 @@ def open_fast1_preview_connection(db_path: str | Path) -> sqlite3.Connection:
             "FAST-1 preview requires a stable SQLite sidecar state",
         )
 
+    uri_options = "mode=ro" if wal_exists else "mode=ro&immutable=1"
     connection = sqlite3.connect(
-        f"{path.as_uri()}?mode=ro",
+        f"{path.as_uri()}?{uri_options}",
         uri=True,
         timeout=15.0,
     )

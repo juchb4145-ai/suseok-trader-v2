@@ -43,6 +43,7 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert "MarketDataGlobalSkipBudget" in script
     assert "MarketScanParserVerified" in script
     assert '"MARKET_SCAN_PARSER_STATUS=$($env:MARKET_SCAN_PARSER_STATUS)"' in script
+    assert '$env:MARKET_SCAN_PARSER_STATUS = "PILOT_UNVERIFIED"' in script
     assert '"KOA_STUDIO_VERIFIED"' in script
     assert "$GatewayScriptParams.DisableConditions = $true" in script
     assert "$RealtimeFidValidation -or $DisableStockRealtime" in script

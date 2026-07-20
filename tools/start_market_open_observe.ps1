@@ -589,6 +589,9 @@ $env:KIWOOM_MARKET_INDEX_TR_BOOTSTRAP_ENABLED = if ($MarketIndexTrBootstrapEnabl
 $env:KIWOOM_MARKET_INDEX_CODES = $MarketIndexCodes
 $env:KIWOOM_MARKET_INDEX_SCREEN_NO = $MarketIndexScreenNo
 $env:KIWOOM_MARKET_INDEX_POLL_SEC = $MarketIndexPollSec
+if ([string]::IsNullOrWhiteSpace($env:MARKET_SCAN_PARSER_STATUS)) {
+    $env:MARKET_SCAN_PARSER_STATUS = "PILOT_UNVERIFIED"
+}
 
 Write-ObserveEnvOverrideFile -Label "market_open"
 
