@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from domain.broker.account_snapshot import mask_account_id
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, normalize_payload, utc_now
@@ -19,6 +20,7 @@ from gateway.event_factory import (
 ALLOWED_COMMAND_TYPES: frozenset[str] = frozenset(
     {
         "heartbeat_request",
+        "broker_snapshot_request",
         "request_tr",
         "register_realtime",
         "remove_realtime",
@@ -89,6 +91,8 @@ class GatewayCommandHandler:
             return [make_command_ack_event(command, source=self.source, message="heartbeat ok")]
         if command_type == "request_tr":
             return self._handle_request_tr(command)
+        if command_type == "broker_snapshot_request":
+            return self._handle_broker_snapshot_request(command)
         if command_type == "register_realtime":
             return self._handle_register_realtime(command)
         if command_type == "remove_realtime":
@@ -229,6 +233,63 @@ class GatewayCommandHandler:
         )
         ack_event = make_command_ack_event(command, source=self.source, message="tr response sent")
         return [response_event, ack_event]
+
+    def _handle_broker_snapshot_request(
+        self,
+        command: GatewayCommand,
+    ) -> list[GatewayEvent]:
+        payload = command.payload
+        simulation_values = {"SIM", "SIMULATION", "MOCK", "PAPER"}
+        if any(
+            str(payload.get(key) or "").strip().upper() not in simulation_values
+            for key in ("account_mode", "broker_env", "server_mode")
+        ):
+            return [
+                make_command_failed_event(
+                    command,
+                    "broker_snapshot_request requires simulation-like modes",
+                    source=self.source,
+                )
+            ]
+        account_id = str(payload.get("account_id") or "").strip()
+        snapshot = _mapping_value(payload, "mock_snapshot")
+        snapshot_payload = {
+            "snapshot_id": _string_value(payload, "snapshot_id", command.command_id),
+            "snapshot_status": "COMPLETE",
+            "complete": True,
+            "fresh": True,
+            "account_id_masked": mask_account_id(account_id),
+            "trade_date": _string_value(payload, "trade_date", ""),
+            "snapshot_at": datetime_to_wire(utc_now()),
+            "open_orders": list(snapshot.get("open_orders") or []),
+            "executions": list(snapshot.get("executions") or []),
+            "positions": list(snapshot.get("positions") or []),
+            "page_lineage": list(snapshot.get("page_lineage") or []),
+            "requested_sections": ["OPEN_ORDERS", "EXECUTIONS", "POSITIONS"],
+            "completed_sections": ["OPEN_ORDERS", "EXECUTIONS", "POSITIONS"],
+            "errors": [],
+            "source": "mock_gateway_read_only",
+            "mode": "LIVE_SIM",
+            "live_sim_only": True,
+            "live_real_allowed": False,
+            "broker_order_path": "LIVE_SIM_ONLY",
+            "automatic_local_repair": False,
+        }
+        return [
+            GatewayEvent(
+                event_type="account_snapshot",
+                source=self.source,
+                command_id=command.command_id,
+                idempotency_key=command.idempotency_key,
+                payload=normalize_payload(snapshot_payload),
+            ),
+            make_command_ack_event(
+                command,
+                source=self.source,
+                message="mock LIVE_SIM broker snapshot complete",
+                details={"snapshot_status": "COMPLETE", "live_real_allowed": False},
+            ),
+        ]
 
     def _handle_register_realtime(self, command: GatewayCommand) -> list[GatewayEvent]:
         codes = _extract_codes(command.payload, default_code=self.default_code)

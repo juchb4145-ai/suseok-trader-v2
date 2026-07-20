@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Never
 
+from domain.broker.account_snapshot import (
+    BrokerSnapshotStatus,
+    canonical_snapshot_status,
+    mask_account_id,
+)
 from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import (
@@ -488,6 +493,11 @@ def queue_live_sim_order_command(
         trade_date=intent_row["trade_date"],
     )
     queue_reasons = list(safety_gate.reason_codes)
+    if (
+        intent_row["side"] == LiveSimSide.BUY.value
+        and _latest_reconcile_blocks_new_buy(connection, resolved_settings)
+    ):
+        queue_reasons.append(LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value)
     if intent_row["side"] == LiveSimSide.SELL.value and not resolved_settings.live_sim_allow_sell:
         queue_reasons.append(LiveSimReasonCode.SELL_NOT_ALLOWED.value)
     if intent_row["order_type"] == LiveSimOrderType.MARKET.value:
@@ -670,6 +680,111 @@ def reconcile_live_sim(
     )
 
 
+def request_live_sim_broker_snapshot(
+    connection: sqlite3.Connection,
+    settings: Settings | None = None,
+    *,
+    snapshot_id: str | None = None,
+) -> dict[str, Any]:
+    resolved_settings = settings or load_settings()
+    if not resolved_settings.live_sim_reconcile_enabled:
+        raise ValueError("LIVE_SIM_RECONCILE_ENABLED is false")
+    if not resolved_settings.live_sim_reconcile_request_broker_snapshot_enabled:
+        raise ValueError("LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED is false")
+    if not resolved_settings.live_sim_account_id.strip():
+        raise ValueError("LIVE_SIM_ACCOUNT_ID is required for broker snapshot")
+    for field_name, value in (
+        ("LIVE_SIM_ACCOUNT_MODE", resolved_settings.live_sim_account_mode),
+        ("LIVE_SIM_BROKER_ENV", resolved_settings.live_sim_broker_env),
+        ("LIVE_SIM_SERVER_MODE", resolved_settings.live_sim_server_mode),
+    ):
+        if not is_simulation_like(value):
+            raise ValueError(f"{field_name} must be simulation-like")
+
+    active = connection.execute(
+        """
+        SELECT command_id, status
+        FROM gateway_commands
+        WHERE command_type = 'broker_snapshot_request'
+          AND status IN ('QUEUED', 'DISPATCHED', 'CLAIMED', 'GATEWAY_STARTED')
+        ORDER BY created_at DESC, command_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if active is not None:
+        raise ValueError(
+            "BROKER_SNAPSHOT_REQUEST_ALREADY_ACTIVE:"
+            f"{active['command_id']}:{active['status']}"
+        )
+
+    resolved_snapshot_id = require_non_empty_str(
+        snapshot_id or new_message_id("live_sim_broker_snapshot"),
+        "snapshot_id",
+    )
+    idempotency_key = f"live-sim-broker-snapshot:{resolved_snapshot_id}"
+    duplicate = connection.execute(
+        """
+        SELECT command_id, status
+        FROM gateway_commands
+        WHERE command_type = 'broker_snapshot_request'
+          AND idempotency_key = ?
+        LIMIT 1
+        """,
+        (idempotency_key,),
+    ).fetchone()
+    if duplicate is not None:
+        raise ValueError(
+            "BROKER_SNAPSHOT_REQUEST_DUPLICATE_SNAPSHOT_ID:"
+            f"{duplicate['command_id']}:{duplicate['status']}"
+        )
+    payload = {
+        "snapshot_id": resolved_snapshot_id,
+        "account_id": resolved_settings.live_sim_account_id,
+        "trade_date": _today_trade_date(),
+        "account_mode": resolved_settings.live_sim_account_mode,
+        "broker_env": resolved_settings.live_sim_broker_env,
+        "server_mode": resolved_settings.live_sim_server_mode,
+        "stale_after_sec": resolved_settings.live_sim_broker_snapshot_stale_sec,
+        "max_pages_per_section": (
+            resolved_settings.live_sim_broker_snapshot_max_pages_per_section
+        ),
+        "idempotency_key": idempotency_key,
+        "mode": "LIVE_SIM",
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "broker_order_path": "LIVE_SIM_ONLY",
+        "read_only": True,
+        "automatic_local_repair": False,
+    }
+    command = GatewayCommand(
+        command_type="broker_snapshot_request",
+        source="live_sim",
+        payload=payload,
+        idempotency_key=idempotency_key,
+    )
+    expires_at = utc_now() + timedelta(
+        seconds=resolved_settings.live_sim_broker_snapshot_request_ttl_sec
+    )
+    enqueue_result = enqueue_command(connection, command, expires_at=expires_at)
+    if not enqueue_result.accepted:
+        raise ValueError(
+            enqueue_result.error_message or "BROKER_SNAPSHOT_REQUEST_QUEUE_REJECTED"
+        )
+    return {
+        "snapshot_id": resolved_snapshot_id,
+        "snapshot_status": BrokerSnapshotStatus.REQUESTED.value,
+        "gateway_command_id": command.command_id,
+        "gateway_command_status": enqueue_result.status.value,
+        "account_id_masked": mask_account_id(resolved_settings.live_sim_account_id),
+        "trade_date": payload["trade_date"],
+        "expires_at": datetime_to_wire(expires_at),
+        "read_only": True,
+        "live_sim_only": True,
+        "live_real_allowed": False,
+        "automatic_local_repair": False,
+    }
+
+
 def sweep_expired_live_sim_order_commands(
     connection: sqlite3.Connection,
     settings: Settings | None = None,
@@ -813,6 +928,10 @@ def reconcile_live_sim_orders_and_positions(
         open_only=True,
     )
     positions = list_live_sim_positions(connection, status=None, limit=500, open_only=True)
+    local_execution_summaries = _local_execution_summaries(
+        connection,
+        trade_date=trade_date,
+    )
     mismatch_count = 0
     mismatches: list[dict[str, Any]] = []
     for order in open_orders:
@@ -933,12 +1052,26 @@ def reconcile_live_sim_orders_and_positions(
     broker_positions = (
         [] if normalized_broker_snapshot is None else normalized_broker_snapshot["positions"]
     )
+    broker_executions = (
+        [] if normalized_broker_snapshot is None else normalized_broker_snapshot["executions"]
+    )
     if normalized_broker_snapshot is not None:
+        mismatch_count += _append_broker_snapshot_quality_mismatches(
+            normalized_broker_snapshot,
+            expected_account_id_masked=mask_account_id(
+                resolved_settings.live_sim_account_id
+            ),
+            expected_trade_date=trade_date,
+            mismatches=mismatches,
+        )
         mismatch_count += _append_broker_snapshot_mismatches(
             open_orders=open_orders,
             positions=positions,
+            local_execution_summaries=local_execution_summaries,
             broker_open_orders=broker_open_orders,
             broker_positions=broker_positions,
+            broker_executions=broker_executions,
+            price_tolerance=resolved_settings.live_sim_reconcile_notional_tolerance,
             mismatches=mismatches,
         )
 
@@ -956,7 +1089,9 @@ def reconcile_live_sim_orders_and_positions(
 
     snapshot = LiveSimReconcileSnapshot(
         reconcile_id=new_message_id("live_sim_reconcile"),
-        account_id=resolved_settings.live_sim_account_id or "SIMULATION_ACCOUNT_REQUIRED",
+        account_id=mask_account_id(
+            resolved_settings.live_sim_account_id or "SIMULATION_ACCOUNT_REQUIRED"
+        ),
         trade_date=trade_date,
         broker_open_order_count=len(broker_open_orders),
         broker_position_count=len(broker_positions),
@@ -972,8 +1107,10 @@ def reconcile_live_sim_orders_and_positions(
                 else "BROKER_SNAPSHOT_UNAVAILABLE"
             ),
             "broker_snapshot": normalized_broker_snapshot or {},
-            "open_orders": open_orders,
-            "positions": positions,
+            "open_orders": [_mask_account_fields(item) for item in open_orders],
+            "positions": [_mask_account_fields(item) for item in positions],
+            "local_execution_summaries": local_execution_summaries,
+            "broker_execution_count": len(broker_executions),
             "mismatches": mismatches,
             "notional_tolerance": resolved_settings.live_sim_reconcile_notional_tolerance,
             "blocking_new_buy": blocking_new_buy,
@@ -2315,7 +2452,7 @@ def apply_live_sim_broker_snapshot(
     settings: Settings | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
-    payload = dict(event.payload)
+    payload = _mask_account_fields(event.payload)
     _record_lifecycle_event(
         connection,
         event_type="BROKER_SNAPSHOT_OBSERVED",
@@ -4477,19 +4614,47 @@ def _latest_reconcile_blocks_new_buy(
 ) -> bool:
     if not settings.live_sim_reconcile_block_new_buy_on_mismatch:
         return False
+    active_snapshot_request = connection.execute(
+        """
+        SELECT 1
+        FROM gateway_commands
+        WHERE command_type = 'broker_snapshot_request'
+          AND status IN ('QUEUED', 'DISPATCHED', 'CLAIMED', 'GATEWAY_STARTED')
+        LIMIT 1
+        """
+    ).fetchone()
+    if active_snapshot_request is not None:
+        return True
     row = connection.execute(
         """
-        SELECT status, mismatch_count, blocking_new_buy
+        SELECT status, mismatch_count, blocking_new_buy, snapshot_json
         FROM live_sim_reconcile_snapshots
         ORDER BY created_at DESC, reconcile_id DESC
         LIMIT 1
         """
     ).fetchone()
     if row is None:
-        return False
-    return bool(row["blocking_new_buy"]) or (
+        return bool(settings.live_sim_reconcile_request_broker_snapshot_enabled)
+    if bool(row["blocking_new_buy"]) or (
         int(row["mismatch_count"] or 0) > 0 and str(row["status"]).upper() == "RECONCILE_MISMATCH"
+    ):
+        return True
+    if not settings.live_sim_reconcile_request_broker_snapshot_enabled:
+        return False
+    snapshot_json = _json_object(row["snapshot_json"])
+    broker_snapshot = _json_object(snapshot_json.get("broker_snapshot"))
+    if not broker_snapshot or canonical_snapshot_status(
+        broker_snapshot.get("snapshot_status")
+    ) is not BrokerSnapshotStatus.COMPLETE:
+        return True
+    fresh, _ = _broker_snapshot_freshness(
+        str(broker_snapshot.get("snapshot_at") or ""),
+        int(
+            broker_snapshot.get("stale_after_sec")
+            or settings.live_sim_broker_snapshot_stale_sec
+        ),
     )
+    return not fresh
 
 
 def _unresolved_lifecycle_error_count(
@@ -4920,6 +5085,8 @@ def _normalize_broker_snapshot(
         return None
     root = _json_object(snapshot.get("broker_snapshot")) or dict(snapshot)
     snapshot_keys = {
+        "snapshot_id",
+        "snapshot_status",
         "open_orders",
         "unfilled_orders",
         "orders",
@@ -4928,6 +5095,9 @@ def _normalize_broker_snapshot(
         "holdings",
         "position_snapshots",
         "balances",
+        "executions",
+        "fills",
+        "execution_snapshots",
     }
     has_snapshot_contract = any(key in root for key in snapshot_keys)
     open_orders_raw = _mapping_list(
@@ -4948,13 +5118,43 @@ def _normalize_broker_snapshot(
             "balances",
         )
     )
+    executions_raw = _mapping_list(
+        _first_present(root, "executions", "fills", "execution_snapshots")
+    )
     if not has_snapshot_contract and not open_orders_raw and not positions_raw:
         return None
 
+    explicit_status = _optional_text(root.get("snapshot_status") or root.get("status"))
+    complete = _bool_like(root.get("complete", root.get("snapshot_complete", True)))
+    snapshot_status = (
+        canonical_snapshot_status(explicit_status)
+        if explicit_status is not None
+        else BrokerSnapshotStatus.COMPLETE
+        if complete
+        else BrokerSnapshotStatus.INCOMPLETE
+    )
+    snapshot_at = str(root.get("snapshot_at") or root.get("created_at") or "")
+    if not snapshot_at and explicit_status is None:
+        snapshot_at = datetime_to_wire(utc_now())
+    stale_after_sec = _optional_int_value(root.get("stale_after_sec"))
+    if stale_after_sec is None or stale_after_sec < 1:
+        stale_after_sec = settings.live_sim_broker_snapshot_stale_sec
+    fresh, age_sec = _broker_snapshot_freshness(snapshot_at, stale_after_sec)
+    if snapshot_status is BrokerSnapshotStatus.COMPLETE and not fresh:
+        snapshot_status = BrokerSnapshotStatus.STALE
+
     return {
-        "account_id": str(root.get("account_id") or settings.live_sim_account_id or ""),
+        "snapshot_id": str(root.get("snapshot_id") or ""),
+        "snapshot_status": snapshot_status.value,
+        "account_id_masked": str(
+            root.get("account_id_masked")
+            or mask_account_id(root.get("account_id") or settings.live_sim_account_id)
+        ),
         "trade_date": str(root.get("trade_date") or _today_trade_date()),
-        "snapshot_at": str(root.get("snapshot_at") or root.get("created_at") or ""),
+        "snapshot_at": snapshot_at,
+        "snapshot_age_sec": age_sec,
+        "stale_after_sec": stale_after_sec,
+        "fresh": fresh and snapshot_status is BrokerSnapshotStatus.COMPLETE,
         "open_orders": [
             normalized
             for row in open_orders_raw
@@ -4965,11 +5165,25 @@ def _normalize_broker_snapshot(
             for row in positions_raw
             if (normalized := _normalize_broker_position(row)) is not None
         ],
+        "executions": [
+            normalized
+            for row in executions_raw
+            if (normalized := _normalize_broker_execution(row)) is not None
+        ],
+        "page_lineage": normalize_value(_mapping_list(root.get("page_lineage"))),
+        "requested_sections": [
+            str(item) for item in _sequence_values(root.get("requested_sections"))
+        ],
+        "completed_sections": [
+            str(item) for item in _sequence_values(root.get("completed_sections"))
+        ],
+        "errors": [str(item) for item in _sequence_values(root.get("errors"))],
         "source": str(root.get("source") or "broker_snapshot"),
-        "complete": _bool_like(root.get("complete", root.get("snapshot_complete", True))),
+        "complete": complete and snapshot_status is BrokerSnapshotStatus.COMPLETE,
         "live_sim_only": True,
         "live_real_allowed": False,
         "broker_order_path": "LIVE_SIM_ONLY",
+        "automatic_local_repair": False,
     }
 
 
@@ -4977,8 +5191,11 @@ def _append_broker_snapshot_mismatches(
     *,
     open_orders: Sequence[Mapping[str, Any]],
     positions: Sequence[Mapping[str, Any]],
+    local_execution_summaries: Sequence[Mapping[str, Any]],
     broker_open_orders: Sequence[Mapping[str, Any]],
     broker_positions: Sequence[Mapping[str, Any]],
+    broker_executions: Sequence[Mapping[str, Any]],
+    price_tolerance: float,
     mismatches: list[dict[str, Any]],
 ) -> int:
     mismatch_count = 0
@@ -4995,6 +5212,13 @@ def _append_broker_snapshot_mismatches(
     for order in open_orders:
         broker_order_no = str(order.get("broker_order_no") or "").strip()
         if not broker_order_no:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "reason": "local_open_order_missing_broker_order_no",
+                }
+            )
             continue
         broker_order = broker_orders_by_no.get(broker_order_no)
         if broker_order is None:
@@ -5035,6 +5259,36 @@ def _append_broker_snapshot_mismatches(
                     "broker_remaining_quantity": broker_remaining,
                 }
             )
+        local_quantity = _optional_int_value(order.get("quantity"))
+        broker_quantity = _optional_int_value(broker_order.get("quantity"))
+        if (
+            local_quantity is not None
+            and broker_quantity is not None
+            and local_quantity != broker_quantity
+        ):
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "broker_order_no": broker_order_no,
+                    "reason": "broker_open_order_quantity_mismatch",
+                    "local_quantity": local_quantity,
+                    "broker_quantity": broker_quantity,
+                }
+            )
+        local_status = _canonical_local_open_order_status(order)
+        broker_status = _canonical_broker_open_order_status(broker_order)
+        if broker_status and local_status != broker_status:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "order": order.get("live_sim_order_id"),
+                    "broker_order_no": broker_order_no,
+                    "reason": "broker_open_order_status_mismatch",
+                    "local_status": local_status,
+                    "broker_status": broker_status,
+                }
+            )
 
     for broker_order in broker_open_orders:
         broker_order_no = str(broker_order.get("broker_order_no") or "").strip()
@@ -5054,6 +5308,8 @@ def _append_broker_snapshot_mismatches(
     local_available_by_code = _position_available_quantity_by_code(positions)
     broker_qty_by_code = _position_quantity_by_code(broker_positions)
     broker_available_by_code = _position_available_quantity_by_code(broker_positions)
+    local_avg_price_by_code = _position_average_price_by_code(positions)
+    broker_avg_price_by_code = _position_average_price_by_code(broker_positions)
     for code in sorted(set(local_qty_by_code) | set(broker_qty_by_code)):
         local_quantity = local_qty_by_code.get(code, 0)
         broker_quantity = broker_qty_by_code.get(code, 0)
@@ -5084,7 +5340,106 @@ def _append_broker_snapshot_mismatches(
                     "broker_available_quantity": broker_available,
                 }
             )
+        local_avg_price = local_avg_price_by_code.get(code)
+        broker_avg_price = broker_avg_price_by_code.get(code)
+        if (
+            local_avg_price is not None
+            and broker_avg_price is not None
+            and abs(local_avg_price - broker_avg_price) > float(price_tolerance)
+        ):
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "code": code,
+                    "reason": "broker_position_average_price_mismatch",
+                    "local_avg_entry_price": local_avg_price,
+                    "broker_avg_entry_price": broker_avg_price,
+                    "delta": abs(local_avg_price - broker_avg_price),
+                    "tolerance": float(price_tolerance),
+                }
+            )
+
+    local_execution_by_order = {
+        str(row.get("broker_order_no") or ""): int(row.get("quantity") or 0)
+        for row in local_execution_summaries
+        if str(row.get("broker_order_no") or "").strip()
+    }
+    broker_execution_by_order: dict[str, int] = {}
+    for execution in broker_executions:
+        broker_order_no = str(execution.get("broker_order_no") or "").strip()
+        if not broker_order_no:
+            mismatch_count += 1
+            mismatches.append(
+                {
+                    "reason": "broker_execution_missing_order_no",
+                    "broker_execution": dict(execution),
+                }
+            )
+            continue
+        broker_execution_by_order[broker_order_no] = (
+            broker_execution_by_order.get(broker_order_no, 0)
+            + int(execution.get("quantity") or 0)
+        )
+    for broker_order_no in sorted(
+        set(local_execution_by_order) | set(broker_execution_by_order)
+    ):
+        local_quantity = local_execution_by_order.get(broker_order_no, 0)
+        broker_quantity = broker_execution_by_order.get(broker_order_no, 0)
+        if local_quantity == broker_quantity:
+            continue
+        mismatch_count += 1
+        mismatches.append(
+            {
+                "broker_order_no": broker_order_no,
+                "reason": "broker_execution_sum_mismatch",
+                "local_execution_quantity": local_quantity,
+                "broker_execution_quantity": broker_quantity,
+            }
+        )
     return mismatch_count
+
+
+def _append_broker_snapshot_quality_mismatches(
+    snapshot: Mapping[str, Any],
+    *,
+    expected_account_id_masked: str,
+    expected_trade_date: str,
+    mismatches: list[dict[str, Any]],
+) -> int:
+    status = canonical_snapshot_status(snapshot.get("snapshot_status"))
+    reasons: list[str] = []
+    if status is not BrokerSnapshotStatus.COMPLETE or snapshot.get("complete") is not True:
+        reasons.append(f"broker_snapshot_{status.value.lower()}")
+    if status is BrokerSnapshotStatus.STALE or (
+        status is BrokerSnapshotStatus.COMPLETE and snapshot.get("fresh") is not True
+    ):
+        reasons.append("broker_snapshot_stale")
+    requested = {str(item) for item in _sequence_values(snapshot.get("requested_sections"))}
+    completed = {str(item) for item in _sequence_values(snapshot.get("completed_sections"))}
+    if requested and completed != requested:
+        reasons.append("broker_snapshot_section_incomplete")
+    if str(snapshot.get("account_id_masked") or "") != expected_account_id_masked:
+        reasons.append("broker_snapshot_account_mismatch")
+    if str(snapshot.get("trade_date") or "") != expected_trade_date:
+        reasons.append("broker_snapshot_trade_date_mismatch")
+    unique_reasons = list(dict.fromkeys(reasons))
+    for reason in unique_reasons:
+        mismatches.append(
+            {
+                "snapshot_id": snapshot.get("snapshot_id") or None,
+                "snapshot_status": status.value,
+                "reason": reason,
+                "snapshot_age_sec": snapshot.get("snapshot_age_sec"),
+                "stale_after_sec": snapshot.get("stale_after_sec"),
+                "requested_sections": sorted(requested),
+                "completed_sections": sorted(completed),
+                "account_id_masked": snapshot.get("account_id_masked"),
+                "expected_account_id_masked": expected_account_id_masked,
+                "trade_date": snapshot.get("trade_date"),
+                "expected_trade_date": expected_trade_date,
+            }
+        )
+    return len(unique_reasons)
 
 
 def _normalize_broker_open_order(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -5104,10 +5459,46 @@ def _normalize_broker_open_order(row: Mapping[str, Any]) -> dict[str, Any] | Non
         "broker_order_no": broker_order_no,
         "code": code,
         "side": str(_first_present(row, "side", "order_side") or "").upper(),
+        "order_status": str(
+            _first_present(row, "order_status", "status") or ""
+        ).upper(),
         "quantity": quantity if quantity is not None else remaining or 0,
+        "filled_quantity": _optional_int_value(
+            _first_present(row, "filled_quantity", "executed_quantity")
+        )
+        or 0,
         "remaining_quantity": remaining if remaining is not None else quantity or 0,
         "price": _optional_float_value(_first_present(row, "price", "order_price")),
-        "raw": normalize_value(dict(row)),
+        "raw": _masked_broker_row(row),
+    }
+
+
+def _normalize_broker_execution(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    broker_order_no = _optional_text(
+        _first_present(row, "broker_order_no", "order_no", "broker_order_id")
+    )
+    execution_id = _optional_text(
+        _first_present(row, "broker_execution_id", "execution_id", "fill_id")
+    )
+    code = _optional_stock_code(_first_present(row, "code", "stock_code", "symbol"))
+    quantity = _optional_int_value(
+        _first_present(row, "quantity", "execution_quantity", "fill_quantity")
+    )
+    if broker_order_no is None and execution_id is None and code is None:
+        return None
+    return {
+        "broker_execution_id": execution_id,
+        "broker_order_no": broker_order_no,
+        "code": code,
+        "side": str(_first_present(row, "side", "order_side") or "").upper(),
+        "quantity": quantity if quantity is not None else 0,
+        "price": _optional_float_value(
+            _first_present(row, "price", "execution_price", "fill_price")
+        ),
+        "executed_at": str(
+            _first_present(row, "executed_at", "execution_time", "fill_time") or ""
+        ),
+        "raw": _masked_broker_row(row),
     }
 
 
@@ -5129,7 +5520,7 @@ def _normalize_broker_position(row: Mapping[str, Any]) -> dict[str, Any] | None:
         "avg_entry_price": _optional_float_value(
             _first_present(row, "avg_entry_price", "average_buy_price", "avg_price")
         ),
-        "raw": normalize_value(dict(row)),
+        "raw": _masked_broker_row(row),
     }
 
 
@@ -5157,6 +5548,124 @@ def _position_available_quantity_by_code(
             continue
         quantities[code] = int(quantities.get(code) or 0) + int(available or 0)
     return quantities
+
+
+def _position_average_price_by_code(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, float | None]:
+    notionals: dict[str, float] = {}
+    quantities: dict[str, int] = {}
+    missing: set[str] = set()
+    for row in rows:
+        code = _optional_stock_code(row.get("code"))
+        if code is None:
+            continue
+        quantity = int(row.get("quantity") or 0)
+        avg_price = _optional_float_value(row.get("avg_entry_price"))
+        if avg_price is None:
+            missing.add(code)
+            continue
+        notionals[code] = notionals.get(code, 0.0) + avg_price * quantity
+        quantities[code] = quantities.get(code, 0) + quantity
+    result: dict[str, float | None] = {}
+    for code in set(notionals) | missing:
+        quantity = quantities.get(code, 0)
+        result[code] = notionals.get(code, 0.0) / quantity if quantity > 0 else None
+    return result
+
+
+def _local_execution_summaries(
+    connection: sqlite3.Connection,
+    *,
+    trade_date: str,
+) -> list[dict[str, Any]]:
+    rows = connection.execute(
+        """
+        SELECT
+            o.broker_order_no,
+            o.code,
+            COALESCE(SUM(e.quantity), 0) AS quantity,
+            COALESCE(SUM(e.notional), 0) AS notional
+        FROM live_sim_orders o
+        JOIN live_sim_executions e
+          ON e.live_sim_order_id = o.live_sim_order_id
+        WHERE o.trade_date = ?
+          AND o.broker_order_no IS NOT NULL
+          AND trim(o.broker_order_no) <> ''
+        GROUP BY o.broker_order_no, o.code
+        ORDER BY o.broker_order_no
+        """,
+        (trade_date,),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _canonical_local_open_order_status(order: Mapping[str, Any]) -> str:
+    status = str(order.get("status") or "").strip().upper()
+    if status == LiveSimOrderStatus.PARTIALLY_FILLED.value:
+        return "PARTIALLY_FILLED"
+    if status in {
+        LiveSimOrderStatus.CANCEL_REQUESTED.value,
+        LiveSimOrderStatus.CANCEL_COMMAND_QUEUED.value,
+    }:
+        return "CANCEL_PENDING"
+    return "OPEN"
+
+
+def _canonical_broker_open_order_status(order: Mapping[str, Any]) -> str:
+    remaining = int(order.get("remaining_quantity") or 0)
+    filled = int(order.get("filled_quantity") or 0)
+    status = str(order.get("order_status") or "").strip().upper()
+    if "취소" in status or "CANCEL" in status:
+        return "CANCEL_PENDING"
+    if filled > 0 and remaining > 0:
+        return "PARTIALLY_FILLED"
+    if status or remaining > 0:
+        return "OPEN"
+    return ""
+
+
+def _broker_snapshot_freshness(
+    snapshot_at: str,
+    stale_after_sec: int,
+) -> tuple[bool, float | None]:
+    if not str(snapshot_at or "").strip():
+        return False, None
+    try:
+        parsed = parse_timestamp(snapshot_at, "broker_snapshot_at")
+    except (TypeError, ValueError):
+        return False, None
+    age_sec = (utc_now() - parsed).total_seconds()
+    if age_sec < -5:
+        return False, round(age_sec, 3)
+    return age_sec <= int(stale_after_sec), round(max(age_sec, 0.0), 3)
+
+
+def _sequence_values(value: object) -> list[object]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return list(value)
+
+
+def _masked_broker_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    masked: dict[str, Any] = {}
+    for key, value in row.items():
+        normalized_key = str(key).strip().lower()
+        if normalized_key in {"account", "account_id", "account_no", "계좌번호"}:
+            masked[str(key)] = mask_account_id(value)
+        else:
+            masked[str(key)] = normalize_value(value)
+    return masked
+
+
+def _mask_account_fields(row: Mapping[str, Any]) -> dict[str, Any]:
+    item = normalize_value(dict(row))
+    if not isinstance(item, dict):
+        return {}
+    for key in ("account", "account_id", "account_no", "계좌번호"):
+        if key in item:
+            item[key] = mask_account_id(item[key])
+    return item
 
 
 def _mapping_list(value: object) -> list[Mapping[str, Any]]:

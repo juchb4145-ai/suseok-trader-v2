@@ -20,7 +20,8 @@ PR13은 `suseok_ai`의 실제 Kiwoom OpenAPI+ Gateway 자산을 `suseok-trader-v
 
 - legacy strategy/runtime/dashboard
 - theme/candidate hydration parser
-- broker reconcile 대형 TR runtime
+- legacy broker reconcile runtime. FAST-4의 좁은 모의계좌 read-only snapshot collector만
+  `docs/fast4_broker_snapshot_reconcile_ko.md` 계약으로 제공한다.
 - background auto order worker
 - generic order enqueue API
 - generic `cancel_order` / `modify_order` 실행 경로. `cancel_order`는 LIVE_SIM 미체결 BUY TTL 취소 전용으로만 처리한다.
@@ -37,6 +38,7 @@ PR13은 `suseok_ai`의 실제 Kiwoom OpenAPI+ Gateway 자산을 `suseok-trader-v
 | `OnReceiveRealCondition` `I/D` | `condition_event` action `ENTER/EXIT` | market condition projection |
 | `OnReceiveRealData` | `price_tick` | latest tick, bars, readiness |
 | `request_tr` command | `tr_response` | TR snapshot projection |
+| `broker_snapshot_request` command | `account_snapshot` | LIVE_SIM broker/local reconcile |
 | `SendOrder` result | `command_ack` or `command_failed` | LIVE_SIM order state |
 | `OnReceiveChejanData` fill | `execution_event` | LIVE_SIM execution state |
 
@@ -103,7 +105,9 @@ Gateway 처리:
 4. `GetRepeatCnt`, `GetCommData`로 rows 구성
 5. `tr_response` event와 `command_ack` 전송
 
-초기 안정 범위는 `opt10001` 같은 기본 TR이다. 대형 multi-page TR은 후속 PR에서 별도 rate-limit와 parser spec을 붙인다.
+generic `request_tr`의 초기 안정 범위는 `opt10001` 같은 기본 TR이다. multi-page 계좌 TR은
+generic 경로로 열지 않고 FAST-4 `broker_snapshot_request`의 모의서버 전용 parser와 page
+lineage 계약으로만 제공한다.
 
 ## LIVE_SIM Order Guard
 

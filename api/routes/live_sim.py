@@ -28,6 +28,7 @@ from services.live_sim.live_sim_service import (
     list_live_sim_rejections,
     queue_live_sim_order_command,
     reconcile_live_sim,
+    request_live_sim_broker_snapshot,
     run_live_sim_cancel_unfilled_once,
     run_live_sim_exit_once,
 )
@@ -649,6 +650,31 @@ def live_sim_reconcile_broker_snapshot(body: dict[str, Any]) -> dict[str, Any]:
     finally:
         connection.close()
     return {"reconcile": snapshot.to_dict(), **_live_sim_response_flags()}
+
+
+@router.post(
+    "/reconcile/broker-snapshot/request",
+    dependencies=[Depends(require_local_token)],
+)
+def live_sim_request_broker_snapshot(
+    snapshot_id: str | None = Query(default=None),
+) -> dict[str, Any]:
+    settings = load_settings()
+    connection = open_connection(settings.trading_db_path)
+    try:
+        request = request_live_sim_broker_snapshot(
+            connection,
+            settings=settings,
+            snapshot_id=snapshot_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    finally:
+        connection.close()
+    return {"broker_snapshot_request": request, **_live_sim_response_flags()}
 
 
 @router.post("/cancel/run-once", dependencies=[Depends(require_local_token)])

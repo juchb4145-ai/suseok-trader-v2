@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from services.dashboard_service import build_dashboard_snapshot
 from services.live_sim.live_sim_service import create_live_sim_intent
 from services.oms.dry_run_service import create_dry_run_intent
+from storage.sqlite import initialize_database
 from tests.support_fastapi_routes import iter_app_routes
 from tests.test_live_sim import _live_sim_settings, _mark_gateway_ready
 from tests.test_oms_dry_run import _prepared_connection
@@ -94,11 +95,45 @@ def test_dashboard_snapshot_includes_live_sim_read_only(tmp_path) -> None:
     assert snapshot["pipeline_summary"]["live_sim"]["intent_count"] == 1
 
 
+def test_live_sim_api_queues_masked_read_only_broker_snapshot_request(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "live-sim-broker-snapshot-api.sqlite3"
+    initialize_database(db_path).close()
+    _set_live_sim_api_env(monkeypatch, db_path)
+    monkeypatch.setenv(
+        "LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED",
+        "true",
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/live-sim/reconcile/broker-snapshot/request",
+            params={"snapshot_id": "api-snapshot-1"},
+            headers={"X-Local-Token": "secret-token"},
+        )
+
+    assert response.status_code == 200
+    request = response.json()["broker_snapshot_request"]
+    assert request["snapshot_status"] == "REQUESTED"
+    assert request["account_id_masked"] == "***5678"
+    assert "SIM-12345678" not in response.text
+    connection = initialize_database(db_path)
+    command = connection.execute(
+        "SELECT command_type, payload_json FROM gateway_commands"
+    ).fetchone()
+    connection.close()
+    assert command["command_type"] == "broker_snapshot_request"
+    assert '"read_only":true' in command["payload_json"]
+
+
 def test_live_sim_routes_do_not_add_generic_order_surface() -> None:
     paths = {route.path for route in iter_app_routes(app)}
 
     assert "/api/live-sim/status" in paths
     assert "/api/live-sim/orders/from-intent/{live_sim_intent_id}" in paths
+    assert "/api/live-sim/reconcile/broker-snapshot/request" in paths
     assert "/api/orders/enqueue" not in paths
     assert all("cancel_order" not in path for path in paths)
     assert all("modify_order" not in path for path in paths)

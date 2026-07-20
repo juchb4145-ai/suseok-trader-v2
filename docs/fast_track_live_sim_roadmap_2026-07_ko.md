@@ -101,7 +101,7 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 | FAST-2A Point-in-Time Replay | `DONE` | 현재 코드·격리 replay 입력 | virtual-clock replay와 입력 coverage |
 | FAST-2B Profit Lab | `DONE` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
 | FAST-3 Parallel Shadow | `DONE` | Profit Lab model 고정 | shadow/live comparison |
-| FAST-4 Broker Snapshot Reconcile | `NEXT` | Gateway query contract | broker/local reconcile |
+| FAST-4 Broker Snapshot Reconcile | `DONE` | Gateway query contract | broker/local reconcile |
 | FAST-5 Automatic Canary | `BLOCKED` | C1 + Alpha + Broker reconcile | 일 1~2건 자동 canary |
 | FAST-6 Champion/Challenger | `BLOCKED_BY_FAST_5` | canary evidence | 모델 운영 체계 |
 
@@ -796,6 +796,10 @@ PR: FAST-4: Add Kiwoom simulation broker snapshot reconciliation
 - duplicate snapshot/request 0
 - REAL server request 0
 - mismatch fixture에서 신규 BUY command 0
+
+구현 계약은 `docs/fast4_broker_snapshot_reconcile_ko.md`를 따른다. 새 운영 DB schema 없이
+기존 Gateway command/event와 LIVE_SIM reconcile snapshot을 재사용하며, 기능 플래그 기본값은
+off다. 실제 계좌 snapshot 요청은 별도 운영 승인 전까지 실행하지 않는다.
 
 ## 12. FAST-5 — Guarded Automatic LIVE_SIM Canary
 

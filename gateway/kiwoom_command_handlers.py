@@ -17,6 +17,7 @@ from gateway.event_factory import (
     make_command_failed_event,
     make_command_started_event,
 )
+from gateway.kiwoom_broker_snapshot import KiwoomBrokerSnapshotCollector
 from gateway.kiwoom_client import (
     KiwoomOrderRequest,
     KiwoomOrderResult,
@@ -33,6 +34,7 @@ DurableOrderPreAckCallback = Callable[[GatewayEvent], Mapping[str, Any]]
 
 ALLOWED_KIWOOM_COMMAND_TYPES = {
     "heartbeat_request",
+    "broker_snapshot_request",
     "request_tr",
     "register_realtime",
     "remove_realtime",
@@ -74,6 +76,7 @@ class KiwoomRateLimitGovernor:
         self.hourly_limit = max(float(hourly_limit), 1.0)
         self.min_interval_sec = {
             "request_tr": 1.0,
+            "broker_snapshot_request": 1.0,
             "load_conditions": 1.0,
             "send_condition": 0.2,
             "send_order": 0.2,
@@ -85,6 +88,7 @@ class KiwoomRateLimitGovernor:
             "register_realtime": 1.0,
             "remove_realtime": 1.0,
             "request_tr": 1.0,
+            "broker_snapshot_request": 3.0,
             "load_conditions": 1.0,
             "send_condition": 1.0,
             "stop_condition": 1.0,
@@ -219,6 +223,8 @@ class KiwoomGatewayCommandHandler:
             return [make_command_ack_event(command, source=self.source, message="heartbeat ok")]
         if command_type == "request_tr":
             return self._handle_request_tr(command)
+        if command_type == "broker_snapshot_request":
+            return self._handle_broker_snapshot_request(command)
         if command_type == "register_realtime":
             return self._handle_register_realtime(command)
         if command_type == "remove_realtime":
@@ -317,6 +323,80 @@ class KiwoomGatewayCommandHandler:
 
         result = self.tr_runner.request(**common_kwargs)
         return self._tr_result_events(command, result, request_id)
+
+    def _handle_broker_snapshot_request(
+        self,
+        command: GatewayCommand,
+    ) -> list[GatewayEvent]:
+        validation_error = _validate_broker_snapshot_command(command)
+        if validation_error is not None:
+            return [make_command_failed_event(command, validation_error, source=self.source)]
+        actual_broker_env = self._actual_broker_env()
+        if actual_broker_env != "SIMULATION":
+            return [
+                make_command_failed_event(
+                    command,
+                    "Kiwoom broker_snapshot_request requires simulation server, "
+                    f"got {actual_broker_env}",
+                    source=self.source,
+                )
+            ]
+
+        payload = command.payload
+        collector = KiwoomBrokerSnapshotCollector(self.tr_runner)
+        completed_during_submit: list[GatewayEvent] = []
+        submitting = True
+
+        def emit(events: list[GatewayEvent]) -> None:
+            if submitting:
+                completed_during_submit.extend(events)
+            elif self.on_async_events is not None:
+                self.on_async_events(events)
+
+        def on_progress(snapshot: dict[str, Any]) -> None:
+            emit([_broker_snapshot_event(command, snapshot, source=self.source)])
+
+        def on_complete(snapshot: dict[str, Any]) -> None:
+            terminal = str(snapshot.get("snapshot_status") or "FAILED").upper()
+            terminal_event = _broker_snapshot_event(command, snapshot, source=self.source)
+            if terminal == "COMPLETE":
+                command_event = make_command_ack_event(
+                    command,
+                    source=self.source,
+                    message="Kiwoom LIVE_SIM broker snapshot complete",
+                    details={
+                        "snapshot_id": snapshot.get("snapshot_id"),
+                        "snapshot_status": terminal,
+                        "page_count": len(snapshot.get("page_lineage") or []),
+                        "open_order_count": len(snapshot.get("open_orders") or []),
+                        "execution_count": len(snapshot.get("executions") or []),
+                        "position_count": len(snapshot.get("positions") or []),
+                        "live_sim_only": True,
+                        "live_real_allowed": False,
+                    },
+                )
+            else:
+                command_event = make_command_failed_event(
+                    command,
+                    f"BROKER_SNAPSHOT_{terminal}",
+                    source=self.source,
+                )
+            emit([terminal_event, command_event])
+
+        requested = collector.start(
+            snapshot_id=_string_value(payload, "snapshot_id", command.command_id),
+            account_id=_string_value(payload, "account_id", ""),
+            trade_date=_string_value(payload, "trade_date", ""),
+            stale_after_sec=int(payload.get("stale_after_sec") or 120),
+            max_pages_per_section=int(payload.get("max_pages_per_section") or 20),
+            on_progress=on_progress,
+            on_complete=on_complete,
+        )
+        submitting = False
+        return [
+            _broker_snapshot_event(command, requested, source=self.source),
+            *completed_during_submit,
+        ]
 
     def _tr_result_events(
         self,
@@ -745,6 +825,52 @@ def _extract_codes(payload: Mapping[str, Any]) -> set[str]:
     else:
         candidates = []
     return {normalize_code(code) for code in candidates if str(code).strip()}
+
+
+def _broker_snapshot_event(
+    command: GatewayCommand,
+    snapshot: Mapping[str, Any],
+    *,
+    source: str,
+) -> GatewayEvent:
+    return GatewayEvent(
+        event_type="account_snapshot",
+        source=source,
+        command_id=command.command_id,
+        idempotency_key=command.idempotency_key,
+        payload=normalize_payload(snapshot),
+    )
+
+
+def _validate_broker_snapshot_command(command: GatewayCommand) -> str | None:
+    if command.source.strip().lower() != "live_sim":
+        return "broker_snapshot_request disabled except live_sim source"
+    if not command.idempotency_key:
+        return "broker_snapshot_request requires idempotency_key"
+    payload = command.payload
+    if not str(payload.get("account_id") or "").strip():
+        return "broker_snapshot_request requires account_id"
+    if payload.get("idempotency_key") != command.idempotency_key:
+        return "broker_snapshot_request payload idempotency_key mismatch"
+    for key in ("account_mode", "broker_env", "server_mode"):
+        if str(payload.get(key) or "").strip().upper() not in {
+            "SIM",
+            "SIMULATION",
+            "MOCK",
+            "PAPER",
+        }:
+            return f"broker_snapshot_request {key} must be simulation-like"
+    if payload.get("live_sim_only") is not True:
+        return "broker_snapshot_request requires live_sim_only=true"
+    if payload.get("live_real_allowed") is not False:
+        return "broker_snapshot_request requires live_real_allowed=false"
+    if payload.get("read_only") is not True:
+        return "broker_snapshot_request requires read_only=true"
+    if payload.get("automatic_local_repair") is not False:
+        return "broker_snapshot_request requires automatic_local_repair=false"
+    if str(payload.get("broker_order_path") or "").upper() != "LIVE_SIM_ONLY":
+        return "broker_snapshot_request requires broker_order_path=LIVE_SIM_ONLY"
+    return None
 
 
 def _string_value(payload: Mapping[str, Any], key: str, default: str) -> str:

@@ -636,6 +636,9 @@ class Settings:
     live_sim_reconcile_allow_exit_on_mismatch: bool = True
     live_sim_reconcile_stale_order_sec: int = 300
     live_sim_reconcile_notional_tolerance: float = 1.0
+    live_sim_broker_snapshot_stale_sec: int = 120
+    live_sim_broker_snapshot_request_ttl_sec: int = 180
+    live_sim_broker_snapshot_max_pages_per_section: int = 20
     live_sim_operating_cycle_enabled: bool = True
     live_sim_operating_default_mode: str = "OBSERVE_CYCLE"
     live_sim_operating_max_buy_commands_per_cycle: int = 1
@@ -1479,6 +1482,9 @@ class Settings:
             "live_sim_exit_max_hold_sec",
             "live_sim_exit_max_commands_per_run",
             "live_sim_reconcile_stale_order_sec",
+            "live_sim_broker_snapshot_stale_sec",
+            "live_sim_broker_snapshot_request_ttl_sec",
+            "live_sim_broker_snapshot_max_pages_per_section",
         ):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -4012,6 +4018,21 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             env.get("LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE", "1.0"),
             "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE",
             min_value=0.0,
+        ),
+        live_sim_broker_snapshot_stale_sec=_parse_int(
+            env.get("LIVE_SIM_BROKER_SNAPSHOT_STALE_SEC", "120"),
+            "LIVE_SIM_BROKER_SNAPSHOT_STALE_SEC",
+            min_value=1,
+        ),
+        live_sim_broker_snapshot_request_ttl_sec=_parse_int(
+            env.get("LIVE_SIM_BROKER_SNAPSHOT_REQUEST_TTL_SEC", "180"),
+            "LIVE_SIM_BROKER_SNAPSHOT_REQUEST_TTL_SEC",
+            min_value=1,
+        ),
+        live_sim_broker_snapshot_max_pages_per_section=_parse_int(
+            env.get("LIVE_SIM_BROKER_SNAPSHOT_MAX_PAGES_PER_SECTION", "20"),
+            "LIVE_SIM_BROKER_SNAPSHOT_MAX_PAGES_PER_SECTION",
+            min_value=1,
         ),
         live_sim_operating_cycle_enabled=_parse_bool(
             env.get("LIVE_SIM_OPERATING_CYCLE_ENABLED", "true")

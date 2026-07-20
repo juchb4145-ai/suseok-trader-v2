@@ -455,6 +455,9 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_entry_window_end == "14:30:00"
     assert settings.live_sim_exit_eod_flatten_time == "15:15:00"
     assert settings.live_sim_reconcile_notional_tolerance == 1.0
+    assert settings.live_sim_broker_snapshot_stale_sec == 120
+    assert settings.live_sim_broker_snapshot_request_ttl_sec == 180
+    assert settings.live_sim_broker_snapshot_max_pages_per_section == 20
     assert settings.live_sim_operating_loop_enabled is False
     assert settings.live_sim_operating_loop_queue_commands is False
     assert settings.live_sim_operating_loop_interval_sec == 20
@@ -1404,6 +1407,9 @@ def test_live_sim_buy_reprice_and_reconcile_settings_are_validated() -> None:
             "LIVE_SIM_REPRICE_ENABLED": "true",
             "LIVE_SIM_REPRICE_MAX_ATTEMPTS": "2",
             "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE": "0.5",
+            "LIVE_SIM_BROKER_SNAPSHOT_STALE_SEC": "90",
+            "LIVE_SIM_BROKER_SNAPSHOT_REQUEST_TTL_SEC": "150",
+            "LIVE_SIM_BROKER_SNAPSHOT_MAX_PAGES_PER_SECTION": "10",
         }
     )
 
@@ -1411,11 +1417,17 @@ def test_live_sim_buy_reprice_and_reconcile_settings_are_validated() -> None:
     assert settings.live_sim_reprice_enabled is True
     assert settings.live_sim_reprice_max_attempts == 2
     assert settings.live_sim_reconcile_notional_tolerance == 0.5
+    assert settings.live_sim_broker_snapshot_stale_sec == 90
+    assert settings.live_sim_broker_snapshot_request_ttl_sec == 150
+    assert settings.live_sim_broker_snapshot_max_pages_per_section == 10
 
     invalid_cases = {
         "LIVE_SIM_BUY_PRICE_OFFSET_TICKS": "4",
         "LIVE_SIM_REPRICE_MAX_ATTEMPTS": "0",
         "LIVE_SIM_RECONCILE_NOTIONAL_TOLERANCE": "-0.1",
+        "LIVE_SIM_BROKER_SNAPSHOT_STALE_SEC": "0",
+        "LIVE_SIM_BROKER_SNAPSHOT_REQUEST_TTL_SEC": "0",
+        "LIVE_SIM_BROKER_SNAPSHOT_MAX_PAGES_PER_SECTION": "0",
     }
     for key, value in invalid_cases.items():
         try:
