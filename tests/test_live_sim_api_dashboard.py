@@ -134,6 +134,8 @@ def test_live_sim_routes_do_not_add_generic_order_surface() -> None:
     assert "/api/live-sim/status" in paths
     assert "/api/live-sim/orders/from-intent/{live_sim_intent_id}" in paths
     assert "/api/live-sim/reconcile/broker-snapshot/request" in paths
+    assert "/api/live-sim/automation/canary/status" in paths
+    assert "/api/live-sim/automation/canary/run-once" in paths
     assert "/api/orders/enqueue" not in paths
     assert all("cancel_order" not in path for path in paths)
     assert all("modify_order" not in path for path in paths)

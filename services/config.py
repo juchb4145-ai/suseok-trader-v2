@@ -653,6 +653,19 @@ class Settings:
     live_sim_operating_loop_interval_sec: int = 20
     live_sim_operating_loop_market_open_time: str = "09:05:00"
     live_sim_operating_loop_market_close_time: str = "15:20:00"
+    live_sim_fast5_automatic_canary_enabled: bool = False
+    live_sim_fast5_auto_queue_enabled: bool = False
+    live_sim_fast5_manual_c1_status: str = "BLOCKED"
+    live_sim_fast5_manual_c1_evidence_sha256: str = ""
+    live_sim_fast5_alpha_status: str = "BLOCKED"
+    live_sim_fast5_alpha_evidence_sha256: str = ""
+    live_sim_fast5_shadow_status: str = "BLOCKED"
+    live_sim_fast5_shadow_evidence_sha256: str = ""
+    live_sim_fast5_rollback_ack_run_id: str = ""
+    live_sim_fast5_max_buy_commands_per_cycle: int = 1
+    live_sim_fast5_max_daily_buy_count: int = 2
+    live_sim_fast5_max_order_notional: float = 100_000
+    live_sim_fast5_pipeline_max_age_sec: int = 60
     no_buy_sentinel_enabled: bool = True
     no_buy_sentinel_market_open_time: str = "09:00:00"
     no_buy_sentinel_minutes_after_open: int = 20
@@ -1585,6 +1598,61 @@ class Settings:
                 "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME",
             ),
         )
+        fast5_status_contracts = {
+            "live_sim_fast5_manual_c1_status": {"BLOCKED", "PASS"},
+            "live_sim_fast5_alpha_status": {"BLOCKED", "ALPHA_QUALIFIED"},
+            "live_sim_fast5_shadow_status": {"BLOCKED", "PASS"},
+        }
+        for field_name, allowed in fast5_status_contracts.items():
+            normalized = _normalize_non_empty(getattr(self, field_name))
+            if normalized not in allowed:
+                values = ", ".join(sorted(allowed))
+                raise ValueError(f"{field_name.upper()} must be one of {values}")
+            object.__setattr__(self, field_name, normalized)
+        fast5_evidence_contracts = (
+            (
+                "live_sim_fast5_manual_c1_status",
+                "PASS",
+                "live_sim_fast5_manual_c1_evidence_sha256",
+            ),
+            (
+                "live_sim_fast5_alpha_status",
+                "ALPHA_QUALIFIED",
+                "live_sim_fast5_alpha_evidence_sha256",
+            ),
+            (
+                "live_sim_fast5_shadow_status",
+                "PASS",
+                "live_sim_fast5_shadow_evidence_sha256",
+            ),
+        )
+        for status_field, passing_value, sha_field in fast5_evidence_contracts:
+            sha256 = str(getattr(self, sha_field) or "").strip()
+            if sha256 and not _is_lower_sha256(sha256):
+                raise ValueError(f"{sha_field.upper()} must be lowercase SHA-256")
+            if getattr(self, status_field) == passing_value and not sha256:
+                raise ValueError(
+                    f"{sha_field.upper()} is required when "
+                    f"{status_field.upper()}={passing_value}"
+                )
+            object.__setattr__(self, sha_field, sha256)
+        object.__setattr__(
+            self,
+            "live_sim_fast5_rollback_ack_run_id",
+            str(self.live_sim_fast5_rollback_ack_run_id or "").strip(),
+        )
+        if self.live_sim_fast5_max_buy_commands_per_cycle != 1:
+            raise ValueError(
+                "LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE must remain exactly 1"
+            )
+        if not 1 <= self.live_sim_fast5_max_daily_buy_count <= 2:
+            raise ValueError("LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT must be between 1 and 2")
+        if not 0 < self.live_sim_fast5_max_order_notional <= 100_000:
+            raise ValueError(
+                "LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL must be > 0 and <= 100000"
+            )
+        if self.live_sim_fast5_pipeline_max_age_sec < 1:
+            raise ValueError("LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC must be >= 1")
         for field_name in ("dashboard_refresh_sec", "dashboard_snapshot_default_limit"):
             if getattr(self, field_name) < 1:
                 raise ValueError(f"{field_name.upper()} must be >= 1")
@@ -4087,6 +4155,60 @@ def _build_settings(env: Mapping[str, str]) -> Settings:
             "LIVE_SIM_OPERATING_LOOP_MARKET_CLOSE_TIME",
             "15:20:00",
         ),
+        live_sim_fast5_automatic_canary_enabled=_parse_bool(
+            env.get("LIVE_SIM_FAST5_AUTOMATIC_CANARY_ENABLED", "false")
+        ),
+        live_sim_fast5_auto_queue_enabled=_parse_bool(
+            env.get("LIVE_SIM_FAST5_AUTO_QUEUE_ENABLED", "false")
+        ),
+        live_sim_fast5_manual_c1_status=env.get(
+            "LIVE_SIM_FAST5_MANUAL_C1_STATUS",
+            "BLOCKED",
+        ),
+        live_sim_fast5_manual_c1_evidence_sha256=env.get(
+            "LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256",
+            "",
+        ),
+        live_sim_fast5_alpha_status=env.get(
+            "LIVE_SIM_FAST5_ALPHA_STATUS",
+            "BLOCKED",
+        ),
+        live_sim_fast5_alpha_evidence_sha256=env.get(
+            "LIVE_SIM_FAST5_ALPHA_EVIDENCE_SHA256",
+            "",
+        ),
+        live_sim_fast5_shadow_status=env.get(
+            "LIVE_SIM_FAST5_SHADOW_STATUS",
+            "BLOCKED",
+        ),
+        live_sim_fast5_shadow_evidence_sha256=env.get(
+            "LIVE_SIM_FAST5_SHADOW_EVIDENCE_SHA256",
+            "",
+        ),
+        live_sim_fast5_rollback_ack_run_id=env.get(
+            "LIVE_SIM_FAST5_ROLLBACK_ACK_RUN_ID",
+            "",
+        ),
+        live_sim_fast5_max_buy_commands_per_cycle=_parse_int(
+            env.get("LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE", "1"),
+            "LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE",
+            min_value=1,
+        ),
+        live_sim_fast5_max_daily_buy_count=_parse_int(
+            env.get("LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT", "2"),
+            "LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT",
+            min_value=1,
+        ),
+        live_sim_fast5_max_order_notional=_parse_float(
+            env.get("LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL", "100000"),
+            "LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL",
+            min_value=0.01,
+        ),
+        live_sim_fast5_pipeline_max_age_sec=_parse_int(
+            env.get("LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC", "60"),
+            "LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC",
+            min_value=1,
+        ),
         no_buy_sentinel_enabled=_parse_bool(env.get("NO_BUY_SENTINEL_ENABLED", "true")),
         no_buy_sentinel_market_open_time=env.get(
             "NO_BUY_SENTINEL_MARKET_OPEN_TIME",
@@ -4342,6 +4464,10 @@ def _normalize_list_values(values: tuple[str, ...]) -> tuple[str, ...]:
     if len(set(normalized)) != len(normalized):
         raise ValueError("configuration list values must not contain duplicates")
     return normalized
+
+
+def _is_lower_sha256(value: str) -> bool:
+    return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
 def _parse_csv_list(value: str, field_name: str) -> tuple[str, ...]:

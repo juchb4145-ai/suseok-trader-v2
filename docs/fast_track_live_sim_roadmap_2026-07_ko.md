@@ -102,7 +102,7 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 | FAST-2B Profit Lab | `DONE` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
 | FAST-3 Parallel Shadow | `DONE` | Profit Lab model 고정 | shadow/live comparison |
 | FAST-4 Broker Snapshot Reconcile | `DONE` | Gateway query contract | broker/local reconcile |
-| FAST-5 Automatic Canary | `BLOCKED` | C1 + Alpha + Broker reconcile | 일 1~2건 자동 canary |
+| FAST-5 Automatic Canary | `BLOCKED_BY_C1_ALPHA_BROKER` | C1 + Alpha + Broker reconcile | 기본 OFF guarded 자동화 구현, 운영 evidence 대기 |
 | FAST-6 Champion/Challenger | `BLOCKED_BY_FAST_5` | canary evidence | 모델 운영 체계 |
 
 상태값은 다음만 사용한다.
@@ -802,6 +802,19 @@ PR: FAST-4: Add Kiwoom simulation broker snapshot reconciliation
 off다. 실제 계좌 snapshot 요청은 별도 운영 승인 전까지 실행하지 않는다.
 
 ## 12. FAST-5 — Guarded Automatic LIVE_SIM Canary
+
+### 구현 상태
+
+```text
+branch: codex/fast-5-guarded-automatic-canary
+PR: FAST-5: Add guarded automatic LIVE_SIM canary
+code: implemented behind default-off flags
+activation: BLOCKED_BY_C1_ALPHA_BROKER
+```
+
+구현 계약은 `docs/fast5_guarded_automatic_canary_ko.md`를 따른다. status/preview는
+read-only이고, 실제 queue는 외부 evidence SHA 결속과 모든 동적 gate가 PASS일 때만 가능하다.
+이번 개발 단계에서는 운영 DB, Gateway, LIVE_SIM 주문을 실행하지 않는다.
 
 ### 진입 조건
 

@@ -27,8 +27,8 @@ Master tracking issue는 GitHub Issue `#7`이다.
 | 2 | Operational Gate C1 | BLOCKED_BY_CURRENT_MARKET_DATA | 오늘 tick/index/context와 canary가 준비된 뒤 수동 1건 lifecycle 검증 |
 | 3 | FAST-2A/2B Alpha Replay + Profit Lab | DONE | 미래 데이터 누수 없는 비용 후 수익성 검증 |
 | 4 | FAST-3 Parallel Shadow | DONE | shadow와 모의체결 괴리 측정 |
-| 5 | FAST-4 Broker Snapshot Reconcile | NEXT | 키움 모의계좌와 Core local truth 대사 |
-| 6 | FAST-5 Automatic Canary | BLOCKED | 일 1~2건 제한 자동 LIVE_SIM |
+| 5 | FAST-4 Broker Snapshot Reconcile | DONE | 키움 모의계좌와 Core local truth 대사 |
+| 6 | FAST-5 Automatic Canary | BLOCKED_BY_C1_ALPHA_BROKER | default-off 자동화 구현 완료, 운영 evidence 대기 |
 | 7 | FAST-6 Champion/Challenger | BLOCKED | 검증된 전략 1개와 challenger 운영 |
 
 Append-only 연속 10거래일 evidence는 inline 제거를 위한 장기 병렬 트랙이며,

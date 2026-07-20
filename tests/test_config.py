@@ -463,6 +463,19 @@ def test_default_settings_are_observe_with_live_flags_disabled() -> None:
     assert settings.live_sim_operating_loop_interval_sec == 20
     assert settings.live_sim_operating_loop_market_open_time == "09:05:00"
     assert settings.live_sim_operating_loop_market_close_time == "15:20:00"
+    assert settings.live_sim_fast5_automatic_canary_enabled is False
+    assert settings.live_sim_fast5_auto_queue_enabled is False
+    assert settings.live_sim_fast5_manual_c1_status == "BLOCKED"
+    assert settings.live_sim_fast5_manual_c1_evidence_sha256 == ""
+    assert settings.live_sim_fast5_alpha_status == "BLOCKED"
+    assert settings.live_sim_fast5_alpha_evidence_sha256 == ""
+    assert settings.live_sim_fast5_shadow_status == "BLOCKED"
+    assert settings.live_sim_fast5_shadow_evidence_sha256 == ""
+    assert settings.live_sim_fast5_rollback_ack_run_id == ""
+    assert settings.live_sim_fast5_max_buy_commands_per_cycle == 1
+    assert settings.live_sim_fast5_max_daily_buy_count == 2
+    assert settings.live_sim_fast5_max_order_notional == 100_000
+    assert settings.live_sim_fast5_pipeline_max_age_sec == 60
     assert settings.market_scan_enabled is False
     assert settings.market_scan_interval_sec == 120
     assert settings.market_scan_top_n == 200
@@ -1531,6 +1544,53 @@ def test_live_sim_operating_loop_settings_are_validated() -> None:
             assert key in str(exc)
         else:
             raise AssertionError(f"expected invalid LIVE_SIM operating loop setting: {key}")
+
+
+def test_fast5_automatic_canary_settings_require_bound_evidence_and_hard_caps() -> None:
+    sha256 = "b" * 64
+    settings = load_settings(
+        {
+            "LIVE_SIM_FAST5_AUTOMATIC_CANARY_ENABLED": "true",
+            "LIVE_SIM_FAST5_AUTO_QUEUE_ENABLED": "true",
+            "LIVE_SIM_FAST5_MANUAL_C1_STATUS": "PASS",
+            "LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256": sha256,
+            "LIVE_SIM_FAST5_ALPHA_STATUS": "ALPHA_QUALIFIED",
+            "LIVE_SIM_FAST5_ALPHA_EVIDENCE_SHA256": sha256,
+            "LIVE_SIM_FAST5_SHADOW_STATUS": "PASS",
+            "LIVE_SIM_FAST5_SHADOW_EVIDENCE_SHA256": sha256,
+            "LIVE_SIM_FAST5_ROLLBACK_ACK_RUN_ID": "fast5-run-reviewed",
+            "LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE": "1",
+            "LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT": "2",
+            "LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL": "100000",
+            "LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC": "30",
+        }
+    )
+
+    assert settings.live_sim_fast5_automatic_canary_enabled is True
+    assert settings.live_sim_fast5_auto_queue_enabled is True
+    assert settings.live_sim_fast5_manual_c1_evidence_sha256 == sha256
+    assert settings.live_sim_fast5_alpha_status == "ALPHA_QUALIFIED"
+    assert settings.live_sim_fast5_shadow_status == "PASS"
+    assert settings.live_sim_fast5_rollback_ack_run_id == "fast5-run-reviewed"
+    assert settings.live_sim_fast5_pipeline_max_age_sec == 30
+
+    invalid_cases = (
+        {"LIVE_SIM_FAST5_MANUAL_C1_STATUS": "PASS"},
+        {"LIVE_SIM_FAST5_MANUAL_C1_EVIDENCE_SHA256": "B" * 64},
+        {"LIVE_SIM_FAST5_ALPHA_STATUS": "PASS"},
+        {"LIVE_SIM_FAST5_SHADOW_STATUS": "READY"},
+        {"LIVE_SIM_FAST5_MAX_BUY_COMMANDS_PER_CYCLE": "2"},
+        {"LIVE_SIM_FAST5_MAX_DAILY_BUY_COUNT": "3"},
+        {"LIVE_SIM_FAST5_MAX_ORDER_NOTIONAL": "100001"},
+        {"LIVE_SIM_FAST5_PIPELINE_MAX_AGE_SEC": "0"},
+    )
+    for env in invalid_cases:
+        try:
+            load_settings(env)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"expected invalid FAST-5 setting: {env}")
 
 
 def test_dashboard_settings_are_validated() -> None:
