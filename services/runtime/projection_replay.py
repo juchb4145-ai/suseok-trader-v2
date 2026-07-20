@@ -1299,7 +1299,13 @@ def _trade_date_bounds(trade_date: str | None) -> tuple[str, str] | None:
 
 
 def _open_read_only_connection(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=15.0)
+    wal_exists = Path(f"{path}-wal").is_file()
+    uri_options = "mode=ro" if wal_exists else "mode=ro&immutable=1"
+    connection = sqlite3.connect(
+        f"{path.as_uri()}?{uri_options}",
+        uri=True,
+        timeout=15.0,
+    )
     connection.execute("PRAGMA query_only=ON")
     return connection
 

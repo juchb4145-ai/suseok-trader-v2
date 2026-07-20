@@ -26,7 +26,8 @@ X-Local-Token: <local operator token>
 
 ## 읽기 전용 계약
 
-- SQLite URI `mode=ro`
+- sidecar가 없으면 SQLite URI `mode=ro&immutable=1`
+- WAL/SHM pair가 함께 있는 활성 snapshot은 SQLite URI `mode=ro`
 - 안정된 WAL/SHM pair 또는 sidecar 없는 main만 허용
 - `PRAGMA query_only=ON`
 - 단일 `BEGIN DEFERRED` snapshot

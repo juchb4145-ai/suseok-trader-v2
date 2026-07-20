@@ -5,6 +5,7 @@ import inspect
 import json
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from apps.core_api import app
@@ -238,6 +239,24 @@ def test_fast1_preview_rejects_non_query_only_connections(tmp_path) -> None:
     connection.close()
 
     assert exc_info.value.reason_code == "PREVIEW_QUERY_ONLY_REQUIRED"
+
+
+def test_fast1_preview_read_only_open_does_not_create_sqlite_sidecars(tmp_path) -> None:
+    db_path = tmp_path / "fast1-no-sidecars.sqlite3"
+    connection, _ = _prepared_fast1_connection(db_path)
+    connection.close()
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+
+    assert wal_path.exists() is False
+    assert shm_path.exists() is False
+
+    read_only = open_fast1_preview_connection(db_path)
+    read_only.execute("SELECT COUNT(*) FROM market_ticks_latest").fetchone()
+    read_only.close()
+
+    assert wal_path.exists() is False
+    assert shm_path.exists() is False
 
 
 def test_fast1_preview_blocks_when_current_market_inputs_are_missing(
