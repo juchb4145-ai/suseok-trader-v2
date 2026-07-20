@@ -22,6 +22,11 @@ from domain.broker.utils import (
     utc_now,
     validate_stock_code,
 )
+from domain.exit.policy import (
+    ExitPolicyConfig,
+    LongPositionSnapshot,
+    evaluate_long_exit_policy,
+)
 from domain.live_sim.models import (
     LiveSimEligibility,
     LiveSimExecutionRecord,
@@ -1987,73 +1992,43 @@ def evaluate_live_sim_exit_signals(
 
         avg_price = float(position["avg_entry_price"])
         highest_price = float(position.get("highest_price") or last_price)
-        hold_sec = _age_seconds_from_wire(position.get("opened_at"))
-        candidates: list[dict[str, Any]] = []
-        if avg_price > 0 and last_price <= avg_price * (
-            1 - resolved_settings.live_sim_exit_stop_loss_pct / 100
-        ):
-            candidates.append(
-                _exit_signal_candidate(
-                    position,
-                    "STOP_LOSS",
-                    avg_price * (1 - resolved_settings.live_sim_exit_stop_loss_pct / 100),
-                    last_price,
-                    {"unrealized_pnl": metrics["unrealized_pnl"]},
-                )
-            )
-        if avg_price > 0 and last_price >= avg_price * (
-            1 + resolved_settings.live_sim_exit_take_profit_pct / 100
-        ):
-            candidates.append(
-                _exit_signal_candidate(
-                    position,
-                    "TAKE_PROFIT",
-                    avg_price * (1 + resolved_settings.live_sim_exit_take_profit_pct / 100),
-                    last_price,
-                    {"unrealized_pnl": metrics["unrealized_pnl"]},
-                )
-            )
-        trailing_activated = highest_price >= avg_price * (
-            1 + resolved_settings.live_sim_exit_trailing_activation_pct / 100
+        now = utc_now()
+        shared_exit = evaluate_long_exit_policy(
+            LongPositionSnapshot(
+                entry_price=avg_price,
+                current_price=last_price,
+                highest_price=highest_price,
+                quantity=int(position["quantity"]),
+                opened_at=position.get("opened_at") or now,
+                observed_at=now,
+            ),
+            ExitPolicyConfig(
+                stop_loss_pct=resolved_settings.live_sim_exit_stop_loss_pct,
+                take_profit_pct=resolved_settings.live_sim_exit_take_profit_pct,
+                trailing_activation_pct=(resolved_settings.live_sim_exit_trailing_activation_pct),
+                trailing_stop_pct=resolved_settings.live_sim_exit_trailing_stop_pct,
+                minimum_hold_sec=resolved_settings.live_sim_exit_min_hold_sec,
+                maximum_hold_sec=resolved_settings.live_sim_exit_max_hold_sec,
+                eod_flatten_enabled=resolved_settings.live_sim_exit_eod_flatten_enabled,
+                eod_flatten_time=resolved_settings.live_sim_exit_eod_flatten_time,
+                policy_version=resolved_settings.live_sim_config_version,
+            ),
         )
-        trailing_stop_price = highest_price * (
-            1 - resolved_settings.live_sim_exit_trailing_stop_pct / 100
-        )
-        if trailing_activated and last_price <= trailing_stop_price:
-            candidates.append(
-                _exit_signal_candidate(
-                    position,
-                    "TRAILING_STOP",
-                    trailing_stop_price,
-                    last_price,
-                    {"highest_price": highest_price, "trailing_stop_price": trailing_stop_price},
-                )
+        candidates = [
+            _exit_signal_candidate(
+                position,
+                trigger.trigger_type.value,
+                trigger.trigger_price,
+                last_price,
+                {
+                    **trigger.evidence,
+                    "hold_sec": trigger.hold_sec,
+                    "unrealized_pnl": metrics["unrealized_pnl"],
+                    "shared_exit_policy": True,
+                },
             )
-        if (
-            hold_sec >= resolved_settings.live_sim_exit_max_hold_sec
-            and hold_sec >= resolved_settings.live_sim_exit_min_hold_sec
-        ):
-            candidates.append(
-                _exit_signal_candidate(
-                    position,
-                    "MAX_HOLD",
-                    None,
-                    last_price,
-                    {"hold_sec": hold_sec},
-                )
-            )
-        if resolved_settings.live_sim_exit_eod_flatten_enabled and _is_eod_flatten_time(
-            resolved_settings
-        ):
-            candidates.append(
-                _exit_signal_candidate(
-                    position,
-                    "EOD_FLATTEN",
-                    None,
-                    last_price,
-                    {"eod_flatten_time": resolved_settings.live_sim_exit_eod_flatten_time},
-                )
-            )
+            for trigger in shared_exit.triggers
+        ]
         for signal in candidates:
             if _active_exit_for_position(connection, position["position_id"]):
                 signal["eligible"] = False

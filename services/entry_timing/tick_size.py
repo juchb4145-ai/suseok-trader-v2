@@ -32,6 +32,21 @@ def add_ticks(price: float, ticks: int) -> int:
     return adjusted
 
 
+def subtract_ticks(price: float, ticks: int) -> int:
+    if price <= 0:
+        raise ValueError("price must be > 0")
+    if ticks < 0:
+        raise ValueError("ticks must be >= 0")
+    adjusted = normalize_tick_price(price)
+    for _ in range(ticks):
+        if adjusted <= 1:
+            return 1
+        probe = adjusted - 1
+        tick = krx_tick_size(probe)
+        adjusted = max(int(math.floor(probe / tick) * tick), tick)
+    return adjusted
+
+
 def normalize_tick_price(price: float) -> int:
     if price <= 0:
         raise ValueError("price must be > 0")

@@ -57,7 +57,6 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 ### 1.3 알려진 미완료 항목
 
 - 완전 무기록 LIVE_SIM 통합 Preview API
-- 실제 체결·비용·청산을 반영하는 Alpha Replay/Profit Lab
 - Profit Lab과 동일 모델을 사용하는 장중 Parallel Shadow
 - Kiwoom 모의계좌 미체결/보유/체결 broker snapshot 요청과 reconcile
 - Alpha gate와 broker reconcile을 통과한 제한적 자동 BUY canary
@@ -101,8 +100,8 @@ FAST 기능 개발 전 다음 항목을 실제 현재 `main`과 운영 환경에
 | FAST-1 Pure Preview | `DONE` | current-trade-date-only, 운영 승격 비승인 | strict read-only 무기록 preview API와 현재 시장 입력 guard |
 | Operational Gate C1 | `BLOCKED_BY_CURRENT_MARKET_DATA` | 현재 시장 입력 READY, Preview canary PASS, 장중 KRX | 수동 LIVE_SIM 1건 lifecycle |
 | FAST-2A Point-in-Time Replay | `DONE` | 현재 코드·격리 replay 입력 | virtual-clock replay와 입력 coverage |
-| FAST-2B Profit Lab | `NEXT` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
-| FAST-3 Parallel Shadow | `BLOCKED_BY_FAST_2B` | Profit Lab model 고정 | shadow/live comparison |
+| FAST-2B Profit Lab | `DONE` | replay deterministic PASS | 보수적 fill/exit/cost 성과 |
+| FAST-3 Parallel Shadow | `NEXT` | Profit Lab model 고정 | shadow/live comparison |
 | FAST-4 Broker Snapshot Reconcile | `BLOCKED_BY_FAST_1` | Gateway query contract | broker/local reconcile |
 | FAST-5 Automatic Canary | `BLOCKED` | C1 + Alpha + Broker reconcile | 일 1~2건 자동 canary |
 | FAST-6 Champion/Challenger | `BLOCKED_BY_FAST_5` | canary evidence | 모델 운영 체계 |
@@ -697,6 +696,10 @@ DATA_QUALITY_BLOCKED
 - +1 tick stress에서 기대값 급락 여부 표시
 
 기준은 config version으로 기록하되 자동 threshold 완화는 금지한다.
+
+구현·실행 계약은 `docs/fast2b_conservative_profit_lab_ko.md`를 따른다. bundle, FAST-2A
+보고서, signal manifest identity가 일치해야 하며 운영 DB와 주문 경계에는 접근하지 않는다.
+미확정 비용 기본값은 metric 계산만 허용하고 `ALPHA_QUALIFIED`를 fail-closed로 금지한다.
 
 ## 10. FAST-3 — Parallel Shadow Execution
 
