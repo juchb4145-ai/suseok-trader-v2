@@ -128,7 +128,13 @@ def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
     connection = initialize_database(tmp_path / "fast5-strict.sqlite3")
     settings = _qualified_settings(
         live_sim_max_daily_order_count=3,
-        live_sim_max_daily_notional=300_000,
+        live_sim_max_daily_notional=30_000_000,
+        live_sim_max_order_notional=3_000_000,
+        live_sim_order_plan_min_notional=10_000,
+        live_sim_order_plan_default_notional=3_000_000,
+        live_sim_order_plan_max_notional=3_000_000,
+        entry_timing_default_notional=3_000_000,
+        entry_timing_max_notional=3_000_000,
         live_sim_reprice_enabled=True,
         live_sim_operating_include_ai=True,
         live_sim_operating_write_runs=False,
@@ -173,6 +179,11 @@ def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
     assert captured["include_ai"] is False
     assert strict.live_sim_max_daily_order_count == 2
     assert strict.live_sim_max_order_notional == 100_000
+    assert strict.live_sim_order_plan_min_notional == 10_000
+    assert strict.live_sim_order_plan_default_notional == 100_000
+    assert strict.live_sim_order_plan_max_notional == 100_000
+    assert strict.entry_timing_default_notional == 100_000
+    assert strict.entry_timing_max_notional == 100_000
     assert strict.live_sim_max_active_orders == 1
     assert strict.live_sim_max_active_positions == 1
     assert strict.live_sim_operating_max_buy_commands_per_cycle == 1

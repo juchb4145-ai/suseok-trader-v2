@@ -1119,9 +1119,29 @@ def _strict_fast5_settings(
         settings.live_sim_max_daily_order_count,
         1 if bootstrap else settings.live_sim_fast5_max_daily_buy_count,
     )
+    order_plan_min_notional = min(
+        settings.live_sim_order_plan_min_notional,
+        max_order_notional,
+    )
+    order_plan_default_notional = min(
+        settings.live_sim_order_plan_default_notional,
+        max_order_notional,
+    )
+    entry_timing_max_notional = min(
+        settings.entry_timing_max_notional,
+        max_order_notional,
+    )
+    entry_timing_default_notional = min(
+        settings.entry_timing_default_notional,
+        entry_timing_max_notional,
+    )
     return replace(
         settings,
+        entry_timing_default_notional=entry_timing_default_notional,
+        entry_timing_max_notional=entry_timing_max_notional,
         live_sim_max_order_notional=max_order_notional,
+        live_sim_order_plan_min_notional=order_plan_min_notional,
+        live_sim_order_plan_default_notional=order_plan_default_notional,
         live_sim_order_plan_max_notional=max_order_notional,
         live_sim_max_daily_order_count=max_daily_count,
         live_sim_max_daily_notional=min(
