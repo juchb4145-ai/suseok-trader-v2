@@ -25,6 +25,7 @@ from domain.theme.state import ThemeMemberRole
 from storage.gateway_command_store import canonical_json
 
 from services.condition_fusion import (
+    condition_signal_trade_date_bounds,
     is_profile_condition_metadata,
     list_condition_fusion,
     rebuild_condition_fusion,
@@ -100,12 +101,19 @@ def ingest_condition_sources(
 
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
     rebuild_condition_fusion(connection, target_trade_date, settings=resolved_settings)
+    start_at, end_at = condition_signal_trade_date_bounds(
+        target_trade_date,
+        resolved_settings,
+    )
     rows = connection.execute(
         """
         SELECT *
         FROM market_condition_signals
+        WHERE event_ts >= ?
+            AND event_ts < ?
         ORDER BY event_ts ASC, id ASC
-        """
+        """,
+        (start_at, end_at),
     ).fetchall()
     result = _MutableIngestResult()
     for fusion in list_condition_fusion(
@@ -342,6 +350,7 @@ def refresh_candidate_context(
     candidate_instance_id: str,
     *,
     settings: Settings | None = None,
+    freshness_reference_at: datetime | None = None,
 ) -> CandidateRefreshResult:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
@@ -354,7 +363,12 @@ def refresh_candidate_context(
     try:
         active_sources = _list_latest_source_rows(connection, normalized_id, active_only=True)
         all_sources = _list_latest_source_rows(connection, normalized_id, active_only=False)
-        readiness = get_market_data_readiness(connection, row["code"], settings=resolved_settings)
+        readiness = get_market_data_readiness(
+            connection,
+            row["code"],
+            settings=resolved_settings,
+            now=freshness_reference_at,
+        )
         latest_tick = get_latest_tick(connection, row["code"])
         common_market_context = get_market_context_for_code(
             connection,
@@ -468,6 +482,7 @@ def rebuild_candidates_from_observations(
     trade_date: str | None = None,
     *,
     settings: Settings | None = None,
+    freshness_reference_at: datetime | None = None,
 ) -> CandidateRebuildResult:
     resolved_settings = settings or load_settings()
     if not resolved_settings.candidate_fsm_enabled:
@@ -488,6 +503,7 @@ def rebuild_candidates_from_observations(
                 connection,
                 candidate["candidate_instance_id"],
                 settings=resolved_settings,
+                freshness_reference_at=freshness_reference_at,
             )
             refresh_total.add(refresh_result)
             if (

@@ -12,6 +12,7 @@ from services.candidate_service import (
     ingest_condition_sources,
     ingest_theme_sources,
     list_candidates,
+    rebuild_candidates_from_observations,
     refresh_candidate_context,
 )
 from services.config import Settings, candidate_timezone
@@ -59,6 +60,30 @@ def test_condition_source_creates_candidate_and_exit_closes_episode(tmp_path) ->
     assert closed["active_source_count"] == 0
     assert any(source["action"] == "EXIT" for source in closed["sources"])
     assert closed["transitions"][-1]["to_state"] == CandidateState.CLOSED.value
+
+
+def test_condition_ingest_uses_bounded_queries_for_both_fusion_and_sources(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "candidate-condition-date-bound.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+
+    result = ingest_condition_sources(connection, trade_date, settings=settings)
+    connection.set_trace_callback(None)
+    connection.close()
+
+    bounded_selects = [
+        statement.upper()
+        for statement in statements
+        if "FROM MARKET_CONDITION_SIGNALS" in statement.upper()
+        and "SELECT *" in statement.upper()
+        and "ORDER BY EVENT_TS ASC" in statement.upper()
+    ]
+    assert result.source_event_count == 1
+    assert len(bounded_selects) == 2
+    assert all("EVENT_TS >=" in sql and "EVENT_TS <" in sql for sql in bounded_selects)
 
 
 def test_closed_candidate_re_detection_increments_generation(tmp_path) -> None:
@@ -235,6 +260,38 @@ def test_candidate_context_refresh_transitions_through_data_wait_watching_and_re
         CandidateState.WATCHING.value,
         CandidateState.CONTEXT_READY.value,
     ]
+
+
+def test_candidate_rebuild_uses_cycle_freshness_reference(tmp_path, monkeypatch) -> None:
+    connection = initialize_database(tmp_path / "candidate_cycle_freshness.sqlite3")
+    settings = _candidate_settings(
+        market_data_tick_stale_sec=10,
+        market_data_degraded_tick_stale_sec=30,
+        candidate_tick_stale_sec=90,
+    )
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    _append_and_project(connection, make_price_tick_event(), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    freshness_reference_at = utc_now()
+    monkeypatch.setattr(
+        "domain.market.quality.utc_now",
+        lambda: freshness_reference_at + timedelta(seconds=20),
+    )
+
+    result = rebuild_candidates_from_observations(
+        connection,
+        trade_date,
+        settings=settings,
+        freshness_reference_at=freshness_reference_at,
+    )
+    candidate = list_candidates(connection, trade_date=trade_date)[0]
+    connection.close()
+
+    assert result.context_refreshed_count == 2
+    assert candidate["state"] == CandidateState.CONTEXT_READY.value
+    assert candidate["market_readiness_status"] == "FRESH"
+    assert float(candidate["tick_age_sec"]) < settings.market_data_tick_stale_sec
 
 
 def test_condition_candidate_context_uses_latest_theme_snapshot_fallback(tmp_path) -> None:

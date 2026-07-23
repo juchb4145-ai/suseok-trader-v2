@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
@@ -45,6 +46,7 @@ class ObserveCycleStageResult:
     summary: str = ""
     counts: Mapping[str, Any] = field(default_factory=dict)
     details: Mapping[str, Any] = field(default_factory=dict)
+    elapsed_sec: float = 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +56,7 @@ class ObserveCycleStageResult:
             "summary": self.summary,
             "counts": normalize_value(dict(self.counts)),
             "details": normalize_value(dict(self.details)),
+            "elapsed_sec": self.elapsed_sec,
         }
 
 
@@ -77,6 +80,7 @@ class MarketOpenObserveCycleRunResult:
     observe_only: bool = True
     no_order_side_effects: bool = True
     live_real_allowed: bool = False
+    elapsed_sec: float = 0.0
 
     @property
     def send_order_delta(self) -> int:
@@ -125,6 +129,7 @@ class MarketOpenObserveCycleRunResult:
             "real_order_allowed": False,
             "queue_commands": _stage_queue_commands(self.stages),
             "order_controls_available": False,
+            "elapsed_sec": self.elapsed_sec,
         }
 
 
@@ -158,9 +163,11 @@ def _run_market_open_observe_cycle_once(
     settings: Settings | None = None,
     write_run: bool = True,
 ) -> MarketOpenObserveCycleRunResult:
+    cycle_started = time.monotonic()
     resolved_settings = settings or load_settings()
     run_id = new_message_id("market_open_observe_cycle_run")
-    created_at = datetime_to_wire(utc_now())
+    freshness_reference_at = utc_now()
+    created_at = datetime_to_wire(freshness_reference_at)
     command_counts_before = _command_counts(connection)
     send_order_before = _send_order_count(connection)
     order_command_counts_before = _order_command_counts(connection)
@@ -168,9 +175,11 @@ def _run_market_open_observe_cycle_once(
     stages: dict[str, ObserveCycleStageResult] = {}
     warnings: list[str] = []
     errors: list[dict[str, Any]] = []
+    stage_latency_seconds: dict[str, float] = {}
 
     theme_snapshot_payload: dict[str, Any] = {}
     leadership_payload: dict[str, Any] = {}
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         realtime_subscription_plan = run_realtime_subscription_once(
@@ -190,7 +199,9 @@ def _run_market_open_observe_cycle_once(
             "REALTIME_SUBSCRIPTION_WARMUP_FAILED",
             str(exc),
         )
+    stage_latency_seconds["RealtimeSubscription"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         theme_before = get_theme_status(connection, settings=resolved_settings)
@@ -217,24 +228,30 @@ def _run_market_open_observe_cycle_once(
         error = _stage_error("Theme", exc)
         errors.append(error)
         stages["Theme"] = _blocked_stage("Theme", "THEME_SNAPSHOT_NOT_BUILT", str(exc))
+    stage_latency_seconds["Theme"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         candidate_result = rebuild_candidates_from_observations(
             connection,
             trade_date=trade_date,
             settings=resolved_settings,
+            freshness_reference_at=freshness_reference_at,
         )
         candidate_status = get_candidate_status(connection, settings=resolved_settings)
         stages["Candidate"] = _candidate_stage(
             result=candidate_result.to_dict(),
             status=candidate_status,
+            freshness_reference_at=created_at,
         )
     except Exception as exc:
         error = _stage_error("Candidate", exc)
         errors.append(error)
         stages["Candidate"] = _blocked_stage("Candidate", "CANDIDATE_REBUILD_NOT_RUN", str(exc))
+    stage_latency_seconds["Candidate"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         condition_rows = list_condition_fusion(
             connection,
@@ -262,7 +279,9 @@ def _run_market_open_observe_cycle_once(
             "CONDITION_FUSION_NOT_BUILT",
             str(exc),
         )
+    stage_latency_seconds["ConditionFusion"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         strategy_result = evaluate_candidates(
@@ -283,7 +302,9 @@ def _run_market_open_observe_cycle_once(
         error = _stage_error("Strategy", exc)
         errors.append(error)
         stages["Strategy"] = _blocked_stage("Strategy", "STRATEGY_EVALUATE_NOT_RUN", str(exc))
+    stage_latency_seconds["Strategy"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         risk_result = evaluate_risk_observations(
@@ -304,7 +325,9 @@ def _run_market_open_observe_cycle_once(
         error = _stage_error("Risk", exc)
         errors.append(error)
         stages["Risk"] = _blocked_stage("Risk", "RISK_EVALUATE_NOT_RUN", str(exc))
+    stage_latency_seconds["Risk"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
         entry_result = evaluate_entry_timing(
@@ -325,7 +348,9 @@ def _run_market_open_observe_cycle_once(
         error = _stage_error("EntryTiming", exc)
         errors.append(error)
         stages["EntryTiming"] = _blocked_stage("EntryTiming", "ENTRY_TIMING_NO_INPUT", str(exc))
+    stage_latency_seconds["EntryTiming"] = _elapsed_seconds(stage_started)
 
+    stage_started = time.monotonic()
     try:
         live_sim_status = get_live_sim_status(connection, settings=resolved_settings)
         live_sim_preflight = run_live_sim_preflight(
@@ -345,6 +370,7 @@ def _run_market_open_observe_cycle_once(
         error = _stage_error("LiveSim", exc)
         errors.append(error)
         stages["LiveSim"] = _blocked_stage("LiveSim", "LIVE_SIM_DISABLED_EXPECTED", str(exc))
+    stage_latency_seconds["LiveSim"] = _elapsed_seconds(stage_started)
 
     command_counts_after = _command_counts(connection)
     send_order_after = _send_order_count(connection)
@@ -389,6 +415,13 @@ def _run_market_open_observe_cycle_once(
             },
         )
 
+    stages = {
+        stage_name: replace(
+            stage,
+            elapsed_sec=stage_latency_seconds.get(stage_name, stage.elapsed_sec),
+        )
+        for stage_name, stage in stages.items()
+    }
     warnings.extend(_stage_warnings(stages))
     status = _overall_status(stages, errors)
     result = MarketOpenObserveCycleRunResult(
@@ -410,6 +443,7 @@ def _run_market_open_observe_cycle_once(
         no_order_side_effects=(
             all(delta == 0 for delta in order_command_delta.values()) and not errors
         ),
+        elapsed_sec=_elapsed_seconds(cycle_started),
     )
     if write_run:
         with immediate_transaction(connection):
@@ -458,6 +492,7 @@ def save_market_open_observe_cycle_run(
                     ),
                     "realtime_command_counts_after": dict(result.realtime_command_counts_after),
                     "realtime_command_delta": result.realtime_command_delta,
+                    "elapsed_sec": result.elapsed_sec,
                 }
             ),
             _json_dumps(list(result.warnings)),
@@ -547,6 +582,7 @@ def _candidate_stage(
     *,
     result: Mapping[str, Any],
     status: Mapping[str, Any],
+    freshness_reference_at: str | None = None,
 ) -> ObserveCycleStageResult:
     reason_codes: list[str] = []
     stage_status = STAGE_PASS
@@ -571,7 +607,11 @@ def _candidate_stage(
             "context_refreshed_count": result.get("context_refreshed_count"),
             "error_count": error_count,
         },
-        details={"result": result, "status": status},
+        details={
+            "result": result,
+            "status": status,
+            "freshness_reference_at": freshness_reference_at,
+        },
     )
 
 
@@ -978,7 +1018,24 @@ def _run_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     item["live_real_allowed"] = bool(item["live_real_allowed"])
     item["real_order_allowed"] = False
     item["queue_commands"] = False
+    persisted_elapsed = item["command_counts"].get("elapsed_sec")
+    item["elapsed_sec"] = (
+        round(float(persisted_elapsed), 6)
+        if persisted_elapsed is not None
+        else round(
+            sum(
+                float(stage.get("elapsed_sec") or 0.0)
+                for stage in item["stage_summary"].values()
+                if isinstance(stage, Mapping)
+            ),
+            6,
+        )
+    )
     return item
+
+
+def _elapsed_seconds(started: float) -> float:
+    return round(max(time.monotonic() - started, 0.0), 6)
 
 
 def _json_dumps(value: object) -> str:

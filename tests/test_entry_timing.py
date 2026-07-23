@@ -437,6 +437,81 @@ def test_service_orders_candidates_by_condition_fusion_priority(tmp_path) -> Non
     assert gateway_count == 0
 
 
+def test_service_prioritizes_current_run_risk_pass_before_candidate_priority(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "entry_timing_current_run_risk.sqlite3")
+    settings = _settings()
+    source_run_id = "market-open-cycle-current-risk"
+    pass_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-005930-PASS",
+    )
+    blocked_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-000660-BLOCK",
+        code="000660",
+        name="SK하이닉스",
+    )
+    _insert_condition_fusion(
+        connection,
+        code="005930",
+        name="삼성전자",
+        priority_score=20,
+    )
+    _insert_condition_fusion(
+        connection,
+        code="000660",
+        name="SK하이닉스",
+        priority_score=995,
+    )
+    risks = {}
+    for candidate_id in (pass_id, blocked_id):
+        strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+        save_strategy_observation(
+            connection,
+            strategy,
+            source_run_id=source_run_id,
+        )
+        risk = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+        save_risk_observation(
+            connection,
+            risk,
+            source_run_id=source_run_id,
+        )
+        risks[candidate_id] = risk
+    for table_name in ("risk_observations", "risk_observations_latest"):
+        connection.execute(
+            f"""
+            UPDATE {table_name}
+            SET overall_status = 'OBSERVE_BLOCK'
+            WHERE candidate_instance_id = ? AND source_run_id = ?
+            """,
+            (blocked_id, source_run_id),
+        )
+    connection.commit()
+
+    result = evaluate_entry_timing(
+        connection,
+        trade_date="2026-06-27",
+        limit=1,
+        settings=settings,
+        source_run_id=source_run_id,
+    )
+    entry_row = connection.execute(
+        "SELECT * FROM entry_timing_evaluations WHERE candidate_instance_id = ?",
+        (pass_id,),
+    ).fetchone()
+    connection.close()
+
+    assert result.candidate_count == 1
+    assert result.evaluations[0].candidate_instance_id == pass_id
+    assert result.evaluations[0].candidate_instance_id != blocked_id
+    assert result.plan_ready_count == 1
+    assert entry_row is not None
+    assert entry_row["source_run_id"] == source_run_id
+    assert entry_row["risk_observation_id"] == risks[pass_id].risk_observation_id
+    assert result.evaluations[0].evidence_json["pipeline_coherency"]["status"] == "PASS"
+
+
 def test_service_upserts_duplicate_draft_by_stable_key(tmp_path) -> None:
     connection = initialize_database(tmp_path / "entry_timing_dedupe.sqlite3")
     settings = _settings()
