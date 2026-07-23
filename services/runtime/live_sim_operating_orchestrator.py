@@ -116,8 +116,16 @@ def run_live_sim_operating_cycle_once(
     include_ai: bool | None = None,
     include_no_buy: bool | None = None,
     settings: Settings | None = None,
+    required_plan_binding: Mapping[str, Any] | None = None,
 ) -> LiveSimOperatingRunResult:
     resolved_settings = settings or load_settings()
+    bound_plan = _normalize_required_plan_binding(required_plan_binding)
+    if bound_plan is not None and trade_date is not None:
+        bound_trade_date = str(bound_plan.get("trade_date") or "").strip()
+        if not bound_trade_date or bound_trade_date != str(trade_date):
+            raise ValueError(
+                "required_plan_binding trade_date does not match requested trade_date"
+            )
     resolved_mode = OperatingMode.coerce(mode, resolved_settings)
     resolved_include_ai = (
         resolved_settings.live_sim_operating_include_ai
@@ -141,6 +149,7 @@ def run_live_sim_operating_cycle_once(
         "command_budget": _command_budget(resolved_settings),
         "command_policy": _mode_policy(resolved_mode),
         "blocking_reasons": [],
+        "required_plan_binding": bound_plan,
     }
 
     try:
@@ -286,20 +295,30 @@ def run_live_sim_operating_cycle_once(
         errors.append(_stage_error("incremental_backfill", exc))
         stages["incremental_backfill"] = {"status": "ERROR", "error": str(exc)}
 
-    try:
-        with _record_stage_latency(stage_latency, "entry_timing"):
-            entry_result = _run_with_evaluation_lock_retries(
-                lambda: evaluate_entry_timing(
-                    connection,
-                    trade_date=trade_date,
-                    limit=limit,
-                    settings=resolved_settings,
+    if bound_plan is None:
+        try:
+            with _record_stage_latency(stage_latency, "entry_timing"):
+                entry_result = _run_with_evaluation_lock_retries(
+                    lambda: evaluate_entry_timing(
+                        connection,
+                        trade_date=trade_date,
+                        limit=limit,
+                        settings=resolved_settings,
+                    )
                 )
-            )
-        stages["entry_timing"] = entry_result.to_dict()
-    except Exception as exc:
-        errors.append(_stage_error("entry_timing", exc))
-        stages["entry_timing"] = {"status": "ERROR", "error": str(exc)}
+            stages["entry_timing"] = entry_result.to_dict()
+        except Exception as exc:
+            errors.append(_stage_error("entry_timing", exc))
+            stages["entry_timing"] = {"status": "ERROR", "error": str(exc)}
+    else:
+        with _record_stage_latency(stage_latency, "entry_timing"):
+            stages["entry_timing"] = {
+                "status": "SKIPPED",
+                "reason": "required_plan_binding",
+                "entry_timing_evaluated": False,
+                "required_plan_binding": bound_plan,
+                "no_order_side_effects": True,
+            }
 
     ai_run_status = None
     if resolved_include_ai:
@@ -336,7 +355,17 @@ def run_live_sim_operating_cycle_once(
     )
     if resolved_mode.includes_buy and not post_reconcile_blocks_buy:
         remaining_buy_commands = resolved_settings.live_sim_operating_max_buy_commands_per_cycle
-        if resolved_settings.live_sim_reprice_enabled:
+        if resolved_settings.live_sim_reprice_enabled and bound_plan is not None:
+            with _record_stage_latency(stage_latency, "reprice"):
+                stages["reprice"] = {
+                    "status": "SKIPPED",
+                    "reason": "required_plan_binding",
+                    "command_count": 0,
+                    "required_plan_binding": bound_plan,
+                    "live_sim_only": True,
+                    "live_real_allowed": False,
+                }
+        elif resolved_settings.live_sim_reprice_enabled:
             try:
                 with _record_stage_latency(stage_latency, "reprice"):
                     reprice_result = run_live_sim_reprice_once(
@@ -384,9 +413,25 @@ def run_live_sim_operating_cycle_once(
                             trade_date=trade_date,
                             limit=limit,
                             queue_commands=buy_queue,
+                            required_plan_binding=bound_plan,
                         )
                     )
                 stages["buy"] = buy_result.to_dict()
+                if bound_plan is not None and (
+                    str(getattr(buy_result, "status", "")).upper() != "COMPLETED"
+                    or int(getattr(buy_result, "error_count", 0) or 0) > 0
+                ):
+                    errors.append(
+                        {
+                            "stage": "buy",
+                            "error": "Exact bound plan execution did not complete cleanly.",
+                            "status": getattr(buy_result, "status", None),
+                            "error_count": int(
+                                getattr(buy_result, "error_count", 0) or 0
+                            ),
+                            "required_plan_binding": bound_plan,
+                        }
+                    )
             except Exception as exc:
                 errors.append(_stage_error("buy", exc))
                 stages["buy"] = {"status": "ERROR", "error": str(exc)}
@@ -880,6 +925,19 @@ def _reconcile_blocks_new_buy(reconcile: Mapping[str, Any]) -> bool:
         str(reconcile.get("status") or "").upper() == "RECONCILE_MISMATCH"
         and int(reconcile.get("mismatch_count") or 0) > 0
     )
+
+
+def _normalize_required_plan_binding(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("required_plan_binding must be a mapping")
+    binding = dict(value)
+    if not binding or not str(binding.get("order_plan_id") or "").strip():
+        raise ValueError("required_plan_binding requires order_plan_id")
+    return binding
 
 
 def _dict_or_empty(value: object) -> dict[str, Any]:

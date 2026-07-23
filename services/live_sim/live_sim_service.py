@@ -55,6 +55,10 @@ from services.entry_timing.tick_size import add_ticks
 from services.live_sim.execution_lifecycle_status import (
     build_live_sim_execution_lifecycle_status,
 )
+from services.live_sim.order_plan_binding import (
+    build_order_plan_binding,
+    validate_order_plan_binding,
+)
 from services.live_sim.safety_gate import check_live_sim_safety_gate, is_simulation_like
 
 ACTIVE_LIVE_SIM_INTENT_STATUSES = {
@@ -467,6 +471,8 @@ def queue_live_sim_order_command(
     connection: sqlite3.Connection,
     live_sim_intent_id: str,
     settings: Settings | None = None,
+    *,
+    required_plan_binding: Mapping[str, Any] | None = None,
 ) -> LiveSimOrderRecord:
     resolved_settings = settings or load_settings()
     intent_row = get_live_sim_intent(connection, live_sim_intent_id)
@@ -484,60 +490,6 @@ def queue_live_sim_order_command(
         connection.commit()
         raise ValueError(f"LIVE_SIM intent cannot be queued from status: {intent_row['status']}")
 
-    safety_gate = check_live_sim_safety_gate(
-        connection,
-        resolved_settings,
-        purpose="NEW_BUY",
-        enforce_daily_loss_limit=intent_row["side"] == LiveSimSide.BUY.value,
-        enforce_entry_window=intent_row["side"] == LiveSimSide.BUY.value,
-        trade_date=intent_row["trade_date"],
-    )
-    queue_reasons = list(safety_gate.reason_codes)
-    if (
-        intent_row["side"] == LiveSimSide.BUY.value
-        and _latest_reconcile_blocks_new_buy(connection, resolved_settings)
-    ):
-        queue_reasons.append(LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value)
-    if intent_row["side"] == LiveSimSide.SELL.value and not resolved_settings.live_sim_allow_sell:
-        queue_reasons.append(LiveSimReasonCode.SELL_NOT_ALLOWED.value)
-    if intent_row["order_type"] == LiveSimOrderType.MARKET.value:
-        queue_reasons.append(LiveSimReasonCode.MARKET_ORDER_NOT_ALLOWED.value)
-    if _active_order_count(connection) >= resolved_settings.live_sim_max_active_orders:
-        queue_reasons.append(LiveSimReasonCode.ACTIVE_ORDER_LIMIT_EXCEEDED.value)
-    if (
-        _recent_active_live_sim_count_for_code(
-            connection,
-            intent_row["code"],
-            resolved_settings,
-            exclude_intent_id=live_sim_intent_id,
-        )
-        > 0
-    ):
-        queue_reasons.append(LiveSimReasonCode.DUPLICATE_LIVE_SIM_ORDER.value)
-
-    queue_reasons = _merge_reasons(queue_reasons)
-    if queue_reasons:
-        _save_rejection(
-            connection,
-            candidate_instance_id=intent_row["candidate_instance_id"],
-            strategy_observation_id=intent_row["strategy_observation_id"],
-            risk_observation_id=intent_row["risk_observation_id"],
-            trade_date=intent_row["trade_date"],
-            account_id=intent_row["account_id"],
-            code=intent_row["code"],
-            reason_codes=queue_reasons,
-            evidence={"intent": intent_row, "safety_gate": safety_gate.to_dict()},
-        )
-        connection.commit()
-        raise ValueError(",".join(queue_reasons))
-
-    payload = _build_gateway_send_order_payload(intent_row, resolved_settings)
-    command = GatewayCommand(
-        command_type="send_order",
-        source="live_sim",
-        payload=payload,
-        idempotency_key=intent_row["idempotency_key"],
-    )
     buy_boundary = intent_row["side"] == LiveSimSide.BUY.value
     caller_transaction = connection.in_transaction
     boundary_lock_owned = False
@@ -547,7 +499,161 @@ def queue_live_sim_order_command(
     enqueue_savepoint_active = False
     try:
         if buy_boundary:
+            current_intent = get_live_sim_intent(connection, live_sim_intent_id)
+            if current_intent is None:
+                raise ValueError(f"LIVE_SIM intent not found: {live_sim_intent_id}")
+            if current_intent["status"] != LiveSimIntentStatus.CREATED.value:
+                raise ValueError(
+                    "LIVE_SIM intent cannot be queued from status: "
+                    f"{current_intent['status']}"
+                )
+            intent_row = current_intent
+
+        safety_gate = check_live_sim_safety_gate(
+            connection,
+            resolved_settings,
+            purpose="NEW_BUY",
+            enforce_daily_loss_limit=intent_row["side"] == LiveSimSide.BUY.value,
+            enforce_entry_window=intent_row["side"] == LiveSimSide.BUY.value,
+            trade_date=intent_row["trade_date"],
+        )
+        queue_reasons = list(safety_gate.reason_codes)
+        if (
+            intent_row["side"] == LiveSimSide.BUY.value
+            and _latest_reconcile_blocks_new_buy(connection, resolved_settings)
+        ):
+            queue_reasons.append(
+                LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value
+            )
+        if (
+            intent_row["side"] == LiveSimSide.SELL.value
+            and not resolved_settings.live_sim_allow_sell
+        ):
+            queue_reasons.append(LiveSimReasonCode.SELL_NOT_ALLOWED.value)
+        if intent_row["order_type"] == LiveSimOrderType.MARKET.value:
+            queue_reasons.append(LiveSimReasonCode.MARKET_ORDER_NOT_ALLOWED.value)
+        if _active_order_count(connection) >= resolved_settings.live_sim_max_active_orders:
+            queue_reasons.append(
+                LiveSimReasonCode.ACTIVE_ORDER_LIMIT_EXCEEDED.value
+            )
+        if (
+            _recent_active_live_sim_count_for_code(
+                connection,
+                intent_row["code"],
+                resolved_settings,
+                exclude_intent_id=live_sim_intent_id,
+            )
+            > 0
+        ):
+            queue_reasons.append(LiveSimReasonCode.DUPLICATE_LIVE_SIM_ORDER.value)
+
+        queue_reasons = _merge_reasons(queue_reasons)
+        if queue_reasons:
+            _save_rejection(
+                connection,
+                candidate_instance_id=intent_row["candidate_instance_id"],
+                strategy_observation_id=intent_row["strategy_observation_id"],
+                risk_observation_id=intent_row["risk_observation_id"],
+                trade_date=intent_row["trade_date"],
+                account_id=intent_row["account_id"],
+                code=intent_row["code"],
+                reason_codes=queue_reasons,
+                evidence={"intent": intent_row, "safety_gate": safety_gate.to_dict()},
+            )
+            if boundary_lock_owned:
+                connection.commit()
+                boundary_lock_owned = False
+            elif not caller_transaction:
+                connection.commit()
+            raise ValueError(",".join(queue_reasons))
+
+        if buy_boundary:
             _enforce_buy_execution_lifecycle_queue_boundary(connection, intent_row)
+            if intent_row.get("order_plan_id") or required_plan_binding is not None:
+                binding, binding_reasons = _resolve_intent_order_plan_binding(
+                    intent_row,
+                    required_plan_binding=required_plan_binding,
+                )
+                if not intent_row.get("order_plan_id"):
+                    binding_reasons.append("ORDER_PLAN_INTENT_PLAN_ID_MISSING")
+                validation: Mapping[str, Any] = {}
+                if binding is not None and not binding_reasons:
+                    result = validate_order_plan_binding(
+                        connection,
+                        binding,
+                        max_age_sec=resolved_settings.live_sim_order_plan_stale_sec,
+                        expected_trade_date=str(intent_row["trade_date"]),
+                        expected_intent=intent_row,
+                    )
+                    validation = result.to_dict()
+                    if not result.passed:
+                        binding_reasons.extend(result.reason_codes)
+                    else:
+                        # Import locally because the eligibility service depends on
+                        # this module's persistence helpers.
+                        from services.live_sim.order_plan_eligibility import (
+                            evaluate_live_sim_order_plan_eligibility,
+                        )
+
+                        terminal_eligibility = evaluate_live_sim_order_plan_eligibility(
+                            connection,
+                            str(intent_row["order_plan_id"]),
+                            settings=resolved_settings,
+                            ignore_live_sim_intent_id=str(
+                                intent_row["live_sim_intent_id"]
+                            ),
+                        )
+                        validation = {
+                            **validation,
+                            "terminal_eligibility": terminal_eligibility.to_dict(),
+                        }
+                        if not terminal_eligibility.eligible:
+                            binding_reasons.extend(
+                                str(reason)
+                                for reason in terminal_eligibility.reason_codes
+                            )
+                        else:
+                            execution_reasons = (
+                                _bound_order_plan_intent_execution_reasons(
+                                    intent_row,
+                                    binding=binding,
+                                    sizing=terminal_eligibility.sizing,
+                                    expected_account_id=(
+                                        resolved_settings.live_sim_account_id
+                                    ),
+                                )
+                            )
+                            validation = {
+                                **validation,
+                                "intent_execution_reason_codes": execution_reasons,
+                            }
+                            binding_reasons.extend(execution_reasons)
+                if binding_reasons:
+                    rejection_reasons = _merge_reasons(
+                        [
+                            LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+                            *binding_reasons,
+                        ]
+                    )
+                    _reject_bound_order_plan_enqueue(
+                        connection,
+                        intent_row,
+                        reason_codes=rejection_reasons,
+                        binding=binding,
+                        validation=validation,
+                    )
+                    if boundary_lock_owned:
+                        connection.commit()
+                        boundary_lock_owned = False
+                    raise ValueError(",".join(rejection_reasons))
+
+        payload = _build_gateway_send_order_payload(intent_row, resolved_settings)
+        command = GatewayCommand(
+            command_type="send_order",
+            source="live_sim",
+            payload=payload,
+            idempotency_key=intent_row["idempotency_key"],
+        )
         connection.execute(f"SAVEPOINT {enqueue_savepoint}")
         enqueue_savepoint_active = True
         enqueue_result = enqueue_command(
@@ -602,19 +708,25 @@ def queue_live_sim_order_command(
             command_queued_at=now,
         )
         _insert_order(connection, order, trade_date=str(intent_row["trade_date"]))
-        connection.execute(
+        update_cursor = connection.execute(
             """
             UPDATE live_sim_intents
             SET status = ?,
                 gateway_command_id = ?
             WHERE live_sim_intent_id = ?
+              AND status = ?
             """,
             (
                 LiveSimIntentStatus.COMMAND_QUEUED.value,
                 command.command_id,
                 live_sim_intent_id,
+                LiveSimIntentStatus.CREATED.value,
             ),
         )
+        if update_cursor.rowcount != 1:
+            _rollback_and_release_savepoint(connection, enqueue_savepoint)
+            enqueue_savepoint_active = False
+            raise ValueError(LiveSimReasonCode.INVALID_INTENT_STATUS.value)
         connection.execute(f"RELEASE SAVEPOINT {enqueue_savepoint}")
         enqueue_savepoint_active = False
         if not caller_transaction:
@@ -4725,6 +4837,197 @@ def _acquire_buy_queue_boundary_write_lock(connection: sqlite3.Connection) -> bo
         return False
     connection.execute("BEGIN IMMEDIATE")
     return True
+
+
+def _resolve_intent_order_plan_binding(
+    intent_row: Mapping[str, Any],
+    *,
+    required_plan_binding: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[str]]:
+    reasons: list[str] = []
+    evidence = _json_object(intent_row.get("evidence_json"))
+    frozen_binding = evidence.get("order_plan_binding")
+    if not isinstance(frozen_binding, Mapping):
+        frozen_plan = evidence.get("order_plan_draft")
+        if isinstance(frozen_plan, Mapping):
+            try:
+                frozen_binding = build_order_plan_binding(frozen_plan)
+            except Exception:
+                reasons.append("ORDER_PLAN_FROZEN_SNAPSHOT_INVALID")
+                frozen_binding = None
+        else:
+            reasons.append("ORDER_PLAN_FROZEN_SNAPSHOT_MISSING")
+            frozen_binding = None
+
+    required = (
+        dict(required_plan_binding)
+        if isinstance(required_plan_binding, Mapping) and required_plan_binding
+        else None
+    )
+    if required_plan_binding is not None and required is None:
+        reasons.append("ORDER_PLAN_REQUIRED_BINDING_INVALID")
+    if required is not None and isinstance(frozen_binding, Mapping):
+        for field_name in (
+            "binding_sha256",
+            "order_plan_snapshot_sha256",
+            "order_plan_id",
+        ):
+            if required.get(field_name) != frozen_binding.get(field_name):
+                reasons.append(f"ORDER_PLAN_INTENT_{field_name.upper()}_MISMATCH")
+    selected = required or (
+        dict(frozen_binding) if isinstance(frozen_binding, Mapping) else None
+    )
+    if selected is None:
+        reasons.append("ORDER_PLAN_BINDING_MISSING")
+    return selected, _merge_reasons(reasons)
+
+
+def _bound_order_plan_intent_execution_reasons(
+    intent_row: Mapping[str, Any],
+    *,
+    binding: Mapping[str, Any],
+    sizing: Mapping[str, Any],
+    expected_account_id: str,
+) -> list[str]:
+    """Bind the mutable intent execution fields to the terminal plan sizing."""
+
+    mismatch = False
+    if intent_row.get("side") != LiveSimSide.BUY.value:
+        mismatch = True
+    if intent_row.get("order_type") != LiveSimOrderType.LIMIT.value:
+        mismatch = True
+    if (
+        not str(expected_account_id).strip()
+        or intent_row.get("account_id") != expected_account_id
+    ):
+        mismatch = True
+
+    try:
+        actual_quantity = int(intent_row.get("quantity"))
+        expected_quantity = int(sizing.get("quantity"))
+    except (TypeError, ValueError, OverflowError):
+        mismatch = True
+    else:
+        if actual_quantity != expected_quantity:
+            mismatch = True
+
+    for field_name in ("limit_price", "notional"):
+        if not _same_execution_number(
+            intent_row.get(field_name),
+            sizing.get(field_name),
+        ):
+            mismatch = True
+
+    try:
+        intent_expiry = parse_timestamp(
+            intent_row.get("expires_at"),
+            "intent.expires_at",
+        )
+        plan_expiry = parse_timestamp(
+            binding.get("expires_at"),
+            "binding.expires_at",
+        )
+    except (TypeError, ValueError):
+        mismatch = True
+    else:
+        if intent_expiry <= utc_now() or intent_expiry > plan_expiry:
+            mismatch = True
+
+    try:
+        # Imported locally because order_plan_intent imports this module's
+        # persistence helpers.
+        from services.live_sim.order_plan_intent import (
+            make_live_sim_order_plan_idempotency_key,
+        )
+
+        expected_idempotency_key = make_live_sim_order_plan_idempotency_key(
+            trade_date=str(intent_row["trade_date"]),
+            account_id=expected_account_id,
+            order_plan_id=str(binding["order_plan_id"]),
+            code=str(intent_row["code"]),
+            side=LiveSimSide.BUY.value,
+            limit_price=float(sizing["limit_price"]),
+            quantity=int(sizing["quantity"]),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        mismatch = True
+    else:
+        if intent_row.get("idempotency_key") != expected_idempotency_key:
+            mismatch = True
+
+    return (
+        [LiveSimReasonCode.ORDER_PLAN_INTENT_EXECUTION_MISMATCH.value]
+        if mismatch
+        else []
+    )
+
+
+def _same_execution_number(left: Any, right: Any) -> bool:
+    try:
+        left_number = float(left)
+        right_number = float(right)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        math.isfinite(left_number)
+        and math.isfinite(right_number)
+        and math.isclose(left_number, right_number, rel_tol=0.0, abs_tol=1e-9)
+    )
+
+
+def _reject_bound_order_plan_enqueue(
+    connection: sqlite3.Connection,
+    intent_row: Mapping[str, Any],
+    *,
+    reason_codes: Sequence[str],
+    binding: Mapping[str, Any] | None,
+    validation: Mapping[str, Any],
+) -> None:
+    existing_reasons = intent_row.get("reason_codes")
+    if isinstance(existing_reasons, Sequence) and not isinstance(
+        existing_reasons,
+        (str, bytes, bytearray),
+    ):
+        existing_reason_codes = [str(reason) for reason in existing_reasons]
+    else:
+        existing_reason_codes = _json_array(existing_reasons)
+    merged = _merge_reasons(
+        [
+            *existing_reason_codes,
+            *reason_codes,
+        ]
+    )
+    connection.execute(
+        """
+        UPDATE live_sim_intents
+        SET status = ?, reason_codes_json = ?
+        WHERE live_sim_intent_id = ? AND status = ?
+        """,
+        (
+            LiveSimIntentStatus.REJECTED.value,
+            _json_dumps(merged),
+            intent_row["live_sim_intent_id"],
+            LiveSimIntentStatus.CREATED.value,
+        ),
+    )
+    _save_rejection(
+        connection,
+        candidate_instance_id=intent_row.get("candidate_instance_id"),
+        strategy_observation_id=intent_row.get("strategy_observation_id"),
+        risk_observation_id=intent_row.get("risk_observation_id"),
+        trade_date=intent_row.get("trade_date"),
+        account_id=intent_row.get("account_id"),
+        code=intent_row.get("code"),
+        reason_codes=merged,
+        evidence={
+            "stage": "gateway_send_order_exact_plan_boundary",
+            "intent": dict(intent_row),
+            "required_plan_binding": dict(binding or {}),
+            "validation": dict(validation),
+            "live_sim_only": True,
+            "live_real_allowed": False,
+        },
+    )
 
 
 def _enforce_buy_execution_lifecycle_queue_boundary(

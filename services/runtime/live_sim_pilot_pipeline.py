@@ -85,8 +85,16 @@ def run_live_sim_pilot_pipeline_once(
     trade_date: str | None = None,
     limit: int | None = None,
     queue_commands: bool | None = None,
+    required_plan_binding: Mapping[str, Any] | None = None,
 ) -> LiveSimPilotPipelineRunResult:
     resolved_settings = settings or load_settings()
+    bound_plan = _normalize_required_plan_binding(required_plan_binding)
+    if bound_plan is not None and trade_date is not None:
+        bound_trade_date = str(bound_plan.get("trade_date") or "").strip()
+        if not bound_trade_date or bound_trade_date != str(trade_date):
+            raise ValueError(
+                "required_plan_binding trade_date does not match requested trade_date"
+            )
     run_id = new_message_id("live_sim_pilot_run")
     started_at = datetime_to_wire(utc_now())
     _insert_pilot_run(connection, run_id=run_id, trade_date=trade_date, started_at=started_at)
@@ -101,7 +109,13 @@ def run_live_sim_pilot_pipeline_once(
     rejections: list[dict[str, Any]] = []
     intents: list[dict[str, Any]] = []
     commands: list[dict[str, Any]] = []
-    preparation: dict[str, Any] = {"entry_timing_evaluated": False}
+    preparation: dict[str, Any] = {
+        "entry_timing_evaluated": False,
+        "selection_mode": (
+            "EXACT_BOUND_PLAN" if bound_plan is not None else "GENERAL_PLAN_SELECTION"
+        ),
+        "required_plan_binding": bound_plan,
+    }
     evaluated_count = eligible_count = intent_count = command_count = rejection_count = 0
     error_count = 0
 
@@ -152,7 +166,7 @@ def run_live_sim_pilot_pipeline_once(
                 ai_advisory_summary=ai_advisory_summary,
             )
 
-        if _has_candidate_targets(connection, trade_date=trade_date):
+        if bound_plan is None and _has_candidate_targets(connection, trade_date=trade_date):
             entry_result = evaluate_entry_timing(
                 connection,
                 trade_date=trade_date,
@@ -162,11 +176,16 @@ def run_live_sim_pilot_pipeline_once(
             preparation = entry_result.to_dict()
             preparation["entry_timing_evaluated"] = True
 
-        selected_order_plans = select_live_sim_order_plan_candidates(
-            connection,
-            trade_date=trade_date,
-            limit=limit or resolved_settings.live_sim_order_plan_max_plans_per_run,
-        )
+        if bound_plan is None:
+            selected_order_plans = select_live_sim_order_plan_candidates(
+                connection,
+                trade_date=trade_date,
+                limit=limit or resolved_settings.live_sim_order_plan_max_plans_per_run,
+            )
+        else:
+            selected_order_plans = [
+                _select_exact_bound_order_plan(connection, bound_plan)
+            ]
         should_queue = (
             resolved_settings.live_sim_pilot_auto_queue_command
             if queue_commands is None
@@ -175,36 +194,70 @@ def run_live_sim_pilot_pipeline_once(
 
         for plan in selected_order_plans:
             try:
-                eligibility = evaluate_live_sim_order_plan_eligibility(
-                    connection,
-                    plan["order_plan_id"],
-                    settings=resolved_settings,
-                )
-                evaluated_count += 1
-                eligibilities.append(eligibility.to_dict())
-                if not eligibility.eligible:
-                    record_live_sim_order_plan_rejection(
+                if bound_plan is None:
+                    eligibility = evaluate_live_sim_order_plan_eligibility(
                         connection,
-                        eligibility,
-                        account_id=resolved_settings.live_sim_account_id,
+                        plan["order_plan_id"],
+                        settings=resolved_settings,
+                    )
+                    evaluated_count += 1
+                    eligibilities.append(eligibility.to_dict())
+                    if not eligibility.eligible:
+                        record_live_sim_order_plan_rejection(
+                            connection,
+                            eligibility,
+                            account_id=resolved_settings.live_sim_account_id,
+                            source=PIPELINE_SOURCE,
+                        )
+                        rejection_count += 1
+                        rejections.append(eligibility.to_dict())
+                        continue
+                    eligible_count += 1
+                    intent = create_live_sim_intent_from_order_plan(
+                        connection,
+                        plan["order_plan_id"],
+                        settings=resolved_settings,
                         source=PIPELINE_SOURCE,
                     )
-                    rejection_count += 1
-                    rejections.append(eligibility.to_dict())
-                    continue
-                eligible_count += 1
-                intent = create_live_sim_intent_from_order_plan(
-                    connection,
-                    plan["order_plan_id"],
-                    settings=resolved_settings,
-                    source=PIPELINE_SOURCE,
-                )
+                else:
+                    evaluated_count += 1
+                    intent = create_live_sim_intent_from_order_plan(
+                        connection,
+                        plan["order_plan_id"],
+                        settings=resolved_settings,
+                        source=PIPELINE_SOURCE,
+                        expected_binding=bound_plan,
+                    )
                 intents.append(intent.to_dict())
                 if intent.status in {
                     LiveSimIntentStatus.CREATED,
                     LiveSimIntentStatus.COMMAND_QUEUED,
                 }:
                     intent_count += 1
+                    if bound_plan is not None:
+                        eligible_count += 1
+                        eligibilities.append(
+                            {
+                                "eligible": True,
+                                "status": "BOUND_PLAN_VALIDATED",
+                                "order_plan_id": plan["order_plan_id"],
+                                "required_plan_binding": bound_plan,
+                            }
+                        )
+                else:
+                    if bound_plan is not None:
+                        eligibilities.append(
+                            {
+                                "eligible": False,
+                                "status": "BOUND_PLAN_REJECTED",
+                                "order_plan_id": plan["order_plan_id"],
+                                "required_plan_binding": bound_plan,
+                                "reason_codes": list(intent.reason_codes),
+                            }
+                        )
+                    rejection_count += 1
+                    rejections.append(intent.to_dict())
+                    continue
                 if not should_queue:
                     continue
                 if not resolved_settings.live_sim_pilot_auto_queue_command:
@@ -238,11 +291,19 @@ def run_live_sim_pilot_pipeline_once(
                     continue
                 if command_count >= resolved_settings.live_sim_order_plan_max_commands_per_run:
                     continue
-                order = queue_live_sim_order_command(
-                    connection,
-                    intent.live_sim_intent_id,
-                    settings=resolved_settings,
-                )
+                if bound_plan is None:
+                    order = queue_live_sim_order_command(
+                        connection,
+                        intent.live_sim_intent_id,
+                        settings=resolved_settings,
+                    )
+                else:
+                    order = queue_live_sim_order_command(
+                        connection,
+                        intent.live_sim_intent_id,
+                        settings=resolved_settings,
+                        required_plan_binding=bound_plan,
+                    )
                 command_count += 1
                 commands.append(order.to_dict())
             except Exception as exc:
@@ -263,6 +324,7 @@ def run_live_sim_pilot_pipeline_once(
             "queue_commands_requested": should_queue,
             "selected_order_plans": selected_order_plans,
             "preparation": preparation,
+            "required_plan_binding": bound_plan,
             "ai_advisory_summary": ai_advisory_summary,
             "live_sim_only": True,
             "live_real_allowed": False,
@@ -315,7 +377,11 @@ def run_live_sim_pilot_pipeline_once(
             error_count=error_count,
             status="FAILED",
             error_message=str(exc),
-            metadata={"pipeline_source": PIPELINE_SOURCE, "error": str(exc)},
+            metadata={
+                "pipeline_source": PIPELINE_SOURCE,
+                "error": str(exc),
+                "required_plan_binding": bound_plan,
+            },
         )
         connection.commit()
         raise
@@ -413,6 +479,42 @@ def _has_candidate_targets(connection: sqlite3.Connection, *, trade_date: str | 
     return int(row["count"]) > 0
 
 
+def _normalize_required_plan_binding(
+    value: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise TypeError("required_plan_binding must be a mapping")
+    binding = dict(value)
+    if not binding or not str(binding.get("order_plan_id") or "").strip():
+        raise ValueError("required_plan_binding requires order_plan_id")
+    return binding
+
+
+def _select_exact_bound_order_plan(
+    connection: sqlite3.Connection,
+    binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    order_plan_id = str(binding["order_plan_id"])
+    row = connection.execute(
+        """
+        SELECT *
+        FROM order_plan_drafts
+        WHERE order_plan_id = ?
+        """,
+        (order_plan_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"required order plan not found: {order_plan_id}")
+    plan = {key: row[key] for key in row.keys()}
+    plan["reason_codes"] = _json_array(plan.pop("reason_codes_json", None))
+    plan["evidence_json"] = _json_object(plan.get("evidence_json"))
+    plan["observe_only"] = bool(plan.get("observe_only"))
+    plan["not_order_intent"] = bool(plan.get("not_order_intent"))
+    return plan
+
+
 def _latest_ai_advisory_summary(connection: sqlite3.Connection) -> dict[str, Any]:
     try:
         latest = get_latest_ai_advisory_run(connection)
@@ -478,6 +580,18 @@ def _json_object(value: object) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _json_array(value: object) -> list[Any]:
+    if isinstance(value, list):
+        return list(value)
+    if not value:
+        return []
+    try:
+        loaded = json.loads(str(value))
+    except json.JSONDecodeError:
+        return []
+    return loaded if isinstance(loaded, list) else []
 
 
 def _json_dumps(value: object) -> str:

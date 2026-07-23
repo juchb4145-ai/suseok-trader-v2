@@ -6,6 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
+import pytest
 from apps.core_api import app
 from domain.broker.commands import GatewayCommand
 from domain.broker.utils import datetime_to_wire, market_today, utc_now
@@ -578,6 +579,136 @@ def test_operating_entry_timing_retries_evaluation_lock_then_succeeds(
     assert sleeps == [2.0, 2.0]
     assert result.stages["entry_timing"]["status"] == "COMPLETED"
     assert [error["stage"] for error in result.errors] == []
+
+
+def test_bound_operating_cycle_skips_refresh_and_propagates_exact_binding(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_operating_orchestrator as orchestrator
+
+    connection = initialize_database(tmp_path / "bound-operating.sqlite3")
+    binding = {
+        "contract": "live-sim-order-plan-binding.v1",
+        "order_plan_id": "OPD-bound-operating",
+        "order_plan_snapshot_sha256": "c" * 64,
+        "binding_sha256": "b" * 64,
+    }
+    captured: dict[str, Any] = {}
+    settings = _operating_settings(
+        live_sim_reconcile_enabled=False,
+        live_sim_reprice_enabled=True,
+    )
+
+    monkeypatch.setattr(
+        orchestrator,
+        "evaluate_entry_timing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bound cycle must not rerun entry timing")
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_reprice_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bound cycle must not reprice a different intent")
+        ),
+    )
+
+    def bound_buy(*args, **kwargs):
+        captured.update(kwargs)
+        return _FakeBuyResult(
+            run_id="bound-buy",
+            evaluated_count=1,
+            command_count=0,
+        )
+
+    monkeypatch.setattr(orchestrator, "run_live_sim_pilot_pipeline_once", bound_buy)
+    _patch_noop_lifecycle_stages(monkeypatch, orchestrator)
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=settings,
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+        required_plan_binding=binding,
+    )
+    connection.close()
+
+    assert result.stages["entry_timing"]["status"] == "SKIPPED"
+    assert result.stages["entry_timing"]["reason"] == "required_plan_binding"
+    assert result.stages["reprice"]["status"] == "SKIPPED"
+    assert captured["required_plan_binding"] == binding
+    assert result.reason_summary["required_plan_binding"] == binding
+
+
+def test_operating_cycle_rejects_empty_required_binding_before_stages(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "empty-bound-operating.sqlite3")
+
+    with pytest.raises(ValueError, match="required_plan_binding requires order_plan_id"):
+        run_live_sim_operating_cycle_once(
+            connection,
+            settings=_operating_settings(live_sim_reconcile_enabled=False),
+            mode=OperatingMode.PILOT_BUY_ONLY,
+            queue_commands=False,
+            required_plan_binding={},
+        )
+
+    run_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM live_sim_operating_runs"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert run_count == 0
+
+
+def test_bound_operating_cycle_propagates_pilot_terminal_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_operating_orchestrator as orchestrator
+
+    connection = initialize_database(tmp_path / "bound-operating-error.sqlite3")
+    binding = {
+        "contract": "live-sim-order-plan-binding.v1",
+        "order_plan_id": "OPD-bound-error",
+        "order_plan_snapshot_sha256": "c" * 64,
+        "binding_sha256": "b" * 64,
+    }
+    monkeypatch.setattr(
+        orchestrator,
+        "run_live_sim_pilot_pipeline_once",
+        lambda *args, **kwargs: _FakeBuyResult(
+            run_id="bound-buy-error",
+            evaluated_count=1,
+            command_count=0,
+            status="COMPLETED_WITH_ERRORS",
+        ),
+    )
+    _patch_noop_lifecycle_stages(monkeypatch, orchestrator)
+
+    result = run_live_sim_operating_cycle_once(
+        connection,
+        settings=_operating_settings(live_sim_reconcile_enabled=False),
+        mode=OperatingMode.PILOT_BUY_ONLY,
+        queue_commands=False,
+        include_ai=False,
+        include_no_buy=False,
+        required_plan_binding=binding,
+    )
+    connection.close()
+
+    assert result.status == "COMPLETED_WITH_ERRORS"
+    assert result.stages["buy"]["status"] == "COMPLETED_WITH_ERRORS"
+    assert any(
+        error["stage"] == "buy"
+        and error["error"] == "Exact bound plan execution did not complete cleanly."
+        for error in result.errors
+    )
 
 
 def test_operating_buy_records_lock_error_after_retries(

@@ -579,6 +579,51 @@ def test_batch_evaluation_records_counts_and_errors(tmp_path) -> None:
     assert error_count == 1
 
 
+def test_batch_evaluation_uses_only_strategy_rows_from_requested_source_run(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "risk_source_run.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+
+    first_strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(
+        connection,
+        first_strategy,
+        source_run_id="observe-run-a",
+    )
+    second_strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(
+        connection,
+        second_strategy,
+        source_run_id="observe-run-b",
+    )
+
+    result = evaluate_risk_observations(
+        connection,
+        trade_date="2026-06-27",
+        strategy_status="MATCHED_OBSERVATION",
+        settings=settings,
+        source_run_id="observe-run-a",
+    )
+    risk = connection.execute(
+        """
+        SELECT strategy_observation_id, source_run_id
+        FROM risk_observations
+        WHERE candidate_instance_id = ? AND source_run_id = ?
+        """,
+        (candidate_id, "observe-run-a"),
+    ).fetchone()
+    connection.close()
+
+    assert result.strategy_observation_count == 1
+    assert result.evaluated_count == 1
+    assert risk is not None
+    assert risk["strategy_observation_id"] == first_strategy.strategy_observation_id
+    assert risk["strategy_observation_id"] != second_strategy.strategy_observation_id
+    assert risk["source_run_id"] == "observe-run-a"
+
+
 def test_overall_block_for_overheat_and_stale_for_candidate_state(tmp_path) -> None:
     connection = initialize_database(tmp_path / "risk_overall.sqlite3")
     overheat_settings = _settings(risk_gate_max_change_rate=1.0)

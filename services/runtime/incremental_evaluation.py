@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
@@ -20,10 +20,15 @@ from domain.candidate.state import CandidateState
 
 from services.candidate_service import refresh_candidate_context
 from services.config import Settings, load_settings
-from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
+from services.entry_timing.service import evaluate_entry_timing
+from services.risk_gate import (
+    evaluate_risk_for_strategy_observation,
+    save_risk_observation,
+)
 from services.runtime.evaluation_run_guard import (
     EVALUATION_PIPELINE_LOCK,
     assert_runtime_execution_fence,
+    immediate_transaction,
     runtime_execution_lock,
 )
 from services.runtime.incremental_evaluation_dead_letter_resolution import (
@@ -81,6 +86,9 @@ class IncrementalEvaluationBatchResult:
     skipped_closed_count: int = 0
     strategy_observation_count: int = 0
     risk_observation_count: int = 0
+    entry_timing_evaluation_count: int = 0
+    order_plan_draft_count: int = 0
+    plan_ready_count: int = 0
     error_count: int = 0
     dead_letter_count: int = 0
     legacy_retry_exhausted_dead_lettered_count: int = 0
@@ -100,6 +108,9 @@ class IncrementalEvaluationBatchResult:
             "skipped_closed_count": self.skipped_closed_count,
             "strategy_observation_count": self.strategy_observation_count,
             "risk_observation_count": self.risk_observation_count,
+            "entry_timing_evaluation_count": self.entry_timing_evaluation_count,
+            "order_plan_draft_count": self.order_plan_draft_count,
+            "plan_ready_count": self.plan_ready_count,
             "error_count": self.error_count,
             "dead_letter_count": self.dead_letter_count,
             "legacy_retry_exhausted_dead_lettered_count": (
@@ -346,7 +357,17 @@ def process_incremental_evaluation_batch(
             queued_before=queued_before,
             queued_after=queued_before,
         )
-
+    if not (
+        resolved_settings.strategy_engine_enabled
+        and resolved_settings.risk_gate_enabled
+        and resolved_settings.entry_timing_enabled
+    ):
+        return IncrementalEvaluationBatchResult(
+            run_id=run_id,
+            status="DISABLED_REQUIRED_STAGE",
+            queued_before=queued_before,
+            queued_after=queued_before,
+        )
     legacy_dead_lettered_count = 0
     if _retry_exhausted_queue_count(
         connection,
@@ -374,6 +395,9 @@ def process_incremental_evaluation_batch(
     skipped_closed_count = 0
     strategy_count = 0
     risk_count = 0
+    entry_timing_count = 0
+    order_plan_draft_count = 0
+    plan_ready_count = 0
     errors: list[dict[str, Any]] = []
     polled_count = 0
     dead_letter_count = legacy_dead_lettered_count
@@ -407,6 +431,9 @@ def process_incremental_evaluation_batch(
             chunk_skipped_closed_count = 0
             chunk_strategy_count = 0
             chunk_risk_count = 0
+            chunk_entry_timing_count = 0
+            chunk_order_plan_draft_count = 0
+            chunk_plan_ready_count = 0
             chunk_dead_letter_count = 0
 
             for row in rows:
@@ -431,8 +458,8 @@ def process_incremental_evaluation_batch(
                         connection.commit()
                         chunk_skipped_closed_count += 1
                         continue
-
-                    if resolved_settings.strategy_engine_enabled:
+                    with immediate_transaction(connection):
+                        assert_runtime_execution_fence(connection)
                         strategy_observation = evaluate_candidate_strategy(
                             connection,
                             candidate_id,
@@ -443,11 +470,9 @@ def process_incremental_evaluation_batch(
                             strategy_observation,
                             source_run_id=run_id,
                         )
-                        chunk_strategy_count += 1
-                    if resolved_settings.risk_gate_enabled:
-                        risk_observation = evaluate_risk_for_candidate(
+                        risk_observation = evaluate_risk_for_strategy_observation(
                             connection,
-                            candidate_id,
+                            strategy_observation.strategy_observation_id,
                             settings=resolved_settings,
                         )
                         save_risk_observation(
@@ -455,11 +480,41 @@ def process_incremental_evaluation_batch(
                             risk_observation,
                             source_run_id=run_id,
                         )
-                        chunk_risk_count += 1
+                        entry_result = evaluate_entry_timing(
+                            connection,
+                            trade_date=str(row["trade_date"]),
+                            candidate_instance_id=candidate_id,
+                            limit=1,
+                            write_order_plan_drafts=(
+                                resolved_settings.entry_timing_write_order_plan_drafts
+                            ),
+                            persist_evaluations=True,
+                            settings=resolved_settings,
+                            manage_run_lock=False,
+                            source_run_id=run_id,
+                            commit=False,
+                        )
+                        completion = _assert_incremental_pipeline_complete(
+                            connection,
+                            candidate_instance_id=candidate_id,
+                            trade_date=str(row["trade_date"]),
+                            source_run_id=run_id,
+                            strategy_observation=strategy_observation,
+                            risk_observation=risk_observation,
+                            entry_result=entry_result,
+                        )
+                        _delete_queue_row(connection, candidate_id)
+                        assert_runtime_execution_fence(connection)
 
-                    _delete_queue_row(connection, candidate_id)
-                    assert_runtime_execution_fence(connection)
-                    connection.commit()
+                    chunk_strategy_count += 1
+                    chunk_risk_count += 1
+                    chunk_entry_timing_count += completion[
+                        "entry_timing_evaluation_count"
+                    ]
+                    chunk_order_plan_draft_count += completion[
+                        "order_plan_draft_count"
+                    ]
+                    chunk_plan_ready_count += completion["plan_ready_count"]
                     chunk_processed_count += 1
                 except Exception as exc:
                     connection.rollback()
@@ -469,21 +524,25 @@ def process_incremental_evaluation_batch(
                         "error_message": str(exc),
                     }
                     errors.append(error)
-                    queue_error_status = _mark_queue_error(
-                        connection,
-                        candidate_id,
-                        str(exc),
-                        retry_limit=resolved_settings.incremental_evaluation_retry_limit,
-                    )
+                    with immediate_transaction(connection):
+                        assert_runtime_execution_fence(connection)
+                        queue_error_status = _mark_queue_error(
+                            connection,
+                            candidate_id,
+                            str(exc),
+                            retry_limit=resolved_settings.incremental_evaluation_retry_limit,
+                        )
+                        assert_runtime_execution_fence(connection)
                     if queue_error_status == "DEAD_LETTER":
                         chunk_dead_letter_count += 1
-                    assert_runtime_execution_fence(connection)
-                    connection.commit()
 
             processed_count += chunk_processed_count
             skipped_closed_count += chunk_skipped_closed_count
             strategy_count += chunk_strategy_count
             risk_count += chunk_risk_count
+            entry_timing_count += chunk_entry_timing_count
+            order_plan_draft_count += chunk_order_plan_draft_count
+            plan_ready_count += chunk_plan_ready_count
             dead_letter_count += chunk_dead_letter_count
 
         if fetched_count < current_limit:
@@ -520,11 +579,237 @@ def process_incremental_evaluation_batch(
         skipped_closed_count=skipped_closed_count,
         strategy_observation_count=strategy_count,
         risk_observation_count=risk_count,
+        entry_timing_evaluation_count=entry_timing_count,
+        order_plan_draft_count=order_plan_draft_count,
+        plan_ready_count=plan_ready_count,
         error_count=len(errors),
         dead_letter_count=dead_letter_count,
         legacy_retry_exhausted_dead_lettered_count=legacy_dead_lettered_count,
         errors=tuple(errors),
     )
+
+
+def _assert_incremental_pipeline_complete(
+    connection: sqlite3.Connection,
+    *,
+    candidate_instance_id: str,
+    trade_date: str,
+    source_run_id: str,
+    strategy_observation: Any,
+    risk_observation: Any,
+    entry_result: Any,
+) -> dict[str, int]:
+    if (
+        strategy_observation.candidate_instance_id != candidate_instance_id
+        or strategy_observation.trade_date != trade_date
+    ):
+        raise RuntimeError("incremental strategy target mismatch")
+    if not strategy_observation.observe_only:
+        raise RuntimeError("incremental strategy must be observe-only")
+    if (
+        risk_observation.candidate_instance_id != candidate_instance_id
+        or risk_observation.trade_date != trade_date
+    ):
+        raise RuntimeError("incremental risk target mismatch")
+    if (
+        risk_observation.strategy_observation_id
+        != strategy_observation.strategy_observation_id
+    ):
+        raise RuntimeError("incremental risk strategy observation mismatch")
+    if not risk_observation.observe_only:
+        raise RuntimeError("incremental risk must be observe-only")
+
+    evaluations = tuple(entry_result.evaluations)
+    drafts = tuple(entry_result.order_plan_drafts)
+    if (
+        str(entry_result.status).upper() != "COMPLETED"
+        or entry_result.error_count
+        or entry_result.candidate_count != 1
+        or entry_result.evaluated_count != 1
+        or len(evaluations) != 1
+        or len(drafts) > 1
+    ):
+        raise RuntimeError(
+            "incremental entry timing evaluation incomplete: "
+            f"status={entry_result.status}, candidates={entry_result.candidate_count}, "
+            f"evaluated={entry_result.evaluated_count}, errors={entry_result.error_count}, "
+            f"drafts={len(drafts)}"
+        )
+    evaluation = evaluations[0]
+    if (
+        evaluation.candidate_instance_id != candidate_instance_id
+        or evaluation.trade_date != trade_date
+    ):
+        raise RuntimeError("incremental entry timing target mismatch")
+    if not evaluation.observe_only or not evaluation.not_order_intent:
+        raise RuntimeError("incremental entry timing must be observe-only")
+
+    pipeline = _mapping(evaluation.evidence_json.get("pipeline_coherency"))
+    lineage = _mapping(pipeline.get("lineage"))
+    if str(pipeline.get("status") or "").upper() != "PASS":
+        raise RuntimeError(
+            "incremental entry timing pipeline coherency failed: "
+            f"{','.join(str(code) for code in pipeline.get('reason_codes') or [])}"
+        )
+    if (
+        pipeline.get("strategy_observation_id")
+        != strategy_observation.strategy_observation_id
+        or pipeline.get("risk_observation_id")
+        != risk_observation.risk_observation_id
+    ):
+        raise RuntimeError("incremental entry timing upstream observation mismatch")
+    if lineage.get("source_run_id") != source_run_id:
+        raise RuntimeError("incremental entry timing source run mismatch")
+
+    strategy_row = _required_pipeline_row(
+        connection,
+        table_name="strategy_observations",
+        id_column="strategy_observation_id",
+        row_id=strategy_observation.strategy_observation_id,
+    )
+    risk_row = _required_pipeline_row(
+        connection,
+        table_name="risk_observations",
+        id_column="risk_observation_id",
+        row_id=risk_observation.risk_observation_id,
+    )
+    entry_row = _required_pipeline_row(
+        connection,
+        table_name="entry_timing_evaluations",
+        id_column="entry_timing_evaluation_id",
+        row_id=evaluation.entry_timing_evaluation_id,
+    )
+    rows = (strategy_row, risk_row, entry_row)
+    for persisted in rows:
+        if persisted["candidate_instance_id"] != candidate_instance_id:
+            raise RuntimeError("incremental persisted candidate mismatch")
+        if persisted["trade_date"] != trade_date:
+            raise RuntimeError("incremental persisted trade date mismatch")
+        if persisted["source_run_id"] != source_run_id:
+            raise RuntimeError("incremental persisted source run mismatch")
+        if not str(persisted["source_watermark_hash"] or ""):
+            raise RuntimeError("incremental persisted source watermark missing")
+        if int(persisted["observe_only"] or 0) != 1:
+            raise RuntimeError("incremental persisted row must be observe-only")
+    watermark_hashes = {str(row["source_watermark_hash"]) for row in rows}
+    if len(watermark_hashes) != 1:
+        raise RuntimeError("incremental persisted source watermark mismatch")
+    if lineage.get("source_watermark_hash") not in watermark_hashes:
+        raise RuntimeError("incremental entry timing lineage watermark mismatch")
+    if risk_row["strategy_observation_id"] != strategy_observation.strategy_observation_id:
+        raise RuntimeError("incremental persisted risk strategy mismatch")
+    if (
+        entry_row["strategy_observation_id"]
+        != strategy_observation.strategy_observation_id
+        or entry_row["risk_observation_id"] != risk_observation.risk_observation_id
+    ):
+        raise RuntimeError("incremental persisted entry upstream mismatch")
+    if int(entry_row["not_order_intent"] or 0) != 1:
+        raise RuntimeError("incremental persisted entry must not be an order intent")
+
+    latest_strategy = _required_pipeline_row(
+        connection,
+        table_name="strategy_observations_latest",
+        id_column="candidate_instance_id",
+        row_id=candidate_instance_id,
+    )
+    latest_risk = _required_pipeline_row(
+        connection,
+        table_name="risk_observations_latest",
+        id_column="candidate_instance_id",
+        row_id=candidate_instance_id,
+    )
+    if (
+        latest_strategy["strategy_observation_id"]
+        != strategy_observation.strategy_observation_id
+        or latest_risk["risk_observation_id"] != risk_observation.risk_observation_id
+        or latest_risk["strategy_observation_id"]
+        != strategy_observation.strategy_observation_id
+    ):
+        raise RuntimeError("incremental latest observation pointer mismatch")
+    for latest in (latest_strategy, latest_risk):
+        if (
+            latest["source_run_id"] != source_run_id
+            or str(latest["source_watermark_hash"]) not in watermark_hashes
+            or int(latest["observe_only"] or 0) != 1
+        ):
+            raise RuntimeError("incremental latest observation lineage mismatch")
+
+    if drafts:
+        draft = drafts[0]
+        if (
+            evaluation.order_plan_id != draft.order_plan_id
+            or draft.candidate_instance_id != candidate_instance_id
+        ):
+            raise RuntimeError("incremental order plan result mismatch")
+        plan_row = _required_pipeline_row(
+            connection,
+            table_name="order_plan_drafts",
+            id_column="order_plan_id",
+            row_id=draft.order_plan_id,
+        )
+        if (
+            plan_row["candidate_instance_id"] != candidate_instance_id
+            or plan_row["trade_date"] != trade_date
+            or plan_row["source_run_id"] != source_run_id
+            or plan_row["source_watermark_hash"] not in watermark_hashes
+            or plan_row["entry_timing_evaluation_id"]
+            != evaluation.entry_timing_evaluation_id
+            or plan_row["strategy_observation_id"]
+            != strategy_observation.strategy_observation_id
+            or plan_row["risk_observation_id"] != risk_observation.risk_observation_id
+            or int(plan_row["observe_only"] or 0) != 1
+            or int(plan_row["not_order_intent"] or 0) != 1
+        ):
+            raise RuntimeError("incremental persisted order plan mismatch")
+        latest_plan = _required_pipeline_row(
+            connection,
+            table_name="order_plan_drafts_latest",
+            id_column="idempotency_key",
+            row_id=draft.idempotency_key,
+        )
+        if (
+            latest_plan["order_plan_id"] != draft.order_plan_id
+            or latest_plan["source_run_id"] != source_run_id
+            or str(latest_plan["source_watermark_hash"]) not in watermark_hashes
+            or latest_plan["entry_timing_evaluation_id"]
+            != evaluation.entry_timing_evaluation_id
+            or latest_plan["strategy_observation_id"]
+            != strategy_observation.strategy_observation_id
+            or latest_plan["risk_observation_id"]
+            != risk_observation.risk_observation_id
+            or int(latest_plan["observe_only"] or 0) != 1
+            or int(latest_plan["not_order_intent"] or 0) != 1
+        ):
+            raise RuntimeError("incremental latest order plan pointer mismatch")
+    elif evaluation.order_plan_id is not None or entry_row["order_plan_id"] is not None:
+        raise RuntimeError("incremental entry timing has an unpersisted order plan reference")
+
+    return {
+        "entry_timing_evaluation_count": 1,
+        "order_plan_draft_count": len(drafts),
+        "plan_ready_count": int(entry_result.plan_ready_count),
+    }
+
+
+def _required_pipeline_row(
+    connection: sqlite3.Connection,
+    *,
+    table_name: str,
+    id_column: str,
+    row_id: str,
+) -> sqlite3.Row:
+    row = connection.execute(
+        f"SELECT * FROM {table_name} WHERE {id_column} = ?",
+        (row_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(f"incremental persisted row missing: {table_name}")
+    return row
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
 
 
 def get_incremental_evaluation_status(

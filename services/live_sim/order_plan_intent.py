@@ -18,6 +18,10 @@ from services.live_sim.live_sim_service import (
     _save_rejection,
     queue_live_sim_order_command,
 )
+from services.live_sim.order_plan_binding import (
+    build_order_plan_binding,
+    validate_order_plan_binding,
+)
 from services.live_sim.order_plan_eligibility import (
     LiveSimOrderPlanEligibility,
     evaluate_live_sim_order_plan_eligibility,
@@ -34,13 +38,44 @@ def create_live_sim_intent_from_order_plan(
     order_plan_id: str,
     settings: Settings | None = None,
     source: str = ORDER_PLAN_INTENT_SOURCE,
+    expected_binding: Mapping[str, Any] | None = None,
 ) -> LiveSimIntent:
     resolved_settings = settings or load_settings()
+    if expected_binding is None:
+        normalized_expected_binding = None
+    elif not isinstance(expected_binding, Mapping):
+        raise TypeError("expected_binding must be a mapping")
+    else:
+        normalized_expected_binding = dict(expected_binding)
+        if not normalized_expected_binding:
+            raise ValueError(LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value)
+    if normalized_expected_binding is not None:
+        validation = validate_order_plan_binding(
+            connection,
+            normalized_expected_binding,
+            max_age_sec=resolved_settings.live_sim_order_plan_stale_sec,
+        )
+        if not validation.passed:
+            raise ValueError(
+                ",".join(
+                    [
+                        LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+                        *validation.reason_codes,
+                    ]
+                )
+            )
+        if validation.binding.get("order_plan_id") != order_plan_id:
+            raise ValueError(LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value)
     existing = find_live_sim_intent_by_order_plan(connection, order_plan_id)
     if existing is not None and existing["status"] in {
         LiveSimIntentStatus.CREATED.value,
         LiveSimIntentStatus.COMMAND_QUEUED.value,
     }:
+        if normalized_expected_binding is not None and not _intent_binding_matches(
+            existing,
+            normalized_expected_binding,
+        ):
+            raise ValueError(LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value)
         eligibility = evaluate_live_sim_order_plan_eligibility(
             connection,
             order_plan_id,
@@ -71,7 +106,18 @@ def create_live_sim_intent_from_order_plan(
         connection.commit()
         return _rejected_intent(eligibility, resolved_settings, source=source)
 
-    intent = _build_intent_from_eligibility(eligibility, resolved_settings, source=source)
+    current_binding = build_order_plan_binding(eligibility.order_plan)
+    if (
+        normalized_expected_binding is not None
+        and not _bindings_match(current_binding, normalized_expected_binding)
+    ):
+        raise ValueError(LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value)
+    intent = _build_intent_from_eligibility(
+        eligibility,
+        resolved_settings,
+        source=source,
+        order_plan_binding=current_binding,
+    )
     duplicate_by_key = _intent_by_idempotency_key(connection, intent.idempotency_key)
     if duplicate_by_key is not None:
         _save_rejection(
@@ -154,6 +200,7 @@ def _build_intent_from_eligibility(
     settings: Settings,
     *,
     source: str,
+    order_plan_binding: Mapping[str, Any],
 ) -> LiveSimIntent:
     order_plan = dict(eligibility.order_plan)
     sizing = dict(eligibility.sizing)
@@ -187,6 +234,7 @@ def _build_intent_from_eligibility(
         "source": source,
         "order_plan_id": order_plan["order_plan_id"],
         "order_plan_draft": order_plan,
+        "order_plan_binding": dict(order_plan_binding),
         "entry_timing_evidence": _json_object(order_plan.get("evidence_json")),
         "entry_timing_state": order_plan["entry_timing_state"],
         "setup_type": order_plan["setup_type"],
@@ -318,6 +366,39 @@ def _intent_by_idempotency_key(
     item["live_real_allowed"] = bool(item["live_real_allowed"])
     item["broker_order_sent"] = bool(item["broker_order_sent"])
     return item
+
+
+def _intent_binding_matches(
+    intent: Mapping[str, Any],
+    expected_binding: Mapping[str, Any],
+) -> bool:
+    evidence = _json_object(intent.get("evidence_json"))
+    frozen = evidence.get("order_plan_binding")
+    if isinstance(frozen, Mapping):
+        return _bindings_match(frozen, expected_binding)
+    frozen_plan = evidence.get("order_plan_draft")
+    if isinstance(frozen_plan, Mapping):
+        try:
+            return _bindings_match(
+                build_order_plan_binding(frozen_plan),
+                expected_binding,
+            )
+        except (TypeError, ValueError):
+            return False
+    return False
+
+
+def _bindings_match(
+    first: Mapping[str, Any],
+    second: Mapping[str, Any],
+) -> bool:
+    return bool(
+        first.get("binding_sha256")
+        and first.get("binding_sha256") == second.get("binding_sha256")
+        and first.get("order_plan_snapshot_sha256")
+        == second.get("order_plan_snapshot_sha256")
+        and first.get("order_plan_id") == second.get("order_plan_id")
+    )
 
 
 def _order_record_from_dict(data: Mapping[str, Any]) -> LiveSimOrderRecord:
