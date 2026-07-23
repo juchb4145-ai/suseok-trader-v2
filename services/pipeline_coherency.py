@@ -667,6 +667,200 @@ def build_pipeline_coherency_status(
     }
 
 
+def build_fast5_plan_ready_coherency_status(
+    connection: sqlite3.Connection,
+    *,
+    pipeline_status: Mapping[str, Any],
+    trade_date: str,
+    max_age_sec: float = 60.0,
+    as_of: datetime | None = None,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Qualify every latest, unexpired PLAN_READY row for the FAST-5 gate.
+
+    The canonical whole-inventory status remains a diagnostic.  FAST-5 only needs
+    every currently actionable plan to be internally coherent, while historical
+    non-ready rows may remain WARN/FAIL diagnostics.  The caller still has to prove
+    whole-inventory count/coverage separately before accepting this result.
+    """
+
+    observed_at = as_of or utc_now()
+    bounded_limit = min(max(int(limit), 1), 500)
+    rows = connection.execute(
+        """
+        SELECT *
+        FROM order_plan_drafts_latest
+        WHERE trade_date = ?
+          AND status = 'PLAN_READY'
+        ORDER BY created_at DESC, order_plan_id DESC
+        LIMIT ?
+        """,
+        (str(trade_date), bounded_limit + 1),
+    ).fetchall()
+    selection_truncated = len(rows) > bounded_limit
+    selected_rows = rows[:bounded_limit]
+    diagnostic_items = {
+        str(item.get("candidate_instance_id") or ""): item
+        for item in pipeline_status.get("items", [])
+        if isinstance(item, Mapping)
+    }
+    unexpired_items: list[dict[str, Any]] = []
+    expired_plan_ready_count = 0
+    invalid_expiry_count = 0
+    invalid_expiry_ids: list[str] = []
+    for row in selected_rows:
+        plan = _row_dict(row)
+        order_plan_id = str(plan.get("order_plan_id") or "")
+        try:
+            expires_at = parse_timestamp(plan.get("expires_at"), "expires_at")
+            unexpired = expires_at > observed_at
+        except (TypeError, ValueError):
+            invalid_expiry_count += 1
+            invalid_expiry_ids.append(order_plan_id)
+            continue
+        if not unexpired:
+            expired_plan_ready_count += 1
+            continue
+
+        candidate_id = str(plan.get("candidate_instance_id") or "")
+        canonical = diagnostic_items.get(candidate_id)
+        draft_row = connection.execute(
+            "SELECT * FROM order_plan_drafts WHERE order_plan_id = ?",
+            (plan.get("order_plan_id"),),
+        ).fetchone()
+        draft = _row_dict(draft_row)
+        plan_for_lineage = draft or plan
+        evaluation = connection.execute(
+            """
+            SELECT *
+            FROM entry_timing_evaluations
+            WHERE entry_timing_evaluation_id = ?
+            """,
+            (plan_for_lineage.get("entry_timing_evaluation_id"),),
+        ).fetchone()
+        exact_lineage = assess_order_plan_lineage(
+            connection,
+            plan_for_lineage,
+            evaluation,
+            max_age_sec=max_age_sec,
+        )
+        reasons: list[str] = []
+        if not draft:
+            reasons.append("ORDER_PLAN_DRAFT_MISSING")
+        else:
+            for field_name in (
+                "candidate_instance_id",
+                "trade_date",
+                "status",
+                "expires_at",
+                "entry_timing_evaluation_id",
+                "strategy_observation_id",
+                "risk_observation_id",
+                "source_run_id",
+                "source_watermark_hash",
+                "source_observed_at",
+            ):
+                if draft.get(field_name) != plan.get(field_name):
+                    reasons.append(
+                        f"ORDER_PLAN_LATEST_{field_name.upper()}_MISMATCH"
+                    )
+        evaluation_data = _row_dict(evaluation)
+        if evaluation_data:
+            if not evaluation_data.get("order_plan_id"):
+                reasons.append("ENTRY_TIMING_ORDER_PLAN_LINEAGE_MISSING")
+            elif evaluation_data.get("order_plan_id") != plan.get(
+                "order_plan_id"
+            ):
+                reasons.append("ENTRY_TIMING_ORDER_PLAN_MISMATCH")
+        canonical_plan_id: object = None
+        if canonical is None:
+            reasons.append("PLAN_READY_PIPELINE_CANDIDATE_NOT_COVERED")
+        else:
+            reasons.extend(canonical.get("reason_codes") or [])
+            stages = canonical.get("stages")
+            if isinstance(stages, Mapping):
+                order_plan_stage = stages.get("order_plan")
+                if isinstance(order_plan_stage, Mapping):
+                    canonical_plan_id = order_plan_stage.get("order_plan_id")
+            if canonical_plan_id != plan.get("order_plan_id"):
+                reasons.append("PLAN_READY_LATEST_ORDER_PLAN_MISMATCH")
+        reasons.extend(exact_lineage.get("reason_codes") or [])
+        reasons = _dedupe(reasons)
+        unexpired_items.append(
+            {
+                "candidate_instance_id": candidate_id,
+                "order_plan_id": order_plan_id,
+                "expires_at": plan.get("expires_at"),
+                "status": "PASS" if not reasons else "FAIL",
+                "reason_codes": reasons,
+            }
+        )
+
+    non_pass_count = sum(
+        1 for item in unexpired_items if item.get("status") != "PASS"
+    )
+    missing_lineage_count = sum(
+        1
+        for item in unexpired_items
+        if any("MISSING" in reason for reason in item.get("reason_codes", []))
+    )
+    stale_count = sum(
+        1
+        for item in unexpired_items
+        if any("STALE" in reason for reason in item.get("reason_codes", []))
+    )
+    mismatch_count = sum(
+        1
+        for item in unexpired_items
+        if any(
+            "MISMATCH" in reason or "INVALID" in reason
+            for reason in item.get("reason_codes", [])
+        )
+    )
+    reason_codes = _dedupe(
+        reason
+        for item in unexpired_items
+        for reason in item.get("reason_codes", [])
+    )
+    if not unexpired_items:
+        reason_codes.append("NO_UNEXPIRED_PLAN_READY")
+    if invalid_expiry_count:
+        reason_codes.append("PLAN_READY_EXPIRY_INVALID")
+    if selection_truncated:
+        reason_codes.append("PLAN_READY_SELECTION_TRUNCATED")
+    passed = bool(
+        unexpired_items
+        and non_pass_count == 0
+        and invalid_expiry_count == 0
+        and not selection_truncated
+    )
+    return {
+        "status": "PASS" if passed else "FAIL",
+        "trade_date": str(trade_date),
+        "reason_codes": _dedupe(reason_codes),
+        "latest_plan_ready_count": len(selected_rows),
+        "unexpired_plan_ready_count": len(unexpired_items),
+        "coherent_plan_ready_count": sum(
+            1 for item in unexpired_items if item.get("status") == "PASS"
+        ),
+        "non_pass_plan_ready_count": non_pass_count,
+        "missing_lineage_plan_ready_count": missing_lineage_count,
+        "stale_plan_ready_count": stale_count,
+        "mismatch_plan_ready_count": mismatch_count,
+        "expired_plan_ready_count": expired_plan_ready_count,
+        "invalid_expiry_plan_ready_count": invalid_expiry_count,
+        "invalid_expiry_order_plan_ids": invalid_expiry_ids,
+        "selection_truncated": selection_truncated,
+        "max_age_sec": float(max_age_sec),
+        "items": unexpired_items,
+        "generated_at": datetime_to_wire(observed_at),
+        "read_only": True,
+        "observe_only": True,
+        "no_order_side_effects": True,
+        "real_order_allowed": False,
+    }
+
+
 def build_pipeline_coherency_rca_status(
     connection: sqlite3.Connection,
     *,
@@ -2457,14 +2651,21 @@ def _lineage_assessment(
 
 
 def _age_seconds(value: object, *, now: datetime | None = None) -> float:
+    # Keep the public value finite/JSON-safe, but above any practical finite
+    # freshness allowance so missing, invalid, or materially future timestamps
+    # cannot be made fresh by a large diagnostic max_age_sec.
+    invalid_age_sec = 1e300
     if not value:
-        return 0.0
+        return invalid_age_sec
     try:
         observed = parse_timestamp(value, "source_observed_at")
     except (TypeError, ValueError):
-        return 0.0
+        return invalid_age_sec
     current = now or utc_now()
-    return round(max((current - observed).total_seconds(), 0.0), 3)
+    delta_sec = (current - observed).total_seconds()
+    if delta_sec < -5.0:
+        return invalid_age_sec
+    return round(max(delta_sec, 0.0), 3)
 
 
 def _json_object(value: object) -> dict[str, Any]:

@@ -51,7 +51,7 @@ from tools import ops_fast0_strict_requalification as fast0_tool  # noqa: E402
 
 _CONTRACT = "fast0-blocker-resolution-plan.v1"
 _EXPECTED_FAST0_CONTRACT = "fast0-strict-offline-requalification.v1"
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _PIPELINE_MAX_AGE_SEC = 60.0
 _PAGE_LIMIT = 500
 _MAX_PAGES = 100

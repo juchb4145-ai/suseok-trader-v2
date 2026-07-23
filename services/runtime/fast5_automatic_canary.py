@@ -24,7 +24,10 @@ from services.live_sim.execution_lifecycle_status import (
     build_live_sim_execution_lifecycle_status,
 )
 from services.live_sim.live_sim_service import get_latest_live_sim_reconcile
-from services.pipeline_coherency import build_pipeline_coherency_status
+from services.pipeline_coherency import (
+    build_fast5_plan_ready_coherency_status,
+    build_pipeline_coherency_status,
+)
 from services.runtime.live_sim_operating_orchestrator import (
     LiveSimOperatingRunResult,
     run_live_sim_operating_cycle_once,
@@ -37,9 +40,10 @@ from services.runtime.preflight import (
     run_live_sim_preflight,
 )
 
-FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v2"
+FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v3"
 FAST5_ROLLBACK_POLICY_VERSIONS = {
     "fast5-guarded-automatic-canary.v1",
+    "fast5-guarded-automatic-canary.v2",
     FAST5_POLICY_VERSION,
 }
 FAST5_BOOTSTRAP_APPROVAL_CONTRACT = "fast5-bootstrap-automatic-canary-approval.v1"
@@ -167,7 +171,10 @@ def build_fast5_bootstrap_approval(
         "order_type": "LIMIT",
         "max_buy_commands": 1,
         "max_daily_buy_count": 1,
-        "max_order_notional": strict.live_sim_max_order_notional,
+        # Settings can be constructed directly in tests/tools with an integer
+        # literal even though production parsing yields a float.  Normalize the
+        # public contract so the same economic limit always has one approval SHA.
+        "max_order_notional": float(strict.live_sim_max_order_notional),
         "max_active_orders": 1,
         "max_active_positions": 1,
         "scale_in_allowed": False,
@@ -710,41 +717,114 @@ def _add_pipeline_check(
     trade_date: str,
 ) -> None:
     try:
-        inventory_count = _pipeline_inventory_count(connection, trade_date)
-        status = build_pipeline_coherency_status(
-            connection,
-            trade_date=trade_date,
-            max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
-            limit=500,
+        owns_read_snapshot = not connection.in_transaction
+        read_snapshot_savepoint = "fast5_pipeline_read_snapshot"
+        if owns_read_snapshot:
+            connection.execute("BEGIN DEFERRED")
+        else:
+            connection.execute(f"SAVEPOINT {read_snapshot_savepoint}")
+        try:
+            _require_pipeline_read_snapshot(connection)
+            inventory_count = _pipeline_inventory_count(connection, trade_date)
+            _require_pipeline_read_snapshot(connection)
+            status = build_pipeline_coherency_status(
+                connection,
+                trade_date=trade_date,
+                max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
+                limit=500,
+            )
+            _require_pipeline_read_snapshot(connection)
+            qualification = build_fast5_plan_ready_coherency_status(
+                connection,
+                pipeline_status=status,
+                trade_date=trade_date,
+                max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
+            )
+            _require_pipeline_read_snapshot(connection)
+        finally:
+            if owns_read_snapshot and connection.in_transaction:
+                connection.rollback()
+            elif not owns_read_snapshot and connection.in_transaction:
+                connection.execute(
+                    f"ROLLBACK TO SAVEPOINT {read_snapshot_savepoint}"
+                )
+                connection.execute(f"RELEASE SAVEPOINT {read_snapshot_savepoint}")
+        full_inventory_covered = bool(
+            inventory_count <= 500
+            and int(status.get("candidate_count") or 0) == inventory_count
+        )
+        qualification_reason_codes = list(
+            qualification.get("reason_codes") or []
+        )
+        if inventory_count > 500:
+            qualification_reason_codes.append(
+                "PIPELINE_INVENTORY_LIMIT_EXCEEDED"
+            )
+        if int(status.get("candidate_count") or 0) != inventory_count:
+            qualification_reason_codes.append(
+                "PIPELINE_INVENTORY_COVERAGE_MISMATCH"
+            )
+        qualification_reason_codes = list(
+            dict.fromkeys(qualification_reason_codes)
         )
         passed = bool(
-            status.get("status") == "PASS"
-            and int(status.get("candidate_count") or 0) > 0
-            and inventory_count <= 500
-            and int(status.get("candidate_count") or 0) == inventory_count
-            and int(status.get("mismatch_count") or 0) == 0
-            and int(status.get("missing_lineage_count") or 0) == 0
-            and int(status.get("stale_count") or 0) == 0
+            full_inventory_covered
+            and qualification.get("status") == "PASS"
+            and int(qualification.get("unexpired_plan_ready_count") or 0) > 0
         )
         details = {
-            "qualification_status": status.get("status"),
-            "qualification_reason_codes": status.get("reason_codes"),
+            "qualification_status": "PASS" if passed else "FAIL",
+            "qualification_reason_codes": qualification_reason_codes,
+            "plan_ready_qualification_status": qualification.get("status"),
+            "diagnostic_status": status.get("status"),
+            "diagnostic_reason_codes": status.get("reason_codes"),
             "candidate_count": status.get("candidate_count"),
             "full_inventory_count": inventory_count,
-            "full_inventory_covered": (
-                inventory_count <= 500
-                and int(status.get("candidate_count") or 0) == inventory_count
-            ),
+            "full_inventory_covered": full_inventory_covered,
             "coherent_count": status.get("coherent_count"),
             "mismatch_count": status.get("mismatch_count"),
             "missing_lineage_count": status.get("missing_lineage_count"),
             "stale_count": status.get("stale_count"),
-            "generated_at": status.get("generated_at"),
+            "latest_plan_ready_count": qualification.get(
+                "latest_plan_ready_count"
+            ),
+            "unexpired_plan_ready_count": qualification.get(
+                "unexpired_plan_ready_count"
+            ),
+            "coherent_plan_ready_count": qualification.get(
+                "coherent_plan_ready_count"
+            ),
+            "non_pass_plan_ready_count": qualification.get(
+                "non_pass_plan_ready_count"
+            ),
+            "missing_lineage_plan_ready_count": qualification.get(
+                "missing_lineage_plan_ready_count"
+            ),
+            "stale_plan_ready_count": qualification.get(
+                "stale_plan_ready_count"
+            ),
+            "mismatch_plan_ready_count": qualification.get(
+                "mismatch_plan_ready_count"
+            ),
+            "invalid_expiry_plan_ready_count": qualification.get(
+                "invalid_expiry_plan_ready_count"
+            ),
+            "selection_truncated": qualification.get("selection_truncated"),
+            "read_snapshot_consistent": True,
+            "generated_at": qualification.get("generated_at"),
         }
     except Exception as exc:
         passed = False
-        details = {"classifier_error_type": type(exc).__name__}
+        details = {
+            "classifier_error_type": type(exc).__name__,
+            "read_snapshot_consistent": False,
+        }
     add("pipeline_coherency", passed, "FAST5_PIPELINE_NON_PASS", details)
+
+
+def _require_pipeline_read_snapshot(connection: sqlite3.Connection) -> None:
+    if not connection.in_transaction:
+        raise RuntimeError("FAST5 pipeline read snapshot ended unexpectedly.")
 
 
 def _pipeline_inventory_count(connection: sqlite3.Connection, trade_date: str) -> int:
@@ -774,7 +854,9 @@ def _add_broker_boundary_check(add: Any, connection: sqlite3.Connection) -> None
     try:
         status = get_order_broker_boundary_status(connection)
         passed = bool(
-            int(status.get("effective_unconfirmed_count") or 0) == 0
+            status.get("effective_status") == "PASS"
+            and int(status.get("effective_unconfirmed_count") or 0) == 0
+            and int(status.get("active_order_command_count") or 0) == 0
             and status.get("effective_block_new_order_routing") is False
             and status.get("resolution_maintenance_fence_active") is False
             and not status.get("reason_codes")
@@ -783,6 +865,9 @@ def _add_broker_boundary_check(add: Any, connection: sqlite3.Connection) -> None
             "effective_status": status.get("effective_status"),
             "raw_unconfirmed_count": status.get("raw_unconfirmed_count"),
             "effective_unconfirmed_count": status.get("effective_unconfirmed_count"),
+            "active_order_command_count": status.get(
+                "active_order_command_count"
+            ),
             "effective_block_new_order_routing": status.get(
                 "effective_block_new_order_routing"
             ),

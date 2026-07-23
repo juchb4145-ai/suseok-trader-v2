@@ -18,12 +18,14 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from storage.sqlite import (  # noqa: E402
-    SCHEMA_VERSION,
     initialize_database,
     initialize_database_for_offline_migration,
     migrate_schema_61_to_62,
 )
 
+# This module is the historical exact 61 -> 62 evidence contract.  It must not
+# silently retarget when storage.sqlite advances to a newer schema.
+SCHEMA_VERSION = 62
 PREFLIGHT_CONTRACT_VERSION = "exact-61-to-62-v2"
 EXACT_SCHEMA_61_TO_62_MIGRATION_METHOD = "exact_storage_migrate_schema_61_to_62"
 
@@ -416,10 +418,14 @@ def run_preflight(
     clone_after_probes = _snapshot_path(clone)
 
     idempotent_started = time.perf_counter()
-    idempotent = initialize_database(clone)
-    idempotent.close()
-    idempotent_elapsed_sec = time.perf_counter() - idempotent_started
+    historical_validation_failures = _historical_schema_62_validation_failures(clone)
     clone_after_idempotent = _snapshot_path(clone)
+    if historical_validation_failures:
+        clone_after_idempotent = {
+            **clone_after_idempotent,
+            "historical_schema_62_validation_failures": historical_validation_failures,
+        }
+    idempotent_elapsed_sec = time.perf_counter() - idempotent_started
 
     quick_check_started = time.perf_counter()
     quick_check = _quick_check(clone) if run_quick_check else ["SKIPPED"]
@@ -453,6 +459,7 @@ def run_preflight(
             "after_exact_migration": clone_after_exact,
             "after_contract_probes": clone_after_probes,
             "after_idempotent_rerun": clone_after_idempotent,
+            "historical_schema_62_validation_failures": historical_validation_failures,
             "contract_probes": contract_probes,
             "contract_probe_error_type": contract_probe_error_type,
             "exact_quick_check": exact_quick_check,
@@ -484,9 +491,117 @@ def _migrate_clone_to_current_schema(path: Path, *, source_schema: str) -> str:
             connection.close()
         return EXACT_SCHEMA_61_TO_62_MIGRATION_METHOD
 
+    if source_schema == "62":
+        return "historical_schema_62_noop"
+
     migrated = initialize_database_for_offline_migration(path)
-    migrated.close()
-    return "initialize_database_legacy_or_idempotent"
+    try:
+        migrated.execute("BEGIN EXCLUSIVE")
+        table_exists = migrated.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'gateway_order_broker_boundary_fence_events'"
+        ).fetchone()
+        if table_exists is not None:
+            ledger_count = int(
+                migrated.execute(
+                    "SELECT COUNT(*) FROM gateway_order_broker_boundary_fence_events"
+                ).fetchone()[0]
+            )
+            if ledger_count != 0:
+                raise RuntimeError(
+                    "historical schema-62 clone projection requires an empty "
+                    "schema-63 fence-event ledger"
+                )
+            migrated.execute("DROP TABLE gateway_order_broker_boundary_fence_events")
+        updated = migrated.execute(
+            "UPDATE app_metadata SET value = '62', updated_at = datetime('now') "
+            "WHERE key = 'schema_version' AND value = '63'"
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError("historical schema-62 clone metadata CAS failed")
+        migrated.commit()
+    except Exception:
+        if migrated.in_transaction:
+            migrated.rollback()
+        raise
+    finally:
+        migrated.close()
+    return "initialize_database_legacy_to_historical_62"
+
+
+def _historical_schema_62_validation_failures(path: Path) -> list[str]:
+    """Read-only replacement for the former current-target initializer probe.
+
+    Once the application target advances beyond 62, calling the ordinary
+    initializer on a historical schema-62 clone is correctly fail-closed.  The
+    historical 61 -> 62 evidence contract still needs to prove that the target
+    is complete without repairing it, so compare its object/column inventory
+    with a fresh in-memory schema while excluding schema-63 fence objects.
+    """
+
+    canonical = initialize_database(":memory:")
+    actual = sqlite3.connect(path, timeout=60.0)
+    actual.row_factory = sqlite3.Row
+    actual.execute("PRAGMA query_only=ON")
+    try:
+        expected_objects = _historical_schema_object_inventory(canonical)
+        actual_objects = _historical_schema_object_inventory(actual)
+        failures = [
+            f"MISSING_OBJECT:{object_type}:{name}"
+            for object_type, name in sorted(expected_objects - actual_objects)
+        ]
+        expected_columns = _historical_table_columns(canonical)
+        actual_columns = _historical_table_columns(actual)
+        for table_name, columns in sorted(expected_columns.items()):
+            missing = columns - actual_columns.get(table_name, frozenset())
+            failures.extend(
+                f"MISSING_COLUMN:{table_name}:{column}" for column in sorted(missing)
+            )
+        return failures
+    finally:
+        actual.close()
+        canonical.close()
+
+
+def _historical_schema_object_inventory(
+    connection: sqlite3.Connection,
+) -> set[tuple[str, str]]:
+    excluded = {
+        "gateway_order_broker_boundary_fence_events",
+        "idx_gateway_order_boundary_fence_events_created",
+        "uq_gateway_order_boundary_fence_events_request_id",
+        "uq_gateway_order_boundary_fence_events_command_sequence",
+        "trg_gateway_order_boundary_fence_events_no_update",
+        "trg_gateway_order_boundary_fence_events_no_delete",
+    }
+    return {
+        (str(row[0]), str(row[1]))
+        for row in connection.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE type IN ('table', 'index', 'trigger', 'view')"
+        )
+        if str(row[1]) not in excluded and not str(row[1]).startswith("sqlite_autoindex_")
+    }
+
+
+def _historical_table_columns(
+    connection: sqlite3.Connection,
+) -> dict[str, frozenset[str]]:
+    excluded_table = "gateway_order_broker_boundary_fence_events"
+    tables = {
+        str(row[0])
+        for row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        )
+        if str(row[0]) != excluded_table
+    }
+    return {
+        table_name: frozenset(
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info({_quote_identifier(table_name)})")
+        )
+        for table_name in tables
+    }
 
 
 def evaluate_report(report: Mapping[str, Any]) -> dict[str, Any]:

@@ -102,7 +102,7 @@ _REQUIRED_COLUMNS = {
     "no_order_side_effects",
     "auto_run_evaluation",
 }
-_EXPECTED_SCHEMA_VERSION = 62
+_MIN_SCHEMA_VERSION = 62
 _EXPECTED_SCHEMA_SQL_SHA256 = {
     ("table", DISPOSITION_TABLE): (
         "ca63469c6854d5d505072106a36e0c2c3e8b53c8bb7023076eb80a32bd2da0d0"
@@ -558,7 +558,7 @@ def audit_pipeline_orphan_disposition_rows(
 def is_pipeline_coherency_disposition_schema_ready(
     connection: sqlite3.Connection,
 ) -> bool:
-    """Return whether the exact schema-62 append-only ledger contract is present."""
+    """Return whether the schema-62+ append-only ledger contract is present."""
     return _schema_ready(connection)
 
 
@@ -1822,7 +1822,7 @@ def _schema_ready(connection: sqlite3.Connection) -> bool:
         metadata = connection.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
         ).fetchone()
-        if metadata is None or int(metadata["value"]) != _EXPECTED_SCHEMA_VERSION:
+        if metadata is None or int(metadata["value"]) < _MIN_SCHEMA_VERSION:
             return False
         table_row = connection.execute(
             "SELECT type, tbl_name, sql FROM sqlite_master WHERE name = ?",
@@ -1927,7 +1927,7 @@ def _assert_schema_ready(connection: sqlite3.Connection) -> None:
     if not _schema_ready(connection):
         raise PipelineCoherencyDispositionError(
             "PIPELINE_DISPOSITION_SCHEMA_NOT_READY",
-            "schema 62 pipeline disposition contract is not ready",
+            "schema 62+ pipeline disposition contract is not ready",
         )
 
 

@@ -464,8 +464,8 @@ def _apply_under_lock(
         schema_row = connection.execute(
             "SELECT value FROM app_metadata WHERE key='schema_version'"
         ).fetchall()
-        if len(schema_row) != 1 or str(schema_row[0][0]) != "62":
-            raise IncrementalDeadLetterCampaignApplyError("CAMPAIGN_SCHEMA_62_REQUIRED")
+        if len(schema_row) != 1 or str(schema_row[0][0]) != "63":
+            raise IncrementalDeadLetterCampaignApplyError("CAMPAIGN_SCHEMA_63_REQUIRED")
         runtime_lock_count = int(
             connection.execute("SELECT COUNT(*) FROM runtime_execution_locks").fetchone()[0]
         )
@@ -784,7 +784,7 @@ def _postverify_and_report(
             "raw_identifier_mapping_recorded": False,
         },
         "database": {
-            "schema_version": "62",
+            "schema_version": "63",
             "files_before": files_before,
             "files_after": files_after,
             "sidecars_absent_after": not post_failures,
@@ -893,7 +893,7 @@ def _outcome_unknown_report(
             "action": CAMPAIGN_ACTION,
             "approval_binding_sha256": binding["approval_binding_sha256"],
         },
-        "database": {"schema_version": "62", "files_before": files_before},
+        "database": {"schema_version": "63", "files_before": files_before},
         "result": {
             "action": CAMPAIGN_ACTION,
             "status": "OUTCOME_UNKNOWN",

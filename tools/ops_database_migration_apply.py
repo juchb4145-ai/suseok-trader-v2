@@ -146,7 +146,7 @@ def run_apply(
 
     if acknowledge != APPLY_ACKNOWLEDGEMENT:
         raise MigrationApplyError("EXACT_ACKNOWLEDGEMENT_REQUIRED")
-    if str(SCHEMA_VERSION) != TARGET_SCHEMA:
+    if int(SCHEMA_VERSION) < int(TARGET_SCHEMA):
         raise MigrationApplyError("CURRENT_CODE_TARGET_SCHEMA_MISMATCH")
     _validate_paths(source=source, preflight_raw=preflight_path, backup=backup)
 

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
+import pytest
 from apps.core_api import app
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -8,7 +11,10 @@ from services.entry_timing.service import evaluate_entry_timing
 from services.live_sim.order_plan_eligibility import (
     evaluate_live_sim_order_plan_eligibility,
 )
-from services.pipeline_coherency import build_pipeline_coherency_status
+from services.pipeline_coherency import (
+    build_fast5_plan_ready_coherency_status,
+    build_pipeline_coherency_status,
+)
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
 from storage.sqlite import (
@@ -92,7 +98,7 @@ def test_schema_59_pipeline_lineage_migration_is_additive_and_reentrant(tmp_path
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "62"
+    assert schema_version == str(SCHEMA_VERSION) == "63"
     for table_name, columns in table_columns.items():
         assert columns <= migrated_columns[table_name]
     assert {
@@ -151,6 +157,220 @@ def test_candidate_to_order_plan_persists_one_coherent_source_run(tmp_path) -> N
     assert rows["entry"]["risk_observation_id"] == risk.risk_observation_id
     assert rows["plan"]["entry_timing_evaluation_id"] == rows["entry"]["entry_timing_evaluation_id"]
     assert command_count == 0
+
+
+def test_fast5_plan_ready_qualification_ignores_stale_non_ready_diagnostic(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-plan-ready-scope.sqlite3")
+    trade_date = "2026-06-27"
+    _insert_coherent_plan_fixture(
+        connection,
+        candidate_id="candidate-fast5-ready",
+        code="005930",
+    )
+    non_ready_id = _insert_coherent_plan_fixture(
+        connection,
+        candidate_id="candidate-fast5-non-ready",
+        code="000660",
+    )
+    stale_at = datetime_to_wire(utc_now() - timedelta(minutes=10))
+    connection.execute(
+        """
+        UPDATE strategy_observations_latest
+        SET source_observed_at = ?
+        WHERE candidate_instance_id = ?
+        """,
+        (stale_at, non_ready_id),
+    )
+    connection.execute(
+        """
+        UPDATE order_plan_drafts_latest
+        SET status = 'WAIT_RETRY'
+        WHERE candidate_instance_id = ?
+        """,
+        (non_ready_id,),
+    )
+    connection.commit()
+
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date=trade_date,
+        max_age_sec=60,
+        limit=500,
+    )
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date=trade_date,
+        max_age_sec=60,
+    )
+    command_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM gateway_commands"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert diagnostic["status"] == "WARN"
+    assert diagnostic["stale_count"] == 1
+    assert qualification["status"] == "PASS"
+    assert qualification["unexpired_plan_ready_count"] == 1
+    assert qualification["coherent_plan_ready_count"] == 1
+    assert qualification["non_pass_plan_ready_count"] == 0
+    assert command_count == 0
+
+
+def test_fast5_plan_ready_qualification_blocks_zero_plan_ready(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "fast5-zero-plan-ready.sqlite3")
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-07-23",
+        max_age_sec=60,
+        limit=500,
+    )
+
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-07-23",
+        max_age_sec=60,
+    )
+    connection.close()
+
+    assert qualification["status"] == "FAIL"
+    assert qualification["unexpired_plan_ready_count"] == 0
+    assert "NO_UNEXPIRED_PLAN_READY" in qualification["reason_codes"]
+
+
+@pytest.mark.parametrize(
+    "failure", ["stale", "invalid_time", "future_time", "missing", "mismatch"]
+)
+def test_fast5_plan_ready_qualification_blocks_non_pass_plan_ready(
+    tmp_path,
+    failure: str,
+) -> None:
+    connection = initialize_database(tmp_path / f"fast5-plan-ready-{failure}.sqlite3")
+    candidate_id = _insert_coherent_plan_fixture(
+        connection,
+        candidate_id=f"candidate-fast5-{failure}",
+        code="005930",
+    )
+    if failure in {"stale", "invalid_time", "future_time"}:
+        observed_at = {
+            "stale": datetime_to_wire(utc_now() - timedelta(minutes=10)),
+            "invalid_time": "not-a-timestamp",
+            "future_time": datetime_to_wire(utc_now() + timedelta(minutes=10)),
+        }[failure]
+        connection.execute(
+            """
+            UPDATE strategy_observations_latest
+            SET source_observed_at = ?
+            WHERE candidate_instance_id = ?
+            """,
+            (
+                observed_at,
+                candidate_id,
+            ),
+        )
+    elif failure == "missing":
+        connection.execute(
+            """
+            UPDATE order_plan_drafts_latest
+            SET entry_timing_evaluation_id = NULL
+            WHERE candidate_instance_id = ?
+            """,
+            (candidate_id,),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE order_plan_drafts_latest
+            SET source_run_id = 'mismatched-source-run'
+            WHERE candidate_instance_id = ?
+            """,
+            (candidate_id,),
+        )
+    connection.commit()
+
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+        limit=500,
+    )
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+    )
+    connection.close()
+
+    assert qualification["status"] == "FAIL"
+    assert qualification["unexpired_plan_ready_count"] == 1
+    assert qualification["non_pass_plan_ready_count"] == 1
+    count_key = {
+        "stale": "stale_plan_ready_count",
+        "invalid_time": "stale_plan_ready_count",
+        "future_time": "stale_plan_ready_count",
+        "missing": "missing_lineage_plan_ready_count",
+        "mismatch": "mismatch_plan_ready_count",
+    }[failure]
+    assert qualification[count_key] == 1
+
+
+def _insert_coherent_plan_fixture(
+    connection,
+    *,
+    candidate_id: str,
+    code: str,
+) -> str:
+    settings = _settings()
+    _insert_strategy_fixture(
+        connection,
+        candidate_id=candidate_id,
+        code=code,
+        name=code,
+    )
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET cumulative_trade_value = 600000000,
+            execution_strength = 130.0
+        WHERE code = ?
+        """,
+        (code,),
+    )
+    connection.execute(
+        """
+        UPDATE theme_snapshot_members
+        SET cumulative_trade_value = 600000000,
+            execution_strength = 130.0
+        WHERE code = ?
+        """,
+        (code,),
+    )
+    connection.commit()
+    source_run_id = f"pipeline-run-{candidate_id}"
+    strategy = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(
+        connection,
+        strategy,
+        source_run_id=source_run_id,
+    )
+    risk = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    save_risk_observation(
+        connection,
+        risk,
+        source_run_id=source_run_id,
+    )
+    result = evaluate_entry_timing(
+        connection,
+        candidate_instance_id=candidate_id,
+        settings=settings,
+        source_run_id=source_run_id,
+    )
+    assert result.plan_ready_count == 1
+    return candidate_id
 
 
 def test_watermark_mismatch_blocks_plan_ready_and_dashboard_reports_fail(tmp_path) -> None:

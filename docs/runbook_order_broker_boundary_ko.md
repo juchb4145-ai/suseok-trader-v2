@@ -22,7 +22,7 @@
 - 감사 가능한 `BROKER_NOT_REACHED` resolution이 유효할 때 raw `UNCONFIRMED`는 보존되고 effective 상태만 `RESOLVED_BROKER_NOT_REACHED`가 된다.
 - resolution 이후 pre-ack, ack, Chejan, execution 또는 broker order evidence가 발견되면 resolution row는 보존한다. `resolution_status`는 `OVERRIDDEN_BY_BROKER_EVIDENCE` 또는 raw 전이가 먼저 일어난 경우 `OVERRIDDEN_BY_RAW_STATE`가 되며, effective 상태는 현재 raw 상태를 따르고 qualification은 다시 차단된다.
 - `qualification_block_new_order_routing`은 FAST-0 판정용 gate다. `effective_block_new_order_routing`은 실제 주문 routing gate이며 active resolution의 `routing_fence_active`도 포함한다.
-- FAST-0R1 resolution이 qualification을 해소해도 maintenance fence 때문에 실제 주문 routing은 계속 차단된다. 이 작업에는 fence 해제 기능이 없으며, 별도 승인·구현 없이 resolution만으로 주문을 재개할 수 없다.
+- FAST-0R1 resolution 자체는 maintenance fence를 해제하지 않으므로 실제 주문 routing은 계속 차단된다. schema 63의 별도 append-only fence-event 절차와 건별 당일 승인이 없으면 resolution만으로 주문을 재개할 수 없다.
 - 구조 오류, resolution schema/index 오류, 유효성을 판정할 수 없는 상태는 항상 fail closed한다.
 
 기존 consumer가 raw 필드를 읽는 동작은 변경하지 않는다. 신규 주문 safety gate는 명시적으로 effective gate를 소비하며, FAST-0은 `effective_unconfirmed_count=0`만으로 단독 통과시키지 않고 구조 FAIL과 다른 qualification gate도 함께 확인한다.
@@ -208,6 +208,101 @@ Apply 직후 같은 명령을 `--apply` 없이 다시 실행하고 다음을 확
 `--apply`에 `--revoke-resolution-id`가 없으면 `BROKER_NOT_REACHED` resolution, 있으면 해당 active resolution의 revoke다. 한 요청은 두 action을 동시에 수행하지 않는다. Revoke는 고정 `reason_code=OPERATOR_REVOKED_BROKER_NOT_REACHED`, `evidence_type=SIMULATION_HTS_ORDER_HISTORY_CORRECTION`을 사용하며 같은 safe env, evidence SHA-256, CAS와 세 acknowledgement 계약을 그대로 적용한다. 성공 후 raw row는 계속 보존되고 effective 상태는 다시 `UNCONFIRMED`가 되어 차단된다. 동일 request/hash 재시도만 idempotent하다.
 
 기존 `tools.resolve_live_sim_order`는 local order/intent 종결용이며 broker-boundary resolution 도구가 아니다. 두 도구를 한 작업으로 묶거나 기존 lifecycle event를 새 HTS artifact 대신 사용하지 않는다.
+
+## FAST-5 maintenance fence release
+
+`BROKER_NOT_REACHED` resolution은 과거 raw `UNCONFIRMED`를 qualification에서 제외하더라도 기본적으로
+신규 주문 routing maintenance fence를 유지한다. FAST-5 bootstrap을 준비할 때 이 fence를 기존
+resolution 행의 UPDATE/DELETE 또는 revoke로 없애지 않는다. schema 63의
+`gateway_order_broker_boundary_fence_events`에 `RELEASE` 또는 `REINSTATE`를 append-only로 기록한다.
+
+schema 62 운영 DB는 일반 Core startup으로 올리지 않는다. 먼저 프로세스와 writer가 없는 상태에서
+WAL/SHM/journal sidecar가 없음을 확인하고, 별도 clone에 exact migration preflight를 수행한다.
+
+```powershell
+& $python -B -m tools.ops_database_migration_62_to_63_preflight `
+  --source-db $db `
+  --clone-db $clone `
+  --out-dir "$evidence\database_migration_62_to_63_preflight"
+```
+
+운영 DB의 schema 62→63 apply는 위 PASS raw report와 별도 운영 승인을 받은 뒤에만 수행한다.
+migration은 fence-event table/index/append-only trigger만 추가하고 기존 table 내용과 주문 상태를
+보존해야 한다. 이 단계와 개별 fence release 승인은 서로 대체하지 않는다.
+
+Apply 도구가 실패를 출력하더라도 `committed=true`이면 schema 63 변경은 이미 반영된 상태다.
+같은 migration을 재실행하지 말고 운영 DB를 strict read-only로 재확인한 뒤 evidence 생성 실패를
+별도 복구한다. `committed=false`인 사전 검증 실패만 미적용으로 취급한다.
+
+Apply 승인은 preflight raw 파일 자체의 lowercase SHA-256에도 결속한다. 승인된 digest를
+`--preflight-raw-sha256`으로 전달하지 않거나 파일 digest가 달라지면 운영 DB를 열기 전에 거부한다.
+
+```powershell
+& $python -B -m tools.ops_database_migration_62_to_63_apply `
+  --source-db $db `
+  --preflight-raw $preflightRaw `
+  --preflight-raw-sha256 $approvedPreflightRawSha256 `
+  --backup-db $backup `
+  --acknowledge APPLY_EXACT_SCHEMA_62_TO_63_FENCE_EVENT_LEDGER `
+  --out-dir "$evidence\database_migration_62_to_63_apply"
+```
+
+schema 63 적용 후 각 U alias를 한 건씩 strict read-only preflight한다. preflight는 명령 ID,
+active resolution ID/request hash, source boundary fingerprint, 직전 fence event, 거래일, 운영 DB
+instance identity digest, exact app/schema, 전체 Gateway command count/order count/full-state fingerprint와
+증거 SHA를 하나의 공개 approval payload에 결속한다. 다른 경로의 clone DB에는 같은 승인을 재사용할
+수 없다.
+
+```powershell
+& $python -B -m tools.release_order_broker_boundary_fence `
+  --db $db `
+  --action release `
+  --command-id $commandId `
+  --command-alias U01 `
+  --approval-id fence-release-jul23-u01 `
+  --request-id fence-release-request-u01 `
+  --operator-id operator.bootstrap `
+  --trade-date $tradeDate `
+  --out "$evidence\U01_fence_release_preflight.json"
+```
+
+출력의 `status=APPROVAL_READY`, report SHA-256, approval `expected_sha256`을 확인한다. preflight만으로
+apply가 승인되지 않는다. 각 alias마다 해당 approval SHA를 인용한 별도 승인이 필요하며, 세 건을
+한 번에 승인하거나 자동 연속 처리하지 않는다.
+
+승인된 한 건의 apply는 repository 기본 `.env`가 아닌 별도 OBSERVE-safe env를 사용하고 기존
+resolution apply와 같은 producer-off/kill-switch 계약을 만족해야 한다.
+
+```powershell
+$env:TRADING_ENV_FILE = $safeEnv
+
+& $python -B -m tools.release_order_broker_boundary_fence `
+  --db $db `
+  --apply `
+  --preflight-report "$evidence\U01_fence_release_preflight.json" `
+  --preflight-report-sha256 $preflightReportSha256 `
+  --approval-sha256 $approvedSha256 `
+  --acknowledge-append-only-fence-change `
+  --acknowledge-raw-history-preserved `
+  --acknowledge-late-evidence-fail-closed
+```
+
+Apply는 preflight 파일과 approval canonical JSON을 다시 hash하고, 저장소 계층의
+`BEGIN IMMEDIATE` 안에서 당일·DB identity·app/schema·Gateway command snapshot·boundary CAS를 모두
+재검증한 뒤 append-only event 한 건만 기록한다. 승인 뒤 어떤 명령 상태라도 바뀌었으면 새
+preflight와 새 승인이 필요하다. raw boundary와 기존 resolution은 그대로 남는다. 늦은 broker
+evidence, resolution/fingerprint drift, ledger 손상, DB identity 변경 또는 거래일 변경은 release를
+자동으로 무효화해 maintenance fence를 복원한다. 활성 주문 명령과 runtime lock은 release ledger를
+수정하지 않고 FAST-5 동적 gate에서 별도로 차단한다.
+
+Fence 도구의 성공 상태는 신규 apply의 `APPLIED` 또는 현재도 유효한 exact replay의
+`REPLAYED_EFFECTIVE`뿐이다. `APPLIED_WITH_VERIFICATION_FAILURE`와
+`APPLIED_NOT_EFFECTIVE`는 event가 이미 commit된 실패이므로 같은 request를 새 승인처럼 재적용하지
+않는다. ledger와 effective fence를 strict read-only로 확인한 뒤 새 preflight 여부를 결정한다.
+
+잘못 해제했거나 bootstrap을 중단해야 하면 기존 `RELEASE`를 수정하지 않고 `--action reinstate`로
+새 preflight와 별도 SHA 승인을 만든 뒤 `REINSTATE`를 append한다. 실제 broker snapshot 조회,
+FAST-5 `PENDING` 전환, reservation과 주문 queue는 fence release 승인에 포함되지 않는다.
 
 ## 장애 처리
 

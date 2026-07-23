@@ -25,7 +25,7 @@ from tools import ops_fast0_strict_requalification as fast0_tool  # noqa: E402
 
 _CONTRACT = "fast0-pipeline-blocker-reconciliation.v1"
 _EXPECTED_PLAN_CONTRACT = "fast0-blocker-resolution-plan.v1"
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _TARGET_ACTIONS = (
     ACTION_DISPOSE_EXPIRED_PLAN_READY,
     ACTION_DISPOSE_ORPHAN,

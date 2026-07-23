@@ -537,6 +537,9 @@ def _make_schema_61(path: Path) -> None:
     connection = initialize_database(path)
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
     connection.execute(
+        "DROP TABLE gateway_order_broker_boundary_fence_events"
+    )
+    connection.execute(
         """
         CREATE TABLE schema61_migration_sentinel (
             sentinel_id TEXT PRIMARY KEY,

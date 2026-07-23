@@ -61,7 +61,7 @@ def test_schema_53_additively_migrates_market_scan_projection_contract(tmp_path)
     migrated.close()
     initialize_database(db_path).close()
 
-    assert schema_version == "62"
+    assert schema_version == "63"
     lineage = {"source_event_id", "request_id", "parser_status", "generated_by"}
     assert lineage <= snapshot_columns
     assert lineage <= latest_columns
@@ -179,7 +179,7 @@ def test_schema_54_adds_market_scan_cutover_budget_and_controller_columns(
     migrated.close()
     initialize_database(db_path).close()
 
-    assert schema_version == "62"
+    assert schema_version == "63"
     assert set(columns) <= migrated_columns
     assert "idx_market_scan_routing_effective_skip" in indexes
     assert budget_exists == 1

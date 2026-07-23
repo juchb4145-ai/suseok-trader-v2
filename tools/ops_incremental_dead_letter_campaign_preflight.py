@@ -45,7 +45,7 @@ from tools import ops_fast0_strict_requalification as fast0_tool  # noqa: E402
 PREFLIGHT_CONTRACT = "fast0-incremental-dead-letter-campaign-preflight.v1"
 APPLY_REPORT_CONTRACT = "fast0-incremental-dead-letter-campaign-apply.v1"
 _EXPECTED_PLAN_CONTRACT = "fast0-blocker-resolution-plan.v1"
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _EXPECTED_TARGET_SET_SHA256 = "845b5b9bf82f1a2cebdda9ddf262627f3eda1e91fa53d1b027983284be43f31d"
 _FORBIDDEN_PUBLIC_KEYS = frozenset(
     {

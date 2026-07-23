@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sqlite3
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from domain.broker.utils import (
     datetime_to_wire,
+    market_today,
     new_message_id,
     parse_timestamp,
     utc_now,
@@ -22,20 +25,33 @@ RESOLVED_BROKER_NOT_REACHED = "RESOLVED_BROKER_NOT_REACHED"
 BROKER_NOT_REACHED = "BROKER_NOT_REACHED"
 RESOLUTION_ACTION_RESOLVE = "RESOLVE_BROKER_NOT_REACHED"
 RESOLUTION_ACTION_REVOKE = "REVOKE"
+FENCE_EVENT_TABLE = "gateway_order_broker_boundary_fence_events"
+FENCE_ACTION_RELEASE = "RELEASE"
+FENCE_ACTION_REINSTATE = "REINSTATE"
+FENCE_APPROVAL_CONTRACT = "gateway-order-boundary-fence-approval.v2"
+FENCE_EXPECTED_APP_NAME = "suseok-trader-v2"
+FENCE_EXPECTED_SCHEMA_VERSION = 63
+FENCE_RELEASE_REASON_CODE = "APPROVED_MAINTENANCE_FENCE_RELEASE"
+FENCE_REINSTATE_REASON_CODE = "OPERATOR_REINSTATED_MAINTENANCE_FENCE"
 _RESOLUTION_MIGRATION_SAVEPOINT = "gateway_order_boundary_resolution_migration"
 _RESOLUTION_UPDATE_TRIGGER = "trg_gateway_order_boundary_resolutions_no_update"
 _RESOLUTION_DELETE_TRIGGER = "trg_gateway_order_boundary_resolutions_no_delete"
 _RESOLUTION_CREATED_INDEX = "idx_gateway_order_boundary_resolutions_created"
 _RESOLUTION_REQUEST_INDEX = "uq_gateway_order_boundary_resolutions_request_id"
-_RESOLUTION_COMMAND_SEQUENCE_INDEX = (
-    "uq_gateway_order_boundary_resolutions_command_sequence"
-)
+_RESOLUTION_COMMAND_SEQUENCE_INDEX = "uq_gateway_order_boundary_resolutions_command_sequence"
+_FENCE_EVENT_MIGRATION_SAVEPOINT = "gateway_order_boundary_fence_event_migration"
+_FENCE_EVENT_UPDATE_TRIGGER = "trg_gateway_order_boundary_fence_events_no_update"
+_FENCE_EVENT_DELETE_TRIGGER = "trg_gateway_order_boundary_fence_events_no_delete"
+_FENCE_EVENT_CREATED_INDEX = "idx_gateway_order_boundary_fence_events_created"
+_FENCE_EVENT_REQUEST_INDEX = "uq_gateway_order_boundary_fence_events_request_id"
+_FENCE_EVENT_COMMAND_SEQUENCE_INDEX = "uq_gateway_order_boundary_fence_events_command_sequence"
+_FENCE_DATABASE_IDENTITY_CONTRACT = "sqlite-database-instance.v1"
+_FENCE_ORDER_COMMAND_TYPES = frozenset({"send_order", "cancel_order", "modify_order"})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_TRADE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _SAFE_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:@-]{2,127}$")
 _LONG_DIGIT_RUN_RE = re.compile(r"[0-9]{8,}")
-_SEPARATED_DIGIT_RUN_RE = re.compile(
-    r"(?:[0-9][_.:@-]*){8,}"
-)
+_SEPARATED_DIGIT_RUN_RE = re.compile(r"(?:[0-9][_.:@-]*){8,}")
 _RESOLUTION_GATEWAY_QUIESCENCE_SEC = 120.0
 _RESOLUTION_MIN_SOURCE_SCHEMA_VERSION = 60
 _RESOLUTION_REQUIRED_COLUMNS = frozenset(
@@ -61,6 +77,69 @@ _RESOLUTION_REQUIRED_COLUMNS = frozenset(
         "live_real_allowed",
         "routing_fence_active",
     }
+)
+_FENCE_EVENT_REQUIRED_COLUMNS = (
+    "fence_event_id",
+    "request_id",
+    "request_hash",
+    "command_id",
+    "command_alias",
+    "sequence_no",
+    "action",
+    "supersedes_fence_event_id",
+    "resolution_id",
+    "resolution_request_hash",
+    "source_boundary_fingerprint",
+    "approval_id",
+    "approval_trade_date",
+    "approval_sha256",
+    "evidence_sha256",
+    "database_identity_sha256",
+    "expected_app_name",
+    "expected_schema_version",
+    "expected_gateway_command_total_count",
+    "expected_order_command_count",
+    "expected_gateway_command_state_fingerprint",
+    "reason_code",
+    "operator_id",
+    "created_at",
+    "live_sim_only",
+    "live_real_allowed",
+)
+_FENCE_EVENT_REQUIRED_COLUMN_CONTRACTS = (
+    ("fence_event_id", "TEXT", False, None, 1, 0),
+    ("request_id", "TEXT", True, None, 0, 0),
+    ("request_hash", "TEXT", True, None, 0, 0),
+    ("command_id", "TEXT", True, None, 0, 0),
+    ("command_alias", "TEXT", True, None, 0, 0),
+    ("sequence_no", "INTEGER", True, None, 0, 0),
+    ("action", "TEXT", True, None, 0, 0),
+    ("supersedes_fence_event_id", "TEXT", False, None, 0, 0),
+    ("resolution_id", "TEXT", True, None, 0, 0),
+    ("resolution_request_hash", "TEXT", True, None, 0, 0),
+    ("source_boundary_fingerprint", "TEXT", True, None, 0, 0),
+    ("approval_id", "TEXT", True, None, 0, 0),
+    ("approval_trade_date", "TEXT", True, None, 0, 0),
+    ("approval_sha256", "TEXT", True, None, 0, 0),
+    ("evidence_sha256", "TEXT", True, None, 0, 0),
+    ("database_identity_sha256", "TEXT", True, None, 0, 0),
+    ("expected_app_name", "TEXT", True, None, 0, 0),
+    ("expected_schema_version", "INTEGER", True, None, 0, 0),
+    ("expected_gateway_command_total_count", "INTEGER", True, None, 0, 0),
+    ("expected_order_command_count", "INTEGER", True, None, 0, 0),
+    (
+        "expected_gateway_command_state_fingerprint",
+        "TEXT",
+        True,
+        None,
+        0,
+        0,
+    ),
+    ("reason_code", "TEXT", True, None, 0, 0),
+    ("operator_id", "TEXT", True, None, 0, 0),
+    ("created_at", "TEXT", True, None, 0, 0),
+    ("live_sim_only", "INTEGER", True, "1", 0, 0),
+    ("live_real_allowed", "INTEGER", True, "0", 0, 0),
 )
 _RESOLUTION_SOURCE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
     "app_metadata": frozenset({"key", "value"}),
@@ -321,9 +400,7 @@ def _ensure_order_broker_boundary_resolution_schema(
         )
         existing_columns = {
             str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-            for row in connection.execute(
-                f"PRAGMA table_info({RESOLUTION_TABLE})"
-            ).fetchall()
+            for row in connection.execute(f"PRAGMA table_info({RESOLUTION_TABLE})").fetchall()
         }
         missing_columns = _RESOLUTION_REQUIRED_COLUMNS - existing_columns
         if missing_columns:
@@ -375,15 +452,432 @@ def _ensure_order_broker_boundary_resolution_schema(
         )
         schema_status = _resolution_schema_status(connection)
         if not schema_status["ready"]:
-            raise RuntimeError(
-                "gateway order-boundary resolution schema contract is invalid"
-            )
+            raise RuntimeError("gateway order-boundary resolution schema contract is invalid")
     except Exception:
         connection.execute(f"ROLLBACK TO {_RESOLUTION_MIGRATION_SAVEPOINT}")
         connection.execute(f"RELEASE {_RESOLUTION_MIGRATION_SAVEPOINT}")
         raise
     else:
         connection.execute(f"RELEASE {_RESOLUTION_MIGRATION_SAVEPOINT}")
+
+
+def _ensure_order_broker_boundary_fence_event_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    connection.execute(f"SAVEPOINT {_FENCE_EVENT_MIGRATION_SAVEPOINT}")
+    try:
+        connection.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {FENCE_EVENT_TABLE} (
+                fence_event_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL UNIQUE,
+                request_hash TEXT NOT NULL CHECK (length(request_hash) = 64),
+                command_id TEXT NOT NULL,
+                command_alias TEXT NOT NULL,
+                sequence_no INTEGER NOT NULL CHECK (sequence_no > 0),
+                action TEXT NOT NULL CHECK (action IN ('RELEASE', 'REINSTATE')),
+                supersedes_fence_event_id TEXT,
+                resolution_id TEXT NOT NULL,
+                resolution_request_hash TEXT NOT NULL
+                    CHECK (length(resolution_request_hash) = 64),
+                source_boundary_fingerprint TEXT NOT NULL
+                    CHECK (length(source_boundary_fingerprint) = 64),
+                approval_id TEXT NOT NULL,
+                approval_trade_date TEXT NOT NULL
+                    CHECK (length(approval_trade_date) = 10),
+                approval_sha256 TEXT NOT NULL
+                    CHECK (length(approval_sha256) = 64),
+                evidence_sha256 TEXT NOT NULL
+                    CHECK (length(evidence_sha256) = 64),
+                database_identity_sha256 TEXT NOT NULL
+                    CHECK (length(database_identity_sha256) = 64),
+                expected_app_name TEXT NOT NULL
+                    CHECK (expected_app_name = 'suseok-trader-v2'),
+                expected_schema_version INTEGER NOT NULL
+                    CHECK (expected_schema_version = 63),
+                expected_gateway_command_total_count INTEGER NOT NULL
+                    CHECK (expected_gateway_command_total_count >= 0),
+                expected_order_command_count INTEGER NOT NULL
+                    CHECK (
+                        expected_order_command_count >= 0
+                        AND expected_order_command_count
+                            <= expected_gateway_command_total_count
+                    ),
+                expected_gateway_command_state_fingerprint TEXT NOT NULL
+                    CHECK (
+                        length(expected_gateway_command_state_fingerprint) = 64
+                    ),
+                reason_code TEXT NOT NULL,
+                operator_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                live_sim_only INTEGER NOT NULL DEFAULT 1
+                    CHECK (live_sim_only = 1),
+                live_real_allowed INTEGER NOT NULL DEFAULT 0
+                    CHECK (live_real_allowed = 0),
+                FOREIGN KEY (command_id)
+                    REFERENCES gateway_order_broker_boundaries (command_id),
+                FOREIGN KEY (resolution_id)
+                    REFERENCES gateway_order_broker_boundary_resolutions (
+                        resolution_id
+                    ),
+                FOREIGN KEY (supersedes_fence_event_id)
+                    REFERENCES gateway_order_broker_boundary_fence_events (
+                        fence_event_id
+                    )
+            )
+            """
+        )
+        existing_column_rows = connection.execute(
+            f"PRAGMA table_xinfo({FENCE_EVENT_TABLE})"
+        ).fetchall()
+        existing_columns = tuple(
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+            for row in existing_column_rows
+        )
+        existing_hidden = tuple(
+            int(row["hidden"] if isinstance(row, sqlite3.Row) else row[6])
+            for row in existing_column_rows
+        )
+        if (
+            existing_columns != _FENCE_EVENT_REQUIRED_COLUMNS
+            or any(existing_hidden)
+        ):
+            raise RuntimeError("gateway order-boundary fence-event schema columns are not exact")
+        connection.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS {_FENCE_EVENT_CREATED_INDEX}
+            ON {FENCE_EVENT_TABLE} (created_at DESC, fence_event_id DESC)
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS {_FENCE_EVENT_REQUEST_INDEX}
+            ON {FENCE_EVENT_TABLE} (request_id)
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE UNIQUE INDEX IF NOT EXISTS {_FENCE_EVENT_COMMAND_SEQUENCE_INDEX}
+            ON {FENCE_EVENT_TABLE} (command_id, sequence_no)
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_FENCE_EVENT_UPDATE_TRIGGER}
+            BEFORE UPDATE ON {FENCE_EVENT_TABLE}
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'gateway order-boundary fence events are append-only'
+                );
+            END
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TRIGGER IF NOT EXISTS {_FENCE_EVENT_DELETE_TRIGGER}
+            BEFORE DELETE ON {FENCE_EVENT_TABLE}
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'gateway order-boundary fence events are append-only'
+                );
+            END
+            """
+        )
+        if not _fence_event_schema_status(connection)["ready"]:
+            raise RuntimeError("gateway order-boundary fence-event schema contract is invalid")
+    except Exception:
+        connection.execute(f"ROLLBACK TO {_FENCE_EVENT_MIGRATION_SAVEPOINT}")
+        connection.execute(f"RELEASE {_FENCE_EVENT_MIGRATION_SAVEPOINT}")
+        raise
+    else:
+        connection.execute(f"RELEASE {_FENCE_EVENT_MIGRATION_SAVEPOINT}")
+
+
+def ensure_gateway_order_broker_boundary_fence_event_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    """Idempotently install the append-only maintenance-fence event ledger."""
+    _ensure_order_broker_boundary_fence_event_schema(connection)
+
+
+def get_order_broker_boundary_fence_approval_binding(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    """Return the exact database and command state used by a fence approval."""
+    metadata_rows = connection.execute(
+        """
+        SELECT key, value
+        FROM app_metadata
+        WHERE key IN ('app_name', 'schema_version')
+        ORDER BY key
+        """
+    ).fetchall()
+    metadata: dict[str, list[str]] = defaultdict(list)
+    for row in metadata_rows:
+        key = str(row["key"] if isinstance(row, sqlite3.Row) else row[0])
+        value = str(row["value"] if isinstance(row, sqlite3.Row) else row[1])
+        metadata[key].append(value)
+    app_names = metadata.get("app_name", [])
+    schema_versions = metadata.get("schema_version", [])
+    app_name = app_names[0] if len(app_names) == 1 else None
+    schema_version: int | None = None
+    if len(schema_versions) == 1:
+        try:
+            schema_version = int(schema_versions[0])
+        except ValueError:
+            schema_version = None
+    command_snapshot = _gateway_command_approval_snapshot(connection)
+    return {
+        "database_identity_sha256": _database_identity_sha256(connection),
+        "app_name": app_name,
+        "schema_version": schema_version,
+        "gateway_commands": command_snapshot,
+    }
+
+
+def build_order_broker_boundary_fence_approval(
+    *,
+    action: str,
+    approval_id: str,
+    request_id: str,
+    operator_id: str,
+    reason_code: str,
+    approval_trade_date: str,
+    command_alias: str,
+    command_id: str,
+    expected_previous_fence_event_id: str | None,
+    expected_resolution_id: str,
+    expected_resolution_request_hash: str,
+    expected_source_boundary_fingerprint: str,
+    evidence_sha256: str,
+    database_identity_sha256: str,
+    expected_app_name: str,
+    expected_schema_version: int,
+    expected_gateway_command_total_count: int,
+    expected_order_command_count: int,
+    expected_gateway_command_state_fingerprint: str,
+) -> dict[str, Any]:
+    """Build the sole canonical approval contract accepted by storage apply."""
+    normalized_action = str(action).strip().upper()
+    if normalized_action not in {
+        FENCE_ACTION_RELEASE,
+        FENCE_ACTION_REINSTATE,
+    }:
+        raise OrderBrokerBoundaryResolutionError("INVALID_ACTION", "unsupported fence-event action")
+    normalized_reason = _require_safe_identifier("reason_code", reason_code)
+    expected_reason = (
+        FENCE_RELEASE_REASON_CODE
+        if normalized_action == FENCE_ACTION_RELEASE
+        else FENCE_REINSTATE_REASON_CODE
+    )
+    if normalized_reason != expected_reason:
+        raise OrderBrokerBoundaryResolutionError(
+            "INVALID_REASON_CODE", "reason_code does not match fence action"
+        )
+    normalized_trade_date = str(approval_trade_date).strip()
+    if not _TRADE_DATE_RE.fullmatch(normalized_trade_date):
+        raise OrderBrokerBoundaryResolutionError(
+            "INVALID_APPROVAL_TRADE_DATE",
+            "approval_trade_date must use YYYY-MM-DD",
+        )
+    normalized_previous = (
+        None
+        if expected_previous_fence_event_id is None
+        else _require_safe_identifier(
+            "expected_previous_fence_event_id",
+            expected_previous_fence_event_id,
+        )
+    )
+    normalized = {
+        "approval_id": _require_safe_identifier("approval_id", approval_id),
+        "request_id": _require_safe_identifier("request_id", request_id),
+        "operator_id": _require_safe_identifier("operator_id", operator_id),
+        "command_alias": _require_safe_identifier("command_alias", command_alias),
+        "command_id": str(command_id).strip(),
+        "resolution_id": _require_safe_identifier("expected_resolution_id", expected_resolution_id),
+        "resolution_request_hash": _require_sha256(
+            "expected_resolution_request_hash",
+            expected_resolution_request_hash,
+        ),
+        "source_boundary_fingerprint": _require_sha256(
+            "expected_source_boundary_fingerprint",
+            expected_source_boundary_fingerprint,
+        ),
+        "evidence_sha256": _require_sha256("evidence_sha256", evidence_sha256),
+        "database_identity_sha256": _require_sha256(
+            "database_identity_sha256", database_identity_sha256
+        ),
+        "gateway_command_state_fingerprint": _require_sha256(
+            "expected_gateway_command_state_fingerprint",
+            expected_gateway_command_state_fingerprint,
+        ),
+    }
+    if not normalized["command_id"]:
+        raise OrderBrokerBoundaryResolutionError("INVALID_COMMAND_ID", "command_id is required")
+    for field in (
+        "approval_id",
+        "request_id",
+        "operator_id",
+        "command_alias",
+        "reason_code",
+    ):
+        value = normalized_reason if field == "reason_code" else normalized[field]
+        if _contains_account_like_digit_sequence(str(value)):
+            raise OrderBrokerBoundaryResolutionError(
+                f"INVALID_{field.upper()}",
+                f"{field} must not contain an account-like digit sequence",
+            )
+    if str(expected_app_name) != FENCE_EXPECTED_APP_NAME:
+        raise OrderBrokerBoundaryResolutionError(
+            "APP_METADATA_MISMATCH",
+            "fence approval requires the exact application identity",
+        )
+    try:
+        schema_version = int(expected_schema_version)
+        total_count = int(expected_gateway_command_total_count)
+        order_count = int(expected_order_command_count)
+    except (TypeError, ValueError) as exc:
+        raise OrderBrokerBoundaryResolutionError(
+            "APPROVAL_BINDING_INVALID", "approval binding counts are invalid"
+        ) from exc
+    if schema_version != FENCE_EXPECTED_SCHEMA_VERSION:
+        raise OrderBrokerBoundaryResolutionError(
+            "SCHEMA_VERSION_MISMATCH",
+            "fence approval requires the exact schema version",
+        )
+    if total_count < 0 or order_count < 0 or order_count > total_count:
+        raise OrderBrokerBoundaryResolutionError(
+            "GATEWAY_COMMAND_SNAPSHOT_INVALID",
+            "gateway command approval counts are invalid",
+        )
+    target = {
+        "resolution_id": normalized["resolution_id"],
+        "resolution_request_hash": normalized["resolution_request_hash"],
+        "source_boundary_fingerprint": normalized["source_boundary_fingerprint"],
+    }
+    if normalized_action == FENCE_ACTION_RELEASE:
+        target["expected_previous_fence_event_id"] = normalized_previous
+    else:
+        if normalized_previous is None:
+            raise OrderBrokerBoundaryResolutionError(
+                "INVALID_EXPECTED_RELEASE_EVENT_ID",
+                "reinstate requires the approved release event",
+            )
+        target["expected_release_event_id"] = normalized_previous
+    payload = {
+        "contract": FENCE_APPROVAL_CONTRACT,
+        "action": normalized_action,
+        "approval_id": normalized["approval_id"],
+        "request_id": normalized["request_id"],
+        "operator_id": normalized["operator_id"],
+        "reason_code": normalized_reason,
+        "trade_date": normalized_trade_date,
+        "command_alias": normalized["command_alias"],
+        "command_id": normalized["command_id"],
+        "target": target,
+        "evidence_sha256": normalized["evidence_sha256"],
+        "database_identity_sha256": normalized["database_identity_sha256"],
+        "expected_app_name": FENCE_EXPECTED_APP_NAME,
+        "expected_schema_version": FENCE_EXPECTED_SCHEMA_VERSION,
+        "gateway_commands": {
+            "total_count": total_count,
+            "order_count": order_count,
+            "state_fingerprint": normalized["gateway_command_state_fingerprint"],
+        },
+        "one_shot": True,
+        "append_only": True,
+        "raw_boundary_changed": False,
+        "no_order_commands_created": True,
+        "no_broker_calls": True,
+        "live_sim_only": True,
+        "live_real_allowed": False,
+    }
+    canonical_json = _canonical_json(payload)
+    return {
+        "payload": payload,
+        "canonical_json": canonical_json,
+        "sha256": hashlib.sha256(canonical_json.encode("utf-8")).hexdigest(),
+    }
+
+
+def _gateway_command_approval_snapshot(
+    connection: sqlite3.Connection,
+) -> dict[str, Any]:
+    cursor = connection.execute("SELECT * FROM gateway_commands ORDER BY command_id")
+    column_names = tuple(str(item[0]) for item in (cursor.description or ()))
+    rows = cursor.fetchall()
+    state_payload = [
+        {
+            column: (row[column] if isinstance(row, sqlite3.Row) else row[index])
+            for index, column in enumerate(column_names)
+        }
+        for row in rows
+    ]
+    order_count = sum(
+        1
+        for row in state_payload
+        if str(row.get("command_type") or "").lower() in _FENCE_ORDER_COMMAND_TYPES
+    )
+    return {
+        "total_count": len(state_payload),
+        "order_count": order_count,
+        "state_fingerprint": hashlib.sha256(
+            _canonical_json({"rows": state_payload}).encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _database_identity_sha256(connection: sqlite3.Connection) -> str:
+    rows = connection.execute("PRAGMA database_list").fetchall()
+    main_rows = [
+        row
+        for row in rows
+        if str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) == "main"
+    ]
+    if len(main_rows) != 1:
+        raise OrderBrokerBoundaryResolutionError(
+            "DATABASE_IDENTITY_UNAVAILABLE",
+            "main database identity is not uniquely available",
+        )
+    row = main_rows[0]
+    raw_path = str(row["file"] if isinstance(row, sqlite3.Row) else row[2])
+    if raw_path:
+        resolved = Path(raw_path).resolve(strict=True)
+        stat_result = os.stat(resolved)
+        payload = {
+            "contract": _FENCE_DATABASE_IDENTITY_CONTRACT,
+            "kind": "file",
+            "normalized_path_sha256": hashlib.sha256(
+                os.path.normcase(str(resolved)).encode("utf-8")
+            ).hexdigest(),
+            "device": int(stat_result.st_dev),
+            "inode": int(stat_result.st_ino),
+        }
+    else:
+        payload = {
+            "contract": _FENCE_DATABASE_IDENTITY_CONTRACT,
+            "kind": "memory",
+            "connection_identity": f"{id(connection):x}",
+        }
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _fence_event_insert_authorizer(
+    action_code: int,
+    parameter_one: str | None,
+    _parameter_two: str | None,
+    database_name: str | None,
+    _trigger_name: str | None,
+) -> int:
+    if action_code == sqlite3.SQLITE_INSERT:
+        if parameter_one == FENCE_EVENT_TABLE and database_name == "main":
+            return sqlite3.SQLITE_OK
+        return sqlite3.SQLITE_DENY
+    if action_code in {sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE}:
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
 
 
 def is_order_command_type(command_type: object) -> bool:
@@ -506,20 +1000,13 @@ def list_order_broker_boundaries(
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
     params: list[Any] = []
-    normalized_effective = (
-        None
-        if effective_state is None
-        else str(effective_state).strip().upper()
-    )
+    normalized_effective = None if effective_state is None else str(effective_state).strip().upper()
     valid_effective_states = {
         *(state_item.value for state_item in OrderBrokerBoundaryState),
         RESOLVED_BROKER_NOT_REACHED,
     }
     resolution_table_exists = _table_exists(connection, RESOLUTION_TABLE)
-    if (
-        normalized_effective is not None
-        and normalized_effective not in valid_effective_states
-    ):
+    if normalized_effective is not None and normalized_effective not in valid_effective_states:
         return []
     if state is not None:
         clauses.append("state = ?")
@@ -564,40 +1051,37 @@ def list_order_broker_boundaries(
             GROUP BY command_id
             """,
         ).fetchall()
-        resolution_counts = {
-            str(row["command_id"]): int(row["count"] or 0)
-            for row in count_rows
-        }
+        resolution_counts = {str(row["command_id"]): int(row["count"] or 0) for row in count_rows}
     items: list[dict[str, Any]] = []
     for row in rows:
         if resolution_counts.get(str(row["command_id"]), 0):
-            items.append(
-                _effective_boundary_from_row(connection, row, public=True)
-            )
+            items.append(_effective_boundary_from_row(connection, row, public=True))
         else:
             item = _public_boundary_row(row)
             item.update(
                 {
                     "raw_state": str(row["state"]),
                     "effective_state": str(row["state"]),
-                    "resolution_status": (
-                        "NONE" if resolution_table_exists else "LEDGER_INVALID"
-                    ),
+                    "resolution_status": ("NONE" if resolution_table_exists else "LEDGER_INVALID"),
                     "resolution_effective": False,
                     "late_broker_evidence": False,
                     "resolution_event_count": 0,
                     "resolution": None,
                     "resolution_chain_valid": resolution_table_exists,
+                    "maintenance_fence_active": True,
+                    "maintenance_fence_released": False,
+                    "fence_release_status": "NO_ACTIVE_RESOLUTION",
+                    "fence_event_count": 0,
+                    "fence_event": None,
+                    "fence_chain_valid": _fence_event_schema_status(connection)["ready"],
                 }
             )
             items.append(item)
     if normalized_effective is None:
         return items
-    return [
-        item
-        for item in items
-        if item["effective_state"] == normalized_effective
-    ][:normalized_limit]
+    return [item for item in items if item["effective_state"] == normalized_effective][
+        :normalized_limit
+    ]
 
 
 def preview_order_broker_boundary_resolution(
@@ -617,9 +1101,7 @@ def preview_order_broker_boundary_resolution(
             "BOUNDARY_NOT_FOUND",
             "order broker-boundary row was not found",
         )
-    source_schema_reason_codes = _resolution_source_schema_reason_codes(
-        connection
-    )
+    source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
     projection = _resolution_projection(connection, row)
     resolution_schema = _resolution_schema_status(connection)
     raw = _public_boundary_row(row)
@@ -653,12 +1135,8 @@ def preview_order_broker_boundary_resolution(
             and active_resolution is not None
         ),
         "reason_codes": reason_codes,
-        "broker_reach_reason_codes": projection[
-            "broker_reach_reason_codes"
-        ],
-        "broker_reach_evidence_count": projection[
-            "broker_reach_evidence_count"
-        ],
+        "broker_reach_reason_codes": projection["broker_reach_reason_codes"],
+        "broker_reach_evidence_count": projection["broker_reach_evidence_count"],
         "resolution_event_count": len(projection["resolution_rows"]),
         "resolution": _public_resolution_row(active_resolution),
         "chain_valid": projection["chain_valid"],
@@ -728,6 +1206,695 @@ def revoke_order_broker_boundary_resolution(
     )
 
 
+def preview_order_broker_boundary_fence_release(
+    connection: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, Any]:
+    row = connection.execute(
+        """
+        SELECT *
+        FROM gateway_order_broker_boundaries
+        WHERE command_id = ?
+        """,
+        (str(command_id),),
+    ).fetchone()
+    if row is None:
+        raise OrderBrokerBoundaryResolutionError(
+            "BOUNDARY_NOT_FOUND",
+            "order broker-boundary row was not found",
+        )
+    resolution_schema = _resolution_schema_status(connection)
+    fence_schema = _fence_event_schema_status(connection)
+    source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
+    resolution_projection = _resolution_projection(connection, row)
+    fence_projection = _fence_event_projection(
+        connection,
+        row,
+        resolution_projection=resolution_projection,
+    )
+    active_resolution = resolution_projection["active_resolution"]
+    reason_codes: list[str] = []
+    if not resolution_schema["ready"]:
+        reason_codes.append("RESOLUTION_SCHEMA_INVALID")
+    if not fence_schema["ready"]:
+        reason_codes.append("FENCE_EVENT_SCHEMA_INVALID")
+    reason_codes.extend(source_schema_reason_codes)
+    if not resolution_projection["chain_valid"]:
+        reason_codes.append("RESOLUTION_LEDGER_INVALID")
+    if not fence_projection["chain_valid"]:
+        reason_codes.append("FENCE_EVENT_LEDGER_INVALID")
+    if active_resolution is None:
+        reason_codes.append("ACTIVE_RESOLUTION_MISSING")
+    if resolution_projection["resolution_status"] != "EFFECTIVE":
+        reason_codes.append("ACTIVE_RESOLUTION_NOT_EFFECTIVE")
+    reason_codes.extend(resolution_projection["broker_reach_reason_codes"])
+    if fence_projection["active_release"] is not None:
+        reason_codes.append("ACTIVE_FENCE_RELEASE_EXISTS")
+    if not reason_codes:
+        reason_codes.extend(
+            _resolution_quiescence_reason_codes(
+                connection,
+                command_id=str(row["command_id"]),
+            )
+        )
+    reason_codes = list(dict.fromkeys(reason_codes))
+    latest_event = fence_projection["latest_event"]
+    return {
+        "command_id": str(row["command_id"]),
+        "eligible": not reason_codes,
+        "release_allowed": not reason_codes,
+        "reason_codes": reason_codes,
+        "resolution_id": (
+            None if active_resolution is None else str(active_resolution["resolution_id"])
+        ),
+        "resolution_request_hash": (
+            None if active_resolution is None else str(active_resolution["request_hash"])
+        ),
+        "source_boundary_fingerprint": resolution_projection["fingerprint"],
+        "expected_previous_fence_event_id": (
+            None if latest_event is None else str(latest_event["fence_event_id"])
+        ),
+        "resolution_status": resolution_projection["resolution_status"],
+        "broker_reach_reason_codes": resolution_projection["broker_reach_reason_codes"],
+        "broker_reach_evidence_count": resolution_projection["broker_reach_evidence_count"],
+        "fence_event_count": len(fence_projection["event_rows"]),
+        "fence_chain_valid": fence_projection["chain_valid"],
+        "maintenance_fence_released": fence_projection["released"],
+        "maintenance_fence_active": not fence_projection["released"],
+        "fence_release_status": fence_projection["status"],
+        "fence_release_reason_codes": fence_projection["reason_codes"],
+        "read_only": True,
+        "no_order_commands_created": True,
+        "no_broker_calls": True,
+        "raw_boundary_changed": False,
+        "live_sim_only": True,
+        "live_real_allowed": False,
+    }
+
+
+def preview_order_broker_boundary_fence_reinstate(
+    connection: sqlite3.Connection,
+    command_id: str,
+) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM gateway_order_broker_boundaries WHERE command_id = ?",
+        (str(command_id),),
+    ).fetchone()
+    if row is None:
+        raise OrderBrokerBoundaryResolutionError(
+            "BOUNDARY_NOT_FOUND",
+            "order broker-boundary row was not found",
+        )
+    resolution_projection = _resolution_projection(connection, row)
+    fence_projection = _fence_event_projection(
+        connection,
+        row,
+        resolution_projection=resolution_projection,
+    )
+    active_release = fence_projection["active_release"]
+    reason_codes: list[str] = []
+    if not _fence_event_schema_status(connection)["ready"]:
+        reason_codes.append("FENCE_EVENT_SCHEMA_INVALID")
+    if not fence_projection["chain_valid"]:
+        reason_codes.append("FENCE_EVENT_LEDGER_INVALID")
+    if active_release is None:
+        reason_codes.append("ACTIVE_FENCE_RELEASE_MISSING")
+    reason_codes = list(dict.fromkeys(reason_codes))
+    return {
+        "command_id": str(row["command_id"]),
+        "eligible": not reason_codes,
+        "reinstate_allowed": not reason_codes,
+        "reason_codes": reason_codes,
+        "expected_release_event_id": (
+            None if active_release is None else str(active_release["fence_event_id"])
+        ),
+        "resolution_id": (None if active_release is None else str(active_release["resolution_id"])),
+        "resolution_request_hash": (
+            None if active_release is None else str(active_release["resolution_request_hash"])
+        ),
+        "source_boundary_fingerprint": (
+            None if active_release is None else str(active_release["source_boundary_fingerprint"])
+        ),
+        "maintenance_fence_released": fence_projection["released"],
+        "maintenance_fence_active": not fence_projection["released"],
+        "fence_release_status": fence_projection["status"],
+        "read_only": True,
+        "no_order_commands_created": True,
+        "no_broker_calls": True,
+        "raw_boundary_changed": False,
+        "live_sim_only": True,
+        "live_real_allowed": False,
+    }
+
+
+def release_order_broker_boundary_maintenance_fence(
+    connection: sqlite3.Connection,
+    *,
+    command_id: str,
+    request_id: str,
+    expected_previous_fence_event_id: str | None,
+    expected_resolution_id: str,
+    expected_resolution_request_hash: str,
+    expected_source_boundary_fingerprint: str,
+    approval_id: str,
+    command_alias: str,
+    approval_trade_date: str,
+    approval_sha256: str,
+    evidence_sha256: str,
+    database_identity_sha256: str,
+    expected_app_name: str,
+    expected_schema_version: int,
+    expected_gateway_command_total_count: int,
+    expected_order_command_count: int,
+    expected_gateway_command_state_fingerprint: str,
+    reason_code: str,
+    operator_id: str,
+) -> dict[str, Any]:
+    return _append_order_broker_boundary_fence_event(
+        connection,
+        action=FENCE_ACTION_RELEASE,
+        command_id=command_id,
+        request_id=request_id,
+        expected_previous_fence_event_id=expected_previous_fence_event_id,
+        expected_resolution_id=expected_resolution_id,
+        expected_resolution_request_hash=expected_resolution_request_hash,
+        expected_source_boundary_fingerprint=(expected_source_boundary_fingerprint),
+        approval_id=approval_id,
+        command_alias=command_alias,
+        approval_trade_date=approval_trade_date,
+        approval_sha256=approval_sha256,
+        evidence_sha256=evidence_sha256,
+        database_identity_sha256=database_identity_sha256,
+        expected_app_name=expected_app_name,
+        expected_schema_version=expected_schema_version,
+        expected_gateway_command_total_count=(expected_gateway_command_total_count),
+        expected_order_command_count=expected_order_command_count,
+        expected_gateway_command_state_fingerprint=(expected_gateway_command_state_fingerprint),
+        reason_code=reason_code,
+        operator_id=operator_id,
+    )
+
+
+def reinstate_order_broker_boundary_maintenance_fence(
+    connection: sqlite3.Connection,
+    *,
+    command_id: str,
+    request_id: str,
+    expected_release_event_id: str,
+    expected_resolution_id: str,
+    expected_resolution_request_hash: str,
+    expected_source_boundary_fingerprint: str,
+    approval_id: str,
+    command_alias: str,
+    approval_trade_date: str,
+    approval_sha256: str,
+    evidence_sha256: str,
+    database_identity_sha256: str,
+    expected_app_name: str,
+    expected_schema_version: int,
+    expected_gateway_command_total_count: int,
+    expected_order_command_count: int,
+    expected_gateway_command_state_fingerprint: str,
+    reason_code: str,
+    operator_id: str,
+) -> dict[str, Any]:
+    return _append_order_broker_boundary_fence_event(
+        connection,
+        action=FENCE_ACTION_REINSTATE,
+        command_id=command_id,
+        request_id=request_id,
+        expected_previous_fence_event_id=expected_release_event_id,
+        expected_resolution_id=expected_resolution_id,
+        expected_resolution_request_hash=expected_resolution_request_hash,
+        expected_source_boundary_fingerprint=(expected_source_boundary_fingerprint),
+        approval_id=approval_id,
+        command_alias=command_alias,
+        approval_trade_date=approval_trade_date,
+        approval_sha256=approval_sha256,
+        evidence_sha256=evidence_sha256,
+        database_identity_sha256=database_identity_sha256,
+        expected_app_name=expected_app_name,
+        expected_schema_version=expected_schema_version,
+        expected_gateway_command_total_count=(expected_gateway_command_total_count),
+        expected_order_command_count=expected_order_command_count,
+        expected_gateway_command_state_fingerprint=(expected_gateway_command_state_fingerprint),
+        reason_code=reason_code,
+        operator_id=operator_id,
+    )
+
+
+def _append_order_broker_boundary_fence_event(
+    connection: sqlite3.Connection,
+    *,
+    action: str,
+    command_id: str,
+    request_id: str,
+    expected_previous_fence_event_id: str | None,
+    expected_resolution_id: str,
+    expected_resolution_request_hash: str,
+    expected_source_boundary_fingerprint: str,
+    approval_id: str,
+    command_alias: str,
+    approval_trade_date: str,
+    approval_sha256: str,
+    evidence_sha256: str,
+    database_identity_sha256: str,
+    expected_app_name: str,
+    expected_schema_version: int,
+    expected_gateway_command_total_count: int,
+    expected_order_command_count: int,
+    expected_gateway_command_state_fingerprint: str,
+    reason_code: str,
+    operator_id: str,
+) -> dict[str, Any]:
+    normalized = {
+        "action": str(action),
+        "command_id": str(command_id).strip(),
+        "request_id": _require_safe_identifier("request_id", request_id),
+        "expected_previous_fence_event_id": (
+            None
+            if expected_previous_fence_event_id is None
+            else _require_safe_identifier(
+                "expected_previous_fence_event_id",
+                expected_previous_fence_event_id,
+            )
+        ),
+        "expected_resolution_id": _require_safe_identifier(
+            "expected_resolution_id", expected_resolution_id
+        ),
+        "expected_resolution_request_hash": _require_sha256(
+            "expected_resolution_request_hash",
+            expected_resolution_request_hash,
+        ),
+        "expected_source_boundary_fingerprint": _require_sha256(
+            "expected_source_boundary_fingerprint",
+            expected_source_boundary_fingerprint,
+        ),
+        "approval_id": _require_safe_identifier("approval_id", approval_id),
+        "command_alias": _require_safe_identifier("command_alias", command_alias),
+        "approval_trade_date": str(approval_trade_date).strip(),
+        "approval_sha256": _require_sha256("approval_sha256", approval_sha256),
+        "evidence_sha256": _require_sha256("evidence_sha256", evidence_sha256),
+        "database_identity_sha256": _require_sha256(
+            "database_identity_sha256", database_identity_sha256
+        ),
+        "expected_app_name": str(expected_app_name),
+        "expected_schema_version": int(expected_schema_version),
+        "expected_gateway_command_total_count": int(expected_gateway_command_total_count),
+        "expected_order_command_count": int(expected_order_command_count),
+        "expected_gateway_command_state_fingerprint": _require_sha256(
+            "expected_gateway_command_state_fingerprint",
+            expected_gateway_command_state_fingerprint,
+        ),
+        "reason_code": _require_safe_identifier("reason_code", reason_code),
+        "operator_id": _require_safe_identifier("operator_id", operator_id),
+    }
+    if not normalized["command_id"]:
+        raise OrderBrokerBoundaryResolutionError("INVALID_COMMAND_ID", "command_id is required")
+    for field in (
+        "request_id",
+        "approval_id",
+        "command_alias",
+        "reason_code",
+        "operator_id",
+    ):
+        if _contains_account_like_digit_sequence(str(normalized[field])):
+            raise OrderBrokerBoundaryResolutionError(
+                f"INVALID_{field.upper()}",
+                f"{field} must not contain an account-like digit sequence",
+            )
+    approval = build_order_broker_boundary_fence_approval(
+        action=action,
+        approval_id=normalized["approval_id"],
+        request_id=normalized["request_id"],
+        operator_id=normalized["operator_id"],
+        reason_code=normalized["reason_code"],
+        approval_trade_date=normalized["approval_trade_date"],
+        command_alias=normalized["command_alias"],
+        command_id=normalized["command_id"],
+        expected_previous_fence_event_id=normalized["expected_previous_fence_event_id"],
+        expected_resolution_id=normalized["expected_resolution_id"],
+        expected_resolution_request_hash=normalized["expected_resolution_request_hash"],
+        expected_source_boundary_fingerprint=normalized["expected_source_boundary_fingerprint"],
+        evidence_sha256=normalized["evidence_sha256"],
+        database_identity_sha256=normalized["database_identity_sha256"],
+        expected_app_name=normalized["expected_app_name"],
+        expected_schema_version=normalized["expected_schema_version"],
+        expected_gateway_command_total_count=normalized["expected_gateway_command_total_count"],
+        expected_order_command_count=normalized["expected_order_command_count"],
+        expected_gateway_command_state_fingerprint=normalized[
+            "expected_gateway_command_state_fingerprint"
+        ],
+    )
+    if str(approval["sha256"]) != normalized["approval_sha256"]:
+        raise OrderBrokerBoundaryResolutionError(
+            "APPROVAL_SHA256_MISMATCH",
+            "approval_sha256 does not match the canonical storage contract",
+        )
+    request_hash = hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
+    if connection.in_transaction:
+        raise OrderBrokerBoundaryResolutionError(
+            "ACTIVE_TRANSACTION",
+            "fence event requires a connection without an active transaction",
+        )
+
+    transaction_started = False
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        transaction_started = True
+        fence_schema = _fence_event_schema_status(connection)
+        if not fence_schema["ready"]:
+            raise OrderBrokerBoundaryResolutionError(
+                "FENCE_EVENT_SCHEMA_INVALID",
+                "fence-event schema is not append-only safe",
+                details=fence_schema,
+            )
+        resolution_schema = _resolution_schema_status(connection)
+        if not resolution_schema["ready"]:
+            raise OrderBrokerBoundaryResolutionError(
+                "RESOLUTION_SCHEMA_INVALID",
+                "resolution schema is not append-only safe",
+                details=resolution_schema,
+            )
+        existing = connection.execute(
+            f"SELECT * FROM {FENCE_EVENT_TABLE} WHERE request_id = ?",
+            (normalized["request_id"],),
+        ).fetchone()
+        if existing is not None:
+            if str(existing["request_hash"]) != request_hash:
+                raise OrderBrokerBoundaryResolutionError(
+                    "REQUEST_CONFLICT",
+                    "request_id was already used for a different request",
+                )
+            boundary = connection.execute(
+                "SELECT * FROM gateway_order_broker_boundaries WHERE command_id = ?",
+                (normalized["command_id"],),
+            ).fetchone()
+            projection = None if boundary is None else _fence_event_projection(connection, boundary)
+            connection.commit()
+            transaction_started = False
+            public_existing = _public_fence_event_row(existing)
+            assert public_existing is not None
+            replay_is_latest = bool(
+                projection is not None
+                and projection["latest_event"] is not None
+                and str(projection["latest_event"]["fence_event_id"])
+                == str(existing["fence_event_id"])
+            )
+            replay_is_effective = bool(
+                replay_is_latest
+                and (
+                    (
+                        action == FENCE_ACTION_RELEASE
+                        and projection is not None
+                        and projection["active_release"] is not None
+                        and projection["released"]
+                    )
+                    or (
+                        action == FENCE_ACTION_REINSTATE
+                        and projection is not None
+                        and projection["active_release"] is None
+                        and projection["chain_valid"]
+                        and not projection["released"]
+                    )
+                )
+            )
+            return {
+                **public_existing,
+                "idempotent_replay": True,
+                "idempotent_replay_effective": replay_is_effective,
+                "maintenance_fence_released": bool(
+                    projection is not None and projection["released"]
+                ),
+                "maintenance_fence_active": not bool(
+                    projection is not None and projection["released"]
+                ),
+                "no_order_commands_created": True,
+                "no_broker_calls": True,
+                "raw_boundary_changed": False,
+                "routing_safety_state_changed": False,
+                "live_sim_only": True,
+                "live_real_allowed": False,
+            }
+
+        current_binding = get_order_broker_boundary_fence_approval_binding(connection)
+        binding_reason_codes: list[str] = []
+        if current_binding["database_identity_sha256"] != normalized["database_identity_sha256"]:
+            binding_reason_codes.append("DATABASE_IDENTITY_MISMATCH")
+        if current_binding["app_name"] != normalized["expected_app_name"]:
+            binding_reason_codes.append("APP_NAME_MISMATCH")
+        if current_binding["schema_version"] != normalized["expected_schema_version"]:
+            binding_reason_codes.append("SCHEMA_VERSION_MISMATCH")
+        current_commands = current_binding["gateway_commands"]
+        if (
+            int(current_commands["total_count"])
+            != normalized["expected_gateway_command_total_count"]
+        ):
+            binding_reason_codes.append("GATEWAY_COMMAND_TOTAL_COUNT_MISMATCH")
+        if int(current_commands["order_count"]) != normalized["expected_order_command_count"]:
+            binding_reason_codes.append("ORDER_COMMAND_COUNT_MISMATCH")
+        if (
+            str(current_commands["state_fingerprint"])
+            != normalized["expected_gateway_command_state_fingerprint"]
+        ):
+            binding_reason_codes.append("GATEWAY_COMMAND_STATE_FINGERPRINT_MISMATCH")
+        if normalized["approval_trade_date"] != market_today():
+            binding_reason_codes.append("APPROVAL_TRADE_DATE_EXPIRED")
+        if binding_reason_codes:
+            raise OrderBrokerBoundaryResolutionError(
+                "APPROVAL_BINDING_STALE",
+                "approved database state changed before fence apply",
+                details={"reason_codes": binding_reason_codes},
+            )
+        if action == FENCE_ACTION_RELEASE:
+            source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
+            if source_schema_reason_codes:
+                raise OrderBrokerBoundaryResolutionError(
+                    "RESOLUTION_SOURCE_SCHEMA_INVALID",
+                    "release evidence or quiescence schema is incomplete",
+                    details={"reason_codes": source_schema_reason_codes},
+                )
+
+        row = connection.execute(
+            "SELECT * FROM gateway_order_broker_boundaries WHERE command_id = ?",
+            (normalized["command_id"],),
+        ).fetchone()
+        if row is None:
+            raise OrderBrokerBoundaryResolutionError(
+                "BOUNDARY_NOT_FOUND",
+                "order broker-boundary row was not found",
+            )
+        resolution_projection = _resolution_projection(connection, row)
+        fence_projection = _fence_event_projection(
+            connection,
+            row,
+            resolution_projection=resolution_projection,
+        )
+        if not fence_projection["chain_valid"]:
+            raise OrderBrokerBoundaryResolutionError(
+                "FENCE_EVENT_LEDGER_INVALID",
+                "fence-event ledger is not a valid append-only chain",
+            )
+        latest_event = fence_projection["latest_event"]
+        current_previous_id = None if latest_event is None else str(latest_event["fence_event_id"])
+        if normalized["expected_previous_fence_event_id"] != current_previous_id:
+            raise OrderBrokerBoundaryResolutionError(
+                "STALE_FENCE_EVENT_CAS",
+                "fence-event chain changed after preview",
+                details={"current_previous_fence_event_id": current_previous_id},
+            )
+
+        if action == FENCE_ACTION_RELEASE:
+            if not resolution_projection["chain_valid"]:
+                raise OrderBrokerBoundaryResolutionError(
+                    "RESOLUTION_LEDGER_INVALID",
+                    "resolution ledger is not a valid append-only chain",
+                )
+            active_resolution = resolution_projection["active_resolution"]
+            rejection_codes: list[str] = []
+            if active_resolution is None:
+                rejection_codes.append("ACTIVE_RESOLUTION_MISSING")
+            if resolution_projection["resolution_status"] != "EFFECTIVE":
+                rejection_codes.append("ACTIVE_RESOLUTION_NOT_EFFECTIVE")
+            rejection_codes.extend(resolution_projection["broker_reach_reason_codes"])
+            if fence_projection["active_release"] is not None:
+                rejection_codes.append("ACTIVE_FENCE_RELEASE_EXISTS")
+            if active_resolution is not None:
+                if str(active_resolution["resolution_id"]) != normalized["expected_resolution_id"]:
+                    rejection_codes.append("RESOLUTION_ID_MISMATCH")
+                if (
+                    str(active_resolution["request_hash"])
+                    != normalized["expected_resolution_request_hash"]
+                ):
+                    rejection_codes.append("RESOLUTION_REQUEST_HASH_MISMATCH")
+                if (
+                    str(active_resolution["source_boundary_fingerprint"])
+                    != normalized["expected_source_boundary_fingerprint"]
+                ):
+                    rejection_codes.append("RESOLUTION_FINGERPRINT_MISMATCH")
+            if (
+                resolution_projection["fingerprint"]
+                != normalized["expected_source_boundary_fingerprint"]
+            ):
+                rejection_codes.append("SOURCE_BOUNDARY_FINGERPRINT_MISMATCH")
+            rejection_codes.extend(
+                _resolution_quiescence_reason_codes(
+                    connection,
+                    command_id=normalized["command_id"],
+                )
+            )
+            if rejection_codes:
+                raise OrderBrokerBoundaryResolutionError(
+                    "FENCE_RELEASE_NOT_PROVABLE",
+                    "maintenance-fence release was rejected fail-closed",
+                    details={"reason_codes": list(dict.fromkeys(rejection_codes))},
+                )
+        elif action == FENCE_ACTION_REINSTATE:
+            active_release = fence_projection["active_release"]
+            if active_release is None:
+                raise OrderBrokerBoundaryResolutionError(
+                    "ACTIVE_FENCE_RELEASE_MISSING",
+                    "there is no active fence release to reinstate",
+                )
+            binding_mismatches = []
+            for row_field, expected_field, reason_code_value in (
+                (
+                    "resolution_id",
+                    "expected_resolution_id",
+                    "RESOLUTION_ID_MISMATCH",
+                ),
+                (
+                    "resolution_request_hash",
+                    "expected_resolution_request_hash",
+                    "RESOLUTION_REQUEST_HASH_MISMATCH",
+                ),
+                (
+                    "source_boundary_fingerprint",
+                    "expected_source_boundary_fingerprint",
+                    "SOURCE_BOUNDARY_FINGERPRINT_MISMATCH",
+                ),
+            ):
+                if str(active_release[row_field]) != normalized[expected_field]:
+                    binding_mismatches.append(reason_code_value)
+            if binding_mismatches:
+                raise OrderBrokerBoundaryResolutionError(
+                    "FENCE_REINSTATE_BINDING_MISMATCH",
+                    "reinstate must bind the active fence release",
+                    details={"reason_codes": binding_mismatches},
+                )
+        else:
+            raise OrderBrokerBoundaryResolutionError(
+                "INVALID_ACTION", "unsupported fence-event action"
+            )
+
+        before_status = get_order_broker_boundary_status(connection)
+        fence_event_id = new_message_id("boundary_fence_event")
+        created_at = datetime_to_wire(utc_now())
+        sequence_no = len(fence_projection["event_rows"]) + 1
+        connection.set_authorizer(_fence_event_insert_authorizer)
+        try:
+            connection.execute(
+                f"""
+                INSERT INTO {FENCE_EVENT_TABLE} (
+                    fence_event_id, request_id, request_hash, command_id,
+                    command_alias, sequence_no, action,
+                    supersedes_fence_event_id, resolution_id,
+                    resolution_request_hash, source_boundary_fingerprint,
+                    approval_id, approval_trade_date, approval_sha256,
+                    evidence_sha256, database_identity_sha256,
+                    expected_app_name, expected_schema_version,
+                    expected_gateway_command_total_count,
+                    expected_order_command_count,
+                    expected_gateway_command_state_fingerprint,
+                    reason_code, operator_id, created_at,
+                    live_sim_only, live_real_allowed
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, 1, 0
+                )
+                """,
+                (
+                    fence_event_id,
+                    normalized["request_id"],
+                    request_hash,
+                    normalized["command_id"],
+                    normalized["command_alias"],
+                    sequence_no,
+                    action,
+                    normalized["expected_previous_fence_event_id"],
+                    normalized["expected_resolution_id"],
+                    normalized["expected_resolution_request_hash"],
+                    normalized["expected_source_boundary_fingerprint"],
+                    normalized["approval_id"],
+                    normalized["approval_trade_date"],
+                    normalized["approval_sha256"],
+                    normalized["evidence_sha256"],
+                    normalized["database_identity_sha256"],
+                    normalized["expected_app_name"],
+                    normalized["expected_schema_version"],
+                    normalized["expected_gateway_command_total_count"],
+                    normalized["expected_order_command_count"],
+                    normalized["expected_gateway_command_state_fingerprint"],
+                    normalized["reason_code"],
+                    normalized["operator_id"],
+                    created_at,
+                ),
+            )
+        finally:
+            connection.set_authorizer(None)
+        inserted = connection.execute(
+            f"SELECT * FROM {FENCE_EVENT_TABLE} WHERE fence_event_id = ?",
+            (fence_event_id,),
+        ).fetchone()
+        after_status = get_order_broker_boundary_status(connection)
+        after_projection = _fence_event_projection(connection, row)
+        assert inserted is not None
+        public_inserted = _public_fence_event_row(inserted)
+        assert public_inserted is not None
+        response = {
+            **public_inserted,
+            "idempotent_replay": False,
+            "idempotent_replay_effective": False,
+            "maintenance_fence_released": after_projection["released"],
+            "maintenance_fence_active": not after_projection["released"],
+            "fence_release_status": after_projection["status"],
+            "effective_block_new_order_routing": after_status["effective_block_new_order_routing"],
+            "no_order_commands_created": True,
+            "no_broker_calls": True,
+            "raw_boundary_changed": False,
+            "routing_safety_state_changed": bool(
+                before_status["effective_block_new_order_routing"]
+                != after_status["effective_block_new_order_routing"]
+            ),
+            "live_sim_only": True,
+            "live_real_allowed": False,
+        }
+        connection.commit()
+        transaction_started = False
+        return response
+    except OrderBrokerBoundaryResolutionError:
+        if transaction_started:
+            connection.rollback()
+        raise
+    except sqlite3.DatabaseError as exc:
+        if transaction_started:
+            connection.rollback()
+        if "locked" in str(exc).lower():
+            raise OrderBrokerBoundaryResolutionError(
+                "LOCKED_RETRYABLE",
+                "database is locked; retry the same request_id",
+            ) from exc
+        raise OrderBrokerBoundaryResolutionError(
+            "DATABASE_OPERATION_FAILED",
+            "database operation failed without applying the fence event",
+        ) from exc
+    except Exception:
+        if transaction_started:
+            connection.rollback()
+        raise
+
+
 def _append_order_broker_boundary_resolution(
     connection: sqlite3.Connection,
     *,
@@ -746,24 +1913,16 @@ def _append_order_broker_boundary_resolution(
         "action": str(action),
         "command_id": str(command_id).strip(),
         "request_id": _require_safe_identifier("request_id", request_id),
-        "expected_fingerprint": _require_sha256(
-            "expected_fingerprint", expected_fingerprint
-        ),
+        "expected_fingerprint": _require_sha256("expected_fingerprint", expected_fingerprint),
         "reason_code": _require_safe_identifier("reason_code", reason_code),
-        "evidence_type": _require_safe_identifier(
-            "evidence_type", evidence_type
-        ),
+        "evidence_type": _require_safe_identifier("evidence_type", evidence_type),
         "evidence_ref": _require_safe_identifier("evidence_ref", evidence_ref),
-        "evidence_sha256": _require_sha256(
-            "evidence_sha256", evidence_sha256
-        ),
+        "evidence_sha256": _require_sha256("evidence_sha256", evidence_sha256),
         "operator_id": _require_safe_identifier("operator_id", operator_id),
         "supersedes_resolution_id": (
             None
             if supersedes_resolution_id is None
-            else _require_safe_identifier(
-                "supersedes_resolution_id", supersedes_resolution_id
-            )
+            else _require_safe_identifier("supersedes_resolution_id", supersedes_resolution_id)
         ),
     }
     for field in (
@@ -779,12 +1938,8 @@ def _append_order_broker_boundary_resolution(
                 f"{field} must not contain an account-like digit sequence",
             )
     if not normalized["command_id"]:
-        raise OrderBrokerBoundaryResolutionError(
-            "INVALID_COMMAND_ID", "command_id is required"
-        )
-    request_hash = hashlib.sha256(
-        _canonical_json(normalized).encode("utf-8")
-    ).hexdigest()
+        raise OrderBrokerBoundaryResolutionError("INVALID_COMMAND_ID", "command_id is required")
+    request_hash = hashlib.sha256(_canonical_json(normalized).encode("utf-8")).hexdigest()
     if connection.in_transaction:
         raise OrderBrokerBoundaryResolutionError(
             "ACTIVE_TRANSACTION",
@@ -802,9 +1957,7 @@ def _append_order_broker_boundary_resolution(
                 "resolution schema is not append-only safe",
                 details=resolution_schema,
             )
-        source_schema_reason_codes = _resolution_source_schema_reason_codes(
-            connection
-        )
+        source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
         if source_schema_reason_codes:
             raise OrderBrokerBoundaryResolutionError(
                 "RESOLUTION_SOURCE_SCHEMA_INVALID",
@@ -821,9 +1974,7 @@ def _append_order_broker_boundary_resolution(
                     "REQUEST_CONFLICT",
                     "request_id was already used for a different request",
                 )
-            effective = get_effective_order_broker_boundary(
-                connection, normalized["command_id"]
-            )
+            effective = get_effective_order_broker_boundary(connection, normalized["command_id"])
             latest = connection.execute(
                 f"""
                 SELECT resolution_id, action
@@ -837,8 +1988,7 @@ def _append_order_broker_boundary_resolution(
             replay_is_current = bool(
                 effective is not None
                 and latest is not None
-                and str(latest["resolution_id"])
-                == str(existing["resolution_id"])
+                and str(latest["resolution_id"]) == str(existing["resolution_id"])
                 and (
                     (
                         action == RESOLUTION_ACTION_RESOLVE
@@ -858,13 +2008,9 @@ def _append_order_broker_boundary_resolution(
                 **public_existing,
                 "idempotent_replay": True,
                 "idempotent_replay_effective": replay_is_current,
-                "effective_state": (
-                    None if effective is None else effective["effective_state"]
-                ),
+                "effective_state": (None if effective is None else effective["effective_state"]),
                 "resolution_status": (
-                    "MISSING_BOUNDARY"
-                    if effective is None
-                    else effective["resolution_status"]
+                    "MISSING_BOUNDARY" if effective is None else effective["resolution_status"]
                 ),
                 "no_order_commands_created": True,
                 "no_broker_calls": True,
@@ -927,9 +2073,7 @@ def _append_order_broker_boundary_resolution(
                 raise OrderBrokerBoundaryResolutionError(
                     "BROKER_NOT_REACHED_NOT_PROVABLE",
                     "broker-not-reached resolution was rejected",
-                    details={
-                        "reason_codes": list(dict.fromkeys(rejection_codes))
-                    },
+                    details={"reason_codes": list(dict.fromkeys(rejection_codes))},
                 )
         elif action == RESOLUTION_ACTION_REVOKE:
             if active_resolution is None:
@@ -937,10 +2081,7 @@ def _append_order_broker_boundary_resolution(
                     "NO_ACTIVE_RESOLUTION",
                     "there is no active resolution to revoke",
                 )
-            if (
-                normalized["supersedes_resolution_id"]
-                != str(active_resolution["resolution_id"])
-            ):
+            if normalized["supersedes_resolution_id"] != str(active_resolution["resolution_id"]):
                 raise OrderBrokerBoundaryResolutionError(
                     "SUPERSEDES_RESOLUTION_MISMATCH",
                     "revoke must supersede the active resolution",
@@ -1005,9 +2146,7 @@ def _append_order_broker_boundary_resolution(
             (resolution_id,),
         ).fetchone()
         after_status = get_order_broker_boundary_status(connection)
-        effective = get_effective_order_broker_boundary(
-            connection, normalized["command_id"]
-        )
+        effective = get_effective_order_broker_boundary(connection, normalized["command_id"])
         assert inserted is not None
         assert effective is not None
         public_inserted = _public_resolution_row(inserted)
@@ -1018,9 +2157,7 @@ def _append_order_broker_boundary_resolution(
             "idempotent_replay_effective": False,
             "effective_state": effective["effective_state"],
             "resolution_status": effective["resolution_status"],
-            "effective_block_new_order_routing": after_status[
-                "effective_block_new_order_routing"
-            ],
+            "effective_block_new_order_routing": after_status["effective_block_new_order_routing"],
             "no_order_commands_created": True,
             "no_broker_calls": True,
             "raw_boundary_changed": False,
@@ -1087,12 +2224,19 @@ def get_order_broker_boundary_status(
             "invalidated_resolution_count": 0,
             "resolution_maintenance_fence_active_count": 0,
             "resolution_maintenance_fence_active": False,
+            "resolution_maintenance_fence_released_count": 0,
             "resolution_event_count": 0,
             "resolution_schema_ready": False,
             "resolution_source_schema_ready": False,
-            "resolution_source_schema_reason_codes": [
-                "RESOLUTION_SOURCE_SCHEMA_UNAVAILABLE"
-            ],
+            "resolution_source_schema_reason_codes": ["RESOLUTION_SOURCE_SCHEMA_UNAVAILABLE"],
+            "fence_event_count": 0,
+            "fence_event_schema_ready": False,
+            "fence_event_table_exists": False,
+            "fence_event_required_indexes_present": False,
+            "fence_event_append_only_triggers_present": False,
+            "active_fence_release_count": 0,
+            "invalid_fence_event_chain_count": 0,
+            "invalidated_fence_release_count": 0,
             "block_new_order_routing": True,
             "raw_block_new_order_routing": True,
             "qualification_block_new_order_routing": True,
@@ -1239,17 +2383,19 @@ def get_order_broker_boundary_status(
     reason_codes: list[str] = []
     warning_codes: list[str] = []
     resolution_schema = _resolution_schema_status(connection)
-    resolution_source_schema_reason_codes = (
-        _resolution_source_schema_reason_codes(connection)
-    )
+    fence_event_schema = _fence_event_schema_status(connection)
+    resolution_source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
     required_indexes_present = bool(
         raw_required_indexes.issubset(existing_indexes)
         and resolution_schema["required_indexes_present"]
+        and fence_event_schema["required_indexes_present"]
     )
     if not required_indexes_present:
         reason_codes.append("ORDER_BROKER_BOUNDARY_INDEX_MISSING")
     if not resolution_schema["ready"]:
         reason_codes.append("ORDER_BROKER_BOUNDARY_RESOLUTION_SCHEMA_INVALID")
+    if not fence_event_schema["ready"]:
+        reason_codes.append("ORDER_BROKER_BOUNDARY_FENCE_EVENT_SCHEMA_INVALID")
     if resolution_source_schema_reason_codes:
         reason_codes.append("ORDER_BROKER_BOUNDARY_RESOLUTION_SOURCE_SCHEMA_INVALID")
         reason_codes.extend(resolution_source_schema_reason_codes)
@@ -1278,9 +2424,7 @@ def get_order_broker_boundary_status(
     ):
         if int(counts[field] or 0) > 0:
             reason_codes.append(reason)
-    unconfirmed_count = int(
-        state_counts.get(OrderBrokerBoundaryState.UNCONFIRMED.value, 0)
-    )
+    unconfirmed_count = int(state_counts.get(OrderBrokerBoundaryState.UNCONFIRMED.value, 0))
     if unconfirmed_count > 0:
         warning_codes.append("UNCONFIRMED_ORDER_BOUNDARY_REQUIRES_RECONCILE")
 
@@ -1289,13 +2433,25 @@ def get_order_broker_boundary_status(
     effective_resolution_count = 0
     invalidated_resolution_count = 0
     maintenance_fence_active_count = 0
+    maintenance_fence_released_count = 0
     invalid_resolution_chain_count = 0
     resolution_event_count = 0
+    fence_event_count = 0
+    active_fence_release_count = 0
+    invalid_fence_event_chain_count = 0
+    invalidated_fence_release_count = 0
     if resolution_schema["table_exists"]:
         resolution_event_count = int(
-            connection.execute(
-                f"SELECT COUNT(*) AS count FROM {RESOLUTION_TABLE}"
-            ).fetchone()["count"]
+            connection.execute(f"SELECT COUNT(*) AS count FROM {RESOLUTION_TABLE}").fetchone()[
+                "count"
+            ]
+            or 0
+        )
+    if fence_event_schema["table_exists"]:
+        fence_event_count = int(
+            connection.execute(f"SELECT COUNT(*) AS count FROM {FENCE_EVENT_TABLE}").fetchone()[
+                "count"
+            ]
             or 0
         )
     if resolution_schema["ready"] and not resolution_source_schema_reason_codes:
@@ -1308,9 +2464,7 @@ def get_order_broker_boundary_status(
         ).fetchall()
         rows_by_command: dict[str, list[sqlite3.Row]] = defaultdict(list)
         for resolution_row in resolution_rows:
-            rows_by_command[str(resolution_row["command_id"])].append(
-                resolution_row
-            )
+            rows_by_command[str(resolution_row["command_id"])].append(resolution_row)
         boundary_rows = connection.execute(
             f"""
             SELECT b.*
@@ -1322,32 +2476,48 @@ def get_order_broker_boundary_status(
             """
         ).fetchall()
         for boundary_row in boundary_rows:
-            command_resolutions = rows_by_command.get(
-                str(boundary_row["command_id"]), []
-            )
-            chain_valid, active_resolution = _validate_resolution_chain(
-                command_resolutions
-            )
+            command_resolutions = rows_by_command.get(str(boundary_row["command_id"]), [])
+            chain_valid, active_resolution = _validate_resolution_chain(command_resolutions)
             state = str(boundary_row["state"])
             if command_resolutions and not chain_valid:
                 invalid_resolution_chain_count += 1
             elif active_resolution is not None:
                 projection = _resolution_projection(connection, boundary_row)
                 state = str(projection["effective_state"])
+            resolution_projection = _resolution_projection(connection, boundary_row)
+            fence_projection = _fence_event_projection(
+                connection,
+                boundary_row,
+                resolution_projection=resolution_projection,
+            )
+            if fence_projection["event_rows"] and not fence_projection["chain_valid"]:
+                invalid_fence_event_chain_count += 1
+            if fence_projection["active_release"] is not None:
+                active_fence_release_count += 1
+                if fence_projection["released"]:
+                    maintenance_fence_released_count += 1
+                else:
+                    invalidated_fence_release_count += 1
             if state == RESOLVED_BROKER_NOT_REACHED:
                 raw_state = str(boundary_row["state"])
                 effective_state_counts[raw_state] = max(
                     effective_state_counts.get(raw_state, 0) - 1,
                     0,
                 )
-                effective_state_counts[state] = (
-                    effective_state_counts.get(state, 0) + 1
-                )
+                effective_state_counts[state] = effective_state_counts.get(state, 0) + 1
                 effective_resolution_count += 1
             elif active_resolution is not None:
                 invalidated_resolution_count += 1
-            if active_resolution is not None and bool(
-                active_resolution["routing_fence_active"]
+            if (
+                active_resolution is not None
+                and bool(active_resolution["routing_fence_active"])
+                and not fence_projection["released"]
+            ):
+                maintenance_fence_active_count += 1
+            elif (
+                active_resolution is None
+                and fence_projection["active_release"] is not None
+                and not fence_projection["released"]
             ):
                 maintenance_fence_active_count += 1
         orphan_count = int(
@@ -1364,12 +2534,34 @@ def get_order_broker_boundary_status(
         )
         if orphan_count:
             reason_codes.append("ORDER_BOUNDARY_RESOLUTION_ORPHAN")
+        fence_orphan_count = (
+            int(
+                connection.execute(
+                    f"""
+                SELECT COUNT(*) AS count
+                FROM {FENCE_EVENT_TABLE} f
+                LEFT JOIN gateway_order_broker_boundaries b
+                  ON b.command_id = f.command_id
+                LEFT JOIN {RESOLUTION_TABLE} r
+                  ON r.resolution_id = f.resolution_id
+                WHERE b.command_id IS NULL OR r.resolution_id IS NULL
+                """
+                ).fetchone()["count"]
+                or 0
+            )
+            if fence_event_schema["table_exists"]
+            else 0
+        )
+        if fence_orphan_count:
+            reason_codes.append("ORDER_BOUNDARY_FENCE_EVENT_ORPHAN")
     else:
         effective_state_counts = dict(state_counts)
         effective_state_counts[RESOLVED_BROKER_NOT_REACHED] = 0
 
     if invalid_resolution_chain_count:
         reason_codes.append("ORDER_BOUNDARY_RESOLUTION_CHAIN_INVALID")
+    if invalid_fence_event_chain_count:
+        reason_codes.append("ORDER_BOUNDARY_FENCE_EVENT_CHAIN_INVALID")
     reason_codes = list(dict.fromkeys(reason_codes))
     effective_unconfirmed_count = int(
         effective_state_counts.get(OrderBrokerBoundaryState.UNCONFIRMED.value, 0)
@@ -1378,6 +2570,8 @@ def get_order_broker_boundary_status(
         warning_codes.append("EFFECTIVE_ORDER_BOUNDARY_REQUIRES_RESOLUTION")
     if invalidated_resolution_count > 0:
         warning_codes.append("ORDER_BOUNDARY_RESOLUTION_INVALIDATED")
+    if invalidated_fence_release_count > 0:
+        warning_codes.append("ORDER_BOUNDARY_FENCE_RELEASE_INVALIDATED")
     active_order_command_count = int(counts["active_order_command_count"] or 0)
     if active_order_command_count > 0:
         warning_codes.append("ACTIVE_ORDER_COMMANDS_PRESENT")
@@ -1419,49 +2613,31 @@ def get_order_broker_boundary_status(
         "table_exists": True,
         "required_indexes_present": required_indexes_present,
         "resolution_schema_ready": resolution_schema["ready"],
-        "resolution_source_schema_ready": not (
-            resolution_source_schema_reason_codes
-        ),
-        "resolution_source_schema_reason_codes": (
-            resolution_source_schema_reason_codes
-        ),
+        "resolution_source_schema_ready": not (resolution_source_schema_reason_codes),
+        "resolution_source_schema_reason_codes": (resolution_source_schema_reason_codes),
         "resolution_table_exists": resolution_schema["table_exists"],
-        "resolution_required_indexes_present": resolution_schema[
-            "required_indexes_present"
-        ],
+        "resolution_required_indexes_present": resolution_schema["required_indexes_present"],
         "resolution_append_only_triggers_present": resolution_schema[
             "append_only_triggers_present"
         ],
         "order_command_count": int(counts["order_command_count"] or 0),
         "active_order_command_count": active_order_command_count,
-        "unknown_command_status_count": int(
-            counts["unknown_command_status_count"] or 0
-        ),
+        "unknown_command_status_count": int(counts["unknown_command_status_count"] or 0),
         "expected_boundary_count": int(counts["expected_boundary_count"] or 0),
         "boundary_count": int(counts["boundary_count"] or 0),
         "missing_boundary_count": int(counts["missing_boundary_count"] or 0),
         "durable_pre_ack_count": int(counts["durable_pre_ack_count"] or 0),
         "durable_pre_ack_gap_count": int(counts["durable_pre_ack_gap_count"] or 0),
-        "duplicate_idempotency_count": int(
-            counts["duplicate_idempotency_count"] or 0
-        ),
-        "command_state_mismatch_count": int(
-            counts["command_state_mismatch_count"] or 0
-        ),
+        "duplicate_idempotency_count": int(counts["duplicate_idempotency_count"] or 0),
+        "command_state_mismatch_count": int(counts["command_state_mismatch_count"] or 0),
         "unknown_state_count": int(counts["unknown_state_count"] or 0),
         "orphan_boundary_count": int(counts["orphan_boundary_count"] or 0),
-        "unexpected_boundary_count": int(
-            counts["unexpected_boundary_count"] or 0
-        ),
-        "linked_command_type_invalid_count": int(
-            counts["linked_command_type_invalid_count"] or 0
-        ),
+        "unexpected_boundary_count": int(counts["unexpected_boundary_count"] or 0),
+        "linked_command_type_invalid_count": int(counts["linked_command_type_invalid_count"] or 0),
         "linked_command_type_mismatch_count": int(
             counts["linked_command_type_mismatch_count"] or 0
         ),
-        "invalid_command_type_count": int(
-            counts["invalid_command_type_count"] or 0
-        ),
+        "invalid_command_type_count": int(counts["invalid_command_type_count"] or 0),
         "invalid_scope_count": int(counts["invalid_scope_count"] or 0),
         "unconfirmed_count": unconfirmed_count,
         "raw_unconfirmed_count": unconfirmed_count,
@@ -1471,12 +2647,21 @@ def get_order_broker_boundary_status(
         "effective_state_counts": effective_state_counts,
         "effective_resolution_count": effective_resolution_count,
         "invalidated_resolution_count": invalidated_resolution_count,
-        "resolution_maintenance_fence_active_count": (
-            maintenance_fence_active_count
-        ),
+        "resolution_maintenance_fence_active_count": (maintenance_fence_active_count),
         "resolution_maintenance_fence_active": maintenance_fence_active,
+        "resolution_maintenance_fence_released_count": (maintenance_fence_released_count),
         "invalid_resolution_chain_count": invalid_resolution_chain_count,
         "resolution_event_count": resolution_event_count,
+        "fence_event_count": fence_event_count,
+        "fence_event_schema_ready": fence_event_schema["ready"],
+        "fence_event_table_exists": fence_event_schema["table_exists"],
+        "fence_event_required_indexes_present": fence_event_schema["required_indexes_present"],
+        "fence_event_append_only_triggers_present": fence_event_schema[
+            "append_only_triggers_present"
+        ],
+        "active_fence_release_count": active_fence_release_count,
+        "invalid_fence_event_chain_count": invalid_fence_event_chain_count,
+        "invalidated_fence_release_count": invalidated_fence_release_count,
         "block_new_order_routing": raw_block,
         "raw_block_new_order_routing": raw_block,
         "qualification_block_new_order_routing": qualification_block,
@@ -1640,11 +2825,7 @@ def _upsert_boundary(
         occurred_at,
         pre_ack_observed=pre_ack_observed,
     )
-    created_at = (
-        occurred_at
-        if existing is None
-        else str(existing["created_at"] or occurred_at)
-    )
+    created_at = occurred_at if existing is None else str(existing["created_at"] or occurred_at)
     connection.execute(
         """
         INSERT INTO gateway_order_broker_boundaries (
@@ -1845,14 +3026,10 @@ def _state_timestamps(
         "pre_ack_recorded_at": occurred_at if pre_ack_observed else None,
         "broker_accepted_at": occurred_at if rank >= 40 else None,
         "chejan_confirmed_at": (
-            occurred_at
-            if state == OrderBrokerBoundaryState.CHEJAN_CONFIRMED.value
-            else None
+            occurred_at if state == OrderBrokerBoundaryState.CHEJAN_CONFIRMED.value else None
         ),
         "unconfirmed_at": (
-            occurred_at
-            if state == OrderBrokerBoundaryState.UNCONFIRMED.value
-            else None
+            occurred_at if state == OrderBrokerBoundaryState.UNCONFIRMED.value else None
         ),
     }
 
@@ -1890,13 +3067,10 @@ def _public_boundary_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": str(row["created_at"]),
         "updated_at": str(row["updated_at"]),
         "broker_order_no_present": bool(_optional_text(row["broker_order_no"])),
-        "broker_result_code_present": bool(
-            _optional_text(row["broker_result_code"])
-        ),
+        "broker_result_code_present": bool(_optional_text(row["broker_result_code"])),
         "broker_message_present": bool(_optional_text(row["broker_message"])),
         "durable_pre_ack_recorded": bool(row["pre_ack_recorded_at"]),
-        "broker_boundary_reached": str(row["state"])
-        in _DURABLE_PRE_ACK_STATES,
+        "broker_boundary_reached": str(row["state"]) in _DURABLE_PRE_ACK_STATES,
         "live_sim_only": bool(row["live_sim_only"]),
         "live_real_allowed": bool(row["live_real_allowed"]),
     }
@@ -1909,30 +3083,34 @@ def _effective_boundary_from_row(
     public: bool,
 ) -> dict[str, Any]:
     projection = _resolution_projection(connection, row)
+    fence_projection = _fence_event_projection(
+        connection,
+        row,
+        resolution_projection=projection,
+    )
     item = _public_boundary_row(row) if public else _boundary_row_to_dict(row)
     item.update(
         {
             "raw_state": str(row["state"]),
             "effective_state": projection["effective_state"],
             "resolution_status": projection["resolution_status"],
-            "resolution_effective": (
-                projection["resolution_status"] == "EFFECTIVE"
-            ),
+            "resolution_effective": (projection["resolution_status"] == "EFFECTIVE"),
             "late_broker_evidence": bool(
                 projection["active_resolution"] is not None
                 and projection["broker_reach_reason_codes"]
             ),
             "resolution_event_count": len(projection["resolution_rows"]),
-            "resolution": _public_resolution_row(
-                projection["active_resolution"]
-            ),
+            "resolution": _public_resolution_row(projection["active_resolution"]),
             "resolution_chain_valid": projection["chain_valid"],
-            "broker_reach_evidence_count": projection[
-                "broker_reach_evidence_count"
-            ],
-            "broker_reach_reason_codes": projection[
-                "broker_reach_reason_codes"
-            ],
+            "broker_reach_evidence_count": projection["broker_reach_evidence_count"],
+            "broker_reach_reason_codes": projection["broker_reach_reason_codes"],
+            "maintenance_fence_active": not fence_projection["released"],
+            "maintenance_fence_released": fence_projection["released"],
+            "fence_release_status": fence_projection["status"],
+            "fence_release_reason_codes": fence_projection["reason_codes"],
+            "fence_event_count": len(fence_projection["event_rows"]),
+            "fence_event": _public_fence_event_row(fence_projection["active_release"]),
+            "fence_chain_valid": fence_projection["chain_valid"],
         }
     )
     return item
@@ -1943,12 +3121,8 @@ def _resolution_projection(
     boundary_row: sqlite3.Row,
 ) -> dict[str, Any]:
     command_id = str(boundary_row["command_id"])
-    snapshot, reason_codes, evidence_count = _collect_resolution_snapshot(
-        connection, boundary_row
-    )
-    fingerprint = hashlib.sha256(
-        _canonical_json(snapshot).encode("utf-8")
-    ).hexdigest()
+    snapshot, reason_codes, evidence_count = _collect_resolution_snapshot(connection, boundary_row)
+    fingerprint = hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest()
     table_exists = _table_exists(connection, RESOLUTION_TABLE)
     resolution_rows = (
         connection.execute(
@@ -1976,10 +3150,7 @@ def _resolution_projection(
             resolution_status = "OVERRIDDEN_BY_RAW_STATE"
         elif reason_codes:
             resolution_status = "OVERRIDDEN_BY_BROKER_EVIDENCE"
-        elif (
-            str(active_resolution["source_boundary_fingerprint"])
-            != fingerprint
-        ):
+        elif str(active_resolution["source_boundary_fingerprint"]) != fingerprint:
             resolution_status = "OVERRIDDEN_BY_FINGERPRINT_CHANGE"
         else:
             effective_state = RESOLVED_BROKER_NOT_REACHED
@@ -1999,14 +3170,104 @@ def _resolution_projection(
     }
 
 
+def _fence_event_projection(
+    connection: sqlite3.Connection,
+    boundary_row: sqlite3.Row,
+    *,
+    resolution_projection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    command_id = str(boundary_row["command_id"])
+    table_exists = _table_exists(connection, FENCE_EVENT_TABLE)
+    event_rows = (
+        connection.execute(
+            f"""
+            SELECT *
+            FROM {FENCE_EVENT_TABLE}
+            WHERE command_id = ?
+            ORDER BY sequence_no, created_at, fence_event_id
+            """,
+            (command_id,),
+        ).fetchall()
+        if table_exists
+        else []
+    )
+    chain_valid, active_release = _validate_fence_event_chain(event_rows)
+    if not table_exists:
+        chain_valid = False
+    latest_event = event_rows[-1] if event_rows else None
+    projection = (
+        _resolution_projection(connection, boundary_row)
+        if resolution_projection is None
+        else resolution_projection
+    )
+    reason_codes: list[str] = []
+    if not _fence_event_schema_status(connection)["ready"]:
+        reason_codes.append("FENCE_EVENT_SCHEMA_INVALID")
+    if not chain_valid:
+        reason_codes.append("FENCE_EVENT_LEDGER_INVALID")
+    if active_release is None:
+        status = "REINSTATED" if event_rows else "NOT_RELEASED"
+    else:
+        if str(active_release["approval_trade_date"]) != market_today():
+            reason_codes.append("FENCE_RELEASE_TRADE_DATE_EXPIRED")
+        try:
+            current_binding = get_order_broker_boundary_fence_approval_binding(connection)
+        except (OSError, sqlite3.Error, OrderBrokerBoundaryResolutionError):
+            reason_codes.append("DATABASE_IDENTITY_UNAVAILABLE")
+        else:
+            if str(active_release["database_identity_sha256"]) != str(
+                current_binding["database_identity_sha256"]
+            ):
+                reason_codes.append("DATABASE_IDENTITY_MISMATCH")
+            if str(active_release["expected_app_name"]) != str(current_binding["app_name"]):
+                reason_codes.append("APP_NAME_MISMATCH")
+            if int(active_release["expected_schema_version"]) != int(
+                current_binding["schema_version"] or -1
+            ):
+                reason_codes.append("SCHEMA_VERSION_MISMATCH")
+        active_resolution = projection["active_resolution"]
+        if not projection["chain_valid"]:
+            reason_codes.append("RESOLUTION_LEDGER_INVALID")
+        if projection["resolution_status"] != "EFFECTIVE":
+            reason_codes.append("ACTIVE_RESOLUTION_NOT_EFFECTIVE")
+        reason_codes.extend(projection["broker_reach_reason_codes"])
+        if active_resolution is None:
+            reason_codes.append("ACTIVE_RESOLUTION_MISSING")
+        else:
+            if str(active_release["resolution_id"]) != str(active_resolution["resolution_id"]):
+                reason_codes.append("RESOLUTION_ID_MISMATCH")
+            if str(active_release["resolution_request_hash"]) != str(
+                active_resolution["request_hash"]
+            ):
+                reason_codes.append("RESOLUTION_REQUEST_HASH_MISMATCH")
+            if str(active_release["source_boundary_fingerprint"]) != str(
+                active_resolution["source_boundary_fingerprint"]
+            ):
+                reason_codes.append("RESOLUTION_FINGERPRINT_MISMATCH")
+        if str(active_release["source_boundary_fingerprint"]) != str(projection["fingerprint"]):
+            reason_codes.append("SOURCE_BOUNDARY_FINGERPRINT_MISMATCH")
+        status = "RELEASED" if not reason_codes else "RELEASE_INVALIDATED"
+    reason_codes = list(dict.fromkeys(reason_codes))
+    released = bool(active_release is not None and not reason_codes)
+    if active_release is not None and not released:
+        status = "RELEASE_INVALIDATED"
+    return {
+        "event_rows": event_rows,
+        "chain_valid": chain_valid,
+        "latest_event": latest_event,
+        "active_release": active_release,
+        "released": released,
+        "status": status,
+        "reason_codes": reason_codes,
+    }
+
+
 def _collect_resolution_snapshot(
     connection: sqlite3.Connection,
     boundary_row: sqlite3.Row,
 ) -> tuple[dict[str, Any], list[str], int]:
     command_id = str(boundary_row["command_id"])
-    source_schema_reason_codes = _resolution_source_schema_reason_codes(
-        connection
-    )
+    source_schema_reason_codes = _resolution_source_schema_reason_codes(connection)
     command = (
         connection.execute(
             "SELECT * FROM gateway_commands WHERE command_id = ?",
@@ -2062,9 +3323,7 @@ def _collect_resolution_snapshot(
             )
             else []
         )
-        counts = {
-            str(row["event_type"]): int(row["count"] or 0) for row in rows
-        }
+        counts = {str(row["event_type"]): int(row["count"] or 0) for row in rows}
         event_counts[table_name] = counts
         for event_type, count in counts.items():
             if count:
@@ -2112,9 +3371,7 @@ def _collect_resolution_snapshot(
             (command_id,),
         ).fetchone()
         assert order_row is not None
-        order_summary = {
-            key: int(order_row[key] or 0) for key in order_summary
-        }
+        order_summary = {key: int(order_row[key] or 0) for key in order_summary}
     for key, reason_code in (
         ("broker_order_no_count", "LIVE_SIM_ORDER_BROKER_ORDER_PRESENT"),
         ("broker_result_count", "LIVE_SIM_ORDER_BROKER_RESULT_PRESENT"),
@@ -2155,9 +3412,7 @@ def _collect_resolution_snapshot(
             (command_id,),
         ).fetchone()
         assert intent_row is not None
-        intent_summary = {
-            key: int(intent_row[key] or 0) for key in intent_summary
-        }
+        intent_summary = {key: int(intent_row[key] or 0) for key in intent_summary}
     if intent_summary["broker_order_sent_count"]:
         reason_codes.append("LIVE_SIM_INTENT_BROKER_ORDER_SENT")
         evidence_count += intent_summary["broker_order_sent_count"]
@@ -2217,20 +3472,14 @@ def _collect_resolution_snapshot(
         "command_id": command_id,
         "command": {
             "present": command is not None,
-            "command_type": (
-                None if command is None else str(command["command_type"]).lower()
-            ),
+            "command_type": (None if command is None else str(command["command_type"]).lower()),
             "status": command_status,
             "attempts": 0 if command is None else int(command["attempts"] or 0),
             "dispatched_at": (
                 None if command is None else _optional_text(command["dispatched_at"])
             ),
-            "completed_at": (
-                None if command is None else _optional_text(command["completed_at"])
-            ),
-            "expires_at": (
-                None if command is None else _optional_text(command["expires_at"])
-            ),
+            "completed_at": (None if command is None else _optional_text(command["completed_at"])),
+            "expires_at": (None if command is None else _optional_text(command["expires_at"])),
         },
         "boundary": {
             "state": str(boundary_row["state"]),
@@ -2252,9 +3501,7 @@ def _resolution_quiescence_reason_codes(
     *,
     command_id: str,
 ) -> list[str]:
-    reason_codes: list[str] = _resolution_source_schema_reason_codes(
-        connection
-    )
+    reason_codes: list[str] = _resolution_source_schema_reason_codes(connection)
     if not _table_has_columns(
         connection,
         "gateway_commands",
@@ -2319,9 +3566,9 @@ def _resolution_quiescence_reason_codes(
         _RESOLUTION_SOURCE_TABLE_COLUMNS["runtime_execution_locks"],
     ):
         lock_count = int(
-            connection.execute(
-                "SELECT COUNT(*) AS count FROM runtime_execution_locks"
-            ).fetchone()["count"]
+            connection.execute("SELECT COUNT(*) AS count FROM runtime_execution_locks").fetchone()[
+                "count"
+            ]
             or 0
         )
         if lock_count:
@@ -2388,6 +3635,158 @@ def _validate_resolution_chain(
     return True, active
 
 
+def _validate_fence_event_chain(
+    rows: Sequence[sqlite3.Row],
+) -> tuple[bool, sqlite3.Row | None]:
+    previous: sqlite3.Row | None = None
+    active_release: sqlite3.Row | None = None
+    expected_sequence = 1
+    for row in rows:
+        if not _fence_event_row_contract_valid(row):
+            return False, active_release
+        if int(row["sequence_no"]) != expected_sequence:
+            return False, active_release
+        action = str(row["action"])
+        supersedes = _optional_text(row["supersedes_fence_event_id"])
+        expected_supersedes = None if previous is None else str(previous["fence_event_id"])
+        if supersedes != expected_supersedes:
+            return False, active_release
+        if action == FENCE_ACTION_RELEASE:
+            if active_release is not None:
+                return False, active_release
+            if previous is not None and str(previous["action"]) != FENCE_ACTION_REINSTATE:
+                return False, active_release
+            active_release = row
+        elif action == FENCE_ACTION_REINSTATE:
+            if active_release is None or previous is None:
+                return False, active_release
+            if str(previous["fence_event_id"]) != str(active_release["fence_event_id"]):
+                return False, active_release
+            for field in (
+                "resolution_id",
+                "resolution_request_hash",
+                "source_boundary_fingerprint",
+            ):
+                if str(row[field]) != str(active_release[field]):
+                    return False, active_release
+            active_release = None
+        else:
+            return False, active_release
+        previous = row
+        expected_sequence += 1
+    return True, active_release
+
+
+def _fence_event_row_contract_valid(row: sqlite3.Row) -> bool:
+    if str(row["action"]) not in {
+        FENCE_ACTION_RELEASE,
+        FENCE_ACTION_REINSTATE,
+    }:
+        return False
+    for field in (
+        "request_hash",
+        "resolution_request_hash",
+        "source_boundary_fingerprint",
+        "approval_sha256",
+        "evidence_sha256",
+        "database_identity_sha256",
+        "expected_gateway_command_state_fingerprint",
+    ):
+        if not _SHA256_RE.fullmatch(str(row[field])):
+            return False
+    for field in (
+        "fence_event_id",
+        "request_id",
+        "resolution_id",
+        "approval_id",
+        "command_alias",
+        "reason_code",
+        "operator_id",
+    ):
+        if not _SAFE_IDENTIFIER_RE.fullmatch(str(row[field])):
+            return False
+    for field in (
+        "request_id",
+        "approval_id",
+        "command_alias",
+        "reason_code",
+        "operator_id",
+    ):
+        if _contains_account_like_digit_sequence(str(row[field])):
+            return False
+    if not _TRADE_DATE_RE.fullmatch(str(row["approval_trade_date"])):
+        return False
+    if str(row["expected_app_name"]) != FENCE_EXPECTED_APP_NAME:
+        return False
+    if int(row["expected_schema_version"]) != FENCE_EXPECTED_SCHEMA_VERSION:
+        return False
+    total_count = int(row["expected_gateway_command_total_count"])
+    order_count = int(row["expected_order_command_count"])
+    if total_count < 0 or order_count < 0 or order_count > total_count:
+        return False
+    supersedes = _optional_text(row["supersedes_fence_event_id"])
+    if supersedes is not None and not _SAFE_IDENTIFIER_RE.fullmatch(supersedes):
+        return False
+    if not bool(row["live_sim_only"]) or bool(row["live_real_allowed"]):
+        return False
+    normalized_request = {
+        "action": str(row["action"]),
+        "command_id": str(row["command_id"]),
+        "request_id": str(row["request_id"]),
+        "expected_previous_fence_event_id": supersedes,
+        "expected_resolution_id": str(row["resolution_id"]),
+        "expected_resolution_request_hash": str(row["resolution_request_hash"]),
+        "expected_source_boundary_fingerprint": str(row["source_boundary_fingerprint"]),
+        "approval_id": str(row["approval_id"]),
+        "command_alias": str(row["command_alias"]),
+        "approval_trade_date": str(row["approval_trade_date"]),
+        "approval_sha256": str(row["approval_sha256"]),
+        "evidence_sha256": str(row["evidence_sha256"]),
+        "database_identity_sha256": str(row["database_identity_sha256"]),
+        "expected_app_name": str(row["expected_app_name"]),
+        "expected_schema_version": int(row["expected_schema_version"]),
+        "expected_gateway_command_total_count": total_count,
+        "expected_order_command_count": order_count,
+        "expected_gateway_command_state_fingerprint": str(
+            row["expected_gateway_command_state_fingerprint"]
+        ),
+        "reason_code": str(row["reason_code"]),
+        "operator_id": str(row["operator_id"]),
+    }
+    expected_request_hash = hashlib.sha256(
+        _canonical_json(normalized_request).encode("utf-8")
+    ).hexdigest()
+    if str(row["request_hash"]) != expected_request_hash:
+        return False
+    try:
+        approval = build_order_broker_boundary_fence_approval(
+            action=str(row["action"]),
+            approval_id=str(row["approval_id"]),
+            request_id=str(row["request_id"]),
+            operator_id=str(row["operator_id"]),
+            reason_code=str(row["reason_code"]),
+            approval_trade_date=str(row["approval_trade_date"]),
+            command_alias=str(row["command_alias"]),
+            command_id=str(row["command_id"]),
+            expected_previous_fence_event_id=supersedes,
+            expected_resolution_id=str(row["resolution_id"]),
+            expected_resolution_request_hash=str(row["resolution_request_hash"]),
+            expected_source_boundary_fingerprint=str(row["source_boundary_fingerprint"]),
+            evidence_sha256=str(row["evidence_sha256"]),
+            database_identity_sha256=str(row["database_identity_sha256"]),
+            expected_app_name=str(row["expected_app_name"]),
+            expected_schema_version=int(row["expected_schema_version"]),
+            expected_gateway_command_total_count=total_count,
+            expected_order_command_count=order_count,
+            expected_gateway_command_state_fingerprint=str(
+                row["expected_gateway_command_state_fingerprint"]
+            ),
+        )
+    except (OrderBrokerBoundaryResolutionError, TypeError, ValueError):
+        return False
+    return str(row["approval_sha256"]) == str(approval["sha256"])
+
+
 def _resolution_row_contract_valid(row: sqlite3.Row) -> bool:
     action = str(row["action"])
     source_fingerprint = str(row["source_boundary_fingerprint"])
@@ -2398,8 +3797,7 @@ def _resolution_row_contract_valid(row: sqlite3.Row) -> bool:
     if str(row["resolution_type"]) != BROKER_NOT_REACHED:
         return False
     if not all(
-        _SHA256_RE.fullmatch(value)
-        for value in (source_fingerprint, evidence_sha256, request_hash)
+        _SHA256_RE.fullmatch(value) for value in (source_fingerprint, evidence_sha256, request_hash)
     ):
         return False
     for field in (
@@ -2436,9 +3834,7 @@ def _resolution_row_contract_valid(row: sqlite3.Row) -> bool:
         return False
     if not isinstance(snapshot, dict):
         return False
-    if hashlib.sha256(
-        _canonical_json(snapshot).encode("utf-8")
-    ).hexdigest() != source_fingerprint:
+    if hashlib.sha256(_canonical_json(snapshot).encode("utf-8")).hexdigest() != source_fingerprint:
         return False
     normalized_request = {
         "action": action,
@@ -2467,18 +3863,46 @@ def _public_resolution_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         "sequence_no": int(row["sequence_no"]),
         "action": str(row["action"]),
         "resolution_type": str(row["resolution_type"]),
-        "supersedes_resolution_id": _optional_text(
-            row["supersedes_resolution_id"]
-        ),
+        "supersedes_resolution_id": _optional_text(row["supersedes_resolution_id"]),
         "reason_code": str(row["reason_code"]),
         "evidence_type": str(row["evidence_type"]),
-        "evidence_sha256_verified": bool(
-            _SHA256_RE.fullmatch(str(row["evidence_sha256"]))
-        ),
+        "evidence_sha256_verified": bool(_SHA256_RE.fullmatch(str(row["evidence_sha256"]))),
         "created_at": str(row["created_at"]),
         "live_sim_only": bool(row["live_sim_only"]),
         "live_real_allowed": bool(row["live_real_allowed"]),
         "routing_fence_active": bool(row["routing_fence_active"]),
+    }
+
+
+def _public_fence_event_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {
+        "fence_event_id": str(row["fence_event_id"]),
+        "command_id": str(row["command_id"]),
+        "command_alias": str(row["command_alias"]),
+        "sequence_no": int(row["sequence_no"]),
+        "action": str(row["action"]),
+        "supersedes_fence_event_id": _optional_text(row["supersedes_fence_event_id"]),
+        "resolution_id": str(row["resolution_id"]),
+        "resolution_request_hash": str(row["resolution_request_hash"]),
+        "source_boundary_fingerprint": str(row["source_boundary_fingerprint"]),
+        "approval_id": str(row["approval_id"]),
+        "approval_trade_date": str(row["approval_trade_date"]),
+        "approval_sha256": str(row["approval_sha256"]),
+        "evidence_sha256": str(row["evidence_sha256"]),
+        "database_identity_sha256": str(row["database_identity_sha256"]),
+        "expected_app_name": str(row["expected_app_name"]),
+        "expected_schema_version": int(row["expected_schema_version"]),
+        "expected_gateway_command_total_count": int(row["expected_gateway_command_total_count"]),
+        "expected_order_command_count": int(row["expected_order_command_count"]),
+        "expected_gateway_command_state_fingerprint": str(
+            row["expected_gateway_command_state_fingerprint"]
+        ),
+        "reason_code": str(row["reason_code"]),
+        "created_at": str(row["created_at"]),
+        "live_sim_only": bool(row["live_sim_only"]),
+        "live_real_allowed": bool(row["live_real_allowed"]),
     }
 
 
@@ -2493,10 +3917,7 @@ def _require_safe_identifier(name: str, value: object) -> str:
 
 
 def _contains_account_like_digit_sequence(value: str) -> bool:
-    return bool(
-        _LONG_DIGIT_RUN_RE.search(value)
-        or _SEPARATED_DIGIT_RUN_RE.search(value)
-    )
+    return bool(_LONG_DIGIT_RUN_RE.search(value) or _SEPARATED_DIGIT_RUN_RE.search(value))
 
 
 def _require_sha256(name: str, value: object) -> str:
@@ -2521,9 +3942,7 @@ def _resolution_schema_status(connection: sqlite3.Connection) -> dict[str, bool]
         }
     columns = {
         str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in connection.execute(
-            f"PRAGMA table_info({RESOLUTION_TABLE})"
-        ).fetchall()
+        for row in connection.execute(f"PRAGMA table_info({RESOLUTION_TABLE})").fetchall()
     }
     required_columns_present = _RESOLUTION_REQUIRED_COLUMNS.issubset(columns)
     required_indexes_present = all(
@@ -2606,7 +4025,248 @@ def _resolution_schema_status(connection: sqlite3.Connection) -> dict[str, bool]
     }
 
 
-def _resolution_index_contract_valid(
+def _fence_event_schema_status(connection: sqlite3.Connection) -> dict[str, bool]:
+    table_exists = _table_exists(connection, FENCE_EVENT_TABLE)
+    if not table_exists:
+        return {
+            "table_exists": False,
+            "required_columns_present": False,
+            "required_indexes_present": False,
+            "append_only_triggers_present": False,
+            "foreign_keys_present": False,
+            "constraints_present": False,
+            "ready": False,
+        }
+    column_rows = connection.execute(f"PRAGMA table_xinfo({FENCE_EVENT_TABLE})").fetchall()
+    columns = tuple(
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) for row in column_rows
+    )
+    column_contracts = tuple(
+        (
+            str(row["name"] if isinstance(row, sqlite3.Row) else row[1]),
+            str(row["type"] if isinstance(row, sqlite3.Row) else row[2]).upper(),
+            bool(row["notnull"] if isinstance(row, sqlite3.Row) else row[3]),
+            (
+                None
+                if (row["dflt_value"] if isinstance(row, sqlite3.Row) else row[4]) is None
+                else str(row["dflt_value"] if isinstance(row, sqlite3.Row) else row[4])
+            ),
+            int(row["pk"] if isinstance(row, sqlite3.Row) else row[5]),
+            int(row["hidden"] if isinstance(row, sqlite3.Row) else row[6]),
+        )
+        for row in column_rows
+    )
+    required_columns_present = bool(
+        columns == _FENCE_EVENT_REQUIRED_COLUMNS
+        and column_contracts == _FENCE_EVENT_REQUIRED_COLUMN_CONTRACTS
+    )
+    required_index_names = {
+        _FENCE_EVENT_CREATED_INDEX,
+        _FENCE_EVENT_REQUEST_INDEX,
+        _FENCE_EVENT_COMMAND_SEQUENCE_INDEX,
+    }
+    index_rows = connection.execute(f"PRAGMA index_list({FENCE_EVENT_TABLE})").fetchall()
+    custom_index_names = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in index_rows
+        if str(row["origin"] if isinstance(row, sqlite3.Row) else row[3]) == "c"
+    }
+    automatic_index_contracts: set[tuple[str, bool, bool, tuple[str, ...], tuple[bool, ...]]] = (
+        set()
+    )
+    for index_row in index_rows:
+        origin = str(
+            index_row["origin"] if isinstance(index_row, sqlite3.Row) else index_row[3]
+        ).lower()
+        if origin == "c":
+            continue
+        index_name = str(index_row["name"] if isinstance(index_row, sqlite3.Row) else index_row[1])
+        key_rows = [
+            row
+            for row in connection.execute(f"PRAGMA index_xinfo({index_name})").fetchall()
+            if int(row["key"] if isinstance(row, sqlite3.Row) else row[5]) == 1
+            and int(row["cid"] if isinstance(row, sqlite3.Row) else row[1]) >= 0
+        ]
+        key_rows.sort(key=lambda row: int(row["seqno"] if isinstance(row, sqlite3.Row) else row[0]))
+        automatic_index_contracts.add(
+            (
+                origin,
+                bool(index_row["unique"] if isinstance(index_row, sqlite3.Row) else index_row[2]),
+                bool(index_row["partial"] if isinstance(index_row, sqlite3.Row) else index_row[4]),
+                tuple(
+                    str(row["name"] if isinstance(row, sqlite3.Row) else row[2]) for row in key_rows
+                ),
+                tuple(
+                    bool(row["desc"] if isinstance(row, sqlite3.Row) else row[3])
+                    for row in key_rows
+                ),
+            )
+        )
+    automatic_indexes_exact = automatic_index_contracts == {
+        ("pk", True, False, ("fence_event_id",), (False,)),
+        ("u", True, False, ("request_id",), (False,)),
+    }
+    required_indexes_present = (
+        custom_index_names == required_index_names
+        and automatic_indexes_exact
+        and all(
+            _fence_event_index_contract_valid(
+                connection,
+                name=name,
+                columns=index_columns,
+                unique=unique,
+                descending=descending,
+            )
+            for name, index_columns, unique, descending in (
+                (
+                    _FENCE_EVENT_CREATED_INDEX,
+                    ("created_at", "fence_event_id"),
+                    False,
+                    (True, True),
+                ),
+                (
+                    _FENCE_EVENT_REQUEST_INDEX,
+                    ("request_id",),
+                    True,
+                    (False,),
+                ),
+                (
+                    _FENCE_EVENT_COMMAND_SEQUENCE_INDEX,
+                    ("command_id", "sequence_no"),
+                    True,
+                    (False, False),
+                ),
+            )
+        )
+    )
+    trigger_rows = connection.execute(
+        """
+        SELECT name, sql
+        FROM sqlite_master
+        WHERE type = 'trigger' AND tbl_name = ?
+        """,
+        (FENCE_EVENT_TABLE,),
+    ).fetchall()
+    trigger_sql = {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[0]): str(
+            (row["sql"] if isinstance(row, sqlite3.Row) else row[1]) or ""
+        )
+        for row in trigger_rows
+    }
+    required_trigger_names = {
+        _FENCE_EVENT_UPDATE_TRIGGER,
+        _FENCE_EVENT_DELETE_TRIGGER,
+    }
+    append_only_triggers_present = set(trigger_sql) == required_trigger_names and all(
+        _fence_event_trigger_contract_valid(
+            trigger_sql.get(name),
+            name=name,
+            operation=operation,
+        )
+        for name, operation in (
+            (_FENCE_EVENT_UPDATE_TRIGGER, "UPDATE"),
+            (_FENCE_EVENT_DELETE_TRIGGER, "DELETE"),
+        )
+    )
+    foreign_key_rows = connection.execute(
+        f"PRAGMA foreign_key_list({FENCE_EVENT_TABLE})"
+    ).fetchall()
+    foreign_keys = {
+        (
+            str(row["table"] if isinstance(row, sqlite3.Row) else row[2]),
+            str(row["from"] if isinstance(row, sqlite3.Row) else row[3]),
+            str(row["to"] if isinstance(row, sqlite3.Row) else row[4]),
+            str(row["on_update"] if isinstance(row, sqlite3.Row) else row[5]),
+            str(row["on_delete"] if isinstance(row, sqlite3.Row) else row[6]),
+            str(row["match"] if isinstance(row, sqlite3.Row) else row[7]),
+        )
+        for row in foreign_key_rows
+    }
+    expected_foreign_keys = {
+        (
+            "gateway_order_broker_boundaries",
+            "command_id",
+            "command_id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        ),
+        (
+            "gateway_order_broker_boundary_resolutions",
+            "resolution_id",
+            "resolution_id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        ),
+        (
+            FENCE_EVENT_TABLE,
+            "supersedes_fence_event_id",
+            "fence_event_id",
+            "NO ACTION",
+            "NO ACTION",
+            "NONE",
+        ),
+    }
+    foreign_keys_present = foreign_keys == expected_foreign_keys
+    table_row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (FENCE_EVENT_TABLE,),
+    ).fetchone()
+    table_sql = (
+        ""
+        if table_row is None
+        else str(
+            (table_row["sql"] if isinstance(table_row, sqlite3.Row) else table_row[0]) or ""
+        ).upper()
+    )
+    compact_table_sql = re.sub(r"\s+", "", table_sql)
+    constraints_present = all(
+        re.sub(r"\s+", "", token) in compact_table_sql
+        for token in (
+            "CHECK (SEQUENCE_NO > 0)",
+            "CHECK (ACTION IN ('RELEASE', 'REINSTATE'))",
+            "CHECK (LENGTH(REQUEST_HASH) = 64)",
+            "CHECK (LENGTH(RESOLUTION_REQUEST_HASH) = 64)",
+            "CHECK (LENGTH(SOURCE_BOUNDARY_FINGERPRINT) = 64)",
+            "CHECK (LENGTH(APPROVAL_SHA256) = 64)",
+            "CHECK (LENGTH(EVIDENCE_SHA256) = 64)",
+            "CHECK (LENGTH(DATABASE_IDENTITY_SHA256) = 64)",
+            "CHECK (LENGTH(EXPECTED_GATEWAY_COMMAND_STATE_FINGERPRINT) = 64)",
+            "CHECK (LENGTH(APPROVAL_TRADE_DATE) = 10)",
+            "CHECK (LIVE_SIM_ONLY = 1)",
+            "CHECK (LIVE_REAL_ALLOWED = 0)",
+            "CHECK (EXPECTED_APP_NAME = 'SUSEOK-TRADER-V2')",
+            "CHECK (EXPECTED_SCHEMA_VERSION = 63)",
+            "CHECK (EXPECTED_GATEWAY_COMMAND_TOTAL_COUNT >= 0)",
+            (
+                "CHECK (EXPECTED_ORDER_COMMAND_COUNT >= 0 "
+                "AND EXPECTED_ORDER_COMMAND_COUNT "
+                "<= EXPECTED_GATEWAY_COMMAND_TOTAL_COUNT)"
+            ),
+            "REFERENCES GATEWAY_ORDER_BROKER_BOUNDARIES",
+            "REFERENCES GATEWAY_ORDER_BROKER_BOUNDARY_RESOLUTIONS",
+            "REFERENCES GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENTS",
+        )
+    )
+    return {
+        "table_exists": True,
+        "required_columns_present": required_columns_present,
+        "required_indexes_present": required_indexes_present,
+        "append_only_triggers_present": append_only_triggers_present,
+        "foreign_keys_present": foreign_keys_present,
+        "constraints_present": constraints_present,
+        "ready": bool(
+            required_columns_present
+            and required_indexes_present
+            and append_only_triggers_present
+            and foreign_keys_present
+            and constraints_present
+        ),
+    }
+
+
+def _fence_event_index_contract_valid(
     connection: sqlite3.Connection,
     *,
     name: str,
@@ -2614,30 +4274,19 @@ def _resolution_index_contract_valid(
     unique: bool,
     descending: tuple[bool, ...],
 ) -> bool:
-    index_rows = connection.execute(
-        f"PRAGMA index_list({RESOLUTION_TABLE})"
-    ).fetchall()
+    index_rows = connection.execute(f"PRAGMA index_list({FENCE_EVENT_TABLE})").fetchall()
     index_row = next(
         (
             row
             for row in index_rows
-            if str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-            == name
+            if str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) == name
         ),
         None,
     )
     if index_row is None:
         return False
-    is_unique = bool(
-        index_row["unique"]
-        if isinstance(index_row, sqlite3.Row)
-        else index_row[2]
-    )
-    is_partial = bool(
-        index_row["partial"]
-        if isinstance(index_row, sqlite3.Row)
-        else index_row[4]
-    )
+    is_unique = bool(index_row["unique"] if isinstance(index_row, sqlite3.Row) else index_row[2])
+    is_partial = bool(index_row["partial"] if isinstance(index_row, sqlite3.Row) else index_row[4])
     if is_unique is not unique or is_partial:
         return False
     xinfo_rows = connection.execute(f"PRAGMA index_xinfo({name})").fetchall()
@@ -2648,17 +4297,72 @@ def _resolution_index_contract_valid(
             if int(row["key"] if isinstance(row, sqlite3.Row) else row[5]) == 1
             and int(row["cid"] if isinstance(row, sqlite3.Row) else row[1]) >= 0
         ),
-        key=lambda row: int(
-            row["seqno"] if isinstance(row, sqlite3.Row) else row[0]
-        ),
+        key=lambda row: int(row["seqno"] if isinstance(row, sqlite3.Row) else row[0]),
     )
     actual_columns = tuple(
-        str(row["name"] if isinstance(row, sqlite3.Row) else row[2])
-        for row in key_rows
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[2]) for row in key_rows
     )
     actual_descending = tuple(
-        bool(row["desc"] if isinstance(row, sqlite3.Row) else row[3])
-        for row in key_rows
+        bool(row["desc"] if isinstance(row, sqlite3.Row) else row[3]) for row in key_rows
+    )
+    return actual_columns == columns and actual_descending == descending
+
+
+def _fence_event_trigger_contract_valid(
+    sql: str | None,
+    *,
+    name: str,
+    operation: str,
+) -> bool:
+    if not sql:
+        return False
+    compact = re.sub(r"\s+", "", sql.upper()).replace("IFNOTEXISTS", "").rstrip(";")
+    expected = (
+        f"CREATETRIGGER{name.upper()}BEFORE{operation}ON"
+        f"{FENCE_EVENT_TABLE.upper()}BEGINSELECTRAISE(ABORT,"
+        "'GATEWAYORDER-BOUNDARYFENCEEVENTSAREAPPEND-ONLY');END"
+    )
+    return compact == expected
+
+
+def _resolution_index_contract_valid(
+    connection: sqlite3.Connection,
+    *,
+    name: str,
+    columns: tuple[str, ...],
+    unique: bool,
+    descending: tuple[bool, ...],
+) -> bool:
+    index_rows = connection.execute(f"PRAGMA index_list({RESOLUTION_TABLE})").fetchall()
+    index_row = next(
+        (
+            row
+            for row in index_rows
+            if str(row["name"] if isinstance(row, sqlite3.Row) else row[1]) == name
+        ),
+        None,
+    )
+    if index_row is None:
+        return False
+    is_unique = bool(index_row["unique"] if isinstance(index_row, sqlite3.Row) else index_row[2])
+    is_partial = bool(index_row["partial"] if isinstance(index_row, sqlite3.Row) else index_row[4])
+    if is_unique is not unique or is_partial:
+        return False
+    xinfo_rows = connection.execute(f"PRAGMA index_xinfo({name})").fetchall()
+    key_rows = sorted(
+        (
+            row
+            for row in xinfo_rows
+            if int(row["key"] if isinstance(row, sqlite3.Row) else row[5]) == 1
+            and int(row["cid"] if isinstance(row, sqlite3.Row) else row[1]) >= 0
+        ),
+        key=lambda row: int(row["seqno"] if isinstance(row, sqlite3.Row) else row[0]),
+    )
+    actual_columns = tuple(
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[2]) for row in key_rows
+    )
+    actual_descending = tuple(
+        bool(row["desc"] if isinstance(row, sqlite3.Row) else row[3]) for row in key_rows
     )
     return actual_columns == columns and actual_descending == descending
 
@@ -2671,9 +4375,7 @@ def _resolution_trigger_contract_valid(
 ) -> bool:
     if not sql:
         return False
-    compact = re.sub(r"\s+", "", sql.upper()).replace(
-        "IFNOTEXISTS", ""
-    ).rstrip(";")
+    compact = re.sub(r"\s+", "", sql.upper()).replace("IFNOTEXISTS", "").rstrip(";")
     expected = (
         f"CREATETRIGGER{name.upper()}BEFORE{operation}ON"
         f"{RESOLUTION_TABLE.upper()}BEGINSELECTRAISE(ABORT,"
@@ -2744,9 +4446,7 @@ def _table_has_columns(
         return False
     columns = {
         str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in connection.execute(
-            f'PRAGMA table_info("{table_name}")'
-        ).fetchall()
+        for row in connection.execute(f'PRAGMA table_info("{table_name}")').fetchall()
     }
     return required_columns.issubset(columns)
 
@@ -2757,9 +4457,7 @@ def _resolution_source_schema_reason_codes(
     reason_codes: list[str] = []
     for table_name, required_columns in _RESOLUTION_SOURCE_TABLE_COLUMNS.items():
         if not _table_has_columns(connection, table_name, required_columns):
-            reason_codes.append(
-                f"RESOLUTION_SOURCE_SCHEMA_INVALID_{table_name.upper()}"
-            )
+            reason_codes.append(f"RESOLUTION_SOURCE_SCHEMA_INVALID_{table_name.upper()}")
     if "RESOLUTION_SOURCE_SCHEMA_INVALID_APP_METADATA" not in reason_codes:
         schema_row = connection.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
@@ -2774,7 +4472,5 @@ def _resolution_source_schema_reason_codes(
 
 
 def _index_names(connection: sqlite3.Connection) -> set[str]:
-    rows = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'index'"
-    ).fetchall()
+    rows = connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
     return {str(row["name"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows}
