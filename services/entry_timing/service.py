@@ -323,8 +323,24 @@ def load_entry_timing_input(
     latest_1m = _latest_bar(connection, code, 60)
     latest_3m = _latest_bar(connection, code, 180)
     latest_5m = _latest_bar(connection, code, 300)
-    strategy = _latest_strategy(connection, normalized_id)
-    risk = _latest_risk(connection, normalized_id)
+    strategy = _latest_strategy(
+        connection,
+        normalized_id,
+        source_run_id=expected_source_run_id,
+    )
+    risk = _latest_risk(
+        connection,
+        normalized_id,
+        source_run_id=expected_source_run_id,
+    )
+    if expected_source_run_id is not None and strategy is None:
+        raise ValueError(
+            "strategy observation not found for candidate in expected source run"
+        )
+    if expected_source_run_id is not None and risk is None:
+        raise ValueError(
+            "risk observation not found for candidate in expected source run"
+        )
     pipeline_coherency = assess_candidate_pipeline_lineage(
         connection,
         normalized_id,
@@ -890,7 +906,7 @@ def _candidate_rows_for_evaluation(
     risk_priority_sql = ""
     if source_run_id:
         risk_join_sql = """
-        LEFT JOIN risk_observations_latest AS r
+        JOIN risk_observations_latest AS r
             ON r.candidate_instance_id = c.candidate_instance_id
             AND r.source_run_id = ?
         """
@@ -1340,28 +1356,44 @@ def _latest_bar(
 def _latest_strategy(
     connection: sqlite3.Connection,
     candidate_instance_id: str,
+    *,
+    source_run_id: str | None = None,
 ) -> sqlite3.Row | None:
+    source_run_clause = ""
+    params: list[Any] = [candidate_instance_id]
+    if source_run_id is not None:
+        source_run_clause = "AND source_run_id = ?"
+        params.append(require_non_empty_str(source_run_id, "source_run_id"))
     return connection.execute(
-        """
+        f"""
         SELECT *
         FROM strategy_observations_latest
         WHERE candidate_instance_id = ?
+        {source_run_clause}
         """,
-        (candidate_instance_id,),
+        tuple(params),
     ).fetchone()
 
 
 def _latest_risk(
     connection: sqlite3.Connection,
     candidate_instance_id: str,
+    *,
+    source_run_id: str | None = None,
 ) -> sqlite3.Row | None:
+    source_run_clause = ""
+    params: list[Any] = [candidate_instance_id]
+    if source_run_id is not None:
+        source_run_clause = "AND source_run_id = ?"
+        params.append(require_non_empty_str(source_run_id, "source_run_id"))
     return connection.execute(
-        """
+        f"""
         SELECT *
         FROM risk_observations_latest
         WHERE candidate_instance_id = ?
+        {source_run_clause}
         """,
-        (candidate_instance_id,),
+        tuple(params),
     ).fetchone()
 
 

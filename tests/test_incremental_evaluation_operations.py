@@ -180,7 +180,11 @@ def test_retry_limit_moves_failed_candidate_to_dead_letter_atomically(
     connection = initialize_database(tmp_path / "incremental-failure.sqlite3")
     candidate_id = _insert_strategy_fixture(connection)
     _insert_queue_row(connection, candidate_id=candidate_id, code="005930")
-    settings = _settings()
+    settings = _settings(
+        strategy_engine_enabled=True,
+        risk_gate_enabled=True,
+        entry_timing_enabled=True,
+    )
 
     def fail_refresh(*args, **kwargs):
         raise RuntimeError("forced incremental failure")
@@ -221,7 +225,12 @@ def test_legacy_sweep_blocks_new_event_and_preserves_failure_evidence(tmp_path) 
         code="005930",
         attempts=3,
     )
-    settings = _settings(incremental_evaluation_retry_limit=3)
+    settings = _settings(
+        incremental_evaluation_retry_limit=3,
+        strategy_engine_enabled=True,
+        risk_gate_enabled=True,
+        entry_timing_enabled=True,
+    )
 
     batch = process_incremental_evaluation_batch(connection, settings=settings, limit=1)
     first_dead_letter = list_incremental_evaluation_dead_letters(connection)[0]

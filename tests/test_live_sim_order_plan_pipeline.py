@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import domain.broker.utils as broker_utils
+import pytest
 from apps.core_api import app
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -11,12 +12,17 @@ from domain.live_sim.status import LiveSimIntentStatus, LiveSimOrderStatus
 from fastapi.testclient import TestClient
 from services.config import Settings, TradingMode, TradingProfile
 from services.entry_timing.service import evaluate_entry_timing
+from services.live_sim.live_sim_service import queue_live_sim_order_command
+from services.live_sim.order_plan_binding import build_order_plan_binding
 from services.live_sim.order_plan_eligibility import evaluate_live_sim_order_plan_eligibility
-from services.live_sim.order_plan_intent import create_live_sim_intent_from_order_plan
+from services.live_sim.order_plan_intent import (
+    create_live_sim_intent_from_order_plan,
+    make_live_sim_order_plan_idempotency_key,
+)
 from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.runtime.live_sim_pilot_pipeline import run_live_sim_pilot_pipeline_once
 from services.strategy_engine import evaluate_candidate_strategy, save_strategy_observation
-from storage.sqlite import initialize_database
+from storage.sqlite import initialize_database, open_connection
 from tests.test_entry_timing import _raise_fixture_turnover
 from tests.test_live_sim import _insert_live_sim_position, _mark_gateway_ready
 from tests.test_strategy_service import _insert_strategy_fixture
@@ -109,6 +115,410 @@ def test_pilot_run_once_queues_command_and_duplicate_run_does_not_queue_again(tm
     assert payload["live_real_allowed"] is False
     assert payload["metadata"]["live_sim_only"] is True
     assert payload["metadata"]["live_real_allowed"] is False
+
+
+def test_bound_pilot_uses_only_exact_plan_without_refresh_or_general_selection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_pilot_pipeline as pilot_pipeline
+
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "run-bound-plan.sqlite3"
+    )
+    plan = connection.execute(
+        "SELECT * FROM order_plan_drafts WHERE order_plan_id = ?",
+        (order_plan_id,),
+    ).fetchone()
+    assert plan is not None
+    binding = build_order_plan_binding(dict(plan))
+    settings = _pilot_settings(live_sim_pilot_auto_queue_command=True)
+    monkeypatch.setattr(
+        pilot_pipeline,
+        "evaluate_entry_timing",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bound pilot must not rerun entry timing")
+        ),
+    )
+    monkeypatch.setattr(
+        pilot_pipeline,
+        "select_live_sim_order_plan_candidates",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("bound pilot must not run general plan selection")
+        ),
+    )
+
+    result = run_live_sim_pilot_pipeline_once(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        queue_commands=True,
+        required_plan_binding=binding,
+    )
+    command_count = _count(connection, "gateway_commands")
+    connection.close()
+
+    assert result.status == "COMPLETED"
+    assert result.evaluated_count == 1
+    assert result.command_count == 1
+    assert command_count == 1
+    assert [item["order_plan_id"] for item in result.selected_order_plans] == [
+        order_plan_id
+    ]
+    assert result.preparation["entry_timing_evaluated"] is False
+    assert result.preparation["selection_mode"] == "EXACT_BOUND_PLAN"
+    assert result.preparation["required_plan_binding"] == binding
+
+
+def test_bound_pilot_rejects_requested_trade_date_mismatch(tmp_path) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "run-bound-trade-date-mismatch.sqlite3"
+    )
+    plan = connection.execute(
+        "SELECT * FROM order_plan_drafts WHERE order_plan_id = ?",
+        (order_plan_id,),
+    ).fetchone()
+    assert plan is not None
+    binding = build_order_plan_binding(dict(plan))
+
+    with pytest.raises(
+        ValueError,
+        match="required_plan_binding trade_date does not match requested trade_date",
+    ):
+        run_live_sim_pilot_pipeline_once(
+            connection,
+            settings=_pilot_settings(live_sim_pilot_auto_queue_command=True),
+            trade_date="2099-12-31",
+            queue_commands=True,
+            required_plan_binding=binding,
+        )
+
+    command_count = _count(connection, "gateway_commands")
+    pilot_run_count = _count(connection, "live_sim_runs")
+    connection.close()
+
+    assert command_count == 0
+    assert pilot_run_count == 0
+
+
+def test_terminal_queue_rejects_plan_content_changed_after_intent(
+    tmp_path,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "terminal-plan-swap.sqlite3"
+    )
+    settings = _pilot_settings()
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    for table_name in ("order_plan_drafts", "order_plan_drafts_latest"):
+        connection.execute(
+            f"""
+            UPDATE {table_name}
+            SET limit_price = limit_price + 1000,
+                suggested_notional = suggested_quantity * (limit_price + 1000)
+            WHERE order_plan_id = ?
+            """,
+            (order_plan_id,),
+        )
+    connection.commit()
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    persisted_intent = connection.execute(
+        """
+        SELECT status, reason_codes_json
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()
+    rejection = connection.execute(
+        """
+        SELECT reason_codes_json
+        FROM live_sim_rejections
+        ORDER BY created_at DESC, rejection_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    command_count = _count(connection, "gateway_commands")
+    order_count = _count(connection, "live_sim_orders")
+    connection.close()
+
+    assert persisted_intent["status"] == LiveSimIntentStatus.REJECTED.value
+    assert LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value in json.loads(
+        persisted_intent["reason_codes_json"]
+    )
+    assert LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value in json.loads(
+        rejection["reason_codes_json"]
+    )
+    assert command_count == 0
+    assert order_count == 0
+
+
+def test_terminal_queue_rechecks_current_price_after_intent(
+    tmp_path,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "terminal-price-drift.sqlite3"
+    )
+    settings = _pilot_settings()
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET price = price * 1.10,
+            event_ts = ?
+        WHERE code = '005930' AND exchange = 'KRX'
+        """,
+        (datetime_to_wire(utc_now()),),
+    )
+    connection.commit()
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    rejection = connection.execute(
+        """
+        SELECT reason_codes_json
+        FROM live_sim_rejections
+        ORDER BY created_at DESC, rejection_id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    command_count = _count(connection, "gateway_commands")
+    connection.close()
+
+    reasons = json.loads(rejection["reason_codes_json"])
+    assert LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value in reasons
+    assert "ORDER_PLAN_BINDING_CURRENT_SOURCE_WATERMARK_MISMATCH" in reasons
+    assert command_count == 0
+
+
+def test_intent_creation_rejects_explicit_empty_plan_binding(tmp_path) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "empty-expected-binding.sqlite3"
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        create_live_sim_intent_from_order_plan(
+            connection,
+            order_plan_id,
+            settings=_pilot_settings(),
+            expected_binding={},
+        )
+
+    intent_count = _count(connection, "live_sim_intents")
+    connection.close()
+
+    assert intent_count == 0
+
+
+def test_terminal_queue_rejects_mutated_intent_execution_payload(
+    tmp_path,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "terminal-intent-payload-tamper.sqlite3"
+    )
+    settings = _pilot_settings()
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    connection.execute(
+        """
+        UPDATE live_sim_intents
+        SET quantity = 999999,
+            notional = limit_price * 999999,
+            idempotency_key = idempotency_key || ':tampered'
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    )
+    connection.commit()
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    persisted_intent = connection.execute(
+        """
+        SELECT status, reason_codes_json
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()
+    command_count = _count(connection, "gateway_commands")
+    order_count = _count(connection, "live_sim_orders")
+    connection.close()
+
+    reasons = json.loads(persisted_intent["reason_codes_json"])
+    assert persisted_intent["status"] == LiveSimIntentStatus.REJECTED.value
+    assert LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value in reasons
+    assert LiveSimReasonCode.ORDER_PLAN_INTENT_EXECUTION_MISMATCH.value in reasons
+    assert command_count == 0
+    assert order_count == 0
+
+
+def test_terminal_queue_rejects_mutated_account_with_coherent_idempotency(
+    tmp_path,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "terminal-intent-account-tamper.sqlite3"
+    )
+    settings = _pilot_settings()
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    mutated_account_id = "SIM-87654321"
+    mutated_idempotency_key = make_live_sim_order_plan_idempotency_key(
+        trade_date=intent.trade_date,
+        account_id=mutated_account_id,
+        order_plan_id=order_plan_id,
+        code=intent.code,
+        side=intent.side.value,
+        limit_price=float(intent.limit_price or 0),
+        quantity=int(intent.quantity),
+    )
+    connection.execute(
+        """
+        UPDATE live_sim_intents
+        SET account_id = ?,
+            idempotency_key = ?
+        WHERE live_sim_intent_id = ?
+        """,
+        (
+            mutated_account_id,
+            mutated_idempotency_key,
+            intent.live_sim_intent_id,
+        ),
+    )
+    connection.commit()
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    persisted_intent = connection.execute(
+        """
+        SELECT status, reason_codes_json
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()
+    command_count = _count(connection, "gateway_commands")
+    order_count = _count(connection, "live_sim_orders")
+    connection.close()
+
+    reasons = json.loads(persisted_intent["reason_codes_json"])
+    assert persisted_intent["status"] == LiveSimIntentStatus.REJECTED.value
+    assert LiveSimReasonCode.ORDER_PLAN_INTENT_EXECUTION_MISMATCH.value in reasons
+    assert command_count == 0
+    assert order_count == 0
+
+
+def test_terminal_queue_rereads_created_status_after_write_lock(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.live_sim.live_sim_service as live_sim_service
+
+    db_path = tmp_path / "terminal-intent-status-race.sqlite3"
+    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    settings = _pilot_settings()
+    intent = create_live_sim_intent_from_order_plan(
+        connection,
+        order_plan_id,
+        settings=settings,
+    )
+    racing_connection = open_connection(db_path)
+    acquire_real = live_sim_service._acquire_buy_queue_boundary_write_lock
+
+    def transition_before_lock(target_connection):
+        racing_connection.execute(
+            """
+            UPDATE live_sim_intents
+            SET status = ?
+            WHERE live_sim_intent_id = ?
+            """,
+            (
+                LiveSimIntentStatus.REJECTED.value,
+                intent.live_sim_intent_id,
+            ),
+        )
+        racing_connection.commit()
+        return acquire_real(target_connection)
+
+    monkeypatch.setattr(
+        live_sim_service,
+        "_acquire_buy_queue_boundary_write_lock",
+        transition_before_lock,
+    )
+
+    with pytest.raises(ValueError, match=LiveSimIntentStatus.REJECTED.value):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+        )
+
+    persisted_status = connection.execute(
+        """
+        SELECT status
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()["status"]
+    command_count = _count(connection, "gateway_commands")
+    order_count = _count(connection, "live_sim_orders")
+    racing_connection.close()
+    connection.close()
+
+    assert persisted_status == LiveSimIntentStatus.REJECTED.value
+    assert command_count == 0
+    assert order_count == 0
 
 
 def test_pilot_disabled_records_rejection_without_command(tmp_path) -> None:

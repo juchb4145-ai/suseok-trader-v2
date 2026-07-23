@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 from api.routes import live_sim as live_sim_routes
 from services.config import Settings
+from services.live_sim.order_plan_binding import OrderPlanBindingValidationResult
 from services.runtime import fast5_automatic_canary as fast5
 from services.runtime.fast5_automatic_canary import (
     Fast5AutomaticCanaryGate,
@@ -23,9 +24,18 @@ from services.runtime.preflight import (
     PreflightStatus,
 )
 from storage.sqlite import initialize_database
-from tests.test_live_sim_order_plan_pipeline import _pilot_settings
+from tests.test_live_sim_order_plan_pipeline import (
+    _pilot_settings,
+    _prepared_order_plan_connection,
+)
 
 SHA = "a" * 64
+PLAN_BINDING = {
+    "contract": "live-sim-order-plan-binding.v1",
+    "order_plan_id": "OPD-fast5-selected",
+    "order_plan_snapshot_sha256": "c" * 64,
+    "binding_sha256": "b" * 64,
+}
 
 
 def test_fast5_defaults_are_disabled_and_gate_is_read_only(tmp_path) -> None:
@@ -205,6 +215,14 @@ def test_fast5_pipeline_gate_blocks_coverage_mismatch_and_zero_plan_ready(
         trade_date="2026-07-20",
         queue_commands=True,
     )
+    _patch_dynamic_pass(monkeypatch)
+    monkeypatch.setattr(fast5, "_select_fast5_plan_binding", lambda *args: None)
+    missing_binding = evaluate_fast5_automatic_canary_gate(
+        connection,
+        settings=settings,
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
     connection.close()
 
     assert coverage_mismatch.status is Fast5CanaryMode.PROTECT_ONLY
@@ -220,6 +238,39 @@ def test_fast5_pipeline_gate_blocks_coverage_mismatch_and_zero_plan_ready(
     assert zero_plan_ready.checks["pipeline_coherency"][
         "unexpired_plan_ready_count"
     ] == 0
+    assert missing_binding.status is Fast5CanaryMode.PROTECT_ONLY
+    assert "FAST5_PIPELINE_NON_PASS" in missing_binding.reason_codes
+    assert "PLAN_READY_BINDING_MISSING" in missing_binding.checks[
+        "pipeline_coherency"
+    ]["qualification_reason_codes"]
+    assert missing_binding.checks["pipeline_coherency"][
+        "selected_plan_binding"
+    ] is None
+
+
+def test_fast5_selects_binding_from_exact_qualified_base_plan(tmp_path) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "fast5-exact-plan-binding.sqlite3"
+    )
+
+    binding = fast5._select_fast5_plan_binding(
+        connection,
+        {
+            "items": [
+                {
+                    "status": "PASS",
+                    "order_plan_id": order_plan_id,
+                }
+            ]
+        },
+    )
+    connection.close()
+
+    assert binding is not None
+    assert binding["order_plan_id"] == order_plan_id
+    assert binding["contract"] == "live-sim-order-plan-binding.v1"
+    assert len(binding["binding_sha256"]) == 64
+    assert len(binding["order_plan_snapshot_sha256"]) == 64
 
 
 @pytest.mark.parametrize(
@@ -315,12 +366,27 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
             kwargs=kwargs,
         )
 
+    def binding_selector(actual_connection, qualification) -> dict:
+        assert actual_connection is connection
+        assert qualification["status"] == "PASS"
+        read_probe("binding")
+        return dict(PLAN_BINDING)
+
     monkeypatch.setattr(fast5, "_pipeline_inventory_count", inventory_count)
     monkeypatch.setattr(fast5, "build_pipeline_coherency_status", diagnostic_status)
     monkeypatch.setattr(
         fast5,
         "build_fast5_plan_ready_coherency_status",
         qualification_status,
+    )
+    monkeypatch.setattr(fast5, "_select_fast5_plan_binding", binding_selector)
+    monkeypatch.setattr(
+        fast5,
+        "validate_order_plan_binding",
+        lambda *args, **kwargs: OrderPlanBindingValidationResult(
+            passed=True,
+            binding=PLAN_BINDING,
+        ),
     )
 
     try:
@@ -353,6 +419,7 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
         ("inventory", True, 1),
         ("diagnostic", True, 1),
         ("qualification", True, 1),
+        ("binding", True, 1),
     ]
     assert writer_count == 2
     assert captured["passed"] is True
@@ -452,6 +519,7 @@ def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
         phase=Fast5CanaryPhase.QUALIFIED,
         trade_date="2026-07-20",
         queue_commands_requested=True,
+        checks=_ready_gate_checks(),
     )
     preflight = _passing_preflight()
     monkeypatch.setattr(fast5, "_evaluate_gate", lambda *args, **kwargs: (gate, preflight))
@@ -485,6 +553,7 @@ def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
     assert captured["mode"] is OperatingMode.PILOT_BUY_ONLY
     assert captured["queue_commands"] is True
     assert captured["include_ai"] is False
+    assert captured["required_plan_binding"] == PLAN_BINDING
     assert strict.live_sim_max_daily_order_count == 2
     assert strict.live_sim_max_order_notional == 100_000
     assert strict.live_sim_order_plan_min_notional == 10_000
@@ -498,6 +567,43 @@ def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
     assert strict.live_sim_reprice_enabled is False
     assert strict.live_sim_reconcile_enabled is False
     assert strict.live_sim_position_allow_scale_in is False
+
+
+def test_fast5_ready_run_fails_closed_when_exact_binding_is_missing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-missing-execution-binding.sqlite3")
+    gate = Fast5AutomaticCanaryGate(
+        status=Fast5CanaryMode.READY,
+        phase=Fast5CanaryPhase.QUALIFIED,
+        trade_date="2026-07-20",
+        queue_commands_requested=True,
+    )
+    monkeypatch.setattr(
+        fast5,
+        "_evaluate_gate",
+        lambda *args, **kwargs: (gate, _passing_preflight()),
+    )
+    monkeypatch.setattr(
+        fast5,
+        "run_live_sim_operating_cycle_once",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("unbound FAST-5 execution must not start")
+        ),
+    )
+
+    result = run_fast5_automatic_canary_once(
+        connection,
+        settings=_qualified_settings(),
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
+    connection.close()
+
+    assert result.status == "PROTECT_ONLY"
+    assert result.queue_commands_effective is False
+    assert "FAST5_PLAN_BINDING_MISSING_AT_EXECUTION" in result.gate.reason_codes
 
 
 def test_fast5_bootstrap_uses_date_bound_approval_and_advisory_alpha_shadow(
@@ -568,6 +674,7 @@ def test_fast5_bootstrap_reserves_once_then_runs_protect_only_lifecycle(
         phase=Fast5CanaryPhase.BOOTSTRAP,
         trade_date="2026-07-20",
         queue_commands_requested=True,
+        checks=_ready_gate_checks(),
         bootstrap_approval=approval,
     )
     monkeypatch.setattr(
@@ -643,6 +750,7 @@ def test_fast5_bootstrap_reserves_once_then_runs_protect_only_lifecycle(
     assert first.status == "BOOTSTRAP_QUEUED"
     assert first.to_dict()["buy_command_count"] == 1
     assert calls[0]["settings"].live_sim_max_daily_order_count == 1
+    assert calls[0]["required_plan_binding"] == PLAN_BINDING
     assert usage["consumed"] is True
     assert reserved_again is False
     assert existing == usage["reservation_run_id"]
@@ -678,6 +786,7 @@ def test_fast5_bootstrap_cycle_exception_is_audited_and_latched(
         phase=Fast5CanaryPhase.BOOTSTRAP,
         trade_date="2026-07-20",
         queue_commands_requested=True,
+        checks=_ready_gate_checks(),
         bootstrap_approval=approval,
     )
     monkeypatch.setattr(fast5, "_evaluate_gate", lambda *args, **kwargs: (gate, preflight))
@@ -848,6 +957,19 @@ def _patch_dynamic_pass(monkeypatch) -> None:
     monkeypatch.setattr(fast5, "_pipeline_inventory_count", lambda *args: 1)
     monkeypatch.setattr(
         fast5,
+        "_select_fast5_plan_binding",
+        lambda *args, **kwargs: dict(PLAN_BINDING),
+    )
+    monkeypatch.setattr(
+        fast5,
+        "validate_order_plan_binding",
+        lambda *args, **kwargs: OrderPlanBindingValidationResult(
+            passed=True,
+            binding=PLAN_BINDING,
+        ),
+    )
+    monkeypatch.setattr(
+        fast5,
         "get_order_broker_boundary_status",
         lambda connection: {
             "effective_status": "PASS",
@@ -873,6 +995,15 @@ def _patch_dynamic_pass(monkeypatch) -> None:
         "get_latest_live_sim_reconcile",
         lambda connection: _fresh_reconcile(),
     )
+
+
+def _ready_gate_checks() -> dict:
+    return {
+        "pipeline_coherency": {
+            "status": "PASS",
+            "selected_plan_binding": dict(PLAN_BINDING),
+        }
+    }
 
 
 def _passing_preflight() -> LiveSimPreflightResult:

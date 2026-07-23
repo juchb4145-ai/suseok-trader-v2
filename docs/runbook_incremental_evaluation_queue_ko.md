@@ -2,16 +2,36 @@
 
 ## 목적과 안전 경계
 
-Incremental Evaluation Queue는 가격 또는 candidate source 변화 뒤 Candidate → Strategy →
-Risk 관측만 갱신한다. 이 경로 자체는 order intent나 broker command를 만들지 않지만, 갱신된
-관측은 나중에 다른 producer가 소비할 수 있다.
+Incremental Evaluation Queue는 가격 또는 candidate source 변화 뒤 candidate context를
+refresh하고, Strategy → Risk → EntryTiming/OrderPlan 평가를 한 `source_run_id`로 묶어
+갱신한다. 이 경로 자체는 order intent나 broker command를 만들지 않지만, 갱신된 관측과
+`order_plan_drafts`는 나중에 별도 LIVE_SIM producer가 소비할 수 있다.
 
 - LIVE_SIM/LIVE_REAL을 허용하지 않는다.
 - 기존 evaluation runtime lock과 fencing token을 사용한다.
+- Strategy, Risk, EntryTiming 중 하나라도 비활성화되면
+  `DISABLED_REQUIRED_STAGE`로 fail closed하고 queue row를 삭제하거나 attempt를 증가시키지
+  않는다.
 - retry-exhausted 또는 dead-letter audit row를 삭제하지 않는다.
 - historical dead letter를 active queue로 reset하지 않는다.
 - disposition apply/revoke와 future recovery는 Core POST API가 아니라 전용 offline CLI에서만
   수행한다.
+
+## 동일 run 원자성 계약
+
+Candidate context refresh는 기존 계약대로 선행 commit한다. 그 뒤 후보 한 건의 다음 쓰기는
+하나의 `BEGIN IMMEDIATE` transaction 안에서 전부 성공하거나 전부 rollback한다.
+
+1. Strategy observation 및 latest pointer
+2. 방금 생성한 exact Strategy ID를 입력으로 한 Risk observation 및 latest pointer
+3. 같은 `source_run_id`와 `source_watermark_hash`를 사용하는 EntryTiming evaluation
+4. 해당 평가가 draft를 만들면 exact `idempotency_key`의 OrderPlan base/latest row
+5. 모든 ID·run·watermark·observe-only 계약 검증 뒤 incremental queue row 삭제
+
+중간 단계 오류, 다른 run fallback, latest pointer 불일치, fence loss가 있으면 Strategy 이후
+쓰기와 queue 삭제를 rollback한다. 오류 attempt/dead-letter 기록은 별도 fenced transaction으로
+남기며, 그 transaction의 fence 검증도 실패하면 오류 기록까지 rollback해 열린 transaction을
+남기지 않는다.
 
 ## Raw와 effective 상태
 

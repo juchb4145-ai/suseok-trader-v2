@@ -24,6 +24,10 @@ from services.live_sim.execution_lifecycle_status import (
     build_live_sim_execution_lifecycle_status,
 )
 from services.live_sim.live_sim_service import get_latest_live_sim_reconcile
+from services.live_sim.order_plan_binding import (
+    build_order_plan_binding,
+    validate_order_plan_binding,
+)
 from services.pipeline_coherency import (
     build_fast5_plan_ready_coherency_status,
     build_pipeline_coherency_status,
@@ -40,10 +44,11 @@ from services.runtime.preflight import (
     run_live_sim_preflight,
 )
 
-FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v3"
+FAST5_POLICY_VERSION = "fast5-guarded-automatic-canary.v4"
 FAST5_ROLLBACK_POLICY_VERSIONS = {
     "fast5-guarded-automatic-canary.v1",
     "fast5-guarded-automatic-canary.v2",
+    "fast5-guarded-automatic-canary.v3",
     FAST5_POLICY_VERSION,
 }
 FAST5_BOOTSTRAP_APPROVAL_CONTRACT = "fast5-bootstrap-automatic-canary-approval.v1"
@@ -282,6 +287,29 @@ def run_fast5_automatic_canary_once(
             rollback_latched=False,
         )
 
+    required_plan_binding = _selected_plan_binding_from_gate(gate)
+    if required_plan_binding is None:
+        fail_closed_gate = replace(
+            gate,
+            status=Fast5CanaryMode.PROTECT_ONLY,
+            reason_codes=tuple(
+                dict.fromkeys(
+                    [
+                        *gate.reason_codes,
+                        "FAST5_PLAN_BINDING_MISSING_AT_EXECUTION",
+                    ]
+                )
+            ),
+        )
+        return Fast5AutomaticCanaryRunResult(
+            run_id=run_id,
+            status="PROTECT_ONLY",
+            mode=OperatingMode.PROTECT_ONLY,
+            queue_commands_requested=True,
+            queue_commands_effective=False,
+            gate=fail_closed_gate,
+        )
+
     bootstrap = gate.phase is Fast5CanaryPhase.BOOTSTRAP
     bootstrap_reservation_run_id: str | None = None
     if bootstrap:
@@ -321,6 +349,7 @@ def run_fast5_automatic_canary_once(
             limit=limit,
             include_ai=False,
             include_no_buy=True,
+            required_plan_binding=required_plan_binding,
         )
     except Exception as exc:
         failed = LiveSimOperatingRunResult(
@@ -741,6 +770,27 @@ def _add_pipeline_check(
                 max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
             )
             _require_pipeline_read_snapshot(connection)
+            selected_plan_binding = _select_fast5_plan_binding(
+                connection,
+                qualification,
+            )
+            _require_pipeline_read_snapshot(connection)
+            selected_plan_validation: dict[str, Any] | None = None
+            if selected_plan_binding is not None:
+                binding_validation = validate_order_plan_binding(
+                    connection,
+                    selected_plan_binding,
+                    max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
+                    expected_trade_date=trade_date,
+                )
+                selected_plan_validation = {
+                    "status": "PASS" if binding_validation.passed else "FAIL",
+                    "reason_codes": list(binding_validation.reason_codes),
+                    "checked_at": binding_validation.checked_at,
+                    "read_only": True,
+                    "no_order_side_effects": True,
+                }
+            _require_pipeline_read_snapshot(connection)
         finally:
             if owns_read_snapshot and connection.in_transaction:
                 connection.rollback()
@@ -764,6 +814,13 @@ def _add_pipeline_check(
             qualification_reason_codes.append(
                 "PIPELINE_INVENTORY_COVERAGE_MISMATCH"
             )
+        if not selected_plan_binding:
+            qualification_reason_codes.append("PLAN_READY_BINDING_MISSING")
+        elif (
+            selected_plan_validation is None
+            or selected_plan_validation.get("status") != "PASS"
+        ):
+            qualification_reason_codes.append("PLAN_READY_BINDING_NON_PASS")
         qualification_reason_codes = list(
             dict.fromkeys(qualification_reason_codes)
         )
@@ -771,10 +828,15 @@ def _add_pipeline_check(
             full_inventory_covered
             and qualification.get("status") == "PASS"
             and int(qualification.get("unexpired_plan_ready_count") or 0) > 0
+            and selected_plan_binding
+            and selected_plan_validation is not None
+            and selected_plan_validation.get("status") == "PASS"
         )
         details = {
             "qualification_status": "PASS" if passed else "FAIL",
             "qualification_reason_codes": qualification_reason_codes,
+            "selected_plan_binding": selected_plan_binding,
+            "selected_plan_binding_validation": selected_plan_validation,
             "plan_ready_qualification_status": qualification.get("status"),
             "diagnostic_status": status.get("status"),
             "diagnostic_reason_codes": status.get("reason_codes"),
@@ -820,6 +882,53 @@ def _add_pipeline_check(
             "read_snapshot_consistent": False,
         }
     add("pipeline_coherency", passed, "FAST5_PIPELINE_NON_PASS", details)
+
+
+def _select_fast5_plan_binding(
+    connection: sqlite3.Connection,
+    qualification: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    qualified_plan_ids = [
+        str(item.get("order_plan_id") or "")
+        for item in qualification.get("items", [])
+        if isinstance(item, Mapping)
+        and item.get("status") == "PASS"
+        and str(item.get("order_plan_id") or "")
+    ]
+    if not qualified_plan_ids:
+        return None
+    placeholders = ",".join("?" for _ in qualified_plan_ids)
+    row = connection.execute(
+        f"""
+        SELECT draft.*
+        FROM order_plan_drafts_latest AS latest
+        JOIN order_plan_drafts AS draft
+          ON draft.order_plan_id = latest.order_plan_id
+        WHERE latest.order_plan_id IN ({placeholders})
+          AND latest.status = 'PLAN_READY'
+        ORDER BY
+            COALESCE(latest.priority_score, 0) DESC,
+            latest.created_at DESC,
+            latest.order_plan_id ASC
+        LIMIT 1
+        """,
+        tuple(qualified_plan_ids),
+    ).fetchone()
+    if row is None:
+        return None
+    return build_order_plan_binding(dict(row))
+
+
+def _selected_plan_binding_from_gate(
+    gate: Fast5AutomaticCanaryGate,
+) -> dict[str, Any] | None:
+    pipeline_check = gate.checks.get("pipeline_coherency")
+    if not isinstance(pipeline_check, Mapping):
+        return None
+    binding = pipeline_check.get("selected_plan_binding")
+    if not isinstance(binding, Mapping) or not binding:
+        return None
+    return dict(binding)
 
 
 def _require_pipeline_read_snapshot(connection: sqlite3.Connection) -> None:

@@ -146,6 +146,8 @@ def evaluate_live_sim_order_plan_eligibility(
     connection: sqlite3.Connection,
     order_plan_id: str,
     settings: Settings | None = None,
+    *,
+    ignore_live_sim_intent_id: str | None = None,
 ) -> LiveSimOrderPlanEligibility:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(order_plan_id, "order_plan_id")
@@ -318,9 +320,20 @@ def evaluate_live_sim_order_plan_eligibility(
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_LINEAGE_INVALID.value)
 
     existing_intent = find_live_sim_intent_by_order_plan(connection, normalized_id)
-    if existing_intent is not None:
+    if (
+        existing_intent is not None
+        and existing_intent.get("live_sim_intent_id") != ignore_live_sim_intent_id
+    ):
         reason_codes.append(LiveSimReasonCode.ORDER_PLAN_DUPLICATE_INTENT.value)
-    if _recent_active_live_sim_count_for_code(connection, code, resolved_settings) > 0:
+    if (
+        _recent_active_live_sim_count_for_code(
+            connection,
+            code,
+            resolved_settings,
+            exclude_intent_id=ignore_live_sim_intent_id,
+        )
+        > 0
+    ):
         reason_codes.append(LiveSimReasonCode.DUPLICATE_LIVE_SIM_ORDER.value)
     if _latest_reconcile_blocks_new_buy(connection, resolved_settings):
         reason_codes.append(LiveSimReasonCode.LIVE_SIM_RECONCILE_MISMATCH_BLOCK.value)

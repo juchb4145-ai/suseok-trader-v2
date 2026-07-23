@@ -1679,6 +1679,7 @@ def _evaluate_risk_observations(
         limit=bounded_limit,
         candidate_instance_id=candidate_instance_id,
         strategy_observation_id=strategy_observation_id,
+        source_run_id=source_run_id,
     )
     evaluated_count = observe_pass_count = caution_count = block_count = data_wait_count = 0
     error_count = 0
@@ -2049,12 +2050,19 @@ def _risk_evaluation_targets(
     limit: int,
     candidate_instance_id: str | None,
     strategy_observation_id: str | None,
+    source_run_id: str | None,
 ) -> list[dict[str, Any]]:
+    normalized_source_run_id = (
+        None
+        if source_run_id is None
+        else require_non_empty_str(source_run_id, "source_run_id")
+    )
     if strategy_observation_id is not None:
         normalized_id = require_non_empty_str(strategy_observation_id, "strategy_observation_id")
         row = connection.execute(
             """
-            SELECT strategy_observation_id, candidate_instance_id, trade_date, code, overall_status
+            SELECT strategy_observation_id, candidate_instance_id, trade_date, code,
+                overall_status, source_run_id
             FROM strategy_observations
             WHERE strategy_observation_id = ?
             """,
@@ -2062,19 +2070,44 @@ def _risk_evaluation_targets(
         ).fetchone()
         if row is None:
             raise ValueError(f"strategy observation not found: {normalized_id}")
+        if (
+            normalized_source_run_id is not None
+            and row["source_run_id"] != normalized_source_run_id
+        ):
+            raise ValueError(
+                "strategy observation does not belong to the requested source run"
+            )
         return [_row_to_dict(row)]
     if candidate_instance_id is not None:
         normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
-        row = connection.execute(
-            """
-            SELECT strategy_observation_id, candidate_instance_id, trade_date, code, overall_status
-            FROM strategy_observations_latest
-            WHERE candidate_instance_id = ?
-            """,
-            (normalized_id,),
-        ).fetchone()
+        if normalized_source_run_id is None:
+            row = connection.execute(
+                """
+                SELECT strategy_observation_id, candidate_instance_id, trade_date, code,
+                    overall_status, source_run_id
+                FROM strategy_observations_latest
+                WHERE candidate_instance_id = ?
+                """,
+                (normalized_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT strategy_observation_id, candidate_instance_id, trade_date, code,
+                    overall_status, source_run_id
+                FROM strategy_observations
+                WHERE candidate_instance_id = ? AND source_run_id = ?
+                ORDER BY evaluated_at DESC, strategy_observation_id DESC
+                LIMIT 1
+                """,
+                (normalized_id, normalized_source_run_id),
+            ).fetchone()
         if row is not None:
             return [_row_to_dict(row)]
+        if normalized_source_run_id is not None:
+            raise ValueError(
+                "strategy observation not found for candidate in requested source run"
+            )
         candidate = _candidate_row(connection, normalized_id)
         if candidate is None:
             raise ValueError(f"candidate not found: {normalized_id}")
@@ -2101,12 +2134,21 @@ def _risk_evaluation_targets(
         )
         clauses.append("overall_status = ?")
         params.append(normalized_status.value)
+    if normalized_source_run_id is not None:
+        clauses.append("source_run_id = ?")
+        params.append(normalized_source_run_id)
     where_sql = "" if not clauses else "WHERE " + " AND ".join(clauses)
     params.append(limit)
+    source_table = (
+        "strategy_observations"
+        if normalized_source_run_id is not None
+        else "strategy_observations_latest"
+    )
     rows = connection.execute(
         f"""
-        SELECT strategy_observation_id, candidate_instance_id, trade_date, code, overall_status
-        FROM strategy_observations_latest
+        SELECT strategy_observation_id, candidate_instance_id, trade_date, code,
+            overall_status, source_run_id
+        FROM {source_table}
         {where_sql}
         ORDER BY
             CASE overall_status

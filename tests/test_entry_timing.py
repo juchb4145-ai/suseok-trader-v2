@@ -512,6 +512,45 @@ def test_service_prioritizes_current_run_risk_pass_before_candidate_priority(tmp
     assert result.evaluations[0].evidence_json["pipeline_coherency"]["status"] == "PASS"
 
 
+def test_service_does_not_fall_back_to_latest_rows_from_another_source_run(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "entry_timing_exact_run.sqlite3")
+    settings = _settings()
+    candidate_id = _insert_strategy_fixture(connection)
+
+    strategy_a = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy_a, source_run_id="observe-run-a")
+    risk_a = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    save_risk_observation(connection, risk_a, source_run_id="observe-run-a")
+
+    strategy_b = evaluate_candidate_strategy(connection, candidate_id, settings=settings)
+    save_strategy_observation(connection, strategy_b, source_run_id="observe-run-b")
+    risk_b = evaluate_risk_for_candidate(connection, candidate_id, settings=settings)
+    save_risk_observation(connection, risk_b, source_run_id="observe-run-b")
+
+    result = evaluate_entry_timing(
+        connection,
+        candidate_instance_id=candidate_id,
+        settings=settings,
+        source_run_id="observe-run-a",
+    )
+    persisted_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM entry_timing_evaluations
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()["count"]
+    connection.close()
+
+    assert result.candidate_count == 0
+    assert result.evaluated_count == 0
+    assert not result.order_plan_drafts
+    assert persisted_count == 0
+
+
 def test_service_upserts_duplicate_draft_by_stable_key(tmp_path) -> None:
     connection = initialize_database(tmp_path / "entry_timing_dedupe.sqlite3")
     settings = _settings()

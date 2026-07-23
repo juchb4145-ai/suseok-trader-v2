@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime
 
 import domain.broker.utils as broker_utils
+import pytest
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.live_sim.reasons import LiveSimReasonCode
@@ -227,6 +228,50 @@ def test_live_sim_intent_queue_ack_execution_and_reconcile(tmp_path) -> None:
     assert execution_result["handled"] is True
     assert filled_order["status"] == LiveSimOrderStatus.FILLED.value
     assert snapshot.status == "LOCAL_ONLY_WITHOUT_BROKER_SNAPSHOT"
+
+
+def test_generic_intent_cannot_degrade_explicit_plan_binding_to_unbound_queue(
+    tmp_path,
+) -> None:
+    connection, candidate_id = _prepared_connection(
+        tmp_path / "live-sim-required-binding-generic-intent.sqlite3"
+    )
+    create_dry_run_intent(connection, candidate_id, settings=_dry_run_settings())
+    _mark_gateway_ready(connection)
+    settings = _live_sim_settings()
+    intent = create_live_sim_intent(connection, candidate_id, settings=settings)
+
+    with pytest.raises(
+        ValueError,
+        match=LiveSimReasonCode.ORDER_PLAN_BINDING_INVALID.value,
+    ):
+        queue_live_sim_order_command(
+            connection,
+            intent.live_sim_intent_id,
+            settings=settings,
+            required_plan_binding={
+                "contract": "live-sim-order-plan-binding.v1",
+                "order_plan_id": "OPD-required",
+                "binding_sha256": "b" * 64,
+                "order_plan_snapshot_sha256": "c" * 64,
+            },
+        )
+
+    persisted_status = connection.execute(
+        """
+        SELECT status
+        FROM live_sim_intents
+        WHERE live_sim_intent_id = ?
+        """,
+        (intent.live_sim_intent_id,),
+    ).fetchone()["status"]
+    command_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM gateway_commands"
+    ).fetchone()["count"]
+    connection.close()
+
+    assert persisted_status == LiveSimIntentStatus.REJECTED.value
+    assert command_count == 0
 
 
 def test_live_sim_daily_loss_blocks_buy_intent_and_command(tmp_path) -> None:
