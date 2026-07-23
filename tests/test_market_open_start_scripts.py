@@ -11,7 +11,7 @@ def test_start_market_open_observe_script_keeps_order_flags_off() -> None:
     assert '$env:TRADING_MODE = "OBSERVE"' in script
     assert '$env:TRADING_ALLOW_LIVE_REAL = "false"' in script
     _assert_observe_side_effect_flags_are_overridden(script)
-    assert "queue_commands default remains false" in script
+    assert "realtime/order queue commands forced false" in script
     assert "Dashboard URL:" in script
     assert "/api/gateway/events/recent?limit=20" in script
     assert "--realtime-exchange $RealtimeExchange" in script
@@ -290,6 +290,25 @@ def test_start_kiwoom_gateway_visible_defaults_to_multi_profile_file() -> None:
     _assert_observe_side_effect_flags_are_overridden(script)
 
 
+def test_observe_launchers_override_realtime_queue_after_dotenv_load() -> None:
+    for script_name in (
+        "start_market_open_observe.ps1",
+        "start_kiwoom_gateway_visible.ps1",
+    ):
+        script = (ROOT_DIR / "tools" / script_name).read_text(encoding="utf-8")
+        dotenv_index = script.index("Import-DotEnv -Path")
+        assignment_index = script.index(
+            '$env:REALTIME_SUBSCRIPTION_QUEUE_COMMANDS = "false"'
+        )
+        override_file_index = script.rindex("Write-ObserveEnvOverrideFile")
+
+        assert dotenv_index < assignment_index < override_file_index
+        assert (
+            '"REALTIME_SUBSCRIPTION_QUEUE_COMMANDS='
+            '$($env:REALTIME_SUBSCRIPTION_QUEUE_COMMANDS)"'
+        ) in script
+
+
 def _assert_observe_side_effect_flags_are_overridden(script: str) -> None:
     false_flags = (
         "DRY_RUN_ORDER_ROUTING_ENABLED",
@@ -320,6 +339,7 @@ def _assert_observe_side_effect_flags_are_overridden(script: str) -> None:
         "LIVE_SIM_OPERATING_CYCLE_ENABLED",
         "LIVE_SIM_OPERATING_LOOP_ENABLED",
         "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS",
+        "REALTIME_SUBSCRIPTION_QUEUE_COMMANDS",
     )
     for flag in false_flags:
         assert f'$env:{flag} = "false"' in script

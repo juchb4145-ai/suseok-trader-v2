@@ -161,6 +161,7 @@ function Write-ObserveEnvOverrideFile {
         "LIVE_SIM_OPERATING_CYCLE_ENABLED=$($env:LIVE_SIM_OPERATING_CYCLE_ENABLED)",
         "LIVE_SIM_OPERATING_LOOP_ENABLED=$($env:LIVE_SIM_OPERATING_LOOP_ENABLED)",
         "LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS=$($env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS)",
+        "REALTIME_SUBSCRIPTION_QUEUE_COMMANDS=$($env:REALTIME_SUBSCRIPTION_QUEUE_COMMANDS)",
         "LIVE_SIM_KILL_SWITCH=$($env:LIVE_SIM_KILL_SWITCH)",
         "PROJECTION_OUTBOX_WORKER_ENABLED=$($env:PROJECTION_OUTBOX_WORKER_ENABLED)",
         "PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED=$($env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED)",
@@ -420,9 +421,7 @@ if ($MarketScanParserVerified -and -not $AppendOnlyEvidence) {
     throw "MarketScanParserVerified is only allowed with AppendOnlyEvidence."
 }
 $EvidenceModeRequested = $RealtimeFidValidation -or $AppendOnlyEvidence
-if ($AppendOnlyEvidence) {
-    $ThemeRefreshQueueRealtimeCommands = "false"
-}
+$ThemeRefreshQueueRealtimeCommands = "false"
 $OperatingDbPath = Resolve-WorkspacePath -Path $env:TRADING_DB_PATH
 if ($EvidenceModeRequested -and [string]::IsNullOrWhiteSpace($DbPath)) {
     throw "DbPath is required for realtime/evidence validation modes."
@@ -493,6 +492,7 @@ $env:LIVE_SIM_RECONCILE_REQUEST_BROKER_SNAPSHOT_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_CYCLE_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_ENABLED = "false"
 $env:LIVE_SIM_OPERATING_LOOP_QUEUE_COMMANDS = "false"
+$env:REALTIME_SUBSCRIPTION_QUEUE_COMMANDS = "false"
 $env:LIVE_SIM_KILL_SWITCH = "true"
 $env:PROJECTION_OUTBOX_WORKER_ENABLED = if ($AppendOnlyEvidence) { "true" } else { "false" }
 $env:PROJECTION_OUTBOX_APPLY_PROJECTION_ENABLED = if ($MarketReferenceValidationRequested) { "true" } else { "false" }
@@ -635,7 +635,7 @@ $ConditionMode = if (-not [string]::IsNullOrWhiteSpace($ResolvedConditionProfile
 }
 
 Write-Host "Market-open OBSERVE profile is prepared."
-Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, queue_commands default remains false."
+Write-Host "LIVE_REAL=false, LIVE_SIM routing=false, realtime/order queue commands forced false."
 Write-Host "Evidence mode: realtime_fid=$($RealtimeFidValidation.IsPresent) append_only=$($AppendOnlyEvidence.IsPresent)"
 Write-Host "Market-data operating mode: $($env:GATEWAY_MARKET_DATA_APPEND_ONLY_OPERATING_MODE) global_budget=$($env:GATEWAY_MARKET_DATA_APPEND_ONLY_GLOBAL_MAX_SKIP_PER_MINUTE)/min"
 Write-Host "Database path: $ResolvedDbPath"

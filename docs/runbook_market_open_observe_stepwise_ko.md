@@ -97,6 +97,12 @@ python -m tools.run_market_open_observe_cycle `
 - `reports/market_open_observe_cycle/<trade_date>/run_<timestamp>.json`
 - `reports/market_open_observe_cycle/<trade_date>/run_<timestamp>.md`
 
+OBSERVE launcher는 repository `.env`에
+`REALTIME_SUBSCRIPTION_QUEUE_COMMANDS=true`가 있더라도 Core/Gateway 자식 환경에서
+이를 `false`로 덮어쓴다. 따라서 observe cycle과 theme refresh loop는
+`register_realtime`/`remove_realtime` command를 만들지 않는다. 장중 실시간 등록은
+Gateway 시작 인자에 명시한 condition profile과 `KIWOOM_REALTIME_CODES`로만 수행한다.
+
 5. Dashboard 확인
 
 브라우저:
