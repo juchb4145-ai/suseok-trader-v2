@@ -101,7 +101,7 @@ def preview_rebuild(
     before = _file_state(path)
     connection = _open_strict_read_only(path)
     try:
-        _require_schema_62(connection)
+        _require_schema_63(connection)
         preview = preview_targeted_pipeline_rebuild(
             connection,
             candidate_instance_ids,
@@ -121,7 +121,7 @@ def preview_rebuild(
         "mode": "PREVIEW",
         "database": {
             "filename": path.name,
-            "schema_version": "62",
+            "schema_version": "63",
             "files_before": before,
             "files_after": after,
         },
@@ -157,7 +157,7 @@ def run_rebuild(
     result_status = ""
     operation_error: Exception | None = None
     try:
-        _require_schema_62(connection)
+        _require_schema_63(connection)
         if _runtime_lease_count(connection):
             raise TargetedPipelineRebuildCliError("RUNTIME_EXECUTION_LEASE_PRESENT")
         preview = preview_targeted_pipeline_rebuild(
@@ -377,7 +377,7 @@ def _build_run_report(
         "mode": "RUN",
         "database": {
             "filename": path.name,
-            "schema_version": "62",
+            "schema_version": "63",
             "files_before": dict(files_before),
             "files_after": dict(files_after),
         },
@@ -420,7 +420,7 @@ def _post_result_failure_report(
         "mode": "RUN",
         "database": {
             "filename": path.name,
-            "schema_version": "62",
+            "schema_version": "63",
             "files_before": dict(files_before),
             "files_after": (
                 dict(files_after)
@@ -576,10 +576,10 @@ def _open_existing_read_write(path: Path) -> sqlite3.Connection:
     return connection
 
 
-def _require_schema_62(connection: sqlite3.Connection) -> None:
+def _require_schema_63(connection: sqlite3.Connection) -> None:
     row = connection.execute("SELECT value FROM app_metadata WHERE key='schema_version'").fetchone()
-    if row is None or str(row[0]) != "62":
-        raise TargetedPipelineRebuildCliError("SCHEMA_62_REQUIRED")
+    if row is None or str(row[0]) != "63":
+        raise TargetedPipelineRebuildCliError("SCHEMA_63_REQUIRED")
 
 
 def _runtime_lease_count(connection: sqlite3.Connection) -> int:

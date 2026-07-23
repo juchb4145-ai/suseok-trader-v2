@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 from api.routes import live_sim as live_sim_routes
 from services.config import Settings
@@ -43,6 +45,26 @@ def test_fast5_defaults_are_disabled_and_gate_is_read_only(tmp_path) -> None:
     assert "FAST5_BOOTSTRAP_NOT_AUTHORIZED" in gate.reason_codes
     assert gate.to_dict()["ai_routing_effect"] == 0
     assert before == after == 0
+
+
+def test_fast5_bootstrap_approval_normalizes_numeric_types() -> None:
+    direct = build_fast5_bootstrap_approval(
+        Settings(live_sim_fast5_bootstrap_approval_id="fast5-bootstrap-20260723-b"),
+        trade_date="2026-07-23",
+    )
+    parsed_like = build_fast5_bootstrap_approval(
+        Settings(
+            live_sim_fast5_bootstrap_approval_id="fast5-bootstrap-20260723-b",
+            live_sim_max_order_notional=100_000.0,
+            live_sim_order_plan_max_notional=100_000.0,
+            live_sim_fast5_max_order_notional=100_000.0,
+        ),
+        trade_date="2026-07-23",
+    )
+
+    assert direct["canonical_json"] == parsed_like["canonical_json"]
+    assert direct["expected_sha256"] == parsed_like["expected_sha256"]
+    assert '"max_order_notional":100000.0' in direct["canonical_json"]
 
 
 def test_fast5_blocked_queue_request_is_rejected_without_persistent_latch(tmp_path) -> None:
@@ -99,6 +121,26 @@ def test_fast5_all_gates_pass_only_with_bound_evidence_and_dynamic_pass(
         trade_date="2026-07-20",
         queue_commands=True,
     )
+    monkeypatch.setattr(
+        fast5,
+        "get_order_broker_boundary_status",
+        lambda connection: {
+            "effective_status": "WARN",
+            "raw_unconfirmed_count": 3,
+            "effective_unconfirmed_count": 0,
+            "active_order_command_count": 1,
+            "effective_block_new_order_routing": False,
+            "resolution_maintenance_fence_active": False,
+            "reason_codes": [],
+        },
+    )
+    active_order = evaluate_fast5_automatic_canary_gate(
+        connection,
+        settings=settings,
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
+    _patch_dynamic_pass(monkeypatch)
     monkeypatch.setattr(fast5, "_pipeline_inventory_count", lambda *args: 501)
     oversized = evaluate_fast5_automatic_canary_gate(
         connection,
@@ -116,9 +158,275 @@ def test_fast5_all_gates_pass_only_with_bound_evidence_and_dynamic_pass(
     assert gate.effective_limits["max_daily_buy_count"] == 2
     assert gate.effective_limits["max_order_notional"] == 100_000
     assert "FAST5_BROKER_RECONCILE_NON_PASS" in request_disabled.reason_codes
+    assert "FAST5_BROKER_BOUNDARY_BLOCKED" in active_order.reason_codes
+    assert active_order.checks["broker_boundary"]["active_order_command_count"] == 1
     assert oversized.status is Fast5CanaryMode.PROTECT_ONLY
     assert "FAST5_PIPELINE_NON_PASS" in oversized.reason_codes
     assert oversized.checks["pipeline_coherency"]["full_inventory_count"] == 501
+
+
+def test_fast5_pipeline_gate_blocks_coverage_mismatch_and_zero_plan_ready(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-pipeline-scope.sqlite3")
+    settings = _qualified_settings()
+    _patch_dynamic_pass(monkeypatch)
+    monkeypatch.setattr(fast5, "_pipeline_inventory_count", lambda *args: 2)
+
+    coverage_mismatch = evaluate_fast5_automatic_canary_gate(
+        connection,
+        settings=settings,
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
+    monkeypatch.setattr(fast5, "_pipeline_inventory_count", lambda *args: 1)
+    monkeypatch.setattr(
+        fast5,
+        "build_fast5_plan_ready_coherency_status",
+        lambda *args, **kwargs: {
+            "status": "FAIL",
+            "reason_codes": ["NO_UNEXPIRED_PLAN_READY"],
+            "latest_plan_ready_count": 0,
+            "unexpired_plan_ready_count": 0,
+            "coherent_plan_ready_count": 0,
+            "non_pass_plan_ready_count": 0,
+            "missing_lineage_plan_ready_count": 0,
+            "stale_plan_ready_count": 0,
+            "mismatch_plan_ready_count": 0,
+            "invalid_expiry_plan_ready_count": 0,
+            "selection_truncated": False,
+            "generated_at": "2026-07-20T00:00:00Z",
+        },
+    )
+    zero_plan_ready = evaluate_fast5_automatic_canary_gate(
+        connection,
+        settings=settings,
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
+    connection.close()
+
+    assert coverage_mismatch.status is Fast5CanaryMode.PROTECT_ONLY
+    assert "FAST5_PIPELINE_NON_PASS" in coverage_mismatch.reason_codes
+    assert coverage_mismatch.checks["pipeline_coherency"][
+        "full_inventory_covered"
+    ] is False
+    assert "PIPELINE_INVENTORY_COVERAGE_MISMATCH" in coverage_mismatch.checks[
+        "pipeline_coherency"
+    ]["qualification_reason_codes"]
+    assert zero_plan_ready.status is Fast5CanaryMode.PROTECT_ONLY
+    assert "FAST5_PIPELINE_NON_PASS" in zero_plan_ready.reason_codes
+    assert zero_plan_ready.checks["pipeline_coherency"][
+        "unexpired_plan_ready_count"
+    ] == 0
+
+
+@pytest.mark.parametrize(
+    "caller_transaction",
+    [False, True],
+    ids=["owned-snapshot", "caller-snapshot"],
+)
+def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction(
+    tmp_path,
+    monkeypatch,
+    caller_transaction: bool,
+) -> None:
+    db_path = tmp_path / f"fast5-snapshot-{caller_transaction}.sqlite3"
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA journal_mode=WAL")
+    writer = sqlite3.connect(db_path)
+    writer.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE fast5_snapshot_probe (probe_id INTEGER PRIMARY KEY)"
+    )
+    connection.execute("INSERT INTO fast5_snapshot_probe DEFAULT VALUES")
+    connection.commit()
+    if caller_transaction:
+        connection.execute("BEGIN DEFERRED")
+
+    traced_statements: list[str] = []
+    observed_reads: list[tuple[str, bool, int]] = []
+    captured: dict = {}
+    connection.set_trace_callback(traced_statements.append)
+
+    def read_probe(stage: str) -> int:
+        row = connection.execute(
+            "SELECT COUNT(*) AS count FROM fast5_snapshot_probe"
+        ).fetchone()
+        count = int(row["count"] if row else 0)
+        observed_reads.append((stage, connection.in_transaction, count))
+        return count
+
+    def inventory_count(actual_connection, trade_date: str) -> int:
+        assert actual_connection is connection
+        assert trade_date == "2026-07-20"
+        count = read_probe("inventory")
+        writer.execute("INSERT INTO fast5_snapshot_probe DEFAULT VALUES")
+        writer.commit()
+        return count
+
+    def diagnostic_status(actual_connection, **kwargs) -> dict:
+        assert actual_connection is connection
+        assert kwargs["trade_date"] == "2026-07-20"
+        count = read_probe("diagnostic")
+        return {
+            "status": "PASS",
+            "reason_codes": [],
+            "candidate_count": count,
+            "coherent_count": count,
+            "mismatch_count": 0,
+            "missing_lineage_count": 0,
+            "stale_count": 0,
+        }
+
+    def qualification_status(
+        actual_connection,
+        *,
+        pipeline_status,
+        **kwargs,
+    ) -> dict:
+        assert actual_connection is connection
+        assert pipeline_status["candidate_count"] == 1
+        assert kwargs["trade_date"] == "2026-07-20"
+        count = read_probe("qualification")
+        return {
+            "status": "PASS",
+            "reason_codes": [],
+            "latest_plan_ready_count": count,
+            "unexpired_plan_ready_count": count,
+            "coherent_plan_ready_count": count,
+            "non_pass_plan_ready_count": 0,
+            "missing_lineage_plan_ready_count": 0,
+            "stale_plan_ready_count": 0,
+            "mismatch_plan_ready_count": 0,
+            "invalid_expiry_plan_ready_count": 0,
+            "selection_truncated": False,
+            "generated_at": "2026-07-20T00:00:00Z",
+        }
+
+    def capture(name, passed, reason_code, details, **kwargs) -> None:
+        captured.update(
+            name=name,
+            passed=passed,
+            reason_code=reason_code,
+            details=details,
+            kwargs=kwargs,
+        )
+
+    monkeypatch.setattr(fast5, "_pipeline_inventory_count", inventory_count)
+    monkeypatch.setattr(fast5, "build_pipeline_coherency_status", diagnostic_status)
+    monkeypatch.setattr(
+        fast5,
+        "build_fast5_plan_ready_coherency_status",
+        qualification_status,
+    )
+
+    try:
+        fast5._add_pipeline_check(
+            capture,
+            connection,
+            Settings(),
+            "2026-07-20",
+        )
+        caller_transaction_preserved = connection.in_transaction
+        row = writer.execute(
+            "SELECT COUNT(*) AS count FROM fast5_snapshot_probe"
+        ).fetchone()
+        writer_count = int(row["count"] if row else 0)
+    finally:
+        connection.set_trace_callback(None)
+        if connection.in_transaction:
+            connection.rollback()
+        writer.close()
+        connection.close()
+
+    transaction_statements = [
+        statement.strip().upper()
+        for statement in traced_statements
+        if statement.strip()
+        .upper()
+        .startswith(("BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE"))
+    ]
+    assert observed_reads == [
+        ("inventory", True, 1),
+        ("diagnostic", True, 1),
+        ("qualification", True, 1),
+    ]
+    assert writer_count == 2
+    assert captured["passed"] is True
+    assert captured["details"]["read_snapshot_consistent"] is True
+    assert caller_transaction_preserved is caller_transaction
+    if caller_transaction:
+        assert transaction_statements == [
+            "SAVEPOINT FAST5_PIPELINE_READ_SNAPSHOT",
+            "ROLLBACK TO SAVEPOINT FAST5_PIPELINE_READ_SNAPSHOT",
+            "RELEASE SAVEPOINT FAST5_PIPELINE_READ_SNAPSHOT",
+        ]
+    else:
+        assert transaction_statements == ["BEGIN DEFERRED", "ROLLBACK"]
+
+
+def test_fast5_pipeline_gate_fails_closed_when_read_snapshot_ends(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = sqlite3.connect(tmp_path / "fast5-snapshot-ended.sqlite3")
+    captured: dict = {}
+    qualification_called = False
+
+    def inventory_count(*args) -> int:
+        assert connection.in_transaction
+        return 1
+
+    def diagnostic_status(*args, **kwargs) -> dict:
+        assert connection.in_transaction
+        connection.commit()
+        return {
+            "status": "PASS",
+            "reason_codes": [],
+            "candidate_count": 1,
+            "coherent_count": 1,
+            "mismatch_count": 0,
+            "missing_lineage_count": 0,
+            "stale_count": 0,
+        }
+
+    def qualification_status(*args, **kwargs) -> dict:
+        nonlocal qualification_called
+        qualification_called = True
+        return {}
+
+    def capture(name, passed, reason_code, details, **kwargs) -> None:
+        captured.update(
+            name=name,
+            passed=passed,
+            reason_code=reason_code,
+            details=details,
+        )
+
+    monkeypatch.setattr(fast5, "_pipeline_inventory_count", inventory_count)
+    monkeypatch.setattr(fast5, "build_pipeline_coherency_status", diagnostic_status)
+    monkeypatch.setattr(
+        fast5,
+        "build_fast5_plan_ready_coherency_status",
+        qualification_status,
+    )
+
+    fast5._add_pipeline_check(capture, connection, Settings(), "2026-07-20")
+    connection.close()
+
+    assert qualification_called is False
+    assert captured == {
+        "name": "pipeline_coherency",
+        "passed": False,
+        "reason_code": "FAST5_PIPELINE_NON_PASS",
+        "details": {
+            "classifier_error_type": "RuntimeError",
+            "read_snapshot_consistent": False,
+        },
+    }
 
 
 def test_fast5_ready_run_forces_hard_limits_and_disables_ai_and_reprice(
@@ -400,7 +708,7 @@ def test_fast5_bootstrap_cycle_exception_is_audited_and_latched(
     assert operating_count == 2
 
 
-def test_fast5_v2_preserves_unacknowledged_v1_rollback_latch(tmp_path) -> None:
+def test_fast5_v3_preserves_unacknowledged_v1_rollback_latch(tmp_path) -> None:
     connection = initialize_database(tmp_path / "fast5-v1-latch.sqlite3")
     run = LiveSimOperatingRunResult(
         run_id="fast5-v1-failure",
@@ -517,6 +825,24 @@ def _patch_dynamic_pass(monkeypatch) -> None:
             "mismatch_count": 0,
             "missing_lineage_count": 0,
             "stale_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        fast5,
+        "build_fast5_plan_ready_coherency_status",
+        lambda *args, **kwargs: {
+            "status": "PASS",
+            "reason_codes": [],
+            "latest_plan_ready_count": 1,
+            "unexpired_plan_ready_count": 1,
+            "coherent_plan_ready_count": 1,
+            "non_pass_plan_ready_count": 0,
+            "missing_lineage_plan_ready_count": 0,
+            "stale_plan_ready_count": 0,
+            "mismatch_plan_ready_count": 0,
+            "invalid_expiry_plan_ready_count": 0,
+            "selection_truncated": False,
+            "generated_at": "2026-07-20T00:00:00Z",
         },
     )
     monkeypatch.setattr(fast5, "_pipeline_inventory_count", lambda *args: 1)

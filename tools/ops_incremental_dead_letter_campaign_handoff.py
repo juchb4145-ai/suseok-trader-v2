@@ -27,7 +27,7 @@ from tools import ops_incremental_dead_letter_campaign_preflight as preflight_to
 
 HANDOFF_CONTRACT = "fast0-incremental-dead-letter-campaign-handoff.v1"
 APPLY_CHAIN_CONTRACT = "fast0-incremental-dead-letter-campaign-apply-chain.v1"
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 
 
 class IncrementalDeadLetterCampaignHandoffError(RuntimeError):

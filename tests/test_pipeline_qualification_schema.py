@@ -6,10 +6,12 @@ import sqlite3
 
 import pytest
 from storage.sqlite import (
+    GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE,
     SCHEMA_VERSION,
     initialize_database,
     initialize_database_for_offline_migration,
     migrate_schema_61_to_62,
+    migrate_schema_62_to_63,
 )
 
 TABLE = "pipeline_coherency_dispositions"
@@ -32,10 +34,11 @@ DEFAULTED_COLUMNS = {
 }
 
 
-def test_schema_61_to_62_migration_is_additive_and_initializer_is_noop(tmp_path) -> None:
+def test_exact_schema_61_to_62_then_62_to_63_migrations_are_additive(tmp_path) -> None:
     db_path = tmp_path / "schema-61-to-62.sqlite3"
     source = initialize_database(db_path)
     source.execute(f"DROP TABLE {TABLE}")
+    source.execute(f"DROP TABLE {GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE}")
     source.execute(
         """
         CREATE TABLE schema61_migration_sentinel (
@@ -81,7 +84,7 @@ def test_schema_61_to_62_migration_is_additive_and_initializer_is_noop(tmp_path)
     first.execute("BEGIN EXCLUSIVE")
     migrate_schema_61_to_62(first)
     first.commit()
-    assert SCHEMA_VERSION == 62
+    assert SCHEMA_VERSION == 63
     assert _schema_version(first) == "62"
     assert _user_tables(first) - tables_before == {TABLE}
     assert _row_count(first) == 0
@@ -89,16 +92,36 @@ def test_schema_61_to_62_migration_is_additive_and_initializer_is_noop(tmp_path)
     objects_after_first = _table_objects(first)
     first.close()
 
+    with pytest.raises(RuntimeError, match="exact preflight-qualified 62 -> 63"):
+        initialize_database(db_path)
+
+    first = sqlite3.connect(db_path)
+    first.execute("BEGIN EXCLUSIVE")
+    migrate_schema_62_to_63(first)
+    first.commit()
+    assert _schema_version(first) == "63"
+    assert _user_tables(first) - tables_before == {
+        TABLE,
+        GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE,
+    }
+    assert _row_count(first) == 0
+    assert _sentinel_fingerprint(first) == sentinel_before
+    assert _table_objects(first) == objects_after_first
+    first.close()
+
     second = initialize_database(db_path)
-    assert _schema_version(second) == "62"
-    assert _user_tables(second) - tables_before == {TABLE}
+    assert _schema_version(second) == "63"
+    assert _user_tables(second) - tables_before == {
+        TABLE,
+        GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE,
+    }
     assert _row_count(second) == 0
     assert _sentinel_fingerprint(second) == sentinel_before
     assert _table_objects(second) == objects_after_first
     second.close()
 
 
-@pytest.mark.parametrize("schema_version", ("60", "63"))
+@pytest.mark.parametrize("schema_version", ("60", "64"))
 def test_initialize_database_rejects_existing_non_target_schema_without_writes(
     tmp_path,
     schema_version: str,

@@ -126,7 +126,7 @@ def test_schema_58_dead_letter_migration_is_reentrant(tmp_path) -> None:
         migrated.close()
         rerun.close()
 
-    assert schema_version == str(SCHEMA_VERSION) == "62"
+    assert schema_version == str(SCHEMA_VERSION) == "63"
     assert {"dead_letter_id", "candidate_instance_id", "attempts", "status"} <= columns
     assert "uq_incremental_evaluation_dead_letter_active" not in indexes
     assert "idx_incremental_evaluation_dead_letter_candidate_time" in indexes

@@ -566,8 +566,8 @@ def apply_disposition(
         _validated_database_path(resolved_path)
         if [str(row[1]) for row in connection.execute("PRAGMA database_list")] != ["main"]:
             raise PipelineDispositionCliError("ATTACHED_DATABASE_NOT_ALLOWED")
-        if _schema_version(connection) != "62":
-            raise PipelineDispositionCliError("PIPELINE_DISPOSITION_SCHEMA_62_REQUIRED")
+        if _schema_version(connection) != "63":
+            raise PipelineDispositionCliError("PIPELINE_DISPOSITION_SCHEMA_63_REQUIRED")
         if not is_pipeline_coherency_disposition_schema_ready(connection):
             raise PipelineDispositionCliError("PIPELINE_DISPOSITION_SCHEMA_CONTRACT_INVALID")
         if _runtime_lease_count(connection):
@@ -850,7 +850,7 @@ def apply_disposition(
                 if orphan_private_report
                 else {"filename": resolved_path.name}
             ),
-            "schema_version": "62",
+            "schema_version": "63",
             "files_before": files_before,
             "files_after": files_after,
             **(
@@ -1726,7 +1726,7 @@ def _orphan_postcommit_privacy_failure_report(
         "contract": "fast0-pipeline-disposition-apply.v1",
         "generated_at": generated_at,
         "mode": "APPLY",
-        "database": {"schema_version": "62"},
+        "database": {"schema_version": "63"},
         "result": {
             "action": ACTION_DISPOSE_ORPHAN,
             "alias": alias,

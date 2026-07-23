@@ -330,6 +330,8 @@ $GatewayArgs = @(
     "-m", "apps.kiwoom_gateway",
     "--core-url", $CoreUrl,
     "--observe-only",
+    "--disable-command-polling",
+    "--no-dead-man-cancel-enabled",
     "--poll-wait-sec", $env:GATEWAY_COMMAND_WAIT_SEC,
     "--no-threaded-login",
     "--realtime-exchange", $RealtimeExchange,

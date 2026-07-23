@@ -21,7 +21,7 @@ from services.live_sim.execution_lifecycle_status import (  # noqa: E402
 )
 from storage.sqlite import APP_NAME, SCHEMA_VERSION  # noqa: E402
 
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _PAGE_LIMIT = 500
 _DATA_FILE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")

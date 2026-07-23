@@ -85,6 +85,7 @@ def test_database_migration_preflight_clones_and_preserves_outbox(tmp_path) -> N
         )
     for table in REQUIRED_TARGET_TABLES:
         connection.execute(f"DROP TABLE IF EXISTS {table}")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("UPDATE app_metadata SET value = '52' WHERE key = 'schema_version'")
     connection.commit()
     connection.close()
@@ -117,7 +118,9 @@ def test_database_migration_preflight_clones_and_preserves_outbox(tmp_path) -> N
     assert report["verdict"]["idempotent_table_content_unchanged"] is True
     assert report["source"]["quick_check"] == ["ok"]
     assert set(report["source"]["files_before"]) == {"main", "wal", "shm", "journal"}
-    assert report["clone"]["after_migration"]["schema_version"] == str(SCHEMA_VERSION)
+    assert report["clone"]["after_migration"]["schema_version"] == str(
+        preflight_tool.SCHEMA_VERSION
+    )
     assert report["clone"]["quick_check"] == ["ok"]
     hash_columns = (
         "request_hash",
@@ -180,7 +183,7 @@ def test_database_migration_preflight_clones_and_preserves_outbox(tmp_path) -> N
     assert "MIGRATION_SQLITE_SEQUENCE_MISMATCH" in sequence_verdict["failures"]
 
     newer_source = copy.deepcopy(report)
-    newer_schema = str(SCHEMA_VERSION + 1)
+    newer_schema = str(preflight_tool.SCHEMA_VERSION + 1)
     newer_source["required_source_schema"] = newer_schema
     newer_source["source"]["snapshot"]["schema_version"] = newer_schema
     newer_source["clone"]["before_migration"]["schema_version"] = newer_schema
@@ -242,6 +245,7 @@ def test_exact_preflight_rejects_generic_initializer_schema_repair(tmp_path) -> 
     clone = tmp_path / "malformed-schema-61-clone.sqlite3"
     connection = initialize_database(source)
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("DROP TABLE theme_refresh_cycle_runs")
     connection.execute("UPDATE app_metadata SET value = '61' WHERE key = 'schema_version'")
     connection.commit()
@@ -261,12 +265,16 @@ def test_exact_preflight_rejects_generic_initializer_schema_repair(tmp_path) -> 
     assert "pipeline_coherency_dispositions" in exact_tables
     assert "theme_refresh_cycle_runs" not in exact_tables
     assert "theme_refresh_cycle_runs" not in after_probes_tables
-    assert "theme_refresh_cycle_runs" in after_idempotent_tables
+    assert "theme_refresh_cycle_runs" not in after_idempotent_tables
+    assert any(
+        failure == "MISSING_OBJECT:table:theme_refresh_cycle_runs"
+        for failure in report["clone"]["historical_schema_62_validation_failures"]
+    )
     assert report["verdict"]["exact_target_table_set_valid"] is True
     assert report["verdict"]["exact_migration_target_valid"] is True
     assert report["verdict"]["probe_rollback_no_change"] is True
     assert report["verdict"]["idempotent_rerun_no_change"] is False
-    assert report["verdict"]["idempotent_schema_unchanged"] is False
+    assert report["verdict"]["idempotent_schema_unchanged"] is True
     assert report["verdict"]["status"] == "FAIL"
     assert "IDEMPOTENT_RERUN_CHANGED_DATABASE" in report["verdict"]["failures"]
 
@@ -279,6 +287,7 @@ def test_exact_preflight_detects_schema_version_record_change_after_probe(
     clone = tmp_path / "probe-metadata-schema-61-clone.sqlite3"
     connection = initialize_database(source)
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("UPDATE app_metadata SET value = '61' WHERE key = 'schema_version'")
     connection.commit()
     connection.close()
@@ -317,7 +326,7 @@ def test_exact_preflight_detects_schema_version_record_change_after_probe(
     assert "CONTRACT_PROBES_CHANGED_DATABASE" in report["verdict"]["failures"]
 
 
-def test_exact_preflight_detects_schema_version_record_change_during_initializer(
+def test_exact_preflight_detects_historical_target_validator_failure(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -325,21 +334,20 @@ def test_exact_preflight_detects_schema_version_record_change_during_initializer
     clone = tmp_path / "initializer-metadata-schema-61-clone.sqlite3"
     connection = initialize_database(source)
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("UPDATE app_metadata SET value = '61' WHERE key = 'schema_version'")
     connection.commit()
     connection.close()
-    original_initialize = preflight_tool.initialize_database
+    original_validator = preflight_tool._historical_schema_62_validation_failures
 
-    def initialize_then_mutate(path):
-        initialized = original_initialize(path)
-        initialized.execute(
-            "UPDATE app_metadata SET updated_at = ? WHERE key = 'schema_version'",
-            ("2099-12-31T23:59:59Z",),
-        )
-        initialized.commit()
-        return initialized
+    def validate_then_fail(path):
+        return [*original_validator(path), "SIMULATED_HISTORICAL_TARGET_DRIFT"]
 
-    monkeypatch.setattr(preflight_tool, "initialize_database", initialize_then_mutate)
+    monkeypatch.setattr(
+        preflight_tool,
+        "_historical_schema_62_validation_failures",
+        validate_then_fail,
+    )
     report = run_preflight(
         source_db=source,
         clone_db=clone,
@@ -354,7 +362,7 @@ def test_exact_preflight_detects_schema_version_record_change_during_initializer
     )
     assert (
         report["clone"]["after_contract_probes"]["schema_version_record"]
-        != report["clone"]["after_idempotent_rerun"]["schema_version_record"]
+        == report["clone"]["after_idempotent_rerun"]["schema_version_record"]
     )
     assert report["verdict"]["idempotent_rerun_no_change"] is False
     assert report["verdict"]["status"] == "FAIL"
@@ -364,18 +372,24 @@ def test_exact_preflight_detects_schema_version_record_change_during_initializer
 def test_database_migration_preflight_rejects_source_at_target_schema(tmp_path) -> None:
     source = tmp_path / "source-at-target.sqlite3"
     clone = tmp_path / "clone-at-target.sqlite3"
-    initialize_database(source).close()
+    connection = initialize_database(source)
+    _drop_schema_63_fence_ledger(connection)
+    connection.execute("UPDATE app_metadata SET value = '62' WHERE key = 'schema_version'")
+    connection.commit()
+    connection.close()
 
     report = run_preflight(
         source_db=source,
         clone_db=clone,
-        required_source_schema=str(SCHEMA_VERSION),
+        required_source_schema=str(preflight_tool.SCHEMA_VERSION),
         run_quick_check=True,
         out_dir=tmp_path / "reports-at-target",
     )
 
-    assert report["source"]["snapshot"]["schema_version"] == str(SCHEMA_VERSION)
-    assert report["target_schema_version"] == str(SCHEMA_VERSION)
+    assert report["source"]["snapshot"]["schema_version"] == str(
+        preflight_tool.SCHEMA_VERSION
+    )
+    assert report["target_schema_version"] == str(preflight_tool.SCHEMA_VERSION)
     assert report["verdict"]["status"] == "FAIL"
     assert "SOURCE_SCHEMA_NOT_OLDER_THAN_TARGET" in report["verdict"]["failures"]
 
@@ -389,6 +403,7 @@ def test_database_migration_preflight_requires_resolution_schema_contract(
     connection.execute("DROP TABLE gateway_order_broker_boundary_resolutions")
     connection.execute("DROP TABLE incremental_evaluation_dead_letter_dispositions")
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("UPDATE app_metadata SET value = '59' WHERE key = 'schema_version'")
     connection.commit()
     connection.close()
@@ -403,7 +418,7 @@ def test_database_migration_preflight_requires_resolution_schema_contract(
 
     after = report["clone"]["after_migration"]
     assert report["verdict"]["status"] == "PASS"
-    assert after["schema_version"] == str(SCHEMA_VERSION)
+    assert after["schema_version"] == str(preflight_tool.SCHEMA_VERSION)
     assert after["required_tables"]["gateway_order_broker_boundary_resolutions"] is True
     assert all(after["required_indexes"][name]["valid"] for name in REQUIRED_TARGET_INDEX_CONTRACTS)
     assert all(
@@ -427,6 +442,7 @@ def test_database_migration_preflight_migrates_schema_60_to_61_append_only(
     connection = initialize_database(source)
     connection.execute("DROP TABLE incremental_evaluation_dead_letter_dispositions")
     connection.execute("DROP TABLE pipeline_coherency_dispositions")
+    _drop_schema_63_fence_ledger(connection)
     connection.execute("DROP TRIGGER IF EXISTS trg_incremental_evaluation_dead_letters_no_update")
     connection.execute("DROP TRIGGER IF EXISTS trg_incremental_evaluation_dead_letters_no_delete")
     connection.execute("DROP INDEX IF EXISTS idx_incremental_evaluation_dead_letter_candidate_time")
@@ -539,3 +555,9 @@ def test_database_migration_preflight_refuses_source_sidecars(tmp_path, suffix: 
             run_quick_check=True,
             out_dir=tmp_path / "reports-sidecar",
         )
+
+
+def _drop_schema_63_fence_ledger(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        "DROP TABLE IF EXISTS gateway_order_broker_boundary_fence_events"
+    )

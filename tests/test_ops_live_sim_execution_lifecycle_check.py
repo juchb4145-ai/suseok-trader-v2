@@ -9,7 +9,7 @@ from storage.sqlite import initialize_database
 from tools import ops_live_sim_execution_lifecycle_check as tool
 
 
-def test_strict_lifecycle_check_passes_empty_schema_62_without_raw_rows(tmp_path) -> None:
+def test_strict_lifecycle_check_passes_empty_current_schema_without_raw_rows(tmp_path) -> None:
     db_path = tmp_path / "lifecycle.sqlite3"
     initialize_database(db_path).close()
 
@@ -25,7 +25,7 @@ def test_strict_lifecycle_check_passes_empty_schema_62_without_raw_rows(tmp_path
 
     assert report["verdict"]["status"] == "PASS"
     assert report["database"]["quick_check"] == ["ok"]
-    assert report["database"]["identity"]["schema_version"] == "62"
+    assert report["database"]["identity"]["schema_version"] == "63"
     assert report["database"]["connection"] == {
         "mode": "ro",
         "immutable": True,
@@ -556,7 +556,7 @@ def _report(lifecycle: dict) -> dict:
             "identity": {
                 "app_name": "suseok-trader-v2",
                 "app_name_row_count": 1,
-                "schema_version": "62",
+                "schema_version": "63",
                 "schema_version_row_count": 1,
             },
             "files_before": fingerprint,

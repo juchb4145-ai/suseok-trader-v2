@@ -51,7 +51,7 @@ from tools import ops_pipeline_blocker_reconciliation as reconciliation_tool  # 
 _CONTRACT = "fast0-pipeline-orphan-evidence-preflight.v2"
 _EXPECTED_PLAN_CONTRACT = "fast0-blocker-resolution-plan.v1"
 _EXPECTED_RECONCILIATION_CONTRACT = "fast0-pipeline-blocker-reconciliation.v1"
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _ALIAS_RE = re.compile(r"^M(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2})$")
 _KST = timezone(timedelta(hours=9), name="Asia/Seoul")
 _TOOL_ACTIONS = {

@@ -380,7 +380,7 @@ def _minimal_report() -> dict:
                 "app_name": tool.APP_NAME,
                 "app_name_row_count": 1,
                 "app_name_value_valid": True,
-                "schema_version": "62",
+                "schema_version": "63",
                 "schema_version_row_count": 1,
                 "schema_version_value_valid": True,
             },

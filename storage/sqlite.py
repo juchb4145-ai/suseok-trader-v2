@@ -5,14 +5,32 @@ from pathlib import Path
 from urllib.parse import quote
 
 from storage.gateway_order_broker_boundary import (
+    ensure_gateway_order_broker_boundary_fence_event_schema,
     ensure_gateway_order_broker_boundary_schema,
 )
 from storage.live_sim_order_plan_uniqueness import (
     ensure_live_sim_order_plan_uniqueness_schema,
 )
 
-SCHEMA_VERSION = 62
+SCHEMA_VERSION = 63
 APP_NAME = "suseok-trader-v2"
+
+GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE = (
+    "gateway_order_broker_boundary_fence_events"
+)
+GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_INDEXES = frozenset(
+    {
+        "idx_gateway_order_boundary_fence_events_created",
+        "uq_gateway_order_boundary_fence_events_request_id",
+        "uq_gateway_order_boundary_fence_events_command_sequence",
+    }
+)
+GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TRIGGERS = frozenset(
+    {
+        "trg_gateway_order_boundary_fence_events_no_update",
+        "trg_gateway_order_boundary_fence_events_no_delete",
+    }
+)
 
 PIPELINE_QUALIFICATION_TABLE = "pipeline_coherency_dispositions"
 PIPELINE_QUALIFICATION_INDEXES = frozenset(
@@ -54,12 +72,12 @@ def initialize_database_for_offline_migration(
 ) -> sqlite3.Connection:
     """Run historical additive migrations only on an explicitly isolated clone.
 
-    Core and ordinary tools must use :func:`initialize_database`. Schema 61 is
-    deliberately excluded because its exact 61 -> 62 migration has a stricter
-    preflight-qualified public path.
+    Core and ordinary tools must use :func:`initialize_database`. Schemas 61
+    and 62 are deliberately excluded because their exact one-step migrations
+    have stricter preflight-qualified public paths.
     """
 
-    _raise_if_schema_61_requires_exact_migration(Path(db_path))
+    _raise_if_schema_requires_exact_migration(Path(db_path))
     return _initialize_database(db_path, allow_existing_migration=True)
 
 
@@ -132,7 +150,7 @@ def _initialize_database(
     return connection
 
 
-def _raise_if_schema_61_requires_exact_migration(path: Path) -> None:
+def _raise_if_schema_requires_exact_migration(path: Path) -> None:
     if str(path) == ":memory:" or not path.is_file() or path.stat().st_size == 0:
         return
     resolved = path.expanduser().resolve()
@@ -151,9 +169,15 @@ def _raise_if_schema_61_requires_exact_migration(path: Path) -> None:
         rows = connection.execute(
             "SELECT value FROM app_metadata WHERE key = 'schema_version'"
         ).fetchall()
-        if len(rows) == 1 and str(rows[0][0]) == "61" and SCHEMA_VERSION == 62:
+        actual = None if len(rows) != 1 else str(rows[0][0])
+        if actual == "61" and SCHEMA_VERSION >= 62:
             raise RuntimeError(
                 "schema 61 requires the exact preflight-qualified 61 -> 62 apply path; "
+                "generic offline migration is blocked"
+            )
+        if actual == "62" and SCHEMA_VERSION == 63:
+            raise RuntimeError(
+                "schema 62 requires the exact preflight-qualified 62 -> 63 apply path; "
                 "generic offline migration is blocked"
             )
     finally:
@@ -206,11 +230,16 @@ def _raise_if_connection_schema_mismatch(
         and actual_app == APP_NAME
     ):
         return
-    migration_hint = (
-        "schema 61 requires the exact preflight-qualified 61 -> 62 apply path"
-        if actual == "61" and SCHEMA_VERSION == 62
-        else "an explicit preflight-qualified migration or recovery path is required"
-    )
+    if actual == "61" and SCHEMA_VERSION >= 62:
+        migration_hint = (
+            "schema 61 requires the exact preflight-qualified 61 -> 62 apply path"
+        )
+    elif actual == "62" and SCHEMA_VERSION == 63:
+        migration_hint = (
+            "schema 62 requires the exact preflight-qualified 62 -> 63 apply path"
+        )
+    else:
+        migration_hint = "an explicit preflight-qualified migration or recovery path is required"
     raise RuntimeError(
         "existing database schema mismatch: "
         f"code_target={SCHEMA_VERSION} actual={actual!r} rows={len(schema_rows)} "
@@ -290,6 +319,83 @@ def migrate_schema_61_to_62(connection: sqlite3.Connection) -> None:
     )
     if ledger_count != 0:
         raise RuntimeError("schema 61 -> 62 target ledger must start empty")
+
+
+def migrate_schema_62_to_63(connection: sqlite3.Connection) -> None:
+    """Apply only the additive schema 62 -> 63 maintenance-fence ledger migration.
+
+    The caller owns the surrounding transaction and must commit or roll it back.
+    This is an exact, intentionally one-shot migration: source metadata and
+    application identity must match, and every target object must be absent.
+    """
+
+    if not connection.in_transaction:
+        raise RuntimeError("schema 62 -> 63 migration requires an active transaction")
+
+    databases = [str(row[1]) for row in connection.execute("PRAGMA database_list").fetchall()]
+    if databases != ["main"]:
+        raise RuntimeError("schema 62 -> 63 migration requires only the main database")
+
+    metadata_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchall()
+    if len(metadata_rows) != 1 or str(metadata_rows[0][0]) != "62":
+        actual = None if not metadata_rows else str(metadata_rows[0][0])
+        raise RuntimeError(
+            "schema 62 -> 63 source CAS mismatch: "
+            f"expected=62 actual={actual!r} rows={len(metadata_rows)}"
+        )
+    app_rows = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'app_name'"
+    ).fetchall()
+    if len(app_rows) != 1 or str(app_rows[0][0]) != APP_NAME:
+        actual_app = None if not app_rows else str(app_rows[0][0])
+        raise RuntimeError(
+            "schema 62 -> 63 application identity mismatch: "
+            f"expected={APP_NAME!r} actual={actual_app!r} rows={len(app_rows)}"
+        )
+
+    target_objects = {
+        GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE,
+        *GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_INDEXES,
+        *GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TRIGGERS,
+    }
+    placeholders = ", ".join("?" for _ in target_objects)
+    existing_objects = connection.execute(
+        f"SELECT name FROM sqlite_master WHERE name IN ({placeholders})",
+        tuple(sorted(target_objects)),
+    ).fetchall()
+    if existing_objects:
+        names = sorted(str(row[0]) for row in existing_objects)
+        raise RuntimeError(
+            "schema 62 -> 63 target objects must be absent before migration: "
+            + ",".join(names)
+        )
+
+    ensure_gateway_order_broker_boundary_fence_event_schema(connection)
+    ledger_count = int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM {GATEWAY_ORDER_BROKER_BOUNDARY_FENCE_EVENT_TABLE}"
+        ).fetchone()[0]
+    )
+    if ledger_count != 0:
+        raise RuntimeError("schema 62 -> 63 target ledger must start empty")
+
+    updated = connection.execute(
+        """
+        UPDATE app_metadata
+        SET value = '63', updated_at = datetime('now')
+        WHERE key = 'schema_version' AND value = '62'
+        """
+    )
+    if updated.rowcount != 1:
+        raise RuntimeError("schema 62 -> 63 metadata CAS update failed")
+
+    row = connection.execute(
+        "SELECT value FROM app_metadata WHERE key = 'schema_version'"
+    ).fetchone()
+    if row is None or str(row[0]) != "63":
+        raise RuntimeError("schema 62 -> 63 metadata verification failed")
 
 
 def _configure_connection(connection: sqlite3.Connection) -> None:
@@ -1858,6 +1964,7 @@ def _create_gateway_transport_tables(connection: sqlite3.Connection) -> None:
         """
     )
     ensure_gateway_order_broker_boundary_schema(connection)
+    ensure_gateway_order_broker_boundary_fence_event_schema(connection)
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_gateway_events_type_status

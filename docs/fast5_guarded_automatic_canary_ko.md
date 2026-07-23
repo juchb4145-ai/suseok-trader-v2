@@ -89,15 +89,21 @@ LIVE_SIM_FAST5_SHADOW_EVIDENCE_SHA256=<64 hex>
 - LIVE_SIM preflight `PASS`, Kiwoom simulation mode와 orderable heartbeat
 - KRX, LIMIT BUY 전용, scale-in/market order false
 - AI order tool·order-plan attachment 비활성: routing 영향 `0`
-- 현재 거래일 pipeline 전체 inventory가 500행 이하이며 조회 결과와 전체 count 일치
-- pipeline mismatch/missing-lineage/stale `0`
+- 현재 거래일 pipeline 전체 inventory가 500행 이하이며 전수 진단 조회 결과와 전체 count 일치
+- 최신 order plan 중 미만료 `PLAN_READY`가 1건 이상이고, 그 전부의 내부 FK와
+  strategy/risk/entry/plan source run·watermark·현재 source·age 검증이 `PASS`
 - broker-boundary effective `UNCONFIRMED=0`, maintenance fence 없음
+- maintenance fence release가 현재 거래일에 유효하고 운영 DB identity·schema 63 계약과 일치
 - lifecycle qualification `PASS`, effective blocker `0`
 - 최신 broker snapshot `COMPLETE`, fresh, 현재 거래일, local mismatch `0`
 - kill switch, daily loss, 중복, active order/position, notional gate `PASS`
 
 500행 제한을 전체 검증으로 오인하지 않는다. current inventory가 500행을 초과하거나 조회 수와
 inventory count가 다르면 `FAST5_PIPELINE_NON_PASS`로 차단한다.
+전수 진단의 과거/non-ready stale·missing·mismatch는 계속 표시하되 FAST-5 신규 BUY gate를
+직접 차단하지 않는다. 반대로 최신 미만료 `PLAN_READY`의 stale, lineage/FK missing, source
+run/watermark mismatch는 한 건만 있어도 차단한다. 미만료 `PLAN_READY=0`, 잘못된 만료시각,
+500행 selection truncation도 fail-closed다.
 
 ## 강제 한도
 
@@ -120,8 +126,8 @@ eligibility와 Gateway enqueue boundary도 safety/reconcile/lifecycle를 다시 
 실제 queue 단계에 진입한 뒤 운영 cycle 오류나 command budget 위반이 발생하면
 `rollback_latched=true`를 기록하고 신규 BUY를 차단한다. 자동 해제는 없으며 운영자가 원인과
 run을 확인한 뒤 정확한 ID를 설정한다. queue 호출 중 예외는 command count가 0으로 보이더라도
-`side_effects_unknown=true`, `no_order_side_effects=false`로 기록한다. 이전 v1 latch도 v2에서
-그대로 유효하다.
+`side_effects_unknown=true`, `no_order_side_effects=false`로 기록한다. 이전 v1/v2 latch도
+pipeline qualification 범위를 명시한 v3에서 그대로 유효하다.
 
 ```text
 LIVE_SIM_FAST5_ROLLBACK_ACK_RUN_ID=<exact latched run id>

@@ -44,7 +44,7 @@ from storage.gateway_order_broker_boundary import (  # noqa: E402
 from storage.sqlite import APP_NAME, SCHEMA_VERSION  # noqa: E402
 from tools import ops_live_sim_execution_lifecycle_check as lifecycle_tool  # noqa: E402
 
-_EXPECTED_SCHEMA_VERSION = "62"
+_EXPECTED_SCHEMA_VERSION = "63"
 _PAGE_LIMIT = 500
 _DEFAULT_INCREMENTAL_BACKLOG_WARN_COUNT = 100
 _DEFAULT_INCREMENTAL_BACKLOG_FAIL_COUNT = 1000
@@ -63,9 +63,9 @@ _POLICY_PROJECTION_CONDITION_RECENT_MAX_PENDING = 10
 _POLICY_MIN_FREE_BYTES = 1024 * 1024 * 1024
 _MAX_RUNTIME_LOG_FILES = 32
 _MAX_RUNTIME_LOG_TOTAL_BYTES = 1024 * 1024 * 1024
-_MIGRATION_APPLY_FUNCTION = "storage.sqlite.migrate_schema_61_to_62"
-_MIGRATION_SOURCE_SCHEMA = "61"
-_MIGRATION_PREFLIGHT_CONTRACT = "exact-61-to-62-v2"
+_MIGRATION_APPLY_FUNCTION = "storage.sqlite.migrate_schema_62_to_63"
+_MIGRATION_SOURCE_SCHEMA = "62"
+_MIGRATION_PREFLIGHT_CONTRACT = "exact-62-to-63-fence-events-v1"
 _MIGRATION_LEASE_KEYS = frozenset(
     {
         "live_sim_lifecycle_inbox_processing_or_locked",
@@ -73,28 +73,7 @@ _MIGRATION_LEASE_KEYS = frozenset(
         "runtime_execution_locks",
     }
 )
-_MIGRATION_TARGET_PROBES = frozenset(
-    {
-        "action_check",
-        "auto_run_evaluation_check",
-        "delete_blocked",
-        "ledger_empty_after_probe",
-        "live_real_allowed_check",
-        "live_sim_allowed_check",
-        "lower_hex_hash",
-        "no_order_side_effects_check",
-        "not_order_intent_check",
-        "observe_only_check",
-        "order_commands_allowed_check",
-        "request_unique",
-        "sequence_positive",
-        "sequence_unique",
-        "supersedes_foreign_key",
-        "update_blocked",
-        "valid_insert",
-        "valid_revoke",
-    }
-)
+_MIGRATION_TARGET_PROBES = frozenset()
 _DATA_FILE_SUFFIXES = ("", "-wal", "-shm", "-journal")
 _RUNTIME_MARKERS = ("EVALUATION_RUN_FENCE_LOST", "OWNER_ALIVE_AFTER_TTL")
 _PIPELINE_CLASSIFICATIONS = (
@@ -574,6 +553,11 @@ _EXPECTED_PERSISTENT_TRIGGERS = frozenset(
     name
     for name, (object_type, _legacy_hash) in _SCHEMA_OBJECT_MANIFEST.items()
     if object_type == "trigger"
+) | frozenset(
+    {
+        "trg_gateway_order_boundary_fence_events_no_update",
+        "trg_gateway_order_boundary_fence_events_no_delete",
+    }
 )
 
 # The legacy normalized SQL hash intentionally ignores formatting and keyword
@@ -2886,29 +2870,21 @@ def _read_migration_baseline(
     preflight_files_after = _mapping(preflight_source.get("files_after"))
     preflight_after_main = _mapping(preflight_files_after.get("main"))
     required_preflight_true = (
-        "backup_schema_objects_preserved",
-        "backup_schema_version_record_preserved",
+        "backup_tables_preserved",
         "backup_table_content_preserved",
-        "clone_disk_space_sufficient",
-        "exact_migration_target_valid",
-        "exact_snapshot_alias_valid",
-        "exact_target_table_set_valid",
-        "idempotent_rerun_no_change",
-        "idempotent_schema_unchanged",
-        "idempotent_table_content_unchanged",
+        "target_table_set_exact",
+        "existing_table_content_preserved",
         "migration_table_content_preserved",
-        "outbox_preserved",
-        "probe_rollback_no_change",
-        "required_append_only_triggers_present",
-        "required_columns_present",
-        "required_indexes_present",
-        "required_tables_present",
+        "order_state_preserved",
+        "projection_outbox_preserved",
         "source_data_files_unchanged",
         "sqlite_sequence_preserved",
-        "target_behavior_contract_valid",
-        "target_dead_letter_disposition_ledger_empty",
-        "target_pipeline_disposition_ledger_empty",
-        "target_resolution_ledger_empty",
+        "target_objects_absent_at_source",
+        "target_objects_exact",
+        "target_contract_valid",
+        "target_ledger_empty",
+        "initializer_noop",
+        "quick_checks_ok",
     )
     preflight_age = preflight.get("age_sec")
     preflight_chain_valid = bool(
