@@ -164,6 +164,7 @@ def _evaluate_entry_timing(
         trade_date=target_trade_date,
         candidate_instance_id=candidate_instance_id,
         limit=bounded_limit,
+        source_run_id=source_run_id,
     )
     inputs: list[EntryTimingInput] = []
     if rows:
@@ -882,7 +883,25 @@ def _candidate_rows_for_evaluation(
     trade_date: str,
     candidate_instance_id: str | None,
     limit: int,
+    source_run_id: str | None = None,
 ) -> list[sqlite3.Row]:
+    join_params: list[Any] = []
+    risk_join_sql = ""
+    risk_priority_sql = ""
+    if source_run_id:
+        risk_join_sql = """
+        LEFT JOIN risk_observations_latest AS r
+            ON r.candidate_instance_id = c.candidate_instance_id
+            AND r.source_run_id = ?
+        """
+        join_params.append(source_run_id)
+        risk_priority_sql = """
+            CASE r.overall_status
+                WHEN 'OBSERVE_PASS' THEN 0
+                WHEN 'OBSERVE_CAUTION' THEN 1
+                ELSE 2
+            END,
+        """
     clauses: list[str] = []
     params: list[Any] = []
     if candidate_instance_id is not None:
@@ -904,8 +923,10 @@ def _candidate_rows_for_evaluation(
         FROM candidates AS c
         LEFT JOIN candidate_condition_fusion AS f
             ON f.trade_date = c.trade_date AND f.code = c.code
+        {risk_join_sql}
         WHERE {" AND ".join(clauses)}
         ORDER BY
+            {risk_priority_sql}
             CASE c.state
                 WHEN 'CONTEXT_READY' THEN 0
                 WHEN 'WATCHING' THEN 1
@@ -923,7 +944,7 @@ def _candidate_rows_for_evaluation(
             c.candidate_instance_id ASC
         LIMIT ?
         """,
-        tuple(params),
+        tuple([*join_params, *params]),
     ).fetchall()
 
 

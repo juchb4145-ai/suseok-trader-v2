@@ -96,7 +96,11 @@ def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, m
     assert stages["CommandSafety"]["status"] == "PASS"
     assert payload["send_order_delta"] == 0
     assert payload["queue_commands"] is False
+    assert payload["elapsed_sec"] >= 0
+    assert all(stage["elapsed_sec"] >= 0 for stage in stages.values())
     assert latest_run.json()["run"]["run_id"] == payload["run_id"]
+    assert latest_run.json()["run"]["elapsed_sec"] == payload["elapsed_sec"]
+    assert stages["Candidate"]["details"]["freshness_reference_at"] == payload["created_at"]
     assert commands.json()["counts"].get("QUEUED", 0) == 0
 
     connection = open_connection(db_path)

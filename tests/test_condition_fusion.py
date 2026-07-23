@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from apps.core_api import app
-from domain.broker.utils import utc_now
+from domain.broker.utils import datetime_to_wire, parse_timestamp, utc_now
 from fastapi.testclient import TestClient
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.candidate_service import (
@@ -11,6 +13,7 @@ from services.candidate_service import (
     refresh_candidate_context,
 )
 from services.condition_fusion import (
+    condition_signal_trade_date_bounds,
     list_condition_fusion,
     rebuild_condition_fusion,
     rebuild_condition_fusion_for_code,
@@ -99,6 +102,72 @@ def test_condition_fusion_rebuild_for_code_updates_only_target_code(tmp_path) ->
     assert result.fused_code_count == 1
     assert set(rows) == {"005930"}
     assert rows["005930"]["active_roles"] == ["LEADER"]
+
+
+def test_condition_fusion_full_rebuild_bounds_source_rows_to_trade_date(tmp_path) -> None:
+    connection = initialize_database(tmp_path / "condition-fusion-date-bound.sqlite3")
+    settings = _settings()
+    trade_date = _trade_date(settings)
+    start_at, end_at = condition_signal_trade_date_bounds(trade_date, settings)
+    for code, name in (
+        ("005930", "Before"),
+        ("000660", "Inside"),
+        ("035420", "After"),
+    ):
+        _append_and_project(
+            connection,
+            _condition_event(code, name, "LEADER", priority=90),
+            settings,
+        )
+    connection.execute(
+        "UPDATE market_condition_signals SET event_ts = ? WHERE code = '005930'",
+        (
+            datetime_to_wire(
+                parse_timestamp(start_at, "start_at") - timedelta(microseconds=1)
+            ),
+        ),
+    )
+    connection.execute(
+        "UPDATE market_condition_signals SET event_ts = ? WHERE code = '000660'",
+        (
+            datetime_to_wire(
+                parse_timestamp(start_at, "start_at") + timedelta(microseconds=1)
+            ),
+        ),
+    )
+    connection.execute(
+        "UPDATE market_condition_signals SET event_ts = ? WHERE code = '035420'",
+        (end_at,),
+    )
+    connection.execute("DELETE FROM candidate_condition_fusion")
+    connection.commit()
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
+
+    result = rebuild_condition_fusion(connection, trade_date, settings=settings)
+    connection.set_trace_callback(None)
+    rows = list_condition_fusion(
+        connection,
+        trade_date=trade_date,
+        settings=settings,
+    )
+    connection.close()
+
+    bounded_selects = [
+        statement.upper()
+        for statement in statements
+        if "FROM MARKET_CONDITION_SIGNALS" in statement.upper()
+    ]
+    assert result.processed_event_count == 1
+    assert [row["code"] for row in rows] == ["000660"]
+    assert any("EVENT_TS >=" in sql and "EVENT_TS <" in sql for sql in bounded_selects)
+
+
+def test_condition_signal_trade_date_bounds_use_fixed_microsecond_precision() -> None:
+    start_at, end_at = condition_signal_trade_date_bounds("2026-07-23", _settings())
+
+    assert start_at == "2026-07-22T15:00:00.000000Z"
+    assert end_at == "2026-07-23T15:00:00.000000Z"
 
 
 def test_gateway_condition_event_refreshes_condition_fusion_incrementally(

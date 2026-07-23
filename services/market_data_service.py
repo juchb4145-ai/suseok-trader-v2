@@ -466,6 +466,7 @@ def get_market_data_readiness(
     *,
     exchange: object = "KRX",
     settings: Settings | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     resolved_settings = settings or load_settings()
     normalized_code = validate_stock_code(code)
@@ -478,12 +479,13 @@ def get_market_data_readiness(
     if latest is None:
         reason_codes.append("TICK_MISSING")
     else:
-        tick_age_sec = tick_age_seconds(latest["event_ts"])
+        tick_age_sec = tick_age_seconds(latest["event_ts"], now=now)
         stored_status = MarketDataQualityStatus(latest["quality_status"])
         quality_status = freshness_status(
             latest["event_ts"],
             stale_sec=resolved_settings.market_data_tick_stale_sec,
             degraded_sec=resolved_settings.market_data_degraded_tick_stale_sec,
+            now=now,
             base_status=stored_status,
         )
         if quality_status is MarketDataQualityStatus.STALE:

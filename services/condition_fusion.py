@@ -67,12 +67,19 @@ def rebuild_condition_fusion(
 ) -> ConditionFusionRebuildResult:
     resolved_settings = settings or load_settings()
     target_trade_date = _resolve_trade_date(trade_date, resolved_settings)
+    start_at, end_at = condition_signal_trade_date_bounds(
+        target_trade_date,
+        resolved_settings,
+    )
     rows = connection.execute(
         """
         SELECT *
         FROM market_condition_signals
+        WHERE event_ts >= ?
+            AND event_ts < ?
         ORDER BY event_ts ASC, id ASC
-        """
+        """,
+        (start_at, end_at),
     ).fetchall()
     events_by_code: dict[str, list[_ConditionProfileEvent]] = {}
     processed = 0
@@ -216,12 +223,19 @@ def _get_condition_profile_metrics_python(
     limit: int,
 ) -> list[dict[str, Any]]:
     metrics: dict[str, dict[str, Any]] = {}
+    start_at, end_at = condition_signal_trade_date_bounds(
+        target_trade_date,
+        settings,
+    )
     rows = connection.execute(
         """
         SELECT *
         FROM market_condition_signals
+        WHERE event_ts >= ?
+            AND event_ts < ?
         ORDER BY event_ts DESC, id DESC
-        """
+        """,
+        (start_at, end_at),
     ).fetchall()
     for row in rows:
         if _trade_date_for_timestamp(row["event_ts"], settings) != target_trade_date:
@@ -713,12 +727,25 @@ def _resolve_trade_date(trade_date: str | None, settings: Settings) -> str:
     )
 
 
-def _trade_date_bounds(trade_date: str, settings: Settings) -> tuple[str, str]:
+def condition_signal_trade_date_bounds(
+    trade_date: str,
+    settings: Settings,
+) -> tuple[str, str]:
+    """Return the UTC wire interval for one configured-market trade date."""
     trade_day = date.fromisoformat(trade_date)
     timezone = candidate_timezone(settings.candidate_trade_date_timezone)
     start = datetime.combine(trade_day, time.min, tzinfo=timezone)
     end = start + timedelta(days=1)
-    return datetime_to_wire(start), datetime_to_wire(end)
+    return _fixed_precision_wire(start), _fixed_precision_wire(end)
+
+
+def _fixed_precision_wire(value: datetime) -> str:
+    """Return a UTC wire timestamp with a stable TEXT-sortable precision."""
+    return parse_timestamp(value, "timestamp").strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _trade_date_bounds(trade_date: str, settings: Settings) -> tuple[str, str]:
+    return condition_signal_trade_date_bounds(trade_date, settings)
 
 
 def _trade_date_for_timestamp(value: str, settings: Settings) -> str:
