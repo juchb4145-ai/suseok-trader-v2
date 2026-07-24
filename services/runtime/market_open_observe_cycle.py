@@ -10,6 +10,10 @@ from typing import Any
 from domain.broker.utils import datetime_to_wire, new_message_id, normalize_value, utc_now
 from domain.strategy.status import StrategyObservationStatus
 from storage.gateway_command_store import get_command_status_counts
+from storage.sqlite_locking import (
+    configure_sqlite_busy_timeout,
+    is_sqlite_locked_error,
+)
 
 from services.candidate_service import (
     get_candidate_status,
@@ -36,7 +40,6 @@ STAGE_PASS = "PASS"
 STAGE_WARN = "WARN"
 STAGE_BLOCK = "BLOCK"
 STAGE_UNKNOWN = "UNKNOWN"
-
 
 @dataclass(frozen=True, kw_only=True)
 class ObserveCycleStageResult:
@@ -165,6 +168,10 @@ def _run_market_open_observe_cycle_once(
 ) -> MarketOpenObserveCycleRunResult:
     cycle_started = time.monotonic()
     resolved_settings = settings or load_settings()
+    configure_sqlite_busy_timeout(
+        connection,
+        timeout_ms=resolved_settings.operator_sqlite_busy_timeout_ms,
+    )
     run_id = new_message_id("market_open_observe_cycle_run")
     freshness_reference_at = utc_now()
     created_at = datetime_to_wire(freshness_reference_at)
@@ -177,8 +184,6 @@ def _run_market_open_observe_cycle_once(
     errors: list[dict[str, Any]] = []
     stage_latency_seconds: dict[str, float] = {}
 
-    theme_snapshot_payload: dict[str, Any] = {}
-    leadership_payload: dict[str, Any] = {}
     stage_started = time.monotonic()
     try:
         assert_runtime_execution_fence(connection)
@@ -207,27 +212,45 @@ def _run_market_open_observe_cycle_once(
         theme_before = get_theme_status(connection, settings=resolved_settings)
         snapshot_result = calculate_all_theme_snapshots(
             connection,
+            calculated_at=freshness_reference_at,
             settings=resolved_settings,
         )
         leadership_result = rebuild_theme_leadership(
             connection,
             trade_date=trade_date,
-            write_candidate_sources=resolved_settings.theme_leadership_write_candidate_sources,
+            write_candidate_sources=(
+                resolved_settings.theme_leadership_write_candidate_sources
+            ),
             settings=resolved_settings,
         )
         theme_after = get_theme_status(connection, settings=resolved_settings)
-        theme_snapshot_payload = snapshot_result.to_dict()
-        leadership_payload = leadership_result.to_dict(include_members=False)
         stages["Theme"] = _theme_stage(
             theme_before=theme_before,
             theme_after=theme_after,
-            snapshot_result=theme_snapshot_payload,
-            leadership_result=leadership_payload,
+            snapshot_result=snapshot_result.to_dict(),
+            leadership_result=leadership_result.to_dict(include_members=False),
         )
     except Exception as exc:
+        if connection.in_transaction:
+            connection.rollback()
         error = _stage_error("Theme", exc)
         errors.append(error)
-        stages["Theme"] = _blocked_stage("Theme", "THEME_SNAPSHOT_NOT_BUILT", str(exc))
+        if is_sqlite_locked_error(exc):
+            stages["Theme"] = _sqlite_locked_stage(
+                "Theme",
+                "THEME_SNAPSHOT_NOT_BUILT",
+                str(exc),
+                partial_write_possible=True,
+                incomplete_reason_code="THEME_STAGE_INCOMPLETE",
+            )
+        else:
+            stages["Theme"] = _blocked_stage(
+                "Theme",
+                "THEME_SNAPSHOT_NOT_BUILT",
+                str(exc),
+                incomplete_reason_code="THEME_STAGE_INCOMPLETE",
+                partial_write_possible=True,
+            )
     stage_latency_seconds["Theme"] = _elapsed_seconds(stage_started)
 
     stage_started = time.monotonic()
@@ -246,9 +269,26 @@ def _run_market_open_observe_cycle_once(
             freshness_reference_at=created_at,
         )
     except Exception as exc:
+        if connection.in_transaction:
+            connection.rollback()
         error = _stage_error("Candidate", exc)
         errors.append(error)
-        stages["Candidate"] = _blocked_stage("Candidate", "CANDIDATE_REBUILD_NOT_RUN", str(exc))
+        if is_sqlite_locked_error(exc):
+            stages["Candidate"] = _sqlite_locked_stage(
+                "Candidate",
+                "CANDIDATE_REBUILD_NOT_RUN",
+                str(exc),
+                partial_write_possible=True,
+                incomplete_reason_code="CANDIDATE_REBUILD_INCOMPLETE",
+            )
+        else:
+            stages["Candidate"] = _blocked_stage(
+                "Candidate",
+                "CANDIDATE_REBUILD_NOT_RUN",
+                str(exc),
+                incomplete_reason_code="CANDIDATE_REBUILD_INCOMPLETE",
+                partial_write_possible=True,
+            )
     stage_latency_seconds["Candidate"] = _elapsed_seconds(stage_started)
 
     stage_started = time.monotonic()
@@ -873,13 +913,71 @@ def _live_sim_stage(
     )
 
 
-def _blocked_stage(stage: str, reason_code: str, message: str) -> ObserveCycleStageResult:
+def _sqlite_locked_stage(
+    stage: str,
+    stage_reason_code: str,
+    message: str,
+    *,
+    partial_write_possible: bool = False,
+    incomplete_reason_code: str | None = None,
+) -> ObserveCycleStageResult:
+    reason_codes = [stage_reason_code]
+    if incomplete_reason_code:
+        reason_codes.append(incomplete_reason_code)
+    reason_codes.append("SQLITE_DATABASE_LOCKED")
     return ObserveCycleStageResult(
         stage=stage,
         status=STAGE_BLOCK,
-        reason_codes=(reason_code,),
+        reason_codes=tuple(reason_codes),
         summary=message,
-        details={"error": message},
+        counts={"stage_replay_count": 0},
+        details={
+            "error": message,
+            "retryable": True,
+            "automatic_retry_scope": "SHORT_WRITE_TRANSACTION_BEGIN",
+            "lock_phase": "UNKNOWN",
+            "transaction_begin_retry_count_available": False,
+            "stage_replayed": False,
+            "partial_write_possible": partial_write_possible,
+            "completion_state": (
+                "PARTIAL_POSSIBLE"
+                if partial_write_possible
+                else "NOT_COMPLETED"
+            ),
+        },
+    )
+
+
+def _blocked_stage(
+    stage: str,
+    reason_code: str,
+    message: str,
+    *,
+    incomplete_reason_code: str | None = None,
+    partial_write_possible: bool = False,
+) -> ObserveCycleStageResult:
+    reason_codes = [reason_code]
+    if incomplete_reason_code:
+        reason_codes.append(incomplete_reason_code)
+    details: dict[str, Any] = {"error": message}
+    if incomplete_reason_code or partial_write_possible:
+        details.update(
+            {
+                "stage_replayed": False,
+                "partial_write_possible": partial_write_possible,
+                "completion_state": (
+                    "PARTIAL_POSSIBLE"
+                    if partial_write_possible
+                    else "NOT_COMPLETED"
+                ),
+            }
+        )
+    return ObserveCycleStageResult(
+        stage=stage,
+        status=STAGE_BLOCK,
+        reason_codes=tuple(reason_codes),
+        summary=message,
+        details=details,
     )
 
 

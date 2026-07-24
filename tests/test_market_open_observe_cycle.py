@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import timedelta
 
+import pytest
+import services.runtime.market_open_observe_cycle as observe_cycle
 from apps.core_api import app
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
@@ -213,6 +216,350 @@ def test_observe_cycle_returns_conflict_when_evaluation_lock_is_active(
     assert response.json()["detail"]["error"] == "EVALUATION_RUN_LOCKED"
 
 
+def test_observe_cycle_uses_fixed_cycle_time_without_stage_replay(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "observe_cycle_transient_lock.sqlite3"
+    connection = initialize_database(db_path)
+    connection.execute(
+        """
+        CREATE TABLE observe_cycle_retry_probe (
+            stage TEXT PRIMARY KEY,
+            calculated_at TEXT
+        )
+        """
+    )
+    connection.commit()
+    settings = Settings(
+        trading_db_path=db_path,
+        operator_sqlite_lock_retry_attempts=3,
+        operator_sqlite_lock_retry_base_sleep_sec=0,
+        operator_sqlite_lock_retry_max_sleep_sec=0,
+        operator_sqlite_busy_timeout_ms=37,
+    )
+    _stub_non_retry_observe_cycle_stages(monkeypatch)
+    theme_calculated_at = []
+    theme_call_count = 0
+    candidate_call_count = 0
+
+    def calculate_theme_snapshots(
+        actual_connection,
+        *,
+        calculated_at,
+        settings,
+        **kwargs,
+    ):
+        del settings, kwargs
+        nonlocal theme_call_count
+        theme_call_count += 1
+        theme_calculated_at.append(calculated_at)
+        actual_connection.execute(
+            """
+            INSERT INTO observe_cycle_retry_probe (stage, calculated_at)
+            VALUES ('Theme', ?)
+            """,
+            (datetime_to_wire(calculated_at),),
+        )
+        actual_connection.commit()
+        return _StubResult(
+            {
+                "processed_theme_count": 1,
+                "snapshot_count": 1,
+                "error_count": 0,
+            }
+        )
+
+    def rebuild_candidates(actual_connection, *args, **kwargs):
+        del args, kwargs
+        nonlocal candidate_call_count
+        candidate_call_count += 1
+        actual_connection.execute(
+            """
+            INSERT INTO observe_cycle_retry_probe (stage, calculated_at)
+            VALUES ('Candidate', NULL)
+            """
+        )
+        actual_connection.commit()
+        return _StubResult(_candidate_rebuild_payload())
+
+    monkeypatch.setattr(
+        observe_cycle,
+        "calculate_all_theme_snapshots",
+        calculate_theme_snapshots,
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "rebuild_candidates_from_observations",
+        rebuild_candidates,
+    )
+
+    try:
+        result = observe_cycle.run_market_open_observe_cycle_once(
+            connection,
+            trade_date="2026-07-24",
+            settings=settings,
+            write_run=False,
+        )
+        probe_rows = connection.execute(
+            """
+            SELECT stage, calculated_at
+            FROM observe_cycle_retry_probe
+            ORDER BY stage
+            """
+        ).fetchall()
+        busy_timeout_ms = int(connection.execute("PRAGMA busy_timeout").fetchone()[0])
+    finally:
+        connection.close()
+
+    assert theme_call_count == 1
+    assert candidate_call_count == 1
+    assert datetime_to_wire(theme_calculated_at[0]) == result.created_at
+    assert [(row["stage"], row["calculated_at"]) for row in probe_rows] == [
+        ("Candidate", None),
+        ("Theme", result.created_at),
+    ]
+    assert busy_timeout_ms == 37
+    for stage_name in ("Theme", "Candidate"):
+        stage = result.stages[stage_name]
+        assert stage.status == "PASS"
+        assert "sqlite_lock_retry_count" not in stage.counts
+        assert "sqlite_lock_retry_count" not in stage.details
+    assert result.send_order_delta == 0
+    assert result.order_command_delta == {
+        "cancel_order": 0,
+        "modify_order": 0,
+        "send_order": 0,
+    }
+
+
+def test_observe_cycle_reports_candidate_partial_progress_without_stage_replay(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "observe_cycle_exhausted_lock.sqlite3"
+    connection = initialize_database(db_path)
+    connection.execute(
+        """
+        CREATE TABLE observe_cycle_retry_probe (
+            stage TEXT PRIMARY KEY
+        )
+        """
+    )
+    connection.commit()
+    settings = Settings(
+        trading_db_path=db_path,
+        operator_sqlite_lock_retry_attempts=3,
+        operator_sqlite_lock_retry_base_sleep_sec=0,
+        operator_sqlite_lock_retry_max_sleep_sec=0,
+        operator_sqlite_busy_timeout_ms=25,
+    )
+    _stub_non_retry_observe_cycle_stages(monkeypatch)
+    candidate_call_count = 0
+
+    def rebuild_candidates(actual_connection, *args, **kwargs):
+        del args, kwargs
+        nonlocal candidate_call_count
+        candidate_call_count += 1
+        actual_connection.execute(
+            "INSERT INTO observe_cycle_retry_probe (stage) VALUES ('Candidate')"
+        )
+        actual_connection.commit()
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        observe_cycle,
+        "rebuild_candidates_from_observations",
+        rebuild_candidates,
+    )
+
+    try:
+        result = observe_cycle.run_market_open_observe_cycle_once(
+            connection,
+            trade_date="2026-07-24",
+            settings=settings,
+            write_run=False,
+        )
+        probe_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM observe_cycle_retry_probe"
+            ).fetchone()["count"]
+        )
+    finally:
+        connection.close()
+
+    candidate_stage = result.stages["Candidate"]
+    assert candidate_call_count == 1
+    assert probe_count == 1
+    assert candidate_stage.status == "BLOCK"
+    assert candidate_stage.reason_codes == (
+        "CANDIDATE_REBUILD_NOT_RUN",
+        "CANDIDATE_REBUILD_INCOMPLETE",
+        "SQLITE_DATABASE_LOCKED",
+    )
+    assert candidate_stage.counts["stage_replay_count"] == 0
+    assert candidate_stage.details["retryable"] is True
+    assert (
+        candidate_stage.details["automatic_retry_scope"]
+        == "SHORT_WRITE_TRANSACTION_BEGIN"
+    )
+    assert candidate_stage.details["transaction_begin_retry_count_available"] is False
+    assert candidate_stage.details["stage_replayed"] is False
+    assert candidate_stage.details["partial_write_possible"] is True
+    assert candidate_stage.details["completion_state"] == "PARTIAL_POSSIBLE"
+    assert result.send_order_delta == 0
+    assert all(delta == 0 for delta in result.order_command_delta.values())
+
+
+def test_observe_cycle_does_not_replay_theme_after_durable_lock_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "observe_cycle_theme_no_replay.sqlite3"
+    connection = initialize_database(db_path)
+    connection.execute(
+        """
+        CREATE TABLE observe_cycle_retry_probe (
+            stage TEXT PRIMARY KEY
+        )
+        """
+    )
+    connection.commit()
+    settings = Settings(
+        trading_db_path=db_path,
+        operator_sqlite_busy_timeout_ms=25,
+    )
+    _stub_non_retry_observe_cycle_stages(monkeypatch)
+    theme_call_count = 0
+
+    def calculate_theme_snapshots(actual_connection, *args, **kwargs):
+        del args, kwargs
+        nonlocal theme_call_count
+        theme_call_count += 1
+        actual_connection.execute(
+            "INSERT INTO observe_cycle_retry_probe (stage) VALUES ('Theme')"
+        )
+        actual_connection.commit()
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        observe_cycle,
+        "calculate_all_theme_snapshots",
+        calculate_theme_snapshots,
+    )
+
+    try:
+        result = observe_cycle.run_market_open_observe_cycle_once(
+            connection,
+            trade_date="2026-07-24",
+            settings=settings,
+            write_run=False,
+        )
+        probe_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM observe_cycle_retry_probe"
+            ).fetchone()["count"]
+        )
+    finally:
+        connection.close()
+
+    theme_stage = result.stages["Theme"]
+    assert theme_call_count == 1
+    assert probe_count == 1
+    assert theme_stage.status == "BLOCK"
+    assert theme_stage.reason_codes == (
+        "THEME_SNAPSHOT_NOT_BUILT",
+        "THEME_STAGE_INCOMPLETE",
+        "SQLITE_DATABASE_LOCKED",
+    )
+    assert theme_stage.counts["stage_replay_count"] == 0
+    assert theme_stage.details["stage_replayed"] is False
+    assert theme_stage.details["partial_write_possible"] is True
+    assert theme_stage.details["completion_state"] == "PARTIAL_POSSIBLE"
+    assert result.send_order_delta == 0
+    assert all(delta == 0 for delta in result.order_command_delta.values())
+
+
+@pytest.mark.parametrize(
+    ("stage_name", "target_name", "legacy_reason", "incomplete_reason"),
+    (
+        (
+            "Theme",
+            "calculate_all_theme_snapshots",
+            "THEME_SNAPSHOT_NOT_BUILT",
+            "THEME_STAGE_INCOMPLETE",
+        ),
+        (
+            "Candidate",
+            "rebuild_candidates_from_observations",
+            "CANDIDATE_REBUILD_NOT_RUN",
+            "CANDIDATE_REBUILD_INCOMPLETE",
+        ),
+    ),
+)
+def test_observe_cycle_reports_non_lock_partial_progress_as_incomplete(
+    tmp_path,
+    monkeypatch,
+    stage_name,
+    target_name,
+    legacy_reason,
+    incomplete_reason,
+) -> None:
+    db_path = tmp_path / f"observe_cycle_{stage_name.lower()}_incomplete.sqlite3"
+    connection = initialize_database(db_path)
+    connection.execute(
+        """
+        CREATE TABLE observe_cycle_retry_probe (
+            stage TEXT PRIMARY KEY
+        )
+        """
+    )
+    connection.commit()
+    settings = Settings(trading_db_path=db_path)
+    _stub_non_retry_observe_cycle_stages(monkeypatch)
+    call_count = 0
+
+    def commit_then_fail(actual_connection, *args, **kwargs):
+        del args, kwargs
+        nonlocal call_count
+        call_count += 1
+        actual_connection.execute(
+            "INSERT INTO observe_cycle_retry_probe (stage) VALUES (?)",
+            (stage_name,),
+        )
+        actual_connection.commit()
+        raise RuntimeError("stage failed after durable progress")
+
+    monkeypatch.setattr(observe_cycle, target_name, commit_then_fail)
+
+    try:
+        result = observe_cycle.run_market_open_observe_cycle_once(
+            connection,
+            trade_date="2026-07-24",
+            settings=settings,
+            write_run=False,
+        )
+        probe_count = int(
+            connection.execute(
+                "SELECT COUNT(*) AS count FROM observe_cycle_retry_probe"
+            ).fetchone()["count"]
+        )
+    finally:
+        connection.close()
+
+    stage = result.stages[stage_name]
+    assert call_count == 1
+    assert probe_count == 1
+    assert stage.status == "BLOCK"
+    assert stage.reason_codes == (legacy_reason, incomplete_reason)
+    assert "SQLITE_DATABASE_LOCKED" not in stage.reason_codes
+    assert stage.details["stage_replayed"] is False
+    assert stage.details["partial_write_possible"] is True
+    assert stage.details["completion_state"] == "PARTIAL_POSSIBLE"
+    assert result.send_order_delta == 0
+    assert all(delta == 0 for delta in result.order_command_delta.values())
+
+
 def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> None:
     payload = {
         "run_id": "cycle_1",
@@ -282,6 +629,171 @@ def _condition_profile_metadata(role: str, condition_name: str, priority: int) -
             "reason_codes": ["TEST"],
         },
     }
+
+
+class _StubResult:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def to_dict(self, *args, **kwargs) -> dict[str, object]:
+        del args, kwargs
+        return dict(self.payload)
+
+
+def _candidate_rebuild_payload() -> dict[str, object]:
+    return {
+        "source_event_count": 1,
+        "candidate_created_count": 0,
+        "candidate_updated_count": 1,
+        "transition_count": 0,
+        "context_refreshed_count": 1,
+        "stale_count": 0,
+        "closed_count": 0,
+        "error_count": 0,
+    }
+
+
+def _stub_non_retry_observe_cycle_stages(monkeypatch) -> None:
+    monkeypatch.setattr(
+        observe_cycle,
+        "run_realtime_subscription_once",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "status": "OK",
+                "counts": {},
+                "command_count": 0,
+                "queue_commands": False,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_theme_status",
+        lambda *args, **kwargs: {
+            "theme_count": 1,
+            "active_theme_count": 1,
+            "member_count": 1,
+        },
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "calculate_all_theme_snapshots",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "processed_theme_count": 1,
+                "snapshot_count": 1,
+                "error_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "rebuild_theme_leadership",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "status": "OK",
+                "watchset": {"items": []},
+                "candidate_apply_result": {},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "rebuild_candidates_from_observations",
+        lambda *args, **kwargs: _StubResult(_candidate_rebuild_payload()),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_candidate_status",
+        lambda *args, **kwargs: {
+            "candidate_count": 1,
+            "active_candidate_count": 1,
+        },
+    )
+    monkeypatch.setattr(observe_cycle, "list_condition_fusion", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_condition_profile_metrics",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "_condition_fusion_source_count",
+        lambda *args, **kwargs: 0,
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "evaluate_candidates",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "status": "OK",
+                "candidate_count": 1,
+                "evaluated_count": 0,
+                "matched_observation_count": 0,
+                "error_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_strategy_status",
+        lambda *args, **kwargs: {"latest_observation_count": 0},
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "evaluate_risk_observations",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "status": "OK",
+                "strategy_observation_count": 0,
+                "evaluated_count": 0,
+                "observe_pass_count": 0,
+                "block_count": 0,
+                "error_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_risk_status",
+        lambda *args, **kwargs: {"latest_observation_count": 0},
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "evaluate_entry_timing",
+        lambda *args, **kwargs: _StubResult(
+            {
+                "status": "OK",
+                "candidate_count": 0,
+                "evaluated_count": 0,
+                "plan_ready_count": 0,
+                "order_plan_drafts": [],
+                "error_count": 0,
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_entry_timing_status",
+        lambda *args, **kwargs: {"latest_plan_count": 0},
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "get_live_sim_status",
+        lambda *args, **kwargs: {
+            "enabled": False,
+            "kill_switch": True,
+            "intent_count": 0,
+            "order_count": 0,
+            "open_order_count": 0,
+            "open_position_count": 0,
+        },
+    )
+    monkeypatch.setattr(
+        observe_cycle,
+        "run_live_sim_preflight",
+        lambda *args, **kwargs: _StubResult({"status": "PASS"}),
+    )
 
 
 def _insert_fresh_market_inputs(db_path) -> None:

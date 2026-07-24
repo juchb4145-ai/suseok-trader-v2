@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 
 from storage.sqlite import (
     APP_NAME,
@@ -7,6 +8,7 @@ from storage.sqlite import (
     initialize_database_for_offline_migration,
     open_connection,
 )
+from storage.sqlite_locking import coordinated_sqlite_writer
 
 
 def test_sqlite_initialization_creates_app_metadata_and_pragmas(tmp_path) -> None:
@@ -37,6 +39,28 @@ def test_open_connection_accepts_a_bounded_busy_timeout(tmp_path) -> None:
         connection.close()
 
     assert busy_timeout == 250
+
+
+def test_process_sqlite_writer_coordinator_is_reentrant_and_times_out_other_thread() -> None:
+    competing_results: list[bool] = []
+
+    def compete_for_writer() -> None:
+        with coordinated_sqlite_writer(timeout_sec=0.01) as acquired:
+            competing_results.append(acquired)
+
+    with coordinated_sqlite_writer() as outer_acquired:
+        with coordinated_sqlite_writer(timeout_sec=0.0) as nested_acquired:
+            competing = threading.Thread(target=compete_for_writer)
+            competing.start()
+            competing.join(timeout=1.0)
+
+    assert outer_acquired is True
+    assert nested_acquired is True
+    assert competing.is_alive() is False
+    assert competing_results == [False]
+
+    with coordinated_sqlite_writer(timeout_sec=0.0) as acquired_after_release:
+        assert acquired_after_release is True
 
 
 def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:

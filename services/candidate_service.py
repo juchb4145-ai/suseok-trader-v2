@@ -23,6 +23,7 @@ from domain.candidate.state import CandidateState
 from domain.market.models import MarketDataQualityStatus
 from domain.theme.state import ThemeMemberRole
 from storage.gateway_command_store import canonical_json
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from services.condition_fusion import (
     condition_signal_trade_date_bounds,
@@ -33,7 +34,11 @@ from services.condition_fusion import (
 from services.config import Settings, candidate_timezone, load_settings
 from services.market_context_service import get_market_context_for_code
 from services.market_data_service import get_latest_tick, get_market_data_readiness
-from services.runtime.evaluation_run_guard import assert_runtime_execution_fence
+from services.runtime.evaluation_run_guard import (
+    EvaluationRunFenceError,
+    assert_runtime_execution_fence,
+    immediate_transaction,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -139,65 +144,79 @@ def _ingest_condition_sources(
         (start_at, end_at),
     ).fetchall()
     result = _MutableIngestResult()
-    processed_in_chunk = 0
-    for fusion in list_condition_fusion(
-        connection,
-        trade_date=target_trade_date,
-        settings=resolved_settings,
-        limit=500,
-    ):
-        if not fusion.get("active_roles"):
-            continue
-        try:
-            source_event = _fusion_row_to_source_event(fusion, target_trade_date)
-            applied = _apply_candidate_source_event_atomically(
-                connection,
-                source_event,
-                settings=resolved_settings,
-            )
-            result.add_apply(applied)
-        except Exception as exc:
-            result.error_count += 1
-            _record_projection_error(
-                connection,
-                candidate_instance_id=None,
-                source_event_id=fusion.get("latest_event_id"),
-                code=fusion.get("code"),
-                error_message=str(exc),
-                payload=fusion,
-            )
-        processed_in_chunk += 1
-        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
-            _commit_source_ingest_chunk(connection)
-            processed_in_chunk = 0
-    for row in rows:
-        if _trade_date_for_timestamp(row["event_ts"], resolved_settings) != target_trade_date:
-            continue
-        if is_profile_condition_metadata(_condition_row_metadata(row)):
-            continue
-        try:
-            source_event = _condition_row_to_source_event(row, target_trade_date, resolved_settings)
-            applied = _apply_candidate_source_event_atomically(
-                connection,
-                source_event,
-                settings=resolved_settings,
-            )
-            result.add_apply(applied)
-        except Exception as exc:
-            result.error_count += 1
-            _record_projection_error(
-                connection,
-                candidate_instance_id=None,
-                source_event_id=row["event_id"] if "event_id" in row.keys() else None,
-                code=row["code"] if "code" in row.keys() else None,
-                error_message=str(exc),
-                payload=_row_to_dict(row),
-            )
-        processed_in_chunk += 1
-        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
-            _commit_source_ingest_chunk(connection)
-            processed_in_chunk = 0
-    _commit_source_ingest_chunk(connection)
+    fusions = [
+        fusion
+        for fusion in list_condition_fusion(
+            connection,
+            trade_date=target_trade_date,
+            settings=resolved_settings,
+            limit=500,
+        )
+        if fusion.get("active_roles")
+    ]
+    for chunk in _source_ingest_chunks(fusions):
+        with immediate_transaction(connection):
+            for fusion in chunk:
+                try:
+                    source_event = _fusion_row_to_source_event(fusion, target_trade_date)
+                    applied = _apply_candidate_source_event_atomically(
+                        connection,
+                        source_event,
+                        settings=resolved_settings,
+                    )
+                    result.add_apply(applied)
+                except Exception as exc:
+                    if is_sqlite_locked_error(exc):
+                        raise
+                    result.error_count += 1
+                    _record_projection_error(
+                        connection,
+                        candidate_instance_id=None,
+                        source_event_id=fusion.get("latest_event_id"),
+                        code=fusion.get("code"),
+                        error_message=str(exc),
+                        payload=fusion,
+                    )
+            assert_runtime_execution_fence(connection)
+
+    eligible_rows = [
+        row
+        for row in rows
+        if _trade_date_for_timestamp(row["event_ts"], resolved_settings)
+        == target_trade_date
+        and not is_profile_condition_metadata(_condition_row_metadata(row))
+    ]
+    for chunk in _source_ingest_chunks(eligible_rows):
+        with immediate_transaction(connection):
+            for row in chunk:
+                try:
+                    source_event = _condition_row_to_source_event(
+                        row,
+                        target_trade_date,
+                        resolved_settings,
+                    )
+                    applied = _apply_candidate_source_event_atomically(
+                        connection,
+                        source_event,
+                        settings=resolved_settings,
+                    )
+                    result.add_apply(applied)
+                except Exception as exc:
+                    if is_sqlite_locked_error(exc):
+                        raise
+                    result.error_count += 1
+                    _record_projection_error(
+                        connection,
+                        candidate_instance_id=None,
+                        source_event_id=(
+                            row["event_id"] if "event_id" in row.keys() else None
+                        ),
+                        code=row["code"] if "code" in row.keys() else None,
+                        error_message=str(exc),
+                        payload=_row_to_dict(row),
+                    )
+            assert_runtime_execution_fence(connection)
+    assert_runtime_execution_fence(connection)
     return result.to_ingest_result()
 
 
@@ -252,37 +271,41 @@ def _ingest_theme_sources(
         """
     ).fetchall()
     result = _MutableIngestResult()
-    processed_in_chunk = 0
-    for row in rows:
-        if _trade_date_for_timestamp(row["calculated_at"], resolved_settings) != target_trade_date:
-            continue
-        if str(row["state"]).upper() not in resolved_settings.candidate_theme_source_states:
-            continue
-        if str(row["member_role"]).upper() not in resolved_settings.candidate_theme_member_roles:
-            continue
-        try:
-            source_event = _theme_row_to_source_event(row, target_trade_date)
-            applied = _apply_candidate_source_event_atomically(
-                connection,
-                source_event,
-                settings=resolved_settings,
-            )
-            result.add_apply(applied)
-        except Exception as exc:
-            result.error_count += 1
-            _record_projection_error(
-                connection,
-                candidate_instance_id=None,
-                source_event_id=None,
-                code=row["code"] if "code" in row.keys() else None,
-                error_message=str(exc),
-                payload=_row_to_dict(row),
-            )
-        processed_in_chunk += 1
-        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
-            _commit_source_ingest_chunk(connection)
-            processed_in_chunk = 0
-    _commit_source_ingest_chunk(connection)
+    eligible_rows = [
+        row
+        for row in rows
+        if _trade_date_for_timestamp(row["calculated_at"], resolved_settings)
+        == target_trade_date
+        and str(row["state"]).upper()
+        in resolved_settings.candidate_theme_source_states
+        and str(row["member_role"]).upper()
+        in resolved_settings.candidate_theme_member_roles
+    ]
+    for chunk in _source_ingest_chunks(eligible_rows):
+        with immediate_transaction(connection):
+            for row in chunk:
+                try:
+                    source_event = _theme_row_to_source_event(row, target_trade_date)
+                    applied = _apply_candidate_source_event_atomically(
+                        connection,
+                        source_event,
+                        settings=resolved_settings,
+                    )
+                    result.add_apply(applied)
+                except Exception as exc:
+                    if is_sqlite_locked_error(exc):
+                        raise
+                    result.error_count += 1
+                    _record_projection_error(
+                        connection,
+                        candidate_instance_id=None,
+                        source_event_id=None,
+                        code=row["code"] if "code" in row.keys() else None,
+                        error_message=str(exc),
+                        payload=_row_to_dict(row),
+                    )
+            assert_runtime_execution_fence(connection)
+    assert_runtime_execution_fence(connection)
     return result.to_ingest_result()
 
 
@@ -317,12 +340,13 @@ def ingest_manual_watch_source(
         payload={"reason": reason},
         reason_codes=[CandidateReasonCode.SOURCE_DETECTED.value],
     )
-    result = create_or_merge_candidate_from_source(
-        connection,
-        source_event,
-        settings=resolved_settings,
-    )
-    connection.commit()
+    with immediate_transaction(connection):
+        result = create_or_merge_candidate_from_source(
+            connection,
+            source_event,
+            settings=resolved_settings,
+        )
+        assert_runtime_execution_fence(connection)
     return result
 
 
@@ -407,7 +431,7 @@ def _apply_candidate_source_event_atomically(
     settings: Settings,
 ) -> CandidateSourceApplyResult:
     if not connection.in_transaction:
-        connection.execute("BEGIN DEFERRED")
+        raise RuntimeError("candidate source event requires an active write transaction")
     connection.execute(f"SAVEPOINT {_SOURCE_EVENT_SAVEPOINT}")
     try:
         result = create_or_merge_candidate_from_source(
@@ -423,14 +447,11 @@ def _apply_candidate_source_event_atomically(
     return result
 
 
-def _commit_source_ingest_chunk(connection: sqlite3.Connection) -> None:
-    try:
-        assert_runtime_execution_fence(connection)
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
-    connection.commit()
+def _source_ingest_chunks(items: Sequence[Any]) -> list[Sequence[Any]]:
+    return [
+        items[index : index + _SOURCE_INGEST_COMMIT_CHUNK_SIZE]
+        for index in range(0, len(items), _SOURCE_INGEST_COMMIT_CHUNK_SIZE)
+    ]
 
 
 def refresh_candidate_context(
@@ -443,6 +464,11 @@ def refresh_candidate_context(
 ) -> CandidateRefreshResult:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
+    if not manage_transaction and not connection.in_transaction:
+        raise RuntimeError(
+            "candidate context refresh requires an active transaction "
+            "when manage_transaction is false"
+        )
     row = _candidate_row(connection, normalized_id)
     if row is None:
         raise ValueError(f"candidate not found: {normalized_id}")
@@ -450,121 +476,152 @@ def refresh_candidate_context(
         return CandidateRefreshResult()
 
     try:
-        active_sources = _list_latest_source_rows(connection, normalized_id, active_only=True)
-        all_sources = _list_latest_source_rows(connection, normalized_id, active_only=False)
-        readiness = get_market_data_readiness(
-            connection,
-            row["code"],
-            settings=resolved_settings,
-            now=freshness_reference_at,
-        )
-        latest_tick = get_latest_tick(connection, row["code"])
-        common_market_context = get_market_context_for_code(
-            connection,
-            row["code"],
-            settings=resolved_settings,
-        )
-        market_regime = common_market_context["market_regime"]
-        theme_context = _build_theme_context(connection, row, active_sources)
-        source_context = _build_source_context(
-            connection,
-            row,
-            active_sources=active_sources,
-            all_sources=all_sources,
-        )
-        market_context = {
-            "snapshot_id": common_market_context.get("snapshot_id"),
-            "trade_date": common_market_context.get("trade_date"),
-            "market": common_market_context.get("market"),
-            "source_watermark_hash": common_market_context.get(
-                "source_watermark_hash"
-            ),
-            "source_watermark": common_market_context.get("source_watermark", {}),
-            "parser_confidence_status": common_market_context.get(
-                "parser_confidence_status"
-            ),
-            "data_quality_status": common_market_context.get("data_quality_status"),
-            "trading_data_usable": common_market_context.get("trading_data_usable"),
-            "trading_eligible": common_market_context.get("trading_eligible"),
-            "data_age_sec": common_market_context.get("data_age_sec"),
-            "generated_by": common_market_context.get("generated_by"),
-            "snapshot_at": common_market_context.get("snapshot_at"),
-            "latest_tick": latest_tick,
-            "readiness": readiness,
-            "market_regime": market_regime,
-        }
-        context = _fsm_context(
-            row,
-            active_sources=active_sources,
-            readiness=readiness,
-            theme_context=theme_context,
-            settings=resolved_settings,
-        )
-        current = _candidate_row_to_dict(row)
-        decision = determine_next_state(current, context)
-        reason_codes = merge_reason_codes(
-            _read_json_array(row["reason_codes_json"]),
-            _readiness_reason_codes(readiness),
-            _theme_reason_codes(theme_context),
-            context.get("reason_codes", ()),
-            decision.reason_codes,
-        )
-        refreshed_at = datetime_to_wire(utc_now())
-        _upsert_candidate_context(
-            connection,
-            candidate=row,
-            market_context_snapshot_id=common_market_context.get("snapshot_id"),
-            theme_context=theme_context,
-            market_context=market_context,
-            source_context=source_context,
-            readiness=readiness,
-            refreshed_at=refreshed_at,
-        )
-        _update_candidate_context_columns(
-            connection,
-            row,
-            active_source_count=len(active_sources),
-            source_count=len(all_sources),
-            readiness=readiness,
-            theme_context=theme_context,
-            reason_codes=reason_codes,
-        )
-        transition_count = 0
-        if decision.next_state.value != row["state"]:
-            transition_count = _apply_state_transition(
+        with immediate_transaction(connection):
+            current_row = _candidate_row(connection, normalized_id)
+            if current_row is None:
+                raise ValueError(f"candidate not found: {normalized_id}")
+            if current_row["state"] == CandidateState.CLOSED.value:
+                return CandidateRefreshResult()
+            active_sources = _list_latest_source_rows(
                 connection,
                 normalized_id,
-                decision.next_state,
-                event_type=(
-                    CandidateEventType.CANDIDATE_CLOSED
-                    if decision.close_candidate
-                    else CandidateEventType.CANDIDATE_STALE
-                    if decision.stale_candidate
-                    else CandidateEventType.STATE_CHANGED
-                ),
-                source_event_id=None,
-                reason_codes=reason_codes,
-                metadata={"context_refreshed_at": refreshed_at},
+                active_only=True,
             )
-        if manage_transaction:
-            connection.commit()
+            all_sources = _list_latest_source_rows(
+                connection,
+                normalized_id,
+                active_only=False,
+            )
+            readiness = get_market_data_readiness(
+                connection,
+                current_row["code"],
+                settings=resolved_settings,
+                now=freshness_reference_at,
+            )
+            latest_tick = get_latest_tick(connection, current_row["code"])
+            common_market_context = get_market_context_for_code(
+                connection,
+                current_row["code"],
+                settings=resolved_settings,
+            )
+            market_regime = common_market_context["market_regime"]
+            theme_context = _build_theme_context(
+                connection,
+                current_row,
+                active_sources,
+            )
+            source_context = _build_source_context(
+                connection,
+                current_row,
+                active_sources=active_sources,
+                all_sources=all_sources,
+            )
+            market_context = {
+                "snapshot_id": common_market_context.get("snapshot_id"),
+                "trade_date": common_market_context.get("trade_date"),
+                "market": common_market_context.get("market"),
+                "source_watermark_hash": common_market_context.get(
+                    "source_watermark_hash"
+                ),
+                "source_watermark": common_market_context.get("source_watermark", {}),
+                "parser_confidence_status": common_market_context.get(
+                    "parser_confidence_status"
+                ),
+                "data_quality_status": common_market_context.get("data_quality_status"),
+                "trading_data_usable": common_market_context.get("trading_data_usable"),
+                "trading_eligible": common_market_context.get("trading_eligible"),
+                "data_age_sec": common_market_context.get("data_age_sec"),
+                "generated_by": common_market_context.get("generated_by"),
+                "snapshot_at": common_market_context.get("snapshot_at"),
+                "latest_tick": latest_tick,
+                "readiness": readiness,
+                "market_regime": market_regime,
+            }
+            context = _fsm_context(
+                current_row,
+                active_sources=active_sources,
+                readiness=readiness,
+                theme_context=theme_context,
+                settings=resolved_settings,
+            )
+            current = _candidate_row_to_dict(current_row)
+            decision = determine_next_state(current, context)
+            reason_codes = merge_reason_codes(
+                _read_json_array(current_row["reason_codes_json"]),
+                _readiness_reason_codes(readiness),
+                _theme_reason_codes(theme_context),
+                context.get("reason_codes", ()),
+                decision.reason_codes,
+            )
+            refreshed_at = datetime_to_wire(utc_now())
+            _upsert_candidate_context(
+                connection,
+                candidate=current_row,
+                market_context_snapshot_id=common_market_context.get("snapshot_id"),
+                theme_context=theme_context,
+                market_context=market_context,
+                source_context=source_context,
+                readiness=readiness,
+                refreshed_at=refreshed_at,
+            )
+            _update_candidate_context_columns(
+                connection,
+                current_row,
+                active_source_count=len(active_sources),
+                source_count=len(all_sources),
+                readiness=readiness,
+                theme_context=theme_context,
+                reason_codes=reason_codes,
+            )
+            transition_count = 0
+            if decision.next_state.value != current_row["state"]:
+                transition_count = _apply_state_transition(
+                    connection,
+                    normalized_id,
+                    decision.next_state,
+                    event_type=(
+                        CandidateEventType.CANDIDATE_CLOSED
+                        if decision.close_candidate
+                        else CandidateEventType.CANDIDATE_STALE
+                        if decision.stale_candidate
+                        else CandidateEventType.STATE_CHANGED
+                    ),
+                    source_event_id=None,
+                    reason_codes=reason_codes,
+                    metadata={"context_refreshed_at": refreshed_at},
+                )
+            assert_runtime_execution_fence(connection)
         return CandidateRefreshResult(
             context_refreshed_count=1,
             transition_count=transition_count,
             stale_count=1 if decision.next_state is CandidateState.STALE else 0,
             closed_count=1 if decision.next_state is CandidateState.CLOSED else 0,
         )
+    except EvaluationRunFenceError:
+        raise
     except Exception as exc:
-        _record_projection_error(
-            connection,
-            candidate_instance_id=normalized_id,
-            source_event_id=None,
-            code=row["code"],
-            error_message=str(exc),
-            payload={"candidate_instance_id": normalized_id},
-        )
+        if is_sqlite_locked_error(exc):
+            raise
         if manage_transaction:
-            connection.commit()
+            with immediate_transaction(connection):
+                _record_projection_error(
+                    connection,
+                    candidate_instance_id=normalized_id,
+                    source_event_id=None,
+                    code=row["code"],
+                    error_message=str(exc),
+                    payload={"candidate_instance_id": normalized_id},
+                )
+                assert_runtime_execution_fence(connection)
+        else:
+            _record_projection_error(
+                connection,
+                candidate_instance_id=normalized_id,
+                source_event_id=None,
+                code=row["code"],
+                error_message=str(exc),
+                payload={"candidate_instance_id": normalized_id},
+            )
         return CandidateRefreshResult(error_count=1)
 
 

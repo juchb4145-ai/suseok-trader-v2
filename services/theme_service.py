@@ -30,6 +30,7 @@ from domain.theme.models import (
 from domain.theme.quality import ThemeSnapshotQuality
 from domain.theme.state import ThemeMemberRole, ThemeState
 from storage.gateway_command_store import canonical_json
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from services.config import Settings, load_settings
 from services.market_data_service import (
@@ -40,6 +41,7 @@ from services.market_data_service import (
 from services.runtime.evaluation_run_guard import (
     EvaluationRunFenceError,
     assert_runtime_execution_fence,
+    immediate_transaction,
 )
 
 
@@ -498,17 +500,18 @@ def calculate_theme_snapshot(
             member_snapshots.append(member_snapshot)
             member_scores[member_snapshot.code] = score
         except Exception as exc:
+            if is_sqlite_locked_error(exc):
+                raise
             member_error_count += 1
-            _record_projection_error(
-                connection,
-                theme_id=normalized_theme_id,
-                code=member["code"] if "code" in member.keys() else None,
-                error_message=str(exc),
-                payload={"member": row_to_dict(member)},
-            )
-            # Projection diagnostics must not retain the SQLite writer lock while
-            # the remaining members are evaluated.
-            _commit_theme_projection_step(connection)
+            with immediate_transaction(connection):
+                _record_projection_error(
+                    connection,
+                    theme_id=normalized_theme_id,
+                    code=member["code"] if "code" in member.keys() else None,
+                    error_message=str(exc),
+                    payload={"member": row_to_dict(member)},
+                )
+                assert_runtime_execution_fence(connection)
 
     observed_members = [member for member in member_snapshots if member.price is not None]
     observable_members = [
@@ -664,13 +667,9 @@ def calculate_theme_snapshot(
             **({"premarket": premarket_summary} if premarket_summary else {}),
         },
     )
-    try:
+    with immediate_transaction(connection):
         _save_theme_snapshot(connection, snapshot)
-        _commit_theme_projection_step(connection)
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
+        assert_runtime_execution_fence(connection)
     return snapshot
 
 
@@ -698,30 +697,23 @@ def calculate_all_theme_snapshots(
         except EvaluationRunFenceError:
             raise
         except Exception as exc:
+            if is_sqlite_locked_error(exc):
+                raise
             error_count += 1
-            _record_projection_error(
-                connection,
-                theme_id=theme["theme_id"],
-                code=None,
-                error_message=str(exc),
-                payload={"theme": theme},
-            )
-            _commit_theme_projection_step(connection)
+            with immediate_transaction(connection):
+                _record_projection_error(
+                    connection,
+                    theme_id=theme["theme_id"],
+                    code=None,
+                    error_message=str(exc),
+                    payload={"theme": theme},
+                )
+                assert_runtime_execution_fence(connection)
     return ThemeSnapshotRebuildResult(
         processed_theme_count=processed_theme_count,
         snapshot_count=snapshot_count,
         error_count=error_count,
     )
-
-
-def _commit_theme_projection_step(connection: sqlite3.Connection) -> None:
-    try:
-        assert_runtime_execution_fence(connection)
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
-    connection.commit()
 
 
 def get_theme_status(

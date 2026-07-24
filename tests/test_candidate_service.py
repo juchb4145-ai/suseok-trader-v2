@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
@@ -162,11 +164,16 @@ def test_condition_ingest_releases_writer_lock_at_small_chunk_boundary(
 
     call_count = 0
     competing_writer_acquired = False
+    transaction_count = 0
+    real_immediate_transaction = candidate_service.immediate_transaction
 
-    def apply_source(actual_connection, source_event, *, settings):
-        nonlocal call_count, competing_writer_acquired
-        call_count += 1
-        if call_count == 11:
+    @contextmanager
+    def immediate_transaction_with_boundary_probe(actual_connection):
+        nonlocal competing_writer_acquired, transaction_count
+        with real_immediate_transaction(actual_connection):
+            yield
+        transaction_count += 1
+        if transaction_count == 1:
             competing = open_connection(db_path)
             competing.execute("PRAGMA busy_timeout=0")
             try:
@@ -175,6 +182,10 @@ def test_condition_ingest_releases_writer_lock_at_small_chunk_boundary(
                 competing.rollback()
             finally:
                 competing.close()
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
         actual_connection.execute(
             """
             INSERT INTO candidate_projection_errors (
@@ -195,12 +206,18 @@ def test_condition_ingest_releases_writer_lock_at_small_chunk_boundary(
         "create_or_merge_candidate_from_source",
         apply_source,
     )
+    monkeypatch.setattr(
+        candidate_service,
+        "immediate_transaction",
+        immediate_transaction_with_boundary_probe,
+    )
 
     result = ingest_condition_sources(connection, trade_date, settings=settings)
     connection.close()
 
     assert call_count == 11
     assert result.source_event_count == 11
+    assert transaction_count == 2
     assert competing_writer_acquired is True
 
 
@@ -267,6 +284,40 @@ def test_condition_ingest_fence_loss_rolls_back_current_chunk(
 
     assert call_count == 10
     assert durable_count == 0
+    assert in_transaction is False
+
+
+@pytest.mark.parametrize(
+    "ingest_sources",
+    (ingest_condition_sources, ingest_theme_sources),
+)
+def test_empty_source_ingest_still_checks_runtime_fence(
+    tmp_path,
+    monkeypatch,
+    ingest_sources,
+) -> None:
+    connection = initialize_database(
+        tmp_path / f"candidate-empty-{ingest_sources.__name__}.sqlite3"
+    )
+    settings = _candidate_settings()
+    monkeypatch.setattr(
+        candidate_service,
+        "assert_runtime_execution_fence",
+        lambda connection: (_ for _ in ()).throw(
+            RuntimeError("EVALUATION_RUN_FENCE_LOST")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="EVALUATION_RUN_FENCE_LOST"):
+        ingest_sources(
+            connection,
+            _trade_date(settings),
+            settings=settings,
+        )
+
+    in_transaction = connection.in_transaction
+    connection.close()
+
     assert in_transaction is False
 
 
@@ -355,6 +406,40 @@ def test_condition_ingest_rolls_back_partial_source_event_and_leaked_transaction
     assert in_transaction is False
 
 
+def test_condition_ingest_does_not_record_sqlite_lock_as_projection_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-condition-lock.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        ingest_condition_sources(connection, trade_date, settings=settings)
+
+    projection_error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM candidate_projection_errors"
+    ).fetchone()["count"]
+    source_event_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM candidate_source_events"
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert projection_error_count == 0
+    assert source_event_count == 0
+    assert in_transaction is False
+
+
 def test_theme_ingest_releases_writer_lock_at_small_chunk_boundary(
     tmp_path,
     monkeypatch,
@@ -378,11 +463,16 @@ def test_theme_ingest_releases_writer_lock_at_small_chunk_boundary(
     calculate_theme_snapshot(connection, "semiconductor", settings=settings)
     call_count = 0
     competing_writer_acquired = False
+    transaction_count = 0
+    real_immediate_transaction = candidate_service.immediate_transaction
 
-    def apply_source(actual_connection, source_event, *, settings):
-        nonlocal call_count, competing_writer_acquired
-        call_count += 1
-        if call_count == 11:
+    @contextmanager
+    def immediate_transaction_with_boundary_probe(actual_connection):
+        nonlocal competing_writer_acquired, transaction_count
+        with real_immediate_transaction(actual_connection):
+            yield
+        transaction_count += 1
+        if transaction_count == 1:
             competing = open_connection(db_path)
             competing.execute("PRAGMA busy_timeout=0")
             try:
@@ -391,6 +481,10 @@ def test_theme_ingest_releases_writer_lock_at_small_chunk_boundary(
                 competing.rollback()
             finally:
                 competing.close()
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
         actual_connection.execute(
             """
             INSERT INTO candidate_projection_errors (
@@ -411,12 +505,18 @@ def test_theme_ingest_releases_writer_lock_at_small_chunk_boundary(
         "create_or_merge_candidate_from_source",
         apply_source,
     )
+    monkeypatch.setattr(
+        candidate_service,
+        "immediate_transaction",
+        immediate_transaction_with_boundary_probe,
+    )
 
     result = ingest_theme_sources(connection, trade_date, settings=settings)
     connection.close()
 
     assert call_count == 11
     assert result.source_event_count == 11
+    assert transaction_count == 2
     assert competing_writer_acquired is True
 
 
@@ -664,6 +764,100 @@ def test_candidate_context_refresh_transitions_through_data_wait_watching_and_re
         CandidateState.WATCHING.value,
         CandidateState.CONTEXT_READY.value,
     ]
+
+
+def test_candidate_refresh_does_not_record_sqlite_lock_as_projection_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-refresh-lock.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate_id = list_candidates(connection, trade_date=trade_date)[0][
+        "candidate_instance_id"
+    ]
+
+    monkeypatch.setattr(
+        candidate_service,
+        "_upsert_candidate_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        refresh_candidate_context(connection, candidate_id, settings=settings)
+
+    projection_error_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()["count"]
+    context_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_context_latest
+        WHERE candidate_instance_id = ?
+        """,
+        (candidate_id,),
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert projection_error_count == 0
+    assert context_count == 0
+    assert in_transaction is False
+
+
+def test_candidate_refresh_without_transaction_management_requires_caller_transaction(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-refresh-owner.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate_id = list_candidates(connection, trade_date=trade_date)[0][
+        "candidate_instance_id"
+    ]
+
+    with pytest.raises(RuntimeError, match="requires an active transaction"):
+        refresh_candidate_context(
+            connection,
+            candidate_id,
+            settings=settings,
+            manage_transaction=False,
+        )
+
+    connection.execute("BEGIN IMMEDIATE")
+    refresh = refresh_candidate_context(
+        connection,
+        candidate_id,
+        settings=settings,
+        manage_transaction=False,
+    )
+    transaction_owned_by_caller = connection.in_transaction
+    connection.rollback()
+    durable_context_count = int(
+        connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM candidate_context_latest
+            WHERE candidate_instance_id = ?
+            """,
+            (candidate_id,),
+        ).fetchone()["count"]
+    )
+    connection.close()
+
+    assert refresh.context_refreshed_count == 1
+    assert transaction_owned_by_caller is True
+    assert durable_context_count == 0
 
 
 def test_candidate_rebuild_uses_cycle_freshness_reference(tmp_path, monkeypatch) -> None:

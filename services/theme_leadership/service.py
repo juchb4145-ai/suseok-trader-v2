@@ -19,7 +19,10 @@ from services.candidate_service import (
     create_or_merge_candidate_from_source,
 )
 from services.config import Settings, candidate_timezone, load_settings
-from services.runtime.evaluation_run_guard import assert_runtime_execution_fence
+from services.runtime.evaluation_run_guard import (
+    assert_runtime_execution_fence,
+    immediate_transaction,
+)
 from services.theme_leadership.classifier import ThemeStateClassifier, ThemeStateInput
 from services.theme_leadership.models import (
     StockRole,
@@ -556,10 +559,8 @@ def _write_candidate_source_events(
     settings: Settings,
 ) -> CandidateSourceApplyResult:
     total = _MutableCandidateApplyResult()
-    try:
+    with immediate_transaction(connection):
         for event in events:
-            if not connection.in_transaction:
-                connection.execute("BEGIN DEFERRED")
             connection.execute(f"SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}")
             try:
                 result = create_or_merge_candidate_from_source(
@@ -578,11 +579,6 @@ def _write_candidate_source_events(
             connection.execute(f"RELEASE SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}")
             total.add(result)
         assert_runtime_execution_fence(connection)
-        connection.commit()
-    except Exception:
-        if connection.in_transaction:
-            connection.rollback()
-        raise
     return total.to_result()
 
 

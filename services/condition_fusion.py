@@ -19,6 +19,10 @@ from storage.gateway_command_store import canonical_json
 
 from services.config import Settings, candidate_timezone, load_settings
 from services.market_data_service import get_market_data_readiness
+from services.runtime.evaluation_run_guard import (
+    assert_runtime_execution_fence,
+    immediate_transaction,
+)
 
 CONDITION_SENSOR_REASON = "CONDITION_SENSOR_EVIDENCE"
 CONDITION_NOT_BUY_SIGNAL_REASON = "MARKET_SENSOR_NOT_BUY_SIGNAL"
@@ -26,6 +30,7 @@ DISCOVERY_ONLY_REASON = "DISCOVERY_OBSERVATION_ONLY"
 DISCOVERY_PROMOTION_PENDING_REASON = "DISCOVERY_PROMOTION_PENDING"
 RISK_BLOCK_REASON = "RISK_BLOCKED_BY_CONDITION"
 FUSION_PRIORITY_REASON = "CONDITION_FUSION_PRIORITY_READY"
+_FUSION_WRITE_CHUNK_SIZE = 10
 
 _ROLE_WEIGHTS = {
     ConditionRole.DISCOVERY.value: 1.0,
@@ -95,16 +100,17 @@ def rebuild_condition_fusion(
 
     now = utc_now()
     updated_at = datetime_to_wire(now)
-    fused_count = 0
+    fusions: list[dict[str, Any]] = []
     for code, events in sorted(events_by_code.items()):
-        fusion = _fuse_code_events(code, events, now=now, updated_at=updated_at)
-        _upsert_fusion(connection, target_trade_date, fusion)
-        fused_count += 1
-
-    connection.commit()
+        fusions.append(_fuse_code_events(code, events, now=now, updated_at=updated_at))
+    for index in range(0, len(fusions), _FUSION_WRITE_CHUNK_SIZE):
+        with immediate_transaction(connection):
+            for fusion in fusions[index : index + _FUSION_WRITE_CHUNK_SIZE]:
+                _upsert_fusion(connection, target_trade_date, fusion)
+            assert_runtime_execution_fence(connection)
     return ConditionFusionRebuildResult(
         processed_event_count=processed,
-        fused_code_count=fused_count,
+        fused_code_count=len(fusions),
     )
 
 
@@ -145,9 +151,12 @@ def rebuild_condition_fusion_for_code(
     now = utc_now()
     updated_at = datetime_to_wire(now)
     fusion = _fuse_code_events(normalized_code, events, now=now, updated_at=updated_at)
-    _upsert_fusion(connection, target_trade_date, fusion)
     if commit:
-        connection.commit()
+        with immediate_transaction(connection):
+            _upsert_fusion(connection, target_trade_date, fusion)
+            assert_runtime_execution_fence(connection)
+    else:
+        _upsert_fusion(connection, target_trade_date, fusion)
     return ConditionFusionRebuildResult(
         processed_event_count=len(events),
         fused_code_count=1,

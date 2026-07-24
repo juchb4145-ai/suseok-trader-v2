@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
 from domain.broker.utils import datetime_to_wire, utc_now
 from services.config import Settings
+from services.runtime import evaluation_run_guard
 from services.runtime.evaluation_run_guard import (
     DEFAULT_EVALUATION_LOCK_TTL_SEC,
     EVALUATION_PIPELINE_LOCK,
@@ -19,6 +21,7 @@ from services.runtime.evaluation_run_guard import (
 from services.strategy_engine import evaluate_candidates
 from storage.gateway_command_store import canonical_json
 from storage.sqlite import initialize_database, open_connection
+from storage.sqlite_locking import coordinated_sqlite_writer
 
 
 def test_default_evaluation_lock_ttl_is_two_minutes() -> None:
@@ -94,6 +97,55 @@ def test_immediate_transaction_rolls_back_unhandled_error(tmp_path) -> None:
     connection.close()
 
     assert row_count == 0
+
+
+def test_immediate_transaction_rolls_back_failed_commit() -> None:
+    connection = _CommitFailureConnection()
+
+    with pytest.raises(Exception, match="database is locked"):
+        with immediate_transaction(connection):  # type: ignore[arg-type]
+            pass
+
+    assert connection.commit_attempts == 1
+    assert connection.rollback_attempts == 1
+    assert connection.in_transaction is False
+
+
+def test_immediate_transaction_coordinates_begin_through_commit(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "coordinated-transaction.sqlite3")
+    events: list[str] = []
+
+    @contextmanager
+    def tracking_coordinator(*, timeout_sec=None):
+        events.append("coordinator_enter")
+        with coordinated_sqlite_writer(timeout_sec=timeout_sec) as acquired:
+            yield acquired
+        events.append("coordinator_exit")
+
+    monkeypatch.setattr(
+        evaluation_run_guard,
+        "coordinated_sqlite_writer",
+        tracking_coordinator,
+    )
+    connection.set_trace_callback(
+        lambda statement: events.append(f"sql:{statement.strip().split()[0].upper()}")
+    )
+
+    with immediate_transaction(connection):
+        connection.execute(
+            "UPDATE app_metadata SET updated_at = updated_at WHERE key = 'app_name'"
+        )
+
+    connection.set_trace_callback(None)
+    connection.close()
+
+    assert events.index("coordinator_enter") < events.index("sql:BEGIN")
+    assert events.index("sql:BEGIN") < events.index("sql:UPDATE")
+    assert events.index("sql:UPDATE") < events.index("sql:COMMIT")
+    assert events.index("sql:COMMIT") < events.index("coordinator_exit")
 
 
 def test_begin_immediate_retries_transient_database_lock(monkeypatch) -> None:
@@ -224,6 +276,27 @@ class _FlakyBeginConnection:
             if self.begin_attempts == 1:
                 raise __import__("sqlite3").OperationalError("database is locked")
         return None
+
+
+class _CommitFailureConnection:
+    def __init__(self) -> None:
+        self.in_transaction = False
+        self.commit_attempts = 0
+        self.rollback_attempts = 0
+
+    def execute(self, sql: str, *args):
+        del args
+        if sql == "BEGIN IMMEDIATE":
+            self.in_transaction = True
+        return None
+
+    def commit(self) -> None:
+        self.commit_attempts += 1
+        raise __import__("sqlite3").OperationalError("database is locked")
+
+    def rollback(self) -> None:
+        self.rollback_attempts += 1
+        self.in_transaction = False
 
 
 def _insert_lock(
