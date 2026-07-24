@@ -911,6 +911,9 @@ def test_gateway_python_write_lock_timeout_is_retryable_without_db_write(
     db_path = tmp_path / "python-write-lock-timeout.sqlite3"
     monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
     from api.routes import gateway as gateway_route
+    from storage.sqlite_locking import PROCESS_SQLITE_WRITER_COORDINATOR
+
+    assert gateway_route._gateway_event_write_lock is PROCESS_SQLITE_WRITER_COORDINATOR
 
     with TestClient(app) as client:
         gateway_route._gateway_event_write_lock.acquire()

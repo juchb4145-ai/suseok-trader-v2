@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-import threading
 import time
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -83,13 +82,16 @@ from storage.projection_outbox import (
     retire_inline_projection_outbox_job,
 )
 from storage.sqlite import open_connection
-from storage.sqlite_locking import is_sqlite_locked_error
+from storage.sqlite_locking import (
+    PROCESS_SQLITE_WRITER_COORDINATOR,
+    is_sqlite_locked_error,
+)
 
 from api.dependencies.auth import require_local_token
 
 router = APIRouter(prefix="/api/gateway")
 logger = logging.getLogger(__name__)
-_gateway_event_write_lock = threading.RLock()
+_gateway_event_write_lock = PROCESS_SQLITE_WRITER_COORDINATOR
 _FAST_BATCH_LOCK_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2)
 _FAST_BATCH_BUSY_TIMEOUT_MS = 250
 _GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC = 0.5

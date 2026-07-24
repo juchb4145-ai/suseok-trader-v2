@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -257,6 +258,40 @@ def test_theme_snapshot_fence_loss_rolls_back_snapshot_without_error_write(
     connection.close()
 
     assert fence_check_count == 1
+    assert snapshot_count == 0
+    assert projection_error_count == 0
+    assert in_transaction is False
+
+
+def test_theme_snapshot_sqlite_lock_is_not_recorded_as_projection_error(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-snapshot-lock.sqlite3")
+    import_theme_memberships(
+        connection,
+        _theme_payload([{"code": "005930", "name": "삼성전자"}]),
+    )
+    monkeypatch.setattr(
+        theme_service,
+        "_save_theme_snapshot",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            sqlite3.OperationalError("database is locked")
+        ),
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        calculate_all_theme_snapshots(connection)
+
+    snapshot_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM theme_snapshots"
+    ).fetchone()["count"]
+    projection_error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM theme_projection_errors"
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
     assert snapshot_count == 0
     assert projection_error_count == 0
     assert in_transaction is False

@@ -119,6 +119,8 @@ def test_theme_leadership_source_write_rolls_back_all_events_on_late_failure(
     monkeypatch,
 ) -> None:
     connection = initialize_database(tmp_path / "theme-leadership-source-atomic.sqlite3")
+    statements: list[str] = []
+    connection.set_trace_callback(statements.append)
     call_count = 0
 
     def apply_source(actual_connection, source_event, *, settings):
@@ -164,11 +166,14 @@ def test_theme_leadership_source_write_rolls_back_all_events_on_late_failure(
         """
     ).fetchone()["count"]
     in_transaction = connection.in_transaction
+    connection.set_trace_callback(None)
     connection.close()
 
     assert call_count == 11
     assert durable_count == 0
     assert in_transaction is False
+    assert any(statement.strip().upper() == "BEGIN IMMEDIATE" for statement in statements)
+    assert any(statement.strip().upper() == "ROLLBACK" for statement in statements)
 
 
 def test_theme_leadership_fence_loss_rolls_back_entire_rebuild(

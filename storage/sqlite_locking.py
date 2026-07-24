@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import random
 import sqlite3
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TypeVar
 
 T = TypeVar("T")
@@ -13,6 +15,34 @@ _SQLITE_LOCK_MESSAGES = (
     "database table is locked",
     "database is busy",
 )
+PROCESS_SQLITE_WRITER_COORDINATOR = threading.RLock()
+
+
+@contextmanager
+def coordinated_sqlite_writer(
+    *,
+    timeout_sec: float | None = None,
+) -> Iterator[bool]:
+    """Coordinate short SQLite write transactions within this process.
+
+    A timed caller receives ``False`` without entering the writer slot. Blocking
+    callers omit ``timeout_sec`` and always receive ``True``. The coordinator is
+    reentrant so a service transaction can safely run inside a Gateway write
+    request on the same thread.
+    """
+
+    if timeout_sec is None:
+        PROCESS_SQLITE_WRITER_COORDINATOR.acquire()
+        acquired = True
+    else:
+        acquired = PROCESS_SQLITE_WRITER_COORDINATOR.acquire(
+            timeout=max(float(timeout_sec), 0.0)
+        )
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            PROCESS_SQLITE_WRITER_COORDINATOR.release()
 
 
 def configure_sqlite_busy_timeout(

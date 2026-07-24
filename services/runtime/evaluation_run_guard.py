@@ -14,6 +14,7 @@ from typing import Any
 
 from domain.broker.utils import datetime_to_wire, new_message_id, parse_timestamp, utc_now
 from storage.gateway_command_store import canonical_json
+from storage.sqlite_locking import coordinated_sqlite_writer
 
 EVALUATION_PIPELINE_LOCK = "evaluation_pipeline"
 DEFAULT_EVALUATION_LOCK_TTL_SEC = 120
@@ -167,18 +168,21 @@ def immediate_transaction(
     lease: RuntimeExecutionLease | None = None,
 ) -> Iterator[None]:
     started = not connection.in_transaction
-    if started:
-        _begin_immediate_with_retry(connection)
-    try:
+    if not started:
         assert_runtime_execution_fence(connection, lease=lease, renew=True)
         yield
-    except Exception:
-        if started:
-            connection.rollback()
-        raise
-    else:
-        if started:
+        return
+
+    with coordinated_sqlite_writer():
+        _begin_immediate_with_retry(connection)
+        try:
+            assert_runtime_execution_fence(connection, lease=lease, renew=True)
+            yield
             connection.commit()
+        except BaseException:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
 
 
 @contextmanager
