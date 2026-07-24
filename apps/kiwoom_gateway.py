@@ -15,6 +15,12 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+_MIN_CORE_EVENT_TIMEOUT_SEC = 6.0
+
+
+def _core_event_timeout_sec(value: object) -> float:
+    return max(float(value), _MIN_CORE_EVENT_TIMEOUT_SEC)
+
 
 def configure_python_compat() -> None:
     if not hasattr(_datetime, "UTC"):
@@ -77,8 +83,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--event-timeout-sec",
         type=float,
-        default=float(os.environ.get("GATEWAY_EVENT_TIMEOUT_SEC", "15.0")),
-        help="Core event or event-batch HTTP timeout.",
+        default=float(os.environ.get("GATEWAY_EVENT_TIMEOUT_SEC", "6.0")),
+        help="Core event or event-batch HTTP timeout (minimum 6 seconds).",
     )
     parser.add_argument("--command-limit", type=int, default=20)
     parser.add_argument("--condition-name", default=os.environ.get("KIWOOM_CONDITION_NAME"))
@@ -280,7 +286,7 @@ def run_gateway(args: argparse.Namespace) -> int:
         core_client=CoreClient(
             core_url=args.core_url,
             token=args.token,
-            timeout_sec=max(float(args.event_timeout_sec), 1.0),
+            timeout_sec=_core_event_timeout_sec(args.event_timeout_sec),
         ),
         config=KiwoomGatewayRuntimeConfig(
             command_limit=max(int(args.command_limit), 1),

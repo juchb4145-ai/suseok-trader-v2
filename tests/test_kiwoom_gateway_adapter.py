@@ -12,7 +12,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from apps.kiwoom_gateway import parse_args, request_kiwoom_login
+from apps.kiwoom_gateway import (
+    _core_event_timeout_sec,
+    parse_args,
+    request_kiwoom_login,
+)
 from domain.broker.commands import GatewayCommand
 from domain.broker.condition_profiles import (
     ConditionProfile,
@@ -130,6 +134,11 @@ def test_kiwoom_gateway_batch_timeout_uses_env(monkeypatch) -> None:
 
     assert parse_args([]).event_timeout_sec == 20.0
     assert parse_args(["--event-timeout-sec", "12"]).event_timeout_sec == 12.0
+
+
+def test_kiwoom_gateway_event_timeout_preserves_core_response_margin() -> None:
+    assert _core_event_timeout_sec(5.0) == 6.0
+    assert _core_event_timeout_sec(12.0) == 12.0
 
 
 def test_kiwoom_gateway_can_clear_realtime_on_login() -> None:
@@ -1475,6 +1484,67 @@ def test_core_io_worker_batches_fresh_market_events_with_durable_fifo() -> None:
     assert snapshot.latest_batch_size == 6
     assert snapshot.market_event_queue_size == 0
     assert snapshot.durable_event_queue_size == 7
+
+
+def test_core_io_worker_separates_fast_and_non_fast_http_batches() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.batches: list[list[GatewayEvent]] = []
+
+        def post_events(self, events: list[GatewayEvent]) -> dict[str, object]:
+            self.batches.append(list(events))
+            return {
+                "processed_count": len(events),
+                "accepted_count": len(events),
+                "failed_count": 0,
+                "results": [{"accepted": True} for _ in events],
+            }
+
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        event_batch_size=7,
+    )
+    for index in range(3):
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_mixed_fast_{index}",
+                event_type="price_tick",
+                source="kiwoom_gateway",
+                payload={"code": f"{index:06d}", "price": 70_000 + index},
+            )
+        )
+        worker.enqueue_event(
+            GatewayEvent(
+                event_id=f"evt_mixed_non_fast_{index}",
+                event_type="heartbeat",
+                source=f"kiwoom_gateway_{index}",
+                payload={"sequence": index},
+            )
+        )
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_mixed_command_critical",
+            event_type="command_started",
+            source="kiwoom_gateway",
+            payload={"command_id": "cmd-observe-only"},
+        )
+    )
+
+    assert worker._post_next_event_batch(core.post_events) is True
+    assert worker.snapshot().event_queue_size == 3
+    assert worker._post_next_event_batch(core.post_events) is True
+
+    batch_types = [{event.event_type for event in batch} for batch in core.batches]
+    assert batch_types == [
+        {"heartbeat", "command_started"},
+        {"price_tick"},
+    ]
+    assert core.batches[0][0].event_type == "command_started"
+    assert worker.snapshot().event_queue_size == 0
 
 
 def test_core_io_worker_retries_same_batch_with_bounded_exponential_backoff(

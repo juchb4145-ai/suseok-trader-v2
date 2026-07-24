@@ -56,7 +56,7 @@ def test_core_client_post_event_sends_json_to_gateway_event_endpoint() -> None:
     assert call["url"] == "http://core.local/api/gateway/events"
     assert call["body"]["event_type"] == "heartbeat"
     assert call["headers"]["X-Core-Token"] == "secret"
-    assert call["timeout"] == 3.0
+    assert call["timeout"] == 6.0
 
 
 def test_core_client_post_events_sends_one_batch_request() -> None:

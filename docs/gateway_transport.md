@@ -53,12 +53,20 @@ Unknown event type은 버리지 않고 `UNKNOWN_EVENT_TYPE`으로 저장한다.
 Gateway ingest 연결은 일반 Core 연결의 15초 대기 대신 250ms busy timeout과
 50/100/200ms의 제한된 lock 재시도를 사용한다. SQLite writer 또는 Core 내부
 event write lock을 제한 시간 안에 얻지 못하면 HTTP `503`과
-`status=LOCKED_RETRYABLE`, `reason_codes=["SQLITE_DATABASE_LOCKED"]`를 반환한다.
-DB 경로와 원본 SQLite 오류 문자열은 응답에 노출하지 않는다.
-단일 요청의 모든 open/lock/retry는 공통 5초 write budget을 사용한다.
+`status=LOCKED_RETRYABLE`을 반환한다. SQLite 충돌은
+`reason_codes=["SQLITE_DATABASE_LOCKED"]`, Core 내부 writer를 3초 안에 얻지
+못한 경우는 `reason_codes=["GATEWAY_EVENT_WRITE_LOCK_TIMEOUT"]`으로 구분한다.
+DB 경로와 원본 SQLite 오류 문자열은 응답에 노출하지 않는다. 단일 요청의 모든
+open/lock/retry는 공통 5초 write budget을 사용한다. Python writer 대기는 최대
+3초이며, 요청 처리 중 남은 공통 budget이 더 짧으면 그 deadline으로 제한된다.
+Gateway HTTP timeout은 Core의 5초 budget보다 1초 긴 최소 6초로 제한해, deadline
+직전의 retryable 응답이 client timeout과 경쟁하지 않게 한다.
 
 - `price_tick`/`condition_event` fast batch는 한 transaction으로 처리한다. lock
   충돌 시 전체 transaction을 rollback한 뒤 같은 batch를 재시도한다.
+- Gateway worker는 위 fast event와 나머지 non-fast event를 같은 HTTP batch에
+  섞지 않는다. 두 그룹이 모두 대기하면 성공 batch마다 교대로 전송하되,
+  주문 경계 같은 command-critical event는 항상 먼저 전송한다.
 - 단건 및 non-fast batch는 commit 결과가 불명확할 수 있으므로
   `commit_outcome=UNKNOWN_RETRY_SAME_EVENT_ID`를 반환한다. Gateway는 event를
   버리지 않고 동일 `event_id`로 재전송하며 Core의 idempotency가 중복 side

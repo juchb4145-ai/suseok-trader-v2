@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from apps.core_api import app
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now
@@ -15,7 +17,9 @@ from gateway.event_factory import (
 from services.config import Settings, clear_settings_cache
 from services.dashboard_service import build_dashboard_snapshot
 from services.market_data_service import process_gateway_event
+from services.runtime import gateway_projection_routing
 from services.runtime.gateway_projection_routing import (
+    build_market_data_projection_routing_batch_context,
     decide_market_data_projection_routing,
     get_latest_market_data_append_only_routing_status,
 )
@@ -34,6 +38,13 @@ def test_gateway_market_data_append_only_routing_dry_run_disabled_keeps_inline(
 ) -> None:
     db_path = tmp_path / "routing-disabled.sqlite3"
     _configure_env(monkeypatch, tmp_path, db_path)
+    monkeypatch.setattr(
+        gateway_projection_routing,
+        "build_market_data_append_only_controller_status",
+        lambda *args, **kwargs: pytest.fail(
+            "disabled routing must not build the database-heavy controller status"
+        ),
+    )
 
     try:
         with TestClient(app) as client:
@@ -60,6 +71,9 @@ def test_gateway_market_data_append_only_routing_dry_run_disabled_keeps_inline(
     assert decision["would_skip_inline"] == 0
     assert decision["effective_skip_inline"] == 0
     assert "DRY_RUN_DISABLED" in decision["blocked_reason_codes_json"]
+    evidence = json.loads(decision["evidence_json"])
+    assert evidence["routing_evaluation_status"] == "NOT_EVALUATED"
+    assert evidence["routing_evaluation_reason"] == "DRY_RUN_DISABLED"
     assert sample_count == 1
 
 
@@ -367,6 +381,43 @@ def test_market_data_append_only_routing_non_market_event_never_skips(tmp_path) 
     assert decision.would_skip_inline is False
     assert decision.effective_skip_inline is False
     assert "NOT_MARKET_DATA_EVENT" in decision.blocked_reason_codes
+
+
+def test_condition_event_specific_dry_run_keeps_full_routing_evaluation(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "routing-condition-dry-run.sqlite3")
+    settings = Settings(
+        gateway_market_data_append_only_dry_run_enabled=False,
+        gateway_market_data_append_only_condition_event_dry_run_enabled=True,
+    )
+    _seed_reconcile_pass_on_connection(connection, settings=settings)
+    event = make_condition_event().to_dict()
+    event["event_id"] = "evt_condition_specific_dry_run"
+    gateway_event = GatewayEvent.from_dict(event)
+    append_gateway_event(connection, gateway_event)
+    enqueue_projection_jobs_for_gateway_event(connection, gateway_event)
+
+    context = build_market_data_projection_routing_batch_context(
+        connection,
+        settings=settings,
+        include_condition_event=True,
+    )
+    decision = decide_market_data_projection_routing(
+        connection,
+        gateway_event,
+        settings=settings,
+        outbox_status="ENQUEUED",
+        controller_status=context.controller_status,
+        condition_event_backlog_status=context.condition_event_backlog,
+    )
+    connection.close()
+
+    assert context.controller_status is not None
+    assert decision.dry_run_enabled is True
+    assert "APPEND_ONLY_ROUTING_NOT_EVALUATED" not in decision.blocked_reason_codes
+    assert decision.would_skip_inline is True
+    assert decision.effective_skip_inline is False
 
 
 def test_market_data_append_only_routing_dashboard_snapshot_includes_status(

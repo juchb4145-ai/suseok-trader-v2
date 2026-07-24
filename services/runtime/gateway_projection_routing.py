@@ -148,7 +148,7 @@ class MarketDataAppendOnlyRoutingDecision:
 
 @dataclass(frozen=True, kw_only=True)
 class MarketDataProjectionRoutingBatchContext:
-    controller_status: MarketDataAppendOnlyControllerStatus
+    controller_status: MarketDataAppendOnlyControllerStatus | None
     condition_event_backlog: Mapping[str, Any] = field(default_factory=dict)
 
 
@@ -158,6 +158,18 @@ def build_market_data_projection_routing_batch_context(
     settings: Settings,
     include_condition_event: bool = False,
 ) -> MarketDataProjectionRoutingBatchContext:
+    routing_evaluation_enabled = bool(
+        settings.gateway_market_data_append_only_dry_run_enabled
+        or (
+            include_condition_event
+            and settings.gateway_market_data_append_only_condition_event_dry_run_enabled
+        )
+    )
+    if not routing_evaluation_enabled:
+        return MarketDataProjectionRoutingBatchContext(
+            controller_status=None,
+            condition_event_backlog={},
+        )
     latest_reconcile = get_latest_market_data_projection_reconcile(connection)
     return MarketDataProjectionRoutingBatchContext(
         controller_status=build_market_data_append_only_controller_status(
@@ -251,6 +263,30 @@ def decide_market_data_projection_routing(
         settings.gateway_market_data_append_only_fail_closed_on_routing_error
     )
     decided_at = datetime_to_wire(utc_now())
+    if not dry_run_enabled:
+        return _disabled_market_data_projection_routing_decision(
+            connection,
+            event,
+            settings=settings,
+            outbox_status=outbox_status,
+            commit=commit,
+            decided_at=decided_at,
+            dry_run_enabled=dry_run_enabled,
+            cutover_enabled=cutover_enabled,
+            reconcile_required=reconcile_required,
+            condition_event_fusion_enabled=bool(
+                settings.condition_fusion_event_incremental_enabled
+            ),
+            tr_response_require_worker_side_effects=(
+                tr_response_require_worker_side_effects
+            ),
+            condition_event_require_worker_side_effects=(
+                condition_event_require_worker_side_effects
+            ),
+            condition_event_require_fusion_enabled=(
+                condition_event_require_fusion_enabled
+            ),
+        )
     latest_reconcile = get_latest_market_data_projection_reconcile(connection)
     latest_run = latest_reconcile.get("latest_run")
     latest_status = _string_or_none(
@@ -840,6 +876,167 @@ def decide_market_data_projection_routing(
             else None
         ),
         blocked_reason_codes=tuple(reason_codes),
+        evidence=evidence,
+        decided_at=decided_at,
+    )
+    _persist_market_data_projection_routing_decision(
+        connection,
+        decision,
+        commit=commit,
+    )
+    return decision
+
+
+def _disabled_market_data_projection_routing_decision(
+    connection: sqlite3.Connection,
+    event: GatewayEvent,
+    *,
+    settings: Settings,
+    outbox_status: str | None,
+    commit: bool,
+    decided_at: str,
+    dry_run_enabled: bool,
+    cutover_enabled: bool,
+    reconcile_required: bool,
+    condition_event_fusion_enabled: bool,
+    tr_response_require_worker_side_effects: bool,
+    condition_event_require_worker_side_effects: bool,
+    condition_event_require_fusion_enabled: bool,
+) -> MarketDataAppendOnlyRoutingDecision:
+    event_type = event.event_type.strip().lower()
+    normalized_outbox_status = _normalize_outbox_status(outbox_status)
+    worker_apply_enabled = bool(
+        settings.projection_outbox_apply_projection_enabled
+        and settings.projection_outbox_market_data_apply_enabled
+    )
+    tr_response_worker_side_effect_ready = (
+        worker_apply_enabled if tr_response_require_worker_side_effects else True
+    )
+    condition_event_worker_side_effect_ready = (
+        worker_apply_enabled
+        and (
+            condition_event_fusion_enabled
+            or not condition_event_require_fusion_enabled
+        )
+        if condition_event_require_worker_side_effects
+        else True
+    )
+    condition_payload = (
+        _condition_event_payload_identity(event.payload)
+        if event_type == "condition_event"
+        else None
+    )
+    cutover_scope = (
+        PR7_CUTOVER_SCOPE
+        if event_type == "price_tick"
+        else PR11_CUTOVER_SCOPE
+        if event_type == "condition_event"
+        else PR9_CUTOVER_SCOPE
+    )
+    blocked_reason_codes = (
+        "DRY_RUN_DISABLED",
+        "APPEND_ONLY_ROUTING_NOT_EVALUATED",
+    )
+    evidence = {
+        "pr": "PR-11",
+        "routing_evaluation_status": "NOT_EVALUATED",
+        "routing_evaluation_reason": "DRY_RUN_DISABLED",
+        "market_data_append_only_controller": {
+            "status": "NOT_EVALUATED",
+            "reason_codes": list(blocked_reason_codes),
+            "no_trading_side_effects": True,
+        },
+        "outbox_enqueue_status": normalized_outbox_status,
+        "effective_skip_reason": "DRY_RUN_DISABLED",
+        "fallback_inline_projection_expected": True,
+        "inline_projection_remains_enabled_for_non_cutover_events": True,
+        "worker_apply_enabled": worker_apply_enabled,
+        "no_trading_side_effects": True,
+    }
+    decision = MarketDataAppendOnlyRoutingDecision(
+        event_id=event.event_id,
+        event_type=event_type,
+        dry_run_enabled=dry_run_enabled,
+        cutover_enabled=cutover_enabled,
+        reconcile_required=reconcile_required,
+        latest_reconcile_status=None,
+        latest_reconcile_run_id=None,
+        latest_reconcile_created_at=None,
+        latest_reconcile_age_sec=None,
+        append_only_ready=False,
+        outbox_status=normalized_outbox_status,
+        outbox_job_present=normalized_outbox_status is not None,
+        would_skip_inline=False,
+        effective_skip_inline=False,
+        cutover_scope=cutover_scope,
+        skip_budget_limit=int(
+            settings.gateway_market_data_append_only_price_tick_max_skip_per_minute
+        ),
+        skip_budget_used=None,
+        skip_budget_remaining=None,
+        worker_apply_enabled=worker_apply_enabled,
+        fallback_inline_projection_expected=True,
+        tr_response_rows_count=(
+            len(_tr_response_rows(event.payload))
+            if event_type == "tr_response"
+            else None
+        ),
+        tr_response_skip_budget_limit=(
+            int(
+                settings.gateway_market_data_append_only_tr_response_max_skip_per_minute
+            )
+            if event_type == "tr_response"
+            else None
+        ),
+        tr_response_skip_budget_used=None,
+        tr_response_skip_budget_remaining=None,
+        condition_event_skip_budget_limit=(
+            int(
+                settings.gateway_market_data_append_only_condition_event_max_skip_per_minute
+            )
+            if event_type == "condition_event"
+            else None
+        ),
+        condition_event_skip_budget_used=None,
+        condition_event_skip_budget_remaining=None,
+        condition_event_worker_side_effect_ready=(
+            condition_event_worker_side_effect_ready
+            if event_type == "condition_event"
+            else None
+        ),
+        condition_event_fusion_enabled=(
+            condition_event_fusion_enabled
+            if event_type == "condition_event"
+            else None
+        ),
+        condition_event_backlog_ready=(
+            False if event_type == "condition_event" else None
+        ),
+        condition_event_code=(
+            None if condition_payload is None else str(condition_payload["code"])
+        ),
+        condition_event_action=(
+            None if condition_payload is None else str(condition_payload["action"])
+        ),
+        candidate_ingest_executed=False,
+        synthetic_child_guard_status=(
+            "NOT_EVALUATED" if event_type == "tr_response" else None
+        ),
+        worker_side_effect_ready=(
+            tr_response_worker_side_effect_ready
+            if event_type == "tr_response"
+            else condition_event_worker_side_effect_ready
+            if event_type == "condition_event"
+            else None
+        ),
+        deferred_side_effect_required=(
+            tr_response_require_worker_side_effects
+            if event_type == "tr_response"
+            else condition_event_require_worker_side_effects
+            if event_type == "condition_event"
+            else None
+        ),
+        blocked_reason_codes=blocked_reason_codes,
         evidence=evidence,
         decided_at=decided_at,
     )

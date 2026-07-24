@@ -668,11 +668,17 @@ def test_default_gateway_settings_are_mock_local_transport() -> None:
     assert settings.source == "mock_gateway"
     assert settings.poll_interval_sec == 1.0
     assert settings.heartbeat_interval_sec == 2.0
-    assert settings.event_timeout_sec == 5.0
+    assert settings.event_timeout_sec == 6.0
     assert settings.command_wait_sec == 0.0
     assert settings.command_limit == 20
     assert settings.mock_once is False
     assert settings.mock_price_tick_interval_sec == 2.0
+
+
+def test_gateway_event_timeout_preserves_core_response_margin() -> None:
+    settings = load_gateway_settings({"GATEWAY_EVENT_TIMEOUT_SEC": "0.1"})
+
+    assert settings.event_timeout_sec == 6.0
 
 
 def test_default_environment_settings_are_cached_until_cleared(tmp_path, monkeypatch) -> None:

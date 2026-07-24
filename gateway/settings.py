@@ -12,7 +12,7 @@ class GatewaySettings:
     source: str = "mock_gateway"
     poll_interval_sec: float = 1.0
     heartbeat_interval_sec: float = 2.0
-    event_timeout_sec: float = 5.0
+    event_timeout_sec: float = 6.0
     command_wait_sec: float = 0.0
     command_limit: int = 20
     mock_once: bool = False
@@ -27,6 +27,7 @@ class GatewaySettings:
 
 _TRUE_VALUES = {"1", "true", "t", "yes", "y", "on"}
 _FALSE_VALUES = {"0", "false", "f", "no", "n", "off", ""}
+_MIN_EVENT_TIMEOUT_SEC = 6.0
 
 
 def load_gateway_settings(environ: Mapping[str, str] | None = None) -> GatewaySettings:
@@ -48,10 +49,13 @@ def load_gateway_settings(environ: Mapping[str, str] | None = None) -> GatewaySe
             "GATEWAY_HEARTBEAT_INTERVAL_SEC",
             min_value=0.0,
         ),
-        event_timeout_sec=_parse_float(
-            env.get("GATEWAY_EVENT_TIMEOUT_SEC", "5.0"),
-            "GATEWAY_EVENT_TIMEOUT_SEC",
-            min_value=0.1,
+        event_timeout_sec=max(
+            _parse_float(
+                env.get("GATEWAY_EVENT_TIMEOUT_SEC", "6.0"),
+                "GATEWAY_EVENT_TIMEOUT_SEC",
+                min_value=0.1,
+            ),
+            _MIN_EVENT_TIMEOUT_SEC,
         ),
         command_wait_sec=_parse_float(
             env.get("GATEWAY_COMMAND_WAIT_SEC", "0.0"),
