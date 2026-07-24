@@ -80,17 +80,27 @@ def append_gateway_event(
     event: GatewayEvent,
     *,
     commit: bool = True,
+    retry_deadline_at: float | None = None,
 ) -> AppendGatewayEventResult:
     if not commit:
         return _append_gateway_event_once(connection, event, commit=False)
     for delay_sec in (*_DATABASE_LOCK_RETRY_DELAYS_SEC, None):
+        if retry_deadline_at is not None and time.monotonic() >= retry_deadline_at:
+            raise sqlite3.OperationalError(
+                "database is locked: gateway retry deadline exhausted"
+            )
         try:
             return _append_gateway_event_once(connection, event, commit=True)
         except sqlite3.OperationalError as exc:
             connection.rollback()
             if not _is_database_locked_error(exc) or delay_sec is None:
                 raise
-            time.sleep(delay_sec)
+            remaining_sec = (
+                max(retry_deadline_at - time.monotonic(), 0.0)
+                if retry_deadline_at is not None
+                else delay_sec
+            )
+            time.sleep(min(delay_sec, remaining_sec))
     raise RuntimeError("unreachable gateway event retry state")
 
 
@@ -379,6 +389,9 @@ def _upsert_heartbeat_status(connection: sqlite3.Connection, payload: dict[str, 
         "core_io_worker_batch_post_count": "core_io_worker_batch_post_count",
         "core_io_worker_latest_batch_size": "core_io_worker_latest_batch_size",
         "core_io_worker_rejected_event_count": "core_io_worker_rejected_event_count",
+        "core_io_worker_consecutive_post_error_count": (
+            "core_io_worker_consecutive_post_error_count"
+        ),
         "core_io_worker_market_event_queue_size": (
             "core_io_worker_market_event_queue_size"
         ),

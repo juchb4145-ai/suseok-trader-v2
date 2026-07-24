@@ -9,6 +9,7 @@ from typing import Any
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import datetime_to_wire, utc_now, validate_stock_code
 from storage.gateway_command_store import canonical_json
+from storage.sqlite_locking import is_sqlite_locked_error
 
 MARKET_SYMBOL_EVENT_TYPES: frozenset[str] = frozenset({"market_symbols"})
 SUPPORTED_MARKETS: frozenset[str] = frozenset({"KOSPI", "KOSDAQ"})
@@ -97,6 +98,8 @@ def process_market_symbols_event(
         connection.commit()
     except Exception as exc:
         connection.rollback()
+        if is_sqlite_locked_error(exc):
+            raise
         return MarketReferenceProcessResult(
             event_id=event.event_id,
             event_type=event_type,

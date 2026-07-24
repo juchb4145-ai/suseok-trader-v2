@@ -641,6 +641,11 @@ class KiwoomGatewayRuntime:
         worker_rejected_event_count = (
             worker_snapshot.rejected_event_count if worker_snapshot is not None else 0
         )
+        worker_consecutive_post_error_count = (
+            worker_snapshot.consecutive_post_error_count
+            if worker_snapshot is not None
+            else 0
+        )
         worker_market_event_queue_size = (
             worker_snapshot.market_event_queue_size if worker_snapshot is not None else 0
         )
@@ -705,6 +710,9 @@ class KiwoomGatewayRuntime:
             "core_io_worker_batch_post_count": worker_batch_post_count,
             "core_io_worker_latest_batch_size": worker_latest_batch_size,
             "core_io_worker_rejected_event_count": worker_rejected_event_count,
+            "core_io_worker_consecutive_post_error_count": (
+                worker_consecutive_post_error_count
+            ),
             "core_io_worker_market_event_queue_size": worker_market_event_queue_size,
             "core_io_worker_durable_event_queue_size": worker_durable_event_queue_size,
             "core_io_worker_oldest_event_age_sec": worker_oldest_event_age_sec,

@@ -16,6 +16,7 @@ from domain.market.bars import bucket_start_for
 from domain.market.models import MarketDataQualityStatus
 from domain.market.quality import freshness_status, tick_age_seconds
 from storage.gateway_command_store import canonical_json
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from services.config import Settings, load_settings
 from services.market_index_tr_bootstrap import (
@@ -132,6 +133,8 @@ def process_market_index_event(
         connection.commit()
     except Exception as exc:
         connection.rollback()
+        if is_sqlite_locked_error(exc):
+            raise
         _record_projection_error(connection, event, error_message=str(exc))
         connection.commit()
         return MarketIndexProcessResult(
