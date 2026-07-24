@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import domain.broker.utils as broker_utils
@@ -170,6 +171,121 @@ def test_bound_pilot_uses_only_exact_plan_without_refresh_or_general_selection(
     assert result.preparation["required_plan_binding"] == binding
 
 
+def test_bound_pilot_keeps_intent_and_terminal_enqueue_in_caller_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_pilot_pipeline as pilot_pipeline
+
+    db_path = tmp_path / "run-bound-transaction.sqlite3"
+    connection, order_plan_id = _prepared_order_plan_connection(db_path)
+    plan = connection.execute(
+        "SELECT * FROM order_plan_drafts WHERE order_plan_id = ?",
+        (order_plan_id,),
+    ).fetchone()
+    assert plan is not None
+    binding = build_order_plan_binding(dict(plan))
+    settings = _pilot_settings(live_sim_pilot_auto_queue_command=True)
+    queue_live_sim_order_command_original = pilot_pipeline.queue_live_sim_order_command
+    observed: dict[str, bool] = {}
+
+    def queue_while_competing_writer_is_blocked(*args, **kwargs):
+        observed["caller_transaction_active"] = connection.in_transaction
+        competing = open_connection(db_path)
+        competing.execute("PRAGMA busy_timeout = 0")
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+                competing.execute(
+                    """
+                    UPDATE order_plan_drafts_latest
+                    SET source_event_id = 'concurrent-source-mutation'
+                    WHERE order_plan_id = ?
+                    """,
+                    (order_plan_id,),
+                )
+        finally:
+            competing.close()
+        return queue_live_sim_order_command_original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pilot_pipeline,
+        "queue_live_sim_order_command",
+        queue_while_competing_writer_is_blocked,
+    )
+
+    result = run_live_sim_pilot_pipeline_once(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        queue_commands=True,
+        required_plan_binding=binding,
+    )
+    connection.close()
+
+    assert observed["caller_transaction_active"] is True
+    assert result.status == "COMPLETED"
+    assert result.command_count == 1
+
+
+def test_bound_pilot_duplicate_command_queued_intent_preserves_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    import services.runtime.live_sim_pilot_pipeline as pilot_pipeline
+
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "run-bound-duplicate-transaction.sqlite3"
+    )
+    plan = connection.execute(
+        "SELECT * FROM order_plan_drafts WHERE order_plan_id = ?",
+        (order_plan_id,),
+    ).fetchone()
+    assert plan is not None
+    binding = build_order_plan_binding(dict(plan))
+    settings = _pilot_settings(live_sim_pilot_auto_queue_command=True)
+
+    first = run_live_sim_pilot_pipeline_once(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        queue_commands=True,
+        required_plan_binding=binding,
+    )
+    queue_live_sim_order_command_original = pilot_pipeline.queue_live_sim_order_command
+    observed: dict[str, bool] = {}
+
+    def observe_invalid_status_transaction(*args, **kwargs):
+        try:
+            return queue_live_sim_order_command_original(*args, **kwargs)
+        except ValueError:
+            observed["transaction_active_after_invalid_status"] = (
+                connection.in_transaction
+            )
+            raise
+
+    monkeypatch.setattr(
+        pilot_pipeline,
+        "queue_live_sim_order_command",
+        observe_invalid_status_transaction,
+    )
+    second = run_live_sim_pilot_pipeline_once(
+        connection,
+        settings=settings,
+        trade_date="2026-06-27",
+        queue_commands=True,
+        required_plan_binding=binding,
+    )
+    command_count = _count(connection, "gateway_commands")
+    connection.close()
+
+    assert first.command_count == 1
+    assert second.command_count == 0
+    assert second.error_count == 1
+    assert second.status == "COMPLETED_WITH_ERRORS"
+    assert observed["transaction_active_after_invalid_status"] is True
+    assert command_count == 1
+
+
 def test_bound_pilot_rejects_requested_trade_date_mismatch(tmp_path) -> None:
     connection, order_plan_id = _prepared_order_plan_connection(
         tmp_path / "run-bound-trade-date-mismatch.sqlite3"
@@ -330,6 +446,31 @@ def test_intent_creation_rejects_explicit_empty_plan_binding(tmp_path) -> None:
             order_plan_id,
             settings=_pilot_settings(),
             expected_binding={},
+        )
+
+    intent_count = _count(connection, "live_sim_intents")
+    connection.close()
+
+    assert intent_count == 0
+
+
+def test_intent_creation_external_transaction_management_requires_transaction(
+    tmp_path,
+) -> None:
+    connection, order_plan_id = _prepared_order_plan_connection(
+        tmp_path / "intent-external-transaction-required.sqlite3"
+    )
+    assert connection.in_transaction is False
+
+    with pytest.raises(
+        RuntimeError,
+        match="manage_transaction=False requires an active caller transaction",
+    ):
+        create_live_sim_intent_from_order_plan(
+            connection,
+            order_plan_id,
+            settings=_pilot_settings(),
+            manage_transaction=False,
         )
 
     intent_count = _count(connection, "live_sim_intents")

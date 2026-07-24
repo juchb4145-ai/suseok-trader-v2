@@ -614,6 +614,22 @@ def test_bound_operating_cycle_skips_refresh_and_propagates_exact_binding(
             AssertionError("bound cycle must not reprice a different intent")
         ),
     )
+    for stage_name in (
+        "rebuild_theme_leadership",
+        "run_candidate_quote_refresh_once",
+        "enqueue_incremental_evaluation_for_fresh_candidates",
+    ):
+        monkeypatch.setattr(
+            orchestrator,
+            stage_name,
+            lambda *args, _stage_name=stage_name, **kwargs: (
+                (_ for _ in ()).throw(
+                    AssertionError(
+                        f"bound cycle must not run source-mutating stage: {_stage_name}"
+                    )
+                )
+            ),
+        )
 
     def bound_buy(*args, **kwargs):
         captured.update(kwargs)
@@ -640,6 +656,14 @@ def test_bound_operating_cycle_skips_refresh_and_propagates_exact_binding(
     assert result.stages["entry_timing"]["status"] == "SKIPPED"
     assert result.stages["entry_timing"]["reason"] == "required_plan_binding"
     assert result.stages["reprice"]["status"] == "SKIPPED"
+    for stage_name in (
+        "theme_leadership",
+        "candidate_quote_refresh",
+        "incremental_backfill",
+    ):
+        assert result.stages[stage_name]["status"] == "SKIPPED"
+        assert result.stages[stage_name]["reason"] == "required_plan_binding"
+        assert result.stages[stage_name]["source_mutation_skipped"] is True
     assert captured["required_plan_binding"] == binding
     assert result.reason_summary["required_plan_binding"] == binding
 

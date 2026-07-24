@@ -475,6 +475,7 @@ def queue_live_sim_order_command(
     required_plan_binding: Mapping[str, Any] | None = None,
 ) -> LiveSimOrderRecord:
     resolved_settings = settings or load_settings()
+    caller_transaction = connection.in_transaction
     intent_row = get_live_sim_intent(connection, live_sim_intent_id)
     if intent_row is None:
         raise ValueError(f"LIVE_SIM intent not found: {live_sim_intent_id}")
@@ -487,11 +488,11 @@ def queue_live_sim_order_command(
             error_message=LiveSimReasonCode.INVALID_INTENT_STATUS.value,
             payload={"intent": intent_row},
         )
-        connection.commit()
+        if not caller_transaction:
+            connection.commit()
         raise ValueError(f"LIVE_SIM intent cannot be queued from status: {intent_row['status']}")
 
     buy_boundary = intent_row["side"] == LiveSimSide.BUY.value
-    caller_transaction = connection.in_transaction
     boundary_lock_owned = False
     if buy_boundary:
         boundary_lock_owned = _acquire_buy_queue_boundary_write_lock(connection)

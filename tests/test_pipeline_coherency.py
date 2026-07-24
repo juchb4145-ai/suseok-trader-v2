@@ -191,6 +191,14 @@ def test_fast5_plan_ready_qualification_ignores_stale_non_ready_diagnostic(
         """,
         (non_ready_id,),
     )
+    connection.execute(
+        """
+        UPDATE entry_timing_evaluations
+        SET status = 'WAIT_RETRY'
+        WHERE candidate_instance_id = ?
+        """,
+        (non_ready_id,),
+    )
     connection.commit()
 
     diagnostic = build_pipeline_coherency_status(
@@ -217,6 +225,250 @@ def test_fast5_plan_ready_qualification_ignores_stale_non_ready_diagnostic(
     assert qualification["coherent_plan_ready_count"] == 1
     assert qualification["non_pass_plan_ready_count"] == 0
     assert command_count == 0
+
+
+def test_fast5_plan_ready_qualification_excludes_superseded_unexpired_plan(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-superseded-plan-ready.sqlite3")
+    candidate_id = _insert_coherent_plan_fixture(
+        connection,
+        candidate_id="candidate-fast5-superseded",
+        code="005930",
+    )
+    current_evaluation = dict(
+        connection.execute(
+            """
+            SELECT *
+            FROM entry_timing_evaluations
+            WHERE candidate_instance_id = ?
+            ORDER BY evaluated_at DESC, entry_timing_evaluation_id DESC
+            LIMIT 1
+            """,
+            (candidate_id,),
+        ).fetchone()
+    )
+    current_plan = dict(
+        connection.execute(
+            """
+            SELECT *
+            FROM order_plan_drafts_latest
+            WHERE order_plan_id = ?
+            """,
+            (current_evaluation["order_plan_id"],),
+        ).fetchone()
+    )
+    superseded_plan_ids: list[str] = []
+    for index in (1, 2):
+        superseded_evaluation_id = f"ETE-fast5-superseded-{index}"
+        superseded_plan_id = f"OPD-fast5-superseded-{index}"
+        superseded_plan_ids.append(superseded_plan_id)
+        superseded_evaluated_at = datetime_to_wire(
+            utc_now() - timedelta(minutes=index)
+        )
+        superseded_created_at = datetime_to_wire(
+            utc_now() + timedelta(minutes=index)
+        )
+        superseded_evaluation = {
+            **current_evaluation,
+            "entry_timing_evaluation_id": superseded_evaluation_id,
+            "evaluated_at": superseded_evaluated_at,
+            "order_plan_id": superseded_plan_id,
+        }
+        evaluation_columns = ", ".join(superseded_evaluation)
+        evaluation_placeholders = ", ".join("?" for _ in superseded_evaluation)
+        connection.execute(
+            f"""
+            INSERT INTO entry_timing_evaluations ({evaluation_columns})
+            VALUES ({evaluation_placeholders})
+            """,
+            tuple(superseded_evaluation.values()),
+        )
+
+        superseded_plan = {
+            **current_plan,
+            "order_plan_id": superseded_plan_id,
+            "idempotency_key": f"ORDERPLAN-fast5-superseded-{index}",
+            "created_at": superseded_created_at,
+            "entry_timing_evaluation_id": superseded_evaluation_id,
+        }
+        for table_name in ("order_plan_drafts", "order_plan_drafts_latest"):
+            table_columns = {
+                row["name"]
+                for row in connection.execute(f"PRAGMA table_info({table_name})")
+            }
+            values = {
+                key: value
+                for key, value in superseded_plan.items()
+                if key in table_columns
+            }
+            columns = ", ".join(values)
+            placeholders = ", ".join("?" for _ in values)
+            connection.execute(
+                f"INSERT INTO {table_name} ({columns}) VALUES ({placeholders})",
+                tuple(values.values()),
+            )
+    connection.commit()
+
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+        limit=500,
+    )
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+        limit=1,
+    )
+    connection.close()
+
+    assert diagnostic["status"] == "FAIL"
+    assert qualification["status"] == "PASS"
+    assert qualification["latest_plan_ready_count"] == 3
+    assert qualification["raw_plan_ready_total_count"] == 3
+    assert qualification["raw_plan_ready_diagnostic_count"] == 1
+    assert qualification["raw_plan_ready_diagnostics_truncated"] is True
+    assert qualification["actionable_plan_ready_count"] == 1
+    assert qualification["unexpired_plan_ready_count"] == 1
+    assert qualification["coherent_plan_ready_count"] == 1
+    assert qualification["non_pass_plan_ready_count"] == 0
+    assert [item["order_plan_id"] for item in qualification["items"]] == [
+        current_plan["order_plan_id"]
+    ]
+    assert qualification["superseded_unexpired_plan_ready_count"] == 2
+    assert qualification["superseded_unexpired_plan_ready_total_count"] == 2
+    assert qualification["superseded_unexpired_plan_ready_diagnostic_count"] == 1
+    assert (
+        qualification[
+            "superseded_unexpired_plan_ready_diagnostics_truncated"
+        ]
+        is True
+    )
+    assert qualification["superseded_unexpired_plan_ready_items"][0][
+        "order_plan_id"
+    ] in superseded_plan_ids
+    assert qualification["reason_codes"] == []
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_reason"),
+    [
+        ("missing", "LATEST_ENTRY_TIMING_ORDER_PLAN_MISSING"),
+        ("status", "LATEST_ENTRY_TIMING_ORDER_PLAN_STATUS_MISMATCH"),
+    ],
+)
+def test_fast5_plan_ready_qualification_reports_exact_plan_failure(
+    tmp_path,
+    failure: str,
+    expected_reason: str,
+) -> None:
+    connection = initialize_database(tmp_path / f"fast5-exact-plan-{failure}.sqlite3")
+    candidate_id = _insert_coherent_plan_fixture(
+        connection,
+        candidate_id=f"candidate-fast5-exact-plan-{failure}",
+        code="005930",
+    )
+    evaluation = connection.execute(
+        """
+        SELECT *
+        FROM entry_timing_evaluations
+        WHERE candidate_instance_id = ?
+        ORDER BY evaluated_at DESC, entry_timing_evaluation_id DESC
+        LIMIT 1
+        """,
+        (candidate_id,),
+    ).fetchone()
+    assert evaluation is not None
+    order_plan_id = evaluation["order_plan_id"]
+    if failure == "missing":
+        connection.execute(
+            "DELETE FROM order_plan_drafts_latest WHERE order_plan_id = ?",
+            (order_plan_id,),
+        )
+    else:
+        connection.execute(
+            """
+            UPDATE order_plan_drafts_latest
+            SET status = 'WAIT_RETRY'
+            WHERE order_plan_id = ?
+            """,
+            (order_plan_id,),
+        )
+    connection.commit()
+
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+        limit=500,
+    )
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+    )
+    connection.close()
+
+    assert qualification["status"] == "FAIL"
+    assert qualification["unexpired_plan_ready_count"] == 0
+    assert qualification["non_pass_plan_ready_count"] == 1
+    assert len(qualification["items"]) == 1
+    item = qualification["items"][0]
+    assert item["candidate_instance_id"] == candidate_id
+    assert item["order_plan_id"] == order_plan_id
+    assert item["actionable"] is False
+    assert item["status"] == "FAIL"
+    assert expected_reason in item["reason_codes"]
+    assert expected_reason in qualification["reason_codes"]
+    assert "NO_UNEXPIRED_PLAN_READY" in qualification["reason_codes"]
+
+
+def test_fast5_plan_ready_qualification_preserves_current_source_mismatch(
+    tmp_path,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-current-source-mismatch.sqlite3")
+    candidate_id = _insert_coherent_plan_fixture(
+        connection,
+        candidate_id="candidate-fast5-current-source-mismatch",
+        code="005930",
+    )
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET event_id = 'evt-fast5-current-source-mismatch',
+            event_ts = ?
+        WHERE code = '005930' AND exchange = 'KRX'
+        """,
+        (datetime_to_wire(utc_now()),),
+    )
+    connection.commit()
+
+    diagnostic = build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+        limit=500,
+    )
+    qualification = build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-06-27",
+        max_age_sec=60,
+    )
+    connection.close()
+
+    assert diagnostic["status"] == "FAIL"
+    assert "CURRENT_SOURCE_WATERMARK_MISMATCH" in diagnostic["reason_codes"]
+    assert qualification["status"] == "FAIL"
+    assert qualification["items"][0]["candidate_instance_id"] == candidate_id
+    assert "CURRENT_SOURCE_WATERMARK_MISMATCH" in qualification["items"][0][
+        "reason_codes"
+    ]
+    assert "CURRENT_SOURCE_WATERMARK_MISMATCH" in qualification["reason_codes"]
 
 
 def test_fast5_plan_ready_qualification_blocks_zero_plan_ready(tmp_path) -> None:
