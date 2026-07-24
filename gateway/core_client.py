@@ -14,6 +14,8 @@ from gateway.transport import (
     make_token_headers,
 )
 
+_MIN_CORE_REQUEST_TIMEOUT_SEC = 6.0
+
 
 class CoreClient:
     def __init__(
@@ -21,12 +23,12 @@ class CoreClient:
         *,
         core_url: str = "http://127.0.0.1:8000",
         token: str = "",
-        timeout_sec: float = 5.0,
+        timeout_sec: float = 6.0,
         transport: JsonTransport | None = None,
     ) -> None:
         self.core_url = core_url.rstrip("/")
         self.token = token
-        self.timeout_sec = timeout_sec
+        self.timeout_sec = max(float(timeout_sec), _MIN_CORE_REQUEST_TIMEOUT_SEC)
         self._transport = transport or UrllibJsonTransport()
 
     def post_event(self, event: GatewayEvent) -> dict[str, Any]:

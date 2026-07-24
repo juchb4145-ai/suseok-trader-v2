@@ -12,6 +12,7 @@ from domain.broker.events import GatewayEvent
 from domain.broker.utils import utc_now
 
 _MAX_POST_RETRY_SLEEP_SEC = 5.0
+_CORE_FAST_BATCH_EVENT_TYPES = frozenset({"price_tick", "condition_event"})
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,7 @@ class CoreIoWorker:
         self._consecutive_poll_error_count = 0
         self._batch_post_count = 0
         self._latest_batch_size = 0
+        self._last_successful_batch_fast: bool | None = None
         self._rejected_event_count = 0
         self._consecutive_post_error_count = 0
 
@@ -274,6 +276,7 @@ class CoreIoWorker:
             self._posted_count += len(events)
             self._batch_post_count += 1
             self._latest_batch_size = len(events)
+            self._last_successful_batch_fast = _is_core_fast_batch_event(events[0])
             self._rejected_event_count += rejected_count
             self._consecutive_post_error_count = 0
             self._latest_post_at = time.monotonic()
@@ -288,6 +291,7 @@ class CoreIoWorker:
         limit = min(self._event_batch_size, len(self._events))
         if limit <= 0:
             return []
+        target_fast = self._select_batch_fast_group_locked()
         selected: list[GatewayEvent] = []
         selected_ids: set[int] = set()
 
@@ -297,7 +301,11 @@ class CoreIoWorker:
             for event in self._events:
                 if len(selected) >= limit or item_limit <= 0:
                     break
-                if id(event) in selected_ids or not predicate(event):
+                if (
+                    id(event) in selected_ids
+                    or _is_core_fast_batch_event(event) is not target_fast
+                    or not predicate(event)
+                ):
                     continue
                 selected.append(event)
                 selected_ids.add(id(event))
@@ -315,6 +323,36 @@ class CoreIoWorker:
         )
         add_matching(lambda _: True, item_limit=limit - len(selected))
         return selected
+
+    def _select_batch_fast_group_locked(self) -> bool:
+        fast_available = any(_is_core_fast_batch_event(event) for event in self._events)
+        non_fast_available = any(
+            not _is_core_fast_batch_event(event) for event in self._events
+        )
+        if not fast_available:
+            return False
+        if not non_fast_available:
+            return True
+
+        command_critical = next(
+            (event for event in self._events if _is_command_critical_event(event)),
+            None,
+        )
+        if command_critical is not None:
+            return _is_core_fast_batch_event(command_critical)
+        if self._last_successful_batch_fast is not None:
+            return not self._last_successful_batch_fast
+
+        preferred = next(
+            (event for event in self._events if _is_priority_event(event)),
+            None,
+        )
+        if preferred is None:
+            preferred = next(
+                (event for event in self._events if _is_market_refresh_event(event)),
+                self._events[0],
+            )
+        return _is_core_fast_batch_event(preferred)
 
     def _remove_event_by_identity_locked(self, event: GatewayEvent) -> None:
         for index, queued_event in enumerate(self._events):
@@ -435,6 +473,13 @@ def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:
         index_code = str(payload.get("index_code") or payload.get("code") or "").strip()
         return (event_type, index_code) if index_code else None
     return None
+
+
+def _is_core_fast_batch_event(event: GatewayEvent) -> bool:
+    return (
+        str(event.event_type or "").strip().lower()
+        in _CORE_FAST_BATCH_EVENT_TYPES
+    )
 
 
 def _is_priority_event(event: GatewayEvent) -> bool:

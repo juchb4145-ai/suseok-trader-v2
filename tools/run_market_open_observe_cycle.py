@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -12,6 +13,158 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 DEFAULT_REPORT_ROOT = ROOT_DIR / "reports" / "market_open_observe_cycle"
+_REDACTED_VALUE = "[REDACTED]"
+_SENSITIVE_REPORT_KEYS = frozenset(
+    {
+        "account_id",
+        "account_ids",
+        "account_number",
+        "account_numbers",
+        "account_no",
+        "account_nos",
+        "acct_id",
+        "acct_ids",
+        "acct_no",
+        "acct_nos",
+        "account",
+        "broker_account_id",
+        "token",
+        "tokens",
+        "access_token",
+        "refresh_token",
+        "api_key",
+        "password",
+        "passwords",
+        "secret",
+        "secrets",
+        "authorization",
+        "bearer",
+        "credential",
+        "credentials",
+    }
+)
+_SENSITIVE_REPORT_KEY_SUFFIXES = (
+    "_account_id",
+    "_account_ids",
+    "_account_number",
+    "_account_numbers",
+    "_account_no",
+    "_account_nos",
+    "_acct_id",
+    "_acct_ids",
+    "_acct_no",
+    "_acct_nos",
+    "_token",
+    "_tokens",
+    "_password",
+    "_passwords",
+    "_secret",
+    "_secrets",
+    "_api_key",
+    "_authorization",
+    "_bearer",
+    "_credential",
+    "_credentials",
+)
+_SENSITIVE_REPORT_CANONICAL_KEYS = frozenset(
+    key.replace("_", "") for key in _SENSITIVE_REPORT_KEYS
+)
+_SENSITIVE_KOREAN_REPORT_KEYS = frozenset(
+    {
+        "계좌",
+        "계좌id",
+        "계좌번호",
+        "비밀번호",
+        "비밀키",
+        "인증",
+        "인증정보",
+        "토큰",
+    }
+)
+_HUMAN_TEXT_REPORT_KEYS = frozenset(
+    {
+        "error",
+        "errors",
+        "message",
+        "messages",
+        "summary",
+        "warning",
+        "warnings",
+        "detail",
+        "description",
+        "exception",
+        "traceback",
+    }
+)
+_HUMAN_TEXT_REPORT_KEY_SUFFIXES = (
+    "_error",
+    "_errors",
+    "_message",
+    "_messages",
+    "_summary",
+    "_warning",
+    "_warnings",
+    "_description",
+    "_exception",
+)
+_HUMAN_TEXT_REPORT_CONTAINER_KEYS = frozenset(
+    {
+        "error",
+        "errors",
+        "message",
+        "messages",
+        "warning",
+        "warnings",
+        "detail",
+        "exception",
+        "traceback",
+    }
+)
+_CAMEL_CASE_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_ACRONYM_CASE_BOUNDARY_RE = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+_AUTHORIZATION_SCHEME_RE = re.compile(
+    r"(?i)\b(bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{4,}"
+)
+_SENSITIVE_ASSIGNMENT_RE = re.compile(
+    r"""(?ix)
+    \b(
+        account(?:[\s_-]?(?:id|number))?
+        |[A-Za-z0-9_-]*(?:
+            token
+            |credentials?
+            |authorization
+            |bearer
+            |password
+            |secret
+        )
+        |[A-Za-z0-9_-]*api[\s_-]?key
+        |계좌(?:\s*(?:id|번호))?
+        |토큰
+        |비밀번호
+        |비밀키
+    )\b
+    (\s*[:=]\s*)
+    (
+        "[^"]*"
+        |'[^']*'
+        |\S+
+    )
+    """
+)
+_FORMATTED_ACCOUNT_NUMBER_RE = re.compile(
+    r"(?<!\d)\d{4}(?:[- ]\d{4}){1,2}(?:[- ]\d{2,4})?(?!\d)"
+)
+_CONTIGUOUS_ACCOUNT_NUMBER_RE = re.compile(r"(?<!\d)\d{8,14}(?!\d)")
+_KNOWN_TOKEN_RE = re.compile(
+    r"""(?ix)
+    \b(
+        sk-[A-Za-z0-9_-]{8,}
+        |gh[pousr]_[A-Za-z0-9]{20,}
+        |github_pat_[A-Za-z0-9_]{20,}
+        |eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
+    )\b
+    """
+)
 
 
 def write_observe_cycle_report(
@@ -19,8 +172,11 @@ def write_observe_cycle_report(
     *,
     report_root: str | Path = DEFAULT_REPORT_ROOT,
 ) -> dict[str, Path]:
-    trade_date = str(payload.get("trade_date") or datetime.now(tz=UTC).date().isoformat())
-    created_at = str(payload.get("created_at") or datetime.now(tz=UTC).isoformat())
+    safe_payload = sanitize_observe_cycle_payload(payload)
+    trade_date = str(
+        safe_payload.get("trade_date") or datetime.now(tz=UTC).date().isoformat()
+    )
+    created_at = str(safe_payload.get("created_at") or datetime.now(tz=UTC).isoformat())
     timestamp = _safe_timestamp(created_at)
     output_dir = Path(report_root) / trade_date
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -28,11 +184,129 @@ def write_observe_cycle_report(
     run_json = output_dir / f"run_{timestamp}.json"
     run_md = output_dir / f"run_{timestamp}.md"
     run_json.write_text(
-        json.dumps(dict(payload), ensure_ascii=False, indent=2, sort_keys=True),
+        json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    run_md.write_text(_render_markdown(payload), encoding="utf-8")
+    run_md.write_text(_render_markdown(safe_payload), encoding="utf-8")
     return {"run_json": run_json, "run_md": run_md}
+
+
+def _sanitize_report_payload(
+    value: object,
+    *,
+    key_context: object | None = None,
+    human_text_context: bool = False,
+) -> object:
+    if isinstance(value, Mapping):
+        return {
+            str(key): (
+                _REDACTED_VALUE
+                if _is_sensitive_report_key(key)
+                else _sanitize_report_payload(
+                    item,
+                    key_context=key,
+                    human_text_context=(
+                        human_text_context
+                        or _is_human_text_report_container_key(key)
+                    ),
+                )
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _sanitize_report_payload(
+                item,
+                key_context=key_context,
+                human_text_context=human_text_context,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return [
+            _sanitize_report_payload(
+                item,
+                key_context=key_context,
+                human_text_context=human_text_context,
+            )
+            for item in value
+        ]
+    if isinstance(value, str):
+        return _sanitize_report_text(
+            value,
+            redact_bare_account=(
+                human_text_context or _is_human_text_report_key(key_context)
+            ),
+        )
+    return value
+
+
+def sanitize_observe_cycle_payload(
+    payload: Mapping[str, object],
+) -> dict[str, object]:
+    safe_payload = _sanitize_report_payload(payload)
+    if not isinstance(safe_payload, dict):
+        raise TypeError("observe cycle report payload must be a mapping")
+    return safe_payload
+
+
+def _is_sensitive_report_key(key: object) -> bool:
+    normalized = _normalize_report_key(key)
+    canonical = normalized.replace("_", "")
+    compact_raw = re.sub(r"\s+", "", str(key).strip().lower())
+    return (
+        normalized in _SENSITIVE_REPORT_KEYS
+        or canonical in _SENSITIVE_REPORT_CANONICAL_KEYS
+        or normalized.endswith(_SENSITIVE_REPORT_KEY_SUFFIXES)
+        or compact_raw in _SENSITIVE_KOREAN_REPORT_KEYS
+    )
+
+
+def _is_human_text_report_key(key: object | None) -> bool:
+    if key is None:
+        return False
+    normalized = _normalize_report_key(key)
+    return normalized in _HUMAN_TEXT_REPORT_KEYS or normalized.endswith(
+        _HUMAN_TEXT_REPORT_KEY_SUFFIXES
+    )
+
+
+def _is_human_text_report_container_key(key: object) -> bool:
+    return _normalize_report_key(key) in _HUMAN_TEXT_REPORT_CONTAINER_KEYS
+
+
+def _normalize_report_key(key: object) -> str:
+    normalized = _ACRONYM_CASE_BOUNDARY_RE.sub("_", str(key).strip())
+    normalized = _CAMEL_CASE_BOUNDARY_RE.sub("_", normalized)
+    return re.sub(r"[^a-zA-Z0-9]+", "_", normalized).strip("_").lower()
+
+
+def _sanitize_report_text(
+    value: str,
+    *,
+    redact_bare_account: bool,
+) -> str:
+    sanitized = _AUTHORIZATION_SCHEME_RE.sub(
+        lambda match: f"{match.group(1)} {_REDACTED_VALUE}",
+        value,
+    )
+    sanitized = _SENSITIVE_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group(1)}{match.group(2)}{_REDACTED_VALUE}"
+        ),
+        sanitized,
+    )
+    sanitized = _KNOWN_TOKEN_RE.sub(_REDACTED_VALUE, sanitized)
+    if redact_bare_account:
+        sanitized = _FORMATTED_ACCOUNT_NUMBER_RE.sub(
+            _REDACTED_VALUE,
+            sanitized,
+        )
+        sanitized = _CONTIGUOUS_ACCOUNT_NUMBER_RE.sub(
+            _REDACTED_VALUE,
+            sanitized,
+        )
+    return sanitized
 
 
 def _render_markdown(payload: Mapping[str, object]) -> str:
@@ -165,8 +439,11 @@ def main() -> int:
     finally:
         connection.close()
     report_paths = write_observe_cycle_report(payload, report_root=args.out_dir)
-    payload["report_paths"] = {key: str(path) for key, path in report_paths.items()}
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    safe_payload = sanitize_observe_cycle_payload(payload)
+    safe_payload["report_paths"] = {
+        key: str(path) for key, path in report_paths.items()
+    }
+    print(json.dumps(safe_payload, ensure_ascii=False, indent=2, sort_keys=True))
     return 0
 
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
+import time
 from datetime import UTC, datetime
 
 import pytest
@@ -914,6 +916,11 @@ def test_gateway_python_write_lock_timeout_is_retryable_without_db_write(
     from storage.sqlite_locking import PROCESS_SQLITE_WRITER_COORDINATOR
 
     assert gateway_route._gateway_event_write_lock is PROCESS_SQLITE_WRITER_COORDINATOR
+    monkeypatch.setattr(
+        gateway_route,
+        "_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC",
+        0.01,
+    )
 
     with TestClient(app) as client:
         gateway_route._gateway_event_write_lock.acquire()
@@ -936,6 +943,276 @@ def test_gateway_python_write_lock_timeout_is_retryable_without_db_write(
         assert reader.execute("SELECT COUNT(*) FROM raw_events").fetchone()[0] == 0
     finally:
         reader.close()
+
+
+def test_gateway_fast_batch_waits_for_shared_writer_within_request_budget(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "python-write-lock-wait.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    from api.routes import gateway as gateway_route
+
+    writer_acquired = threading.Event()
+    gateway_wait_started = threading.Event()
+    release_writer = threading.Event()
+    thread_errors: list[BaseException] = []
+    real_write_lock = gateway_route._gateway_event_write_lock
+
+    class SignalingWriteLock:
+        def acquire(self, *args, **kwargs):
+            gateway_wait_started.set()
+            return real_write_lock.acquire(*args, **kwargs)
+
+        def release(self) -> None:
+            real_write_lock.release()
+
+    def hold_pipeline_writer() -> None:
+        real_write_lock.acquire()
+        try:
+            writer_acquired.set()
+            if not release_writer.wait(timeout=3.0):
+                thread_errors.append(
+                    TimeoutError("Gateway did not start waiting for the writer lock")
+                )
+        finally:
+            real_write_lock.release()
+
+    def release_pipeline_writer() -> None:
+        if not gateway_wait_started.wait(timeout=2.0):
+            thread_errors.append(
+                TimeoutError("Gateway never attempted to acquire the writer lock")
+            )
+            release_writer.set()
+            return
+        time.sleep(0.75)
+        release_writer.set()
+
+    event = make_price_tick_event(code="005930", price=70_000).to_dict()
+    with TestClient(app) as client:
+        monkeypatch.setattr(
+            gateway_route,
+            "_gateway_event_write_lock",
+            SignalingWriteLock(),
+        )
+        holder = threading.Thread(target=hold_pipeline_writer)
+        holder.start()
+        assert writer_acquired.wait(timeout=1.0)
+        releaser = threading.Thread(target=release_pipeline_writer)
+        releaser.start()
+
+        started_at = time.monotonic()
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": [event]},
+            headers={"X-Local-Token": "test-token"},
+        )
+        elapsed_sec = time.monotonic() - started_at
+
+        holder.join(timeout=3.0)
+        releaser.join(timeout=3.0)
+
+    connection = open_connection(db_path)
+    try:
+        raw_event_count = connection.execute(
+            "SELECT COUNT(*) FROM raw_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        tick_count = connection.execute(
+            "SELECT COUNT(*) FROM market_tick_samples WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        outbox_count = connection.execute(
+            "SELECT COUNT(*) FROM projection_outbox WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        order_command_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM gateway_commands
+            WHERE LOWER(command_type) IN ('send_order', 'modify_order', 'cancel_order')
+            """
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert holder.is_alive() is False
+    assert releaser.is_alive() is False
+    assert thread_errors == []
+    assert response.status_code == 200
+    assert response.json()["accepted_count"] == 1
+    assert response.json()["failed_count"] == 0
+    assert elapsed_sec >= 0.7
+    assert elapsed_sec < gateway_route._GATEWAY_EVENT_WRITE_BUDGET_SEC
+    assert raw_event_count == 1
+    assert tick_count == 1
+    assert outbox_count == 1
+    assert order_command_count == 0
+
+
+def test_gateway_mixed_batch_reacquire_waits_for_shared_writer(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "python-mixed-batch-lock-wait.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    from api.routes import gateway as gateway_route
+
+    real_write_lock = gateway_route._gateway_event_write_lock
+    reacquire_started = threading.Event()
+    competing_writer_acquired = threading.Event()
+    thread_errors: list[BaseException] = []
+
+    class ReacquireSignalingWriteLock:
+        local = threading.local()
+
+        def acquire(self, *args, **kwargs):
+            depth = getattr(self.local, "depth", 0)
+            completed_outer = getattr(self.local, "completed_outer", False)
+            if depth == 0 and completed_outer:
+                reacquire_started.set()
+                if not competing_writer_acquired.wait(timeout=2.0):
+                    raise TimeoutError("Competing writer did not acquire the lock")
+            acquired = real_write_lock.acquire(*args, **kwargs)
+            if acquired:
+                self.local.depth = depth + 1
+            return acquired
+
+        def release(self) -> None:
+            depth = getattr(self.local, "depth", 0)
+            real_write_lock.release()
+            self.local.depth = depth - 1
+            if self.local.depth == 0:
+                self.local.completed_outer = True
+
+    def hold_competing_writer() -> None:
+        try:
+            if not reacquire_started.wait(timeout=2.0):
+                thread_errors.append(
+                    TimeoutError("Gateway did not start the mixed-batch reacquire")
+                )
+                return
+            real_write_lock.acquire()
+            try:
+                competing_writer_acquired.set()
+                time.sleep(0.75)
+            finally:
+                real_write_lock.release()
+        except BaseException as exc:  # pragma: no cover - diagnostic safeguard
+            thread_errors.append(exc)
+
+    price_event = make_price_tick_event(code="005930", price=70_000).to_dict()
+    heartbeat = heartbeat_event("evt_mixed_reacquire_heartbeat")
+    with TestClient(app) as client:
+        monkeypatch.setattr(
+            gateway_route,
+            "_gateway_event_write_lock",
+            ReacquireSignalingWriteLock(),
+        )
+        competitor = threading.Thread(target=hold_competing_writer)
+        competitor.start()
+
+        started_at = time.monotonic()
+        response = client.post(
+            "/api/gateway/events/batch",
+            json={"events": [price_event, heartbeat]},
+            headers={"X-Local-Token": "test-token"},
+        )
+        elapsed_sec = time.monotonic() - started_at
+
+        competitor.join(timeout=3.0)
+
+    connection = open_connection(db_path)
+    try:
+        raw_event_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM raw_events
+            WHERE event_id IN (?, ?)
+            """,
+            (price_event["event_id"], heartbeat["event_id"]),
+        ).fetchone()[0]
+        tick_count = connection.execute(
+            "SELECT COUNT(*) FROM market_tick_samples WHERE event_id = ?",
+            (price_event["event_id"],),
+        ).fetchone()[0]
+        order_command_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM gateway_commands
+            WHERE LOWER(command_type) IN ('send_order', 'modify_order', 'cancel_order')
+            """
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert competitor.is_alive() is False
+    assert thread_errors == []
+    assert response.status_code == 200
+    assert response.json()["accepted_count"] == 2
+    assert response.json()["failed_count"] == 0
+    assert elapsed_sec >= 0.7
+    assert elapsed_sec < gateway_route._GATEWAY_EVENT_WRITE_BUDGET_SEC
+    assert raw_event_count == 2
+    assert tick_count == 1
+    assert order_command_count == 0
+
+
+def test_gateway_fast_batch_process_lock_timeout_is_atomic_and_retryable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "python-fast-batch-lock-timeout.sqlite3"
+    monkeypatch.setenv("TRADING_DB_PATH", str(db_path))
+    from api.routes import gateway as gateway_route
+
+    monkeypatch.setattr(
+        gateway_route,
+        "_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC",
+        0.01,
+    )
+    event = make_price_tick_event(code="005930", price=70_000).to_dict()
+    with TestClient(app) as client:
+        gateway_route._gateway_event_write_lock.acquire()
+        try:
+            blocked = client.post(
+                "/api/gateway/events/batch",
+                json={"events": [event]},
+                headers={"X-Local-Token": "test-token"},
+            )
+        finally:
+            gateway_route._gateway_event_write_lock.release()
+
+    detail = blocked.json()["detail"]
+    connection = open_connection(db_path)
+    try:
+        raw_event_count = connection.execute(
+            "SELECT COUNT(*) FROM raw_events WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        tick_count = connection.execute(
+            "SELECT COUNT(*) FROM market_tick_samples WHERE event_id = ?",
+            (event["event_id"],),
+        ).fetchone()[0]
+        order_command_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM gateway_commands
+            WHERE LOWER(command_type) IN ('send_order', 'modify_order', 'cancel_order')
+            """
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert blocked.status_code == 503
+    assert detail["status"] == "LOCKED_RETRYABLE"
+    assert detail["phase"] == "PYTHON_WRITE_LOCK"
+    assert detail["commit_outcome"] == "NOT_STARTED"
+    assert detail["batch_committed"] is False
+    assert detail["no_order_side_effects"] is True
+    assert raw_event_count == 0
+    assert tick_count == 0
+    assert order_command_count == 0
 
 
 def test_gateway_commands_api_dispatches_queued_commands(tmp_path, monkeypatch) -> None:

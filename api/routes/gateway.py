@@ -94,7 +94,9 @@ logger = logging.getLogger(__name__)
 _gateway_event_write_lock = PROCESS_SQLITE_WRITER_COORDINATOR
 _FAST_BATCH_LOCK_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2)
 _FAST_BATCH_BUSY_TIMEOUT_MS = 250
-_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC = 0.5
+# Absorb the observed short Core pipeline writes without consuming the full
+# five-second request budget. Each acquisition remains clamped by its deadline.
+_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC = 3.0
 _GATEWAY_EVENT_WRITE_BUDGET_SEC = 5.0
 
 
@@ -669,6 +671,7 @@ def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
             with _bounded_gateway_event_write_lock(
                 request_started_at=request_started_at,
                 write_deadline_at=write_deadline_at,
+                atomic_fast_batch=True,
             ):
                 sqlite_lock_retry_count += _process_fast_gateway_event_batch(
                     connection,
@@ -914,6 +917,14 @@ def _process_fast_gateway_event_batch(
                         error_message=str(exc.detail),
                         conflict=exc.status_code == 409,
                     )
+            _ensure_gateway_write_budget(
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+                phase="BATCH_TRANSACTION",
+                commit_outcome="ROLLED_BACK",
+                retry_count=retry_count,
+                atomic_fast_batch=True,
+            )
             connection.commit()
         except sqlite3.OperationalError as exc:
             connection.rollback()
@@ -1005,6 +1016,7 @@ def _bounded_gateway_event_write_lock(
     request_started_at: float | None = None,
     write_deadline_at: float | None = None,
     retry_event_id: str | None = None,
+    atomic_fast_batch: bool = False,
 ):
     started_at = (
         request_started_at
@@ -1022,6 +1034,7 @@ def _bounded_gateway_event_write_lock(
         phase="PYTHON_WRITE_LOCK",
         commit_outcome="NOT_STARTED",
         retry_event_id=retry_event_id,
+        atomic_fast_batch=atomic_fast_batch,
     )
     remaining_sec = max(deadline_at - time.monotonic(), 0.0)
     acquired = _gateway_event_write_lock.acquire(
@@ -1034,6 +1047,7 @@ def _bounded_gateway_event_write_lock(
             phase="PYTHON_WRITE_LOCK",
             commit_outcome="NOT_STARTED",
             retry_event_id=retry_event_id,
+            atomic_fast_batch=atomic_fast_batch,
             reason_codes=["GATEWAY_EVENT_WRITE_LOCK_TIMEOUT"],
         )
     try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import timedelta
 
@@ -19,7 +20,10 @@ from storage.event_store import append_gateway_event
 from storage.gateway_command_store import canonical_json
 from storage.sqlite import initialize_database, open_connection
 from tests.test_market_index_service import index_tick_event
-from tools.run_market_open_observe_cycle import write_observe_cycle_report
+from tools.run_market_open_observe_cycle import (
+    sanitize_observe_cycle_payload,
+    write_observe_cycle_report,
+)
 
 
 def test_mock_events_project_and_observe_cycle_records_stage_updates(tmp_path, monkeypatch) -> None:
@@ -569,8 +573,43 @@ def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> 
             "EntryTiming": {
                 "status": "PASS",
                 "reason_codes": [],
-                "summary": "evaluated=1, drafts=1, ready=1",
+                "summary": (
+                    "failed account=1234-5678-90 "
+                    "authorization=Bearer header-secret-value"
+                ),
                 "counts": {"evaluated_count": 1, "plan_ready_count": 1},
+                "details": {
+                    "preflight": {
+                        "account_id": "sensitive-account-value",
+                        "account_id_configured": True,
+                        "operator_token": "sensitive-token-value",
+                        "credentials": {
+                            "bearer": "nested-credential-value",
+                        },
+                        "headers": {
+                            "Authorization": "Bearer nested-header-value",
+                            "authorization_backup": (
+                                "Basic dXNlcjpwYXNzd29yZA=="
+                            ),
+                        },
+                        "accountIds": ["2468135790"],
+                        "accountNo": "1357-2468-90",
+                        "APIKey": "acronym-api-key-value",
+                        "APIToken": "acronym-api-token-value",
+                        "operatorCredentials": {
+                            "value": "prefixed-credential-value",
+                        },
+                        "httpAuthorization": "opaque-http-auth-value",
+                        "계좌번호": "8642-1357-90",
+                        "detail": {
+                            "value": "account 4321-8765-00",
+                        },
+                        "source_watermark_hash": "abc12345678def",
+                        "event_id": "evt_20260724060747816230",
+                        "scan_id": "scan_20260724",
+                        "idempotency_key": "cycle_1234567890_key",
+                    }
+                },
             },
             "CommandSafety": {
                 "status": "PASS",
@@ -585,7 +624,17 @@ def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> 
         "send_order_count_after": 0,
         "send_order_delta": 0,
         "warnings": [],
-        "errors": [],
+        "errors": [
+            {
+                "error": (
+                    "request failed for 9876-5432; "
+                    "Bearer standalone-secret-value"
+                    " credential=inline-credential-value"
+                    " access_token=inline-access-token-value"
+                    " operator_token=inline-operator-token-value"
+                )
+            }
+        ],
         "created_at": "2026-06-29T09:01:02+09:00",
         "observe_only": True,
         "not_order_intent": True,
@@ -599,11 +648,48 @@ def test_observe_cycle_cli_report_writer_creates_json_and_markdown(tmp_path) -> 
     paths = write_observe_cycle_report(payload, report_root=tmp_path / "observe")
     markdown = paths["run_md"].read_text(encoding="utf-8")
     saved_payload = paths["run_json"].read_text(encoding="utf-8")
+    cli_payload = json.dumps(
+        sanitize_observe_cycle_payload(payload),
+        ensure_ascii=False,
+    )
 
     assert paths["run_json"].exists()
     assert paths["run_md"].exists()
     assert "2026-06-29" in str(paths["run_json"])
     assert '"send_order_delta": 0' in saved_payload
+    assert "sensitive-account-value" not in saved_payload
+    assert "sensitive-token-value" not in saved_payload
+    assert "nested-credential-value" not in saved_payload
+    assert "nested-header-value" not in saved_payload
+    assert "dXNlcjpwYXNzd29yZA==" not in saved_payload
+    assert "acronym-api-key-value" not in saved_payload
+    assert "acronym-api-token-value" not in saved_payload
+    assert "prefixed-credential-value" not in saved_payload
+    assert "opaque-http-auth-value" not in saved_payload
+    assert "header-secret-value" not in saved_payload
+    assert "standalone-secret-value" not in saved_payload
+    assert "inline-credential-value" not in saved_payload
+    assert "inline-access-token-value" not in saved_payload
+    assert "inline-operator-token-value" not in saved_payload
+    assert "1234-5678-90" not in saved_payload
+    assert "9876-5432" not in saved_payload
+    assert "2468135790" not in saved_payload
+    assert "1357-2468-90" not in saved_payload
+    assert "8642-1357-90" not in saved_payload
+    assert "4321-8765-00" not in saved_payload
+    assert '"account_id": "[REDACTED]"' in saved_payload
+    assert '"operator_token": "[REDACTED]"' in saved_payload
+    assert '"account_id_configured": true' in saved_payload
+    assert '"source_watermark_hash": "abc12345678def"' in saved_payload
+    assert '"event_id": "evt_20260724060747816230"' in saved_payload
+    assert '"scan_id": "scan_20260724"' in saved_payload
+    assert '"idempotency_key": "cycle_1234567890_key"' in saved_payload
+    assert "nested-credential-value" not in markdown
+    assert "header-secret-value" not in markdown
+    assert "standalone-secret-value" not in markdown
+    assert "nested-credential-value" not in cli_payload
+    assert "header-secret-value" not in cli_payload
+    assert "standalone-secret-value" not in cli_payload
     assert "CommandSafety" in markdown
     assert "send_order_delta: `0`" in markdown
     assert "queue_commands: `False`" in markdown
