@@ -33,6 +33,7 @@ from services.condition_fusion import (
 from services.config import Settings, candidate_timezone, load_settings
 from services.market_context_service import get_market_context_for_code
 from services.market_data_service import get_latest_tick, get_market_data_readiness
+from services.runtime.evaluation_run_guard import assert_runtime_execution_fence
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -89,7 +90,29 @@ class CandidateRebuildResult:
         }
 
 
+_SOURCE_INGEST_COMMIT_CHUNK_SIZE = 10
+_SOURCE_EVENT_SAVEPOINT = "candidate_source_event_apply"
+
+
 def ingest_condition_sources(
+    connection: sqlite3.Connection,
+    trade_date: str | None = None,
+    *,
+    settings: Settings | None = None,
+) -> CandidateSourceIngestResult:
+    try:
+        return _ingest_condition_sources(
+            connection,
+            trade_date,
+            settings=settings,
+        )
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
+def _ingest_condition_sources(
     connection: sqlite3.Connection,
     trade_date: str | None = None,
     *,
@@ -116,6 +139,7 @@ def ingest_condition_sources(
         (start_at, end_at),
     ).fetchall()
     result = _MutableIngestResult()
+    processed_in_chunk = 0
     for fusion in list_condition_fusion(
         connection,
         trade_date=target_trade_date,
@@ -126,7 +150,7 @@ def ingest_condition_sources(
             continue
         try:
             source_event = _fusion_row_to_source_event(fusion, target_trade_date)
-            applied = create_or_merge_candidate_from_source(
+            applied = _apply_candidate_source_event_atomically(
                 connection,
                 source_event,
                 settings=resolved_settings,
@@ -142,6 +166,10 @@ def ingest_condition_sources(
                 error_message=str(exc),
                 payload=fusion,
             )
+        processed_in_chunk += 1
+        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
+            _commit_source_ingest_chunk(connection)
+            processed_in_chunk = 0
     for row in rows:
         if _trade_date_for_timestamp(row["event_ts"], resolved_settings) != target_trade_date:
             continue
@@ -149,7 +177,7 @@ def ingest_condition_sources(
             continue
         try:
             source_event = _condition_row_to_source_event(row, target_trade_date, resolved_settings)
-            applied = create_or_merge_candidate_from_source(
+            applied = _apply_candidate_source_event_atomically(
                 connection,
                 source_event,
                 settings=resolved_settings,
@@ -165,11 +193,33 @@ def ingest_condition_sources(
                 error_message=str(exc),
                 payload=_row_to_dict(row),
             )
-    connection.commit()
+        processed_in_chunk += 1
+        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
+            _commit_source_ingest_chunk(connection)
+            processed_in_chunk = 0
+    _commit_source_ingest_chunk(connection)
     return result.to_ingest_result()
 
 
 def ingest_theme_sources(
+    connection: sqlite3.Connection,
+    trade_date: str | None = None,
+    *,
+    settings: Settings | None = None,
+) -> CandidateSourceIngestResult:
+    try:
+        return _ingest_theme_sources(
+            connection,
+            trade_date,
+            settings=settings,
+        )
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+
+
+def _ingest_theme_sources(
     connection: sqlite3.Connection,
     trade_date: str | None = None,
     *,
@@ -202,6 +252,7 @@ def ingest_theme_sources(
         """
     ).fetchall()
     result = _MutableIngestResult()
+    processed_in_chunk = 0
     for row in rows:
         if _trade_date_for_timestamp(row["calculated_at"], resolved_settings) != target_trade_date:
             continue
@@ -211,7 +262,7 @@ def ingest_theme_sources(
             continue
         try:
             source_event = _theme_row_to_source_event(row, target_trade_date)
-            applied = create_or_merge_candidate_from_source(
+            applied = _apply_candidate_source_event_atomically(
                 connection,
                 source_event,
                 settings=resolved_settings,
@@ -227,7 +278,11 @@ def ingest_theme_sources(
                 error_message=str(exc),
                 payload=_row_to_dict(row),
             )
-    connection.commit()
+        processed_in_chunk += 1
+        if processed_in_chunk >= _SOURCE_INGEST_COMMIT_CHUNK_SIZE:
+            _commit_source_ingest_chunk(connection)
+            processed_in_chunk = 0
+    _commit_source_ingest_chunk(connection)
     return result.to_ingest_result()
 
 
@@ -345,12 +400,46 @@ def create_or_merge_candidate_from_source(
     )
 
 
+def _apply_candidate_source_event_atomically(
+    connection: sqlite3.Connection,
+    source_event: CandidateSourceEvent,
+    *,
+    settings: Settings,
+) -> CandidateSourceApplyResult:
+    if not connection.in_transaction:
+        connection.execute("BEGIN DEFERRED")
+    connection.execute(f"SAVEPOINT {_SOURCE_EVENT_SAVEPOINT}")
+    try:
+        result = create_or_merge_candidate_from_source(
+            connection,
+            source_event,
+            settings=settings,
+        )
+    except Exception:
+        connection.execute(f"ROLLBACK TO SAVEPOINT {_SOURCE_EVENT_SAVEPOINT}")
+        connection.execute(f"RELEASE SAVEPOINT {_SOURCE_EVENT_SAVEPOINT}")
+        raise
+    connection.execute(f"RELEASE SAVEPOINT {_SOURCE_EVENT_SAVEPOINT}")
+    return result
+
+
+def _commit_source_ingest_chunk(connection: sqlite3.Connection) -> None:
+    try:
+        assert_runtime_execution_fence(connection)
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    connection.commit()
+
+
 def refresh_candidate_context(
     connection: sqlite3.Connection,
     candidate_instance_id: str,
     *,
     settings: Settings | None = None,
     freshness_reference_at: datetime | None = None,
+    manage_transaction: bool = True,
 ) -> CandidateRefreshResult:
     resolved_settings = settings or load_settings()
     normalized_id = require_non_empty_str(candidate_instance_id, "candidate_instance_id")
@@ -457,7 +546,8 @@ def refresh_candidate_context(
                 reason_codes=reason_codes,
                 metadata={"context_refreshed_at": refreshed_at},
             )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
         return CandidateRefreshResult(
             context_refreshed_count=1,
             transition_count=transition_count,
@@ -473,7 +563,8 @@ def refresh_candidate_context(
             error_message=str(exc),
             payload={"candidate_instance_id": normalized_id},
         )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
         return CandidateRefreshResult(error_count=1)
 
 
@@ -739,7 +830,10 @@ def _apply_exit_source_event(
             connection,
             candidate_instance_id,
             settings=settings,
+            manage_transaction=False,
         )
+        if refresh_result.error_count:
+            raise RuntimeError("CONDITION_EXIT_CONTEXT_REFRESH_FAILED")
         closed_count = refresh_result.closed_count
         transition_count = refresh_result.transition_count
     return CandidateSourceApplyResult(

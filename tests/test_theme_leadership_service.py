@@ -3,10 +3,12 @@ from __future__ import annotations
 from datetime import timedelta
 from pathlib import Path
 
+import services.theme_leadership.service as leadership_service
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
 from domain.broker.utils import utc_now
 from gateway.event_factory import make_condition_event, make_price_tick_event
+from services.candidate_service import CandidateSourceApplyResult
 from services.config import Settings, candidate_timezone
 from services.market_data_service import process_gateway_event
 from services.market_scan_service import process_market_scan_event
@@ -110,6 +112,118 @@ def test_theme_leadership_builders_rank_leading_theme_and_watchset(tmp_path) -> 
     }
     assert len(watchset.items) == 3
     assert all(item.source_type.startswith("THEME_") for item in watchset.items)
+
+
+def test_theme_leadership_source_write_rolls_back_all_events_on_late_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-leadership-source-atomic.sqlite3")
+    call_count = 0
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 11:
+            raise RuntimeError("synthetic late source failure")
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, NULL, NULL, 'leadership-chunk-probe', '{}')
+            """
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        leadership_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+
+    try:
+        leadership_service._write_candidate_source_events(
+            connection,
+            [object() for _ in range(11)],
+            settings=_settings(),
+        )
+    except RuntimeError as exc:
+        assert "synthetic late source failure" in str(exc)
+    else:
+        raise AssertionError("expected late source failure")
+    durable_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE error_message = 'leadership-chunk-probe'
+        """
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert call_count == 11
+    assert durable_count == 0
+    assert in_transaction is False
+
+
+def test_theme_leadership_fence_loss_rolls_back_entire_rebuild(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-leadership-fence.sqlite3")
+    connection.execute(
+        "CREATE TABLE leadership_source_probe (event_id TEXT PRIMARY KEY)"
+    )
+    connection.commit()
+    events = [f"leadership-event-{index}" for index in range(11)]
+    call_count = 0
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
+        actual_connection.execute(
+            "INSERT INTO leadership_source_probe (event_id) VALUES (?)",
+            (source_event,),
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        leadership_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+    monkeypatch.setattr(
+        leadership_service,
+        "assert_runtime_execution_fence",
+        lambda connection: (_ for _ in ()).throw(
+            RuntimeError("EVALUATION_RUN_FENCE_LOST")
+        ),
+    )
+
+    try:
+        leadership_service._write_candidate_source_events(
+            connection,
+            events,
+            settings=_settings(),
+        )
+    except RuntimeError as exc:
+        assert "EVALUATION_RUN_FENCE_LOST" in str(exc)
+    else:
+        raise AssertionError("expected fence loss before rebuild commit")
+    durable_after_loss = connection.execute(
+        "SELECT COUNT(*) AS count FROM leadership_source_probe"
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert call_count == 11
+    assert durable_after_loss == 0
+    assert in_transaction is False
 
 
 def test_ranker_prioritizes_observed_zero_score_theme_over_empty_theme(tmp_path) -> None:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+import services.theme_service as theme_service
 from domain.broker.conditions import BrokerConditionEvent
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
@@ -9,6 +11,7 @@ from domain.broker.utils import utc_now
 from services.config import Settings
 from services.market_data_service import process_gateway_event
 from services.market_scan_service import process_market_scan_event
+from services.runtime.evaluation_run_guard import EvaluationRunFenceError
 from services.theme_service import (
     calculate_all_theme_snapshots,
     calculate_theme_snapshot,
@@ -22,7 +25,7 @@ from services.theme_service import (
     upsert_theme_member,
 )
 from storage.event_store import append_gateway_event
-from storage.sqlite import initialize_database
+from storage.sqlite import initialize_database, open_connection
 
 
 def test_theme_membership_import_upsert_lists_and_replace_scope(tmp_path) -> None:
@@ -104,6 +107,159 @@ def test_theme_direct_upserts_validate_codes_and_active_lists(tmp_path) -> None:
 
     assert members[0]["code"] == "005930"
     assert members[0]["active"] is True
+
+
+def test_theme_member_projection_error_releases_writer_before_remaining_members(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "theme-member-error-lock.sqlite3"
+    connection = initialize_database(db_path)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": "005930", "name": "삼성전자"},
+                {"code": "000660", "name": "SK하이닉스"},
+            ]
+        ),
+    )
+    original = theme_service._calculate_member_snapshot
+    call_count = 0
+    competing_writer_acquired = False
+
+    def calculate_member(*args, **kwargs):
+        nonlocal call_count, competing_writer_acquired
+        call_count += 1
+        if call_count == 1:
+            raise RuntimeError("synthetic member projection failure")
+        competing = open_connection(db_path)
+        competing.execute("PRAGMA busy_timeout=0")
+        try:
+            competing.execute("BEGIN IMMEDIATE")
+            competing_writer_acquired = True
+            competing.rollback()
+        finally:
+            competing.close()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        theme_service,
+        "_calculate_member_snapshot",
+        calculate_member,
+    )
+
+    snapshot = calculate_theme_snapshot(connection, "semiconductor")
+    projection_error_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM theme_projection_errors
+        WHERE error_message = 'synthetic member projection failure'
+        """
+    ).fetchone()["count"]
+    connection.close()
+
+    assert call_count == 2
+    assert snapshot.metadata["member_error_count"] == 1
+    assert projection_error_count == 1
+    assert competing_writer_acquired is True
+
+
+def test_theme_member_error_fence_loss_rolls_back_error_before_next_member(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-member-error-fence.sqlite3")
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": "005930", "name": "삼성전자"},
+                {"code": "000660", "name": "SK하이닉스"},
+            ]
+        ),
+    )
+    member_call_count = 0
+
+    def fail_member(*args, **kwargs):
+        nonlocal member_call_count
+        member_call_count += 1
+        raise RuntimeError("synthetic member projection failure")
+
+    def lose_fence(connection):
+        raise EvaluationRunFenceError(
+            lock_name="evaluation_pipeline",
+            owner_id="test-owner",
+            fencing_token=1,
+            current_owner_id="replacement-owner",
+            current_fencing_token=2,
+        )
+
+    monkeypatch.setattr(theme_service, "_calculate_member_snapshot", fail_member)
+    monkeypatch.setattr(theme_service, "assert_runtime_execution_fence", lose_fence)
+
+    with pytest.raises(EvaluationRunFenceError):
+        calculate_theme_snapshot(connection, "semiconductor")
+
+    projection_error_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM theme_projection_errors
+        WHERE error_message = 'synthetic member projection failure'
+        """
+    ).fetchone()["count"]
+    snapshot_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM theme_snapshots"
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert member_call_count == 1
+    assert projection_error_count == 0
+    assert snapshot_count == 0
+    assert in_transaction is False
+
+
+def test_theme_snapshot_fence_loss_rolls_back_snapshot_without_error_write(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "theme-snapshot-fence.sqlite3")
+    import_theme_memberships(
+        connection,
+        _theme_payload([{"code": "005930", "name": "삼성전자"}]),
+    )
+    fence_check_count = 0
+
+    def lose_fence(connection):
+        nonlocal fence_check_count
+        fence_check_count += 1
+        raise EvaluationRunFenceError(
+            lock_name="evaluation_pipeline",
+            owner_id="test-owner",
+            fencing_token=1,
+            current_owner_id="replacement-owner",
+            current_fencing_token=2,
+        )
+
+    monkeypatch.setattr(theme_service, "assert_runtime_execution_fence", lose_fence)
+
+    with pytest.raises(EvaluationRunFenceError):
+        calculate_all_theme_snapshots(connection)
+
+    snapshot_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM theme_snapshots"
+    ).fetchone()["count"]
+    projection_error_count = connection.execute(
+        "SELECT COUNT(*) AS count FROM theme_projection_errors"
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert fence_check_count == 1
+    assert snapshot_count == 0
+    assert projection_error_count == 0
+    assert in_transaction is False
 
 
 def test_theme_snapshot_calculates_leader_roles_state_and_persistence(tmp_path) -> None:

@@ -5,6 +5,7 @@ from storage.sqlite import (
     SCHEMA_VERSION,
     initialize_database,
     initialize_database_for_offline_migration,
+    open_connection,
 )
 
 
@@ -25,6 +26,17 @@ def test_sqlite_initialization_creates_app_metadata_and_pragmas(tmp_path) -> Non
     assert journal_mode == "wal"
     assert busy_timeout == 15000
     assert synchronous == 1
+
+
+def test_open_connection_accepts_a_bounded_busy_timeout(tmp_path) -> None:
+    db_path = tmp_path / "bounded-busy-timeout.sqlite3"
+    connection = open_connection(db_path, busy_timeout_ms=250)
+    try:
+        busy_timeout = connection.execute("PRAGMA busy_timeout").fetchone()[0]
+    finally:
+        connection.close()
+
+    assert busy_timeout == 250
 
 
 def test_sqlite_initialization_creates_ai_sidecar_tables(tmp_path) -> None:

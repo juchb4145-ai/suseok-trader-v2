@@ -30,6 +30,7 @@ from storage.projection_watermarks import (
     record_projection_event_result,
     reset_projection_watermark,
 )
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from services.candidate_quote_refresh import (
     candidate_quote_refresh_tick_payloads_from_tr_response,
@@ -207,6 +208,8 @@ def process_gateway_event(
         if not commit:
             raise
         connection.rollback()
+        if is_sqlite_locked_error(exc):
+            raise
         _record_projection_error(connection, event, error_message=str(exc))
         record_projection_event_result(
             connection,

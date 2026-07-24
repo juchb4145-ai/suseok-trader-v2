@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import threading
+import time
 from collections.abc import Mapping
+from contextlib import contextmanager
 from typing import Any
 
 from domain.broker.events import GatewayEvent
@@ -80,26 +83,54 @@ from storage.projection_outbox import (
     retire_inline_projection_outbox_job,
 )
 from storage.sqlite import open_connection
+from storage.sqlite_locking import is_sqlite_locked_error
 
 from api.dependencies.auth import require_local_token
 
 router = APIRouter(prefix="/api/gateway")
 logger = logging.getLogger(__name__)
 _gateway_event_write_lock = threading.RLock()
+_FAST_BATCH_LOCK_RETRY_DELAYS_SEC = (0.05, 0.1, 0.2)
+_FAST_BATCH_BUSY_TIMEOUT_MS = 250
+_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC = 0.5
+_GATEWAY_EVENT_WRITE_BUDGET_SEC = 5.0
 
 
 @router.post("/events", dependencies=[Depends(require_local_token)])
 def post_gateway_event(body: dict[str, Any]) -> dict[str, Any]:
+    request_started_at = time.monotonic()
+    write_deadline_at = request_started_at + _GATEWAY_EVENT_WRITE_BUDGET_SEC
     event = _gateway_event_from_body(body)
     settings = load_settings()
-    connection = open_connection(settings.trading_db_path)
-    return _process_gateway_event(
-        event,
-        settings=settings,
-        connection=connection,
-        commit=True,
-        close_connection=True,
+    connection, sqlite_lock_retry_count = _open_gateway_event_connection(
+        settings.trading_db_path,
+        atomic_fast_batch=False,
+        request_started_at=request_started_at,
+        write_deadline_at=write_deadline_at,
+        retry_event_id=event.event_id,
     )
+    try:
+        result = _process_gateway_event(
+            event,
+            settings=settings,
+            connection=connection,
+            commit=True,
+            close_connection=True,
+            request_started_at=request_started_at,
+            write_deadline_at=write_deadline_at,
+        )
+    except sqlite3.OperationalError as exc:
+        if not is_sqlite_locked_error(exc):
+            raise
+        raise _gateway_event_locked_retryable(
+            request_started_at=request_started_at,
+            retry_count=0,
+            phase="SINGLE_EVENT",
+            commit_outcome="UNKNOWN_RETRY_SAME_EVENT_ID",
+            retry_event_id=event.event_id,
+        ) from exc
+    result["sqlite_lock_retry_count"] = sqlite_lock_retry_count
+    return result
 
 
 def _gateway_event_from_body(body: dict[str, Any]) -> GatewayEvent:
@@ -122,6 +153,8 @@ def _process_gateway_event(
     market_data_controller_status: MarketDataAppendOnlyControllerStatus | None = None,
     condition_event_backlog_status: dict[str, Any] | None = None,
     retire_inline_outbox: bool = False,
+    request_started_at: float | None = None,
+    write_deadline_at: float | None = None,
 ) -> dict[str, Any]:
     projection_status: str | None = None
     projection_statuses: dict[str, str] = {}
@@ -132,18 +165,32 @@ def _process_gateway_event(
     market_scan_routing: dict[str, Any] | None = None
     live_sim_lifecycle: dict[str, Any] | None = None
     broker_boundary: dict[str, Any] | None = None
+    outbox_status: str | None = None
     try:
-        with _gateway_event_write_lock:
-            result = append_gateway_event(connection, event, commit=commit)
-            if result.status == "ACCEPTED" and not result.duplicate:
-                event_type = event.event_type.strip().lower()
+        with _bounded_gateway_event_write_lock(
+            request_started_at=request_started_at,
+            write_deadline_at=write_deadline_at,
+            retry_event_id=event.event_id,
+        ):
+            result = append_gateway_event(
+                connection,
+                event,
+                commit=commit,
+                retry_deadline_at=write_deadline_at if commit else None,
+            )
+            if result.status == "ACCEPTED":
+                # The raw event may already be durable when a prior request lost
+                # its response or failed while creating the outbox. Re-running
+                # this idempotent enqueue for duplicates closes that recovery gap.
                 outbox_status = _enqueue_projection_outbox_jobs(
                     connection,
                     event,
                     commit=commit,
                 )
-                if outbox_status is not None:
+                if outbox_status is not None and not result.duplicate:
                     projection_statuses["projection_outbox"] = outbox_status
+            if result.status == "ACCEPTED" and not result.duplicate:
+                event_type = event.event_type.strip().lower()
                 if event_type in MARKET_DATA_EVENT_TYPES:
                     routing_decision = _decide_market_data_projection_routing(
                         connection,
@@ -564,6 +611,8 @@ def _process_gateway_event(
 
 @router.post("/events/batch", dependencies=[Depends(require_local_token)])
 def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
+    request_started_at = time.monotonic()
+    write_deadline_at = request_started_at + _GATEWAY_EVENT_WRITE_BUDGET_SEC
     raw_events = body.get("events")
     if not isinstance(raw_events, list) or not raw_events:
         raise HTTPException(
@@ -606,64 +655,56 @@ def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
         if event.event_type.strip().lower() == "condition_event"
     ]
     fast_events = [*price_events, *condition_events]
+    sqlite_lock_retry_count = 0
     if fast_events:
-        connection = open_connection(settings.trading_db_path)
+        connection, sqlite_lock_retry_count = _open_gateway_event_connection(
+            settings.trading_db_path,
+            atomic_fast_batch=True,
+            request_started_at=request_started_at,
+            write_deadline_at=write_deadline_at,
+        )
         try:
-            with _gateway_event_write_lock:
-                connection.execute("BEGIN IMMEDIATE")
-                routing_context = build_market_data_projection_routing_batch_context(
+            with _bounded_gateway_event_write_lock(
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+            ):
+                sqlite_lock_retry_count += _process_fast_gateway_event_batch(
                     connection,
+                    fast_events=fast_events,
+                    results=results,
                     settings=settings,
                     include_condition_event=bool(condition_events),
+                    request_started_at=request_started_at,
+                    write_deadline_at=write_deadline_at,
                 )
-                for index, event in fast_events:
-                    try:
-                        event_result = _process_gateway_event(
-                            event,
-                            settings=settings,
-                            connection=connection,
-                            commit=False,
-                            close_connection=False,
-                            market_data_controller_status=(
-                                routing_context.controller_status
-                            ),
-                            condition_event_backlog_status=dict(
-                                routing_context.condition_event_backlog
-                            ),
-                            retire_inline_outbox=True,
-                        )
-                        results[index] = event_result
-                        routing = event_result.get(
-                            "market_data_append_only_routing"
-                        )
-                        if isinstance(routing, dict) and bool(
-                            routing.get("effective_skip_inline")
-                        ):
-                            routing_context = (
-                                build_market_data_projection_routing_batch_context(
-                                    connection,
-                                    settings=settings,
-                                    include_condition_event=bool(condition_events),
-                                )
-                            )
-                    except HTTPException as exc:
-                        results[index] = _batch_rejection(
-                            event_id=event.event_id,
-                            error_message=str(exc.detail),
-                            conflict=exc.status_code == 409,
-                        )
-                connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
         finally:
             connection.close()
 
+    committed_event_ids = _committed_fast_event_ids(
+        fast_events=fast_events,
+        results=results,
+    )
     for index, event in parsed_events:
         if event.event_type.strip().lower() in {"price_tick", "condition_event"}:
             continue
         try:
-            connection = open_connection(settings.trading_db_path)
+            _ensure_gateway_write_budget(
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+                phase="BATCH_NON_FAST_LOOP",
+                commit_outcome="NOT_STARTED",
+                retry_event_id=event.event_id,
+                committed_event_ids=committed_event_ids,
+            )
+            connection, open_retry_count = _open_gateway_event_connection(
+                settings.trading_db_path,
+                atomic_fast_batch=False,
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+                retry_event_id=event.event_id,
+                committed_event_ids=committed_event_ids,
+            )
+            sqlite_lock_retry_count += open_retry_count
             results[index] = _process_gateway_event(
                 event,
                 settings=settings,
@@ -671,8 +712,35 @@ def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
                 commit=True,
                 close_connection=True,
                 retire_inline_outbox=True,
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
             )
+            if bool(results[index].get("accepted")):
+                committed_event_ids.append(event.event_id)
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked_error(exc):
+                raise
+            raise _gateway_event_locked_retryable(
+                request_started_at=request_started_at,
+                retry_count=0,
+                phase="BATCH_NON_FAST_EVENT",
+                commit_outcome="UNKNOWN_RETRY_SAME_EVENT_ID",
+                retry_event_id=event.event_id,
+                committed_event_ids=committed_event_ids,
+            ) from exc
         except HTTPException as exc:
+            if (
+                exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+                and isinstance(exc.detail, dict)
+                and exc.detail.get("status") == "LOCKED_RETRYABLE"
+            ):
+                raise _with_batch_retry_context(
+                    exc,
+                    retry_event_id=event.event_id,
+                    committed_event_ids=committed_event_ids,
+                ) from exc
+            if exc.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY:
+                committed_event_ids.append(event.event_id)
             results[index] = _batch_rejection(
                 event_id=event.event_id,
                 error_message=str(exc.detail),
@@ -695,8 +763,383 @@ def post_gateway_events_batch(body: dict[str, Any]) -> dict[str, Any]:
         "failed_count": sum(
             not bool(item.get("accepted")) for item in resolved_results
         ),
+        "sqlite_lock_retry_count": sqlite_lock_retry_count,
         "results": resolved_results,
     }
+
+
+def _open_gateway_event_connection(
+    db_path: Any,
+    *,
+    atomic_fast_batch: bool,
+    request_started_at: float,
+    write_deadline_at: float,
+    retry_event_id: str | None = None,
+    committed_event_ids: list[str] | None = None,
+) -> tuple[sqlite3.Connection, int]:
+    retry_count = 0
+    for delay_sec in (*_FAST_BATCH_LOCK_RETRY_DELAYS_SEC, None):
+        _ensure_gateway_write_budget(
+            request_started_at=request_started_at,
+            write_deadline_at=write_deadline_at,
+            phase="OPEN_CONNECTION",
+            commit_outcome="NOT_STARTED",
+            retry_count=retry_count,
+            atomic_fast_batch=atomic_fast_batch,
+            retry_event_id=retry_event_id,
+            committed_event_ids=committed_event_ids,
+        )
+        try:
+            remaining_ms = max(
+                int((write_deadline_at - time.monotonic()) * 1000),
+                1,
+            )
+            return (
+                open_connection(
+                    db_path,
+                    busy_timeout_ms=min(
+                        _FAST_BATCH_BUSY_TIMEOUT_MS,
+                        remaining_ms,
+                    ),
+                ),
+                retry_count,
+            )
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked_error(exc):
+                raise
+            if delay_sec is None:
+                raise _gateway_event_locked_retryable(
+                    request_started_at=request_started_at,
+                    retry_count=retry_count,
+                    phase="OPEN_CONNECTION",
+                    commit_outcome="NOT_STARTED",
+                    atomic_fast_batch=atomic_fast_batch,
+                    retry_event_id=retry_event_id,
+                    committed_event_ids=committed_event_ids,
+                ) from exc
+            retry_count += 1
+            _sleep_within_gateway_write_budget(
+                delay_sec,
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+                phase="OPEN_CONNECTION",
+                commit_outcome="NOT_STARTED",
+                retry_count=retry_count,
+                atomic_fast_batch=atomic_fast_batch,
+                retry_event_id=retry_event_id,
+                committed_event_ids=committed_event_ids,
+            )
+    raise RuntimeError("unreachable fast gateway connection retry state")
+
+
+def _process_fast_gateway_event_batch(
+    connection: sqlite3.Connection,
+    *,
+    fast_events: list[tuple[int, GatewayEvent]],
+    results: list[dict[str, Any] | None],
+    settings: Any,
+    include_condition_event: bool,
+    request_started_at: float,
+    write_deadline_at: float,
+) -> int:
+    retry_count = 0
+    for delay_sec in (*_FAST_BATCH_LOCK_RETRY_DELAYS_SEC, None):
+        attempt_results: dict[int, dict[str, Any]] = {}
+        _ensure_gateway_write_budget(
+            request_started_at=request_started_at,
+            write_deadline_at=write_deadline_at,
+            phase="BATCH_TRANSACTION",
+            commit_outcome="ROLLED_BACK" if retry_count else "NOT_STARTED",
+            retry_count=retry_count,
+            atomic_fast_batch=True,
+        )
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            routing_context = build_market_data_projection_routing_batch_context(
+                connection,
+                settings=settings,
+                include_condition_event=include_condition_event,
+            )
+            for index, event in fast_events:
+                _ensure_gateway_write_budget(
+                    request_started_at=request_started_at,
+                    write_deadline_at=write_deadline_at,
+                    phase="BATCH_TRANSACTION",
+                    commit_outcome="ROLLED_BACK",
+                    retry_count=retry_count,
+                    atomic_fast_batch=True,
+                )
+                try:
+                    event_result = _process_gateway_event(
+                        event,
+                        settings=settings,
+                        connection=connection,
+                        commit=False,
+                        close_connection=False,
+                        market_data_controller_status=(
+                            routing_context.controller_status
+                        ),
+                        condition_event_backlog_status=dict(
+                            routing_context.condition_event_backlog
+                        ),
+                        retire_inline_outbox=True,
+                        request_started_at=request_started_at,
+                        write_deadline_at=write_deadline_at,
+                    )
+                    attempt_results[index] = event_result
+                    routing = event_result.get(
+                        "market_data_append_only_routing"
+                    )
+                    if isinstance(routing, dict) and bool(
+                        routing.get("effective_skip_inline")
+                    ):
+                        routing_context = (
+                            build_market_data_projection_routing_batch_context(
+                                connection,
+                                settings=settings,
+                                include_condition_event=include_condition_event,
+                            )
+                        )
+                except HTTPException as exc:
+                    if (
+                        exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE
+                        and isinstance(exc.detail, dict)
+                        and exc.detail.get("status") == "LOCKED_RETRYABLE"
+                    ):
+                        raise
+                    attempt_results[index] = _batch_rejection(
+                        event_id=event.event_id,
+                        error_message=str(exc.detail),
+                        conflict=exc.status_code == 409,
+                    )
+            connection.commit()
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            if not is_sqlite_locked_error(exc):
+                raise
+            if delay_sec is None:
+                raise _gateway_event_locked_retryable(
+                    request_started_at=request_started_at,
+                    retry_count=retry_count,
+                    phase="BATCH_TRANSACTION",
+                    commit_outcome="ROLLED_BACK",
+                    atomic_fast_batch=True,
+                ) from exc
+            retry_count += 1
+            _sleep_within_gateway_write_budget(
+                delay_sec,
+                request_started_at=request_started_at,
+                write_deadline_at=write_deadline_at,
+                phase="BATCH_TRANSACTION",
+                commit_outcome="ROLLED_BACK",
+                retry_count=retry_count,
+                atomic_fast_batch=True,
+            )
+            continue
+        except Exception:
+            connection.rollback()
+            raise
+        for index, event_result in attempt_results.items():
+            results[index] = event_result
+        return retry_count
+    raise RuntimeError("unreachable fast gateway batch retry state")
+
+
+def _gateway_event_locked_retryable(
+    *,
+    request_started_at: float,
+    retry_count: int,
+    phase: str,
+    commit_outcome: str,
+    atomic_fast_batch: bool = False,
+    retry_event_id: str | None = None,
+    committed_event_ids: list[str] | None = None,
+    reason_codes: list[str] | None = None,
+) -> HTTPException:
+    elapsed_ms = (time.monotonic() - request_started_at) * 1000
+    batch_context: dict[str, Any] = {}
+    if committed_event_ids is not None:
+        committed_ids = list(committed_event_ids)
+        batch_context = {
+            "batch_commit_state": _batch_commit_state(
+                commit_outcome=commit_outcome,
+                committed_event_ids=committed_ids,
+            ),
+            "committed_event_count": len(committed_ids),
+            "committed_event_ids": committed_ids,
+        }
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail={
+            "status": "LOCKED_RETRYABLE",
+            "retryable": True,
+            "reason_codes": reason_codes or ["SQLITE_DATABASE_LOCKED"],
+            "phase": phase,
+            "attempts": retry_count + 1,
+            "locked_retry_count": retry_count,
+            "elapsed_ms": round(elapsed_ms, 3),
+            "commit_outcome": commit_outcome,
+            **(
+                {"retry_event_id": retry_event_id}
+                if retry_event_id is not None
+                else {}
+            ),
+            **batch_context,
+            **(
+                {
+                    "batch_committed": False,
+                    "no_order_side_effects": True,
+                }
+                if atomic_fast_batch
+                else {}
+            ),
+        },
+    )
+
+
+@contextmanager
+def _bounded_gateway_event_write_lock(
+    *,
+    request_started_at: float | None = None,
+    write_deadline_at: float | None = None,
+    retry_event_id: str | None = None,
+):
+    started_at = (
+        request_started_at
+        if request_started_at is not None
+        else time.monotonic()
+    )
+    deadline_at = (
+        write_deadline_at
+        if write_deadline_at is not None
+        else started_at + _GATEWAY_EVENT_WRITE_BUDGET_SEC
+    )
+    _ensure_gateway_write_budget(
+        request_started_at=started_at,
+        write_deadline_at=deadline_at,
+        phase="PYTHON_WRITE_LOCK",
+        commit_outcome="NOT_STARTED",
+        retry_event_id=retry_event_id,
+    )
+    remaining_sec = max(deadline_at - time.monotonic(), 0.0)
+    acquired = _gateway_event_write_lock.acquire(
+        timeout=min(_GATEWAY_EVENT_WRITE_LOCK_TIMEOUT_SEC, remaining_sec)
+    )
+    if not acquired:
+        raise _gateway_event_locked_retryable(
+            request_started_at=started_at,
+            retry_count=0,
+            phase="PYTHON_WRITE_LOCK",
+            commit_outcome="NOT_STARTED",
+            retry_event_id=retry_event_id,
+            reason_codes=["GATEWAY_EVENT_WRITE_LOCK_TIMEOUT"],
+        )
+    try:
+        yield
+    finally:
+        _gateway_event_write_lock.release()
+
+
+def _ensure_gateway_write_budget(
+    *,
+    request_started_at: float,
+    write_deadline_at: float,
+    phase: str,
+    commit_outcome: str,
+    retry_count: int = 0,
+    atomic_fast_batch: bool = False,
+    retry_event_id: str | None = None,
+    committed_event_ids: list[str] | None = None,
+) -> None:
+    if time.monotonic() < write_deadline_at:
+        return
+    raise _gateway_event_locked_retryable(
+        request_started_at=request_started_at,
+        retry_count=retry_count,
+        phase=phase,
+        commit_outcome=commit_outcome,
+        atomic_fast_batch=atomic_fast_batch,
+        retry_event_id=retry_event_id,
+        committed_event_ids=committed_event_ids,
+        reason_codes=["GATEWAY_WRITE_BUDGET_EXHAUSTED"],
+    )
+
+
+def _sleep_within_gateway_write_budget(
+    delay_sec: float,
+    *,
+    request_started_at: float,
+    write_deadline_at: float,
+    phase: str,
+    commit_outcome: str,
+    retry_count: int,
+    atomic_fast_batch: bool = False,
+    retry_event_id: str | None = None,
+    committed_event_ids: list[str] | None = None,
+) -> None:
+    _ensure_gateway_write_budget(
+        request_started_at=request_started_at,
+        write_deadline_at=write_deadline_at,
+        phase=phase,
+        commit_outcome=commit_outcome,
+        retry_count=retry_count,
+        atomic_fast_batch=atomic_fast_batch,
+        retry_event_id=retry_event_id,
+        committed_event_ids=committed_event_ids,
+    )
+    remaining_sec = max(write_deadline_at - time.monotonic(), 0.0)
+    time.sleep(min(max(float(delay_sec), 0.0), remaining_sec))
+
+
+def _committed_fast_event_ids(
+    *,
+    fast_events: list[tuple[int, GatewayEvent]],
+    results: list[dict[str, Any] | None],
+) -> list[str]:
+    return [
+        event.event_id
+        for index, event in fast_events
+        if results[index] is not None
+        and results[index].get("status") != "CONFLICT"
+    ]
+
+
+def _batch_commit_state(
+    *,
+    commit_outcome: str,
+    committed_event_ids: list[str],
+) -> str:
+    if committed_event_ids:
+        return "PARTIAL_PREFIX_COMMITTED"
+    if commit_outcome in {"NOT_STARTED", "ROLLED_BACK"}:
+        return "NOT_STARTED"
+    return "UNKNOWN"
+
+
+def _with_batch_retry_context(
+    exc: HTTPException,
+    *,
+    retry_event_id: str,
+    committed_event_ids: list[str],
+) -> HTTPException:
+    detail = dict(exc.detail) if isinstance(exc.detail, dict) else {}
+    commit_outcome = str(detail.get("commit_outcome") or "UNKNOWN")
+    detail.update(
+        {
+            "retry_event_id": retry_event_id,
+            "batch_commit_state": _batch_commit_state(
+                commit_outcome=commit_outcome,
+                committed_event_ids=committed_event_ids,
+            ),
+            "committed_event_count": len(committed_event_ids),
+            "committed_event_ids": list(committed_event_ids),
+        }
+    )
+    return HTTPException(
+        status_code=exc.status_code,
+        detail=detail,
+        headers=exc.headers,
+    )
 
 
 def _batch_rejection(
@@ -726,6 +1169,10 @@ def _enqueue_projection_outbox_jobs(
             event,
             commit=commit,
         )
+    except sqlite3.Error:
+        # A database failure after the raw event commit must remain retryable.
+        # The same event_id retry will revisit this idempotent enqueue.
+        raise
     except Exception:
         logger.exception("projection outbox enqueue failed")
         return "ERROR"
@@ -754,7 +1201,9 @@ def _decide_market_data_projection_routing(
             controller_status=controller_status,
             condition_event_backlog_status=condition_event_backlog_status,
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.Error):
+            raise
         logger.exception("market_data append-only dry-run routing decision failed")
         return None
 
@@ -773,7 +1222,9 @@ def _decide_market_regime_append_only_routing(
             settings=settings,
             outbox_status=outbox_status,
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.Error):
+            raise
         logger.exception("market_regime append-only routing decision failed")
         return None
 
@@ -792,7 +1243,9 @@ def _decide_market_reference_append_only_routing(
             settings=settings,
             outbox_status=outbox_status,
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.Error):
+            raise
         logger.exception("market_reference append-only routing decision failed")
         return None
 
@@ -811,7 +1264,9 @@ def _decide_market_scan_append_only_routing(
             settings=settings,
             outbox_status=outbox_status,
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.Error):
+            raise
         logger.exception("market_scan append-only dry-run routing decision failed")
         return None
 
@@ -830,7 +1285,9 @@ def _decide_market_index_append_only_routing(
             settings=settings,
             outbox_status=outbox_status,
         )
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, sqlite3.Error):
+            raise
         logger.exception("market_index append-only routing decision failed")
         return None
 
@@ -1077,6 +1534,9 @@ def get_gateway_status() -> dict[str, Any]:
         ),
         "core_io_worker_rejected_event_count": _json_value(
             status_values.get("core_io_worker_rejected_event_count")
+        ),
+        "core_io_worker_consecutive_post_error_count": _json_value(
+            status_values.get("core_io_worker_consecutive_post_error_count")
         ),
         "core_io_worker_market_event_queue_size": _json_value(
             status_values.get("core_io_worker_market_event_queue_size")

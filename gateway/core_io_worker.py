@@ -11,6 +11,8 @@ from domain.broker.commands import GatewayCommand
 from domain.broker.events import GatewayEvent
 from domain.broker.utils import utc_now
 
+_MAX_POST_RETRY_SLEEP_SEC = 5.0
+
 
 @dataclass(frozen=True)
 class CoreIoWorkerSnapshot:
@@ -37,6 +39,7 @@ class CoreIoWorkerSnapshot:
     durable_event_queue_size: int
     oldest_event_age_sec: float | None
     oldest_market_event_age_sec: float | None
+    consecutive_post_error_count: int = 0
 
 
 class CoreIoWorker:
@@ -91,6 +94,7 @@ class CoreIoWorker:
         self._batch_post_count = 0
         self._latest_batch_size = 0
         self._rejected_event_count = 0
+        self._consecutive_post_error_count = 0
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -177,6 +181,7 @@ class CoreIoWorker:
             batch_post_count = self._batch_post_count
             latest_batch_size = self._latest_batch_size
             rejected_event_count = self._rejected_event_count
+            consecutive_post_error_count = self._consecutive_post_error_count
             market_events = [
                 event for event in self._events if _is_market_refresh_event(event)
             ]
@@ -209,6 +214,7 @@ class CoreIoWorker:
             durable_event_queue_size=durable_event_queue_size,
             oldest_event_age_sec=oldest_event_age_sec,
             oldest_market_event_age_sec=oldest_market_event_age_sec,
+            consecutive_post_error_count=consecutive_post_error_count,
         )
 
     def _coalesce_event_locked(self, event: GatewayEvent) -> bool:
@@ -253,7 +259,9 @@ class CoreIoWorker:
         except Exception as exc:
             with self._condition:
                 self._last_error = str(exc)
-            self._next_post_retry_at = time.monotonic() + self._retry_sleep_sec
+                self._consecutive_post_error_count += 1
+                retry_delay_sec = self._post_retry_delay_sec_locked()
+            self._next_post_retry_at = time.monotonic() + retry_delay_sec
             return False
         rejected_count = (
             int(response.get("failed_count") or 0)
@@ -267,6 +275,7 @@ class CoreIoWorker:
             self._batch_post_count += 1
             self._latest_batch_size = len(events)
             self._rejected_event_count += rejected_count
+            self._consecutive_post_error_count = 0
             self._latest_post_at = time.monotonic()
             self._last_error = (
                 f"Core rejected {rejected_count} event(s) from latest batch"
@@ -328,7 +337,9 @@ class CoreIoWorker:
         except Exception as exc:
             with self._condition:
                 self._last_error = str(exc)
-            self._next_post_retry_at = time.monotonic() + self._retry_sleep_sec
+                self._consecutive_post_error_count += 1
+                retry_delay_sec = self._post_retry_delay_sec_locked()
+            self._next_post_retry_at = time.monotonic() + retry_delay_sec
             return False
         with self._condition:
             if self._events and self._events[0] is event:
@@ -339,9 +350,17 @@ class CoreIoWorker:
                 except ValueError:
                     pass
             self._posted_count += 1
+            self._consecutive_post_error_count = 0
             self._latest_post_at = time.monotonic()
             self._last_error = ""
         return True
+
+    def _post_retry_delay_sec_locked(self) -> float:
+        exponent = min(max(self._consecutive_post_error_count - 1, 0), 10)
+        return min(
+            self._retry_sleep_sec * (2**exponent),
+            _MAX_POST_RETRY_SLEEP_SEC,
+        )
 
     def _enqueue_priority_event_locked(self, event: GatewayEvent) -> None:
         key = _coalescing_key(event)
@@ -386,9 +405,22 @@ class CoreIoWorker:
 
     def _wait_for_work(self, *, timeout_sec: float) -> None:
         with self._condition:
-            if self._events:
+            now = time.monotonic()
+            deadlines: list[float] = []
+            if self._events and self._next_post_retry_at <= now:
                 return
-            self._condition.wait(timeout=max(float(timeout_sec), 0.01))
+            if self._events:
+                deadlines.append(self._next_post_retry_at)
+            if self._command_polling_enabled:
+                if self._next_command_poll_at <= now:
+                    return
+                deadlines.append(self._next_command_poll_at)
+            wait_sec = (
+                min(deadlines) - now
+                if deadlines
+                else max(float(timeout_sec), 0.01)
+            )
+            self._condition.wait(timeout=max(wait_sec, 0.01))
 
 
 def _coalescing_key(event: GatewayEvent) -> tuple[str, str] | None:

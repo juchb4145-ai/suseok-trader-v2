@@ -19,6 +19,7 @@ from services.candidate_service import (
     create_or_merge_candidate_from_source,
 )
 from services.config import Settings, candidate_timezone, load_settings
+from services.runtime.evaluation_run_guard import assert_runtime_execution_fence
 from services.theme_leadership.classifier import ThemeStateClassifier, ThemeStateInput
 from services.theme_leadership.models import (
     StockRole,
@@ -34,6 +35,8 @@ from services.theme_leadership.ranker import ThemeLeadershipRanker
 from services.theme_leadership.snapshot import RealtimeSnapshotBuilder
 from services.theme_leadership.universe import ThemeUniverseBuilder
 from services.theme_leadership.watchset import WatchsetSelector
+
+_CANDIDATE_SOURCE_SAVEPOINT = "theme_leadership_candidate_source_apply"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -146,12 +149,16 @@ class ThemeLeadershipService:
         )
         apply_result = CandidateSourceApplyResult()
         if should_write:
-            apply_result = _write_candidate_source_events(
-                connection,
-                candidate_events,
-                settings=self.settings,
-            )
-            connection.commit()
+            try:
+                apply_result = _write_candidate_source_events(
+                    connection,
+                    candidate_events,
+                    settings=self.settings,
+                )
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
         return ThemeLeadershipRebuildResult(
             status="OK",
             snapshots=top_snapshots,
@@ -549,9 +556,33 @@ def _write_candidate_source_events(
     settings: Settings,
 ) -> CandidateSourceApplyResult:
     total = _MutableCandidateApplyResult()
-    for event in events:
-        result = create_or_merge_candidate_from_source(connection, event, settings=settings)
-        total.add(result)
+    try:
+        for event in events:
+            if not connection.in_transaction:
+                connection.execute("BEGIN DEFERRED")
+            connection.execute(f"SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}")
+            try:
+                result = create_or_merge_candidate_from_source(
+                    connection,
+                    event,
+                    settings=settings,
+                )
+            except Exception:
+                connection.execute(
+                    f"ROLLBACK TO SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}"
+                )
+                connection.execute(
+                    f"RELEASE SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}"
+                )
+                raise
+            connection.execute(f"RELEASE SAVEPOINT {_CANDIDATE_SOURCE_SAVEPOINT}")
+            total.add(result)
+        assert_runtime_execution_fence(connection)
+        connection.commit()
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
     return total.to_result()
 
 

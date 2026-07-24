@@ -37,6 +37,10 @@ from services.market_data_service import (
     get_market_data_readiness,
     get_premarket_snapshot,
 )
+from services.runtime.evaluation_run_guard import (
+    EvaluationRunFenceError,
+    assert_runtime_execution_fence,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -502,6 +506,9 @@ def calculate_theme_snapshot(
                 error_message=str(exc),
                 payload={"member": row_to_dict(member)},
             )
+            # Projection diagnostics must not retain the SQLite writer lock while
+            # the remaining members are evaluated.
+            _commit_theme_projection_step(connection)
 
     observed_members = [member for member in member_snapshots if member.price is not None]
     observable_members = [
@@ -657,8 +664,13 @@ def calculate_theme_snapshot(
             **({"premarket": premarket_summary} if premarket_summary else {}),
         },
     )
-    _save_theme_snapshot(connection, snapshot)
-    connection.commit()
+    try:
+        _save_theme_snapshot(connection, snapshot)
+        _commit_theme_projection_step(connection)
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
     return snapshot
 
 
@@ -683,6 +695,8 @@ def calculate_all_theme_snapshots(
             )
             snapshot_count += 1
             error_count += int(snapshot.metadata.get("member_error_count", 0))
+        except EvaluationRunFenceError:
+            raise
         except Exception as exc:
             error_count += 1
             _record_projection_error(
@@ -692,12 +706,22 @@ def calculate_all_theme_snapshots(
                 error_message=str(exc),
                 payload={"theme": theme},
             )
-            connection.commit()
+            _commit_theme_projection_step(connection)
     return ThemeSnapshotRebuildResult(
         processed_theme_count=processed_theme_count,
         snapshot_count=snapshot_count,
         error_count=error_count,
     )
+
+
+def _commit_theme_projection_step(connection: sqlite3.Connection) -> None:
+    try:
+        assert_runtime_execution_fence(connection)
+    except Exception:
+        if connection.in_transaction:
+            connection.rollback()
+        raise
+    connection.commit()
 
 
 def get_theme_status(

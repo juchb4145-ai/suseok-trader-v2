@@ -1477,6 +1477,136 @@ def test_core_io_worker_batches_fresh_market_events_with_durable_fifo() -> None:
     assert snapshot.durable_event_queue_size == 7
 
 
+def test_core_io_worker_retries_same_batch_with_bounded_exponential_backoff(
+    monkeypatch,
+) -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.calls: list[list[GatewayEvent]] = []
+
+        def post_events(self, events: list[GatewayEvent]) -> dict[str, object]:
+            self.calls.append(list(events))
+            if len(self.calls) <= 2:
+                raise RuntimeError("Core returned LOCKED_RETRYABLE")
+            return {
+                "processed_count": len(events),
+                "accepted_count": len(events),
+                "failed_count": 0,
+                "results": [{"accepted": True} for _ in events],
+            }
+
+    now = [100.0]
+    monkeypatch.setattr(
+        "gateway.core_io_worker.time.monotonic",
+        lambda: now[0],
+    )
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=False,
+        retry_sleep_sec=0.1,
+        event_batch_size=2,
+    )
+    events = [
+        GatewayEvent(
+            event_id=f"evt_retry_batch_{index}",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": f"{index:06d}", "action": "ENTER"},
+        )
+        for index in range(2)
+    ]
+    for event in events:
+        worker.enqueue_event(event)
+
+    assert worker._post_next_event_batch(core.post_events) is False
+    first = worker.snapshot()
+    assert first.event_queue_size == 2
+    assert first.posted_count == 0
+    assert first.consecutive_post_error_count == 1
+    assert worker._next_post_retry_at == pytest.approx(100.1)
+
+    now[0] = 100.1
+    assert worker._post_next_event_batch(core.post_events) is False
+    second = worker.snapshot()
+    assert second.event_queue_size == 2
+    assert second.consecutive_post_error_count == 2
+    assert worker._next_post_retry_at == pytest.approx(100.3)
+
+    now[0] = 100.3
+    assert worker._post_next_event_batch(core.post_events) is True
+    recovered = worker.snapshot()
+    assert recovered.event_queue_size == 0
+    assert recovered.posted_count == 2
+    assert recovered.batch_post_count == 1
+    assert recovered.consecutive_post_error_count == 0
+    assert [
+        [event.event_id for event in batch] for batch in core.calls
+    ] == [
+        [event.event_id for event in events],
+        [event.event_id for event in events],
+        [event.event_id for event in events],
+    ]
+
+
+def test_core_io_worker_run_waits_for_retry_deadline_and_keeps_polling_commands() -> None:
+    class Core:
+        def __init__(self) -> None:
+            self.post_count = 0
+            self.poll_count = 0
+
+        def post_events(self, events: list[GatewayEvent]) -> dict[str, object]:
+            self.post_count += 1
+            raise RuntimeError("Core returned LOCKED_RETRYABLE")
+
+        def poll_commands(self, *, limit: int, wait_sec: float) -> list:
+            self.poll_count += 1
+            return []
+
+    core = Core()
+    worker = CoreIoWorker(
+        core_client=core,
+        command_limit=1,
+        command_wait_sec=0,
+        command_polling_enabled=True,
+        command_poll_interval_sec=0.04,
+        retry_sleep_sec=0.2,
+        event_batch_size=1,
+    )
+    wait_count = 0
+    real_wait_for_work = worker._wait_for_work
+
+    def counted_wait_for_work(*, timeout_sec: float) -> None:
+        nonlocal wait_count
+        wait_count += 1
+        real_wait_for_work(timeout_sec=timeout_sec)
+
+    worker._wait_for_work = counted_wait_for_work
+    worker.enqueue_event(
+        GatewayEvent(
+            event_id="evt_retry_deadline_wait",
+            event_type="condition_event",
+            source="kiwoom_gateway",
+            payload={"code": "005930", "action": "ENTER"},
+        )
+    )
+
+    worker.start()
+    try:
+        _wait_until(lambda: core.poll_count >= 4, timeout_sec=1.0)
+    finally:
+        worker.stop()
+
+    snapshot = worker.snapshot()
+    assert core.poll_count >= 4
+    assert core.post_count <= 2
+    assert snapshot.event_queue_size == 1
+    assert snapshot.consecutive_post_error_count >= 1
+    assert wait_count < 20
+
+
 def test_core_io_data_plane_health_fails_closed_on_stale_market_backlog() -> None:
     worker = CoreIoWorker(
         core_client=object(),

@@ -9,6 +9,7 @@ Gateway Transport는 future Gateway process와 Core 사이의 HTTP/SQLite 경계
 | 방향 | Endpoint | 의미 |
 | --- | --- | --- |
 | Gateway -> Core | `POST /api/gateway/events` | broker-neutral event ingest |
+| Gateway -> Core | `POST /api/gateway/events/batch` | 최대 200건의 at-least-once event ingest |
 | Core -> Gateway | `GET /api/gateway/commands` | queued command long-poll |
 | Operator/Test | `GET /api/gateway/status` | transport 상태 조회 |
 | Operator/Test | `GET /api/gateway/events/recent` | 최근 event 조회 |
@@ -46,6 +47,38 @@ Known payload event type은 broker-neutral model로 검증된다.
 - `execution_event`
 
 Unknown event type은 버리지 않고 `UNKNOWN_EVENT_TYPE`으로 저장한다.
+
+### Backlog와 SQLite lock
+
+Gateway ingest 연결은 일반 Core 연결의 15초 대기 대신 250ms busy timeout과
+50/100/200ms의 제한된 lock 재시도를 사용한다. SQLite writer 또는 Core 내부
+event write lock을 제한 시간 안에 얻지 못하면 HTTP `503`과
+`status=LOCKED_RETRYABLE`, `reason_codes=["SQLITE_DATABASE_LOCKED"]`를 반환한다.
+DB 경로와 원본 SQLite 오류 문자열은 응답에 노출하지 않는다.
+단일 요청의 모든 open/lock/retry는 공통 5초 write budget을 사용한다.
+
+- `price_tick`/`condition_event` fast batch는 한 transaction으로 처리한다. lock
+  충돌 시 전체 transaction을 rollback한 뒤 같은 batch를 재시도한다.
+- 단건 및 non-fast batch는 commit 결과가 불명확할 수 있으므로
+  `commit_outcome=UNKNOWN_RETRY_SAME_EVENT_ID`를 반환한다. Gateway는 event를
+  버리지 않고 동일 `event_id`로 재전송하며 Core의 idempotency가 중복 side
+  effect를 막는다. raw event 뒤 outbox 생성이 실패한 경우에도 duplicate
+  재전송이 idempotent outbox enqueue를 다시 수행한다.
+- mixed batch가 일부를 이미 반영했다면 503 detail의
+  `batch_commit_state=PARTIAL_PREFIX_COMMITTED`, `committed_event_ids`,
+  `retry_event_id`로 재전송 범위를 오해하지 않게 한다. Gateway는 여전히
+  at-least-once 계약에 따라 원래 batch를 그대로 보존한다.
+- Gateway worker의 연속 POST 실패 재시도는 기본 0.2초에서 시작해 2배씩
+  늘어나며 최대 5초다. 성공하면 즉시 초기화된다. backoff 중에도 command
+  polling deadline은 유지하고 CPU busy-spin을 하지 않는다.
+  `/api/gateway/status`의 `core_io_worker_consecutive_post_error_count`로 현재
+  연속 실패 횟수를 확인할 수 있다.
+- Candidate condition/theme source는 event 내부 SAVEPOINT 원자성을 유지한 채
+  10건마다 commit한다. 각 commit 직전 runtime execution fence를 같은
+  transaction에서 검증하므로 stale owner의 chunk를 rollback한다.
+- Theme leadership candidate source는 매 rebuild마다 source ID가 달라질 수
+  있으므로 부분 chunk commit을 사용하지 않고 전체 event 묶음을 한
+  transaction으로 유지한다.
 
 ## Market Projection
 

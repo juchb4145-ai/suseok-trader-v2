@@ -47,18 +47,37 @@ PIPELINE_QUALIFICATION_TRIGGERS = frozenset(
 )
 
 
-def open_connection(db_path: str | Path) -> sqlite3.Connection:
-    connection = _open_unconfigured_connection(db_path)
-    _configure_connection(connection)
+def open_connection(
+    db_path: str | Path,
+    *,
+    busy_timeout_ms: int = 15_000,
+) -> sqlite3.Connection:
+    bounded_busy_timeout_ms = min(max(int(busy_timeout_ms), 1), 60_000)
+    connection = _open_unconfigured_connection(
+        db_path,
+        timeout_sec=bounded_busy_timeout_ms / 1_000,
+    )
+    try:
+        _configure_connection(
+            connection,
+            busy_timeout_ms=bounded_busy_timeout_ms,
+        )
+    except Exception:
+        connection.close()
+        raise
     return connection
 
 
-def _open_unconfigured_connection(db_path: str | Path) -> sqlite3.Connection:
+def _open_unconfigured_connection(
+    db_path: str | Path,
+    *,
+    timeout_sec: float = 15.0,
+) -> sqlite3.Connection:
     path = Path(db_path)
     if path.parent != Path("."):
         path.parent.mkdir(parents=True, exist_ok=True)
 
-    connection = sqlite3.connect(path, timeout=15.0)
+    connection = sqlite3.connect(path, timeout=max(float(timeout_sec), 0.001))
     connection.row_factory = sqlite3.Row
     return connection
 
@@ -398,8 +417,13 @@ def migrate_schema_62_to_63(connection: sqlite3.Connection) -> None:
         raise RuntimeError("schema 62 -> 63 metadata verification failed")
 
 
-def _configure_connection(connection: sqlite3.Connection) -> None:
-    connection.execute("PRAGMA busy_timeout=15000")
+def _configure_connection(
+    connection: sqlite3.Connection,
+    *,
+    busy_timeout_ms: int = 15_000,
+) -> None:
+    bounded_busy_timeout_ms = min(max(int(busy_timeout_ms), 1), 60_000)
+    connection.execute(f"PRAGMA busy_timeout={bounded_busy_timeout_ms}")
     connection.execute("PRAGMA journal_mode=WAL")
     connection.execute("PRAGMA synchronous=NORMAL")
 

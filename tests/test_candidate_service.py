@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+import services.candidate_service as candidate_service
 from domain.broker.events import GatewayEvent
 from domain.broker.market import BrokerPriceTick
 from domain.broker.utils import datetime_to_wire, utc_now
 from domain.candidate.state import CandidateState
 from gateway.event_factory import make_condition_event, make_price_tick_event
 from services.candidate_service import (
+    CandidateSourceApplyResult,
     get_candidate,
     ingest_condition_sources,
     ingest_theme_sources,
@@ -19,7 +22,7 @@ from services.config import Settings, candidate_timezone
 from services.market_data_service import process_gateway_event
 from services.theme_service import calculate_theme_snapshot, import_theme_memberships
 from storage.event_store import append_gateway_event
-from storage.sqlite import initialize_database
+from storage.sqlite import initialize_database, open_connection
 
 
 def test_condition_source_creates_candidate_and_exit_closes_episode(tmp_path) -> None:
@@ -62,6 +65,59 @@ def test_condition_source_creates_candidate_and_exit_closes_episode(tmp_path) ->
     assert closed["transitions"][-1]["to_state"] == CandidateState.CLOSED.value
 
 
+def test_condition_exit_context_failure_rolls_back_whole_source_event(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-exit-rollback.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+    ingest_condition_sources(connection, trade_date, settings=settings)
+    _append_and_project(connection, make_condition_event(action="EXIT"), settings)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "_upsert_candidate_context",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("candidate context write failed")
+        ),
+    )
+    result = ingest_condition_sources(connection, trade_date, settings=settings)
+    candidate = list_candidates(
+        connection,
+        trade_date=trade_date,
+        active_only=False,
+    )[0]
+    exit_event_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_source_events
+        WHERE action = 'EXIT'
+        """
+    ).fetchone()["count"]
+    latest_active = connection.execute(
+        "SELECT active FROM candidate_sources_latest"
+    ).fetchone()["active"]
+    projection_errors = connection.execute(
+        """
+        SELECT error_message
+        FROM candidate_projection_errors
+        ORDER BY id
+        """
+    ).fetchall()
+    connection.close()
+
+    assert result.source_event_count == 0
+    assert result.error_count == 1
+    assert candidate["state"] == CandidateState.HYDRATING.value
+    assert exit_event_count == 0
+    assert latest_active == 1
+    assert [row["error_message"] for row in projection_errors] == [
+        "CONDITION_EXIT_CONTEXT_REFRESH_FAILED"
+    ]
+
+
 def test_condition_ingest_uses_bounded_queries_for_both_fusion_and_sources(tmp_path) -> None:
     connection = initialize_database(tmp_path / "candidate-condition-date-bound.sqlite3")
     settings = _candidate_settings()
@@ -84,6 +140,354 @@ def test_condition_ingest_uses_bounded_queries_for_both_fusion_and_sources(tmp_p
     assert result.source_event_count == 1
     assert len(bounded_selects) == 2
     assert all("EVENT_TS >=" in sql and "EVENT_TS <" in sql for sql in bounded_selects)
+
+
+def test_condition_ingest_releases_writer_lock_at_small_chunk_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "candidate-condition-chunk.sqlite3"
+    connection = initialize_database(db_path)
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    for index in range(11):
+        _append_and_project(
+            connection,
+            make_condition_event(
+                condition_id=f"condition-{index}",
+                metadata={"chunk_index": index},
+            ),
+            settings,
+        )
+
+    call_count = 0
+    competing_writer_acquired = False
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count, competing_writer_acquired
+        call_count += 1
+        if call_count == 11:
+            competing = open_connection(db_path)
+            competing.execute("PRAGMA busy_timeout=0")
+            try:
+                competing.execute("BEGIN IMMEDIATE")
+                competing_writer_acquired = True
+                competing.rollback()
+            finally:
+                competing.close()
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, ?, NULL, 'chunk-probe', '{}')
+            """,
+            (source_event.source_event_id,),
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+
+    result = ingest_condition_sources(connection, trade_date, settings=settings)
+    connection.close()
+
+    assert call_count == 11
+    assert result.source_event_count == 11
+    assert competing_writer_acquired is True
+
+
+def test_condition_ingest_fence_loss_rolls_back_current_chunk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-condition-fence.sqlite3")
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    for index in range(11):
+        _append_and_project(
+            connection,
+            make_condition_event(
+                condition_id=f"fence-condition-{index}",
+                metadata={"fence_index": index},
+            ),
+            settings,
+        )
+    call_count = 0
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, ?, NULL, 'candidate-fence-chunk', '{}')
+            """,
+            (source_event.source_event_id,),
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+    monkeypatch.setattr(
+        candidate_service,
+        "assert_runtime_execution_fence",
+        lambda connection: (_ for _ in ()).throw(
+            RuntimeError("EVALUATION_RUN_FENCE_LOST")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="EVALUATION_RUN_FENCE_LOST"):
+        ingest_condition_sources(connection, trade_date, settings=settings)
+    durable_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE error_message = 'candidate-fence-chunk'
+        """
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert call_count == 10
+    assert durable_count == 0
+    assert in_transaction is False
+
+
+def test_condition_ingest_rolls_back_partial_source_event_and_leaked_transaction(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "candidate-condition-event-rollback.sqlite3"
+    connection = initialize_database(db_path)
+    settings = _candidate_settings()
+    trade_date = _trade_date(settings)
+    _append_and_project(connection, make_condition_event(action="ENTER"), settings)
+
+    def partially_write_then_fail(actual_connection, source_event, *, settings):
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, ?, NULL, 'partial-source-write', '{}')
+            """,
+            (source_event.source_event_id,),
+        )
+        raise RuntimeError("source apply failed")
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        partially_write_then_fail,
+    )
+    result = ingest_condition_sources(connection, trade_date, settings=settings)
+    partial_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE error_message = 'partial-source-write'
+        """
+    ).fetchone()["count"]
+
+    def fusion_write_then_fail(actual_connection, *args, **kwargs):
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, NULL, NULL, 'leaked-fusion-write', '{}')
+            """
+        )
+        raise RuntimeError("fusion failed")
+
+    monkeypatch.setattr(
+        candidate_service,
+        "rebuild_condition_fusion",
+        fusion_write_then_fail,
+    )
+    with pytest.raises(RuntimeError, match="fusion failed"):
+        ingest_condition_sources(connection, trade_date, settings=settings)
+    leaked_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE error_message = 'leaked-fusion-write'
+        """
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    competing = open_connection(db_path)
+    try:
+        competing.execute("BEGIN IMMEDIATE")
+        competing.rollback()
+    finally:
+        competing.close()
+
+    assert result.error_count == 1
+    assert partial_count == 0
+    assert leaked_count == 0
+    assert in_transaction is False
+
+
+def test_theme_ingest_releases_writer_lock_at_small_chunk_boundary(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "candidate-theme-chunk.sqlite3"
+    connection = initialize_database(db_path)
+    settings = _candidate_settings(
+        candidate_theme_source_states=("DATA_WAIT",),
+        candidate_theme_member_roles=("UNKNOWN",),
+    )
+    trade_date = _trade_date(settings)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": f"{100000 + index:06d}", "name": f"member-{index}"}
+                for index in range(11)
+            ]
+        ),
+    )
+    calculate_theme_snapshot(connection, "semiconductor", settings=settings)
+    call_count = 0
+    competing_writer_acquired = False
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count, competing_writer_acquired
+        call_count += 1
+        if call_count == 11:
+            competing = open_connection(db_path)
+            competing.execute("PRAGMA busy_timeout=0")
+            try:
+                competing.execute("BEGIN IMMEDIATE")
+                competing_writer_acquired = True
+                competing.rollback()
+            finally:
+                competing.close()
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, ?, NULL, 'theme-chunk-probe', '{}')
+            """,
+            (source_event.source_event_id,),
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+
+    result = ingest_theme_sources(connection, trade_date, settings=settings)
+    connection.close()
+
+    assert call_count == 11
+    assert result.source_event_count == 11
+    assert competing_writer_acquired is True
+
+
+def test_theme_ingest_fence_loss_rolls_back_current_chunk(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "candidate-theme-fence.sqlite3")
+    settings = _candidate_settings(
+        candidate_theme_source_states=("DATA_WAIT",),
+        candidate_theme_member_roles=("UNKNOWN",),
+    )
+    trade_date = _trade_date(settings)
+    import_theme_memberships(
+        connection,
+        _theme_payload(
+            [
+                {"code": f"{100000 + index:06d}", "name": f"member-{index}"}
+                for index in range(11)
+            ]
+        ),
+    )
+    calculate_theme_snapshot(connection, "semiconductor", settings=settings)
+    call_count = 0
+
+    def apply_source(actual_connection, source_event, *, settings):
+        nonlocal call_count
+        call_count += 1
+        actual_connection.execute(
+            """
+            INSERT INTO candidate_projection_errors (
+                candidate_instance_id,
+                source_event_id,
+                code,
+                error_message,
+                payload_json
+            )
+            VALUES (NULL, ?, NULL, 'candidate-theme-fence-chunk', '{}')
+            """,
+            (source_event.source_event_id,),
+        )
+        return CandidateSourceApplyResult(source_event_count=1)
+
+    monkeypatch.setattr(
+        candidate_service,
+        "create_or_merge_candidate_from_source",
+        apply_source,
+    )
+    monkeypatch.setattr(
+        candidate_service,
+        "assert_runtime_execution_fence",
+        lambda connection: (_ for _ in ()).throw(
+            RuntimeError("EVALUATION_RUN_FENCE_LOST")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="EVALUATION_RUN_FENCE_LOST"):
+        ingest_theme_sources(connection, trade_date, settings=settings)
+    durable_count = connection.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM candidate_projection_errors
+        WHERE error_message = 'candidate-theme-fence-chunk'
+        """
+    ).fetchone()["count"]
+    in_transaction = connection.in_transaction
+    connection.close()
+
+    assert call_count == 10
+    assert durable_count == 0
+    assert in_transaction is False
 
 
 def test_closed_candidate_re_detection_increments_generation(tmp_path) -> None:
