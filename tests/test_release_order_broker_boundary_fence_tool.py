@@ -26,6 +26,14 @@ from tests.test_gateway_order_broker_boundary_resolution import (
 )
 from tools import release_order_broker_boundary_fence as tool
 
+TEST_TRADE_DATE = "2026-07-23"
+
+
+@pytest.fixture(autouse=True)
+def _freeze_fence_trade_date(monkeypatch) -> None:
+    monkeypatch.setattr(tool, "market_today", lambda: TEST_TRADE_DATE)
+    monkeypatch.setattr(boundary_storage, "market_today", lambda: TEST_TRADE_DATE)
+
 
 def test_preflight_binds_exact_release_target_and_is_deterministic(tmp_path) -> None:
     db_path = tmp_path / "fence-preflight.sqlite3"
