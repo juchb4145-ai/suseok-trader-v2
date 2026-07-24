@@ -227,6 +227,7 @@ def run_live_sim_pilot_pipeline_once(
                         settings=resolved_settings,
                         source=PIPELINE_SOURCE,
                         expected_binding=bound_plan,
+                        manage_transaction=False,
                     )
                 intents.append(intent.to_dict())
                 if intent.status in {

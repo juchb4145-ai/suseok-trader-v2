@@ -25,6 +25,7 @@ from services.live_sim.execution_lifecycle_status import (
 )
 from services.live_sim.live_sim_service import get_latest_live_sim_reconcile
 from services.live_sim.order_plan_binding import (
+    OrderPlanBindingValidationResult,
     build_order_plan_binding,
     validate_order_plan_binding,
 )
@@ -63,6 +64,13 @@ class Fast5CanaryPhase(StrEnum):
     BLOCKED = "BLOCKED"
     BOOTSTRAP = "BOOTSTRAP"
     QUALIFIED = "QUALIFIED"
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Fast5PlanBindingSelection:
+    binding: Mapping[str, Any] | None = None
+    validation: OrderPlanBindingValidationResult | None = None
+    attempts: Sequence[Mapping[str, Any]] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -770,26 +778,33 @@ def _add_pipeline_check(
                 max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
             )
             _require_pipeline_read_snapshot(connection)
-            selected_plan_binding = _select_fast5_plan_binding(
+            binding_selection = _select_fast5_plan_binding(
                 connection,
                 qualification,
+                max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
+                expected_trade_date=trade_date,
             )
-            _require_pipeline_read_snapshot(connection)
-            selected_plan_validation: dict[str, Any] | None = None
-            if selected_plan_binding is not None:
-                binding_validation = validate_order_plan_binding(
-                    connection,
-                    selected_plan_binding,
-                    max_age_sec=settings.live_sim_fast5_pipeline_max_age_sec,
-                    expected_trade_date=trade_date,
-                )
-                selected_plan_validation = {
-                    "status": "PASS" if binding_validation.passed else "FAIL",
-                    "reason_codes": list(binding_validation.reason_codes),
-                    "checked_at": binding_validation.checked_at,
+            selected_plan_binding = (
+                dict(binding_selection.binding)
+                if binding_selection.binding is not None
+                else None
+            )
+            selected_plan_validation = (
+                {
+                    "status": "PASS",
+                    "reason_codes": list(
+                        binding_selection.validation.reason_codes
+                    ),
+                    "checked_at": binding_selection.validation.checked_at,
                     "read_only": True,
                     "no_order_side_effects": True,
                 }
+                if binding_selection.validation is not None
+                else None
+            )
+            binding_candidate_attempts = [
+                dict(attempt) for attempt in binding_selection.attempts
+            ]
             _require_pipeline_read_snapshot(connection)
         finally:
             if owns_read_snapshot and connection.in_transaction:
@@ -814,7 +829,9 @@ def _add_pipeline_check(
             qualification_reason_codes.append(
                 "PIPELINE_INVENTORY_COVERAGE_MISMATCH"
             )
-        if not selected_plan_binding:
+        if not selected_plan_binding and binding_candidate_attempts:
+            qualification_reason_codes.append("PLAN_READY_BINDING_NON_PASS")
+        elif not selected_plan_binding:
             qualification_reason_codes.append("PLAN_READY_BINDING_MISSING")
         elif (
             selected_plan_validation is None
@@ -837,6 +854,7 @@ def _add_pipeline_check(
             "qualification_reason_codes": qualification_reason_codes,
             "selected_plan_binding": selected_plan_binding,
             "selected_plan_binding_validation": selected_plan_validation,
+            "plan_binding_candidate_attempts": binding_candidate_attempts,
             "plan_ready_qualification_status": qualification.get("status"),
             "diagnostic_status": status.get("status"),
             "diagnostic_reason_codes": status.get("reason_codes"),
@@ -849,6 +867,24 @@ def _add_pipeline_check(
             "stale_count": status.get("stale_count"),
             "latest_plan_ready_count": qualification.get(
                 "latest_plan_ready_count"
+            ),
+            "raw_plan_ready_total_count": qualification.get(
+                "raw_plan_ready_total_count"
+            ),
+            "raw_plan_ready_diagnostic_count": qualification.get(
+                "raw_plan_ready_diagnostic_count"
+            ),
+            "raw_plan_ready_diagnostics_truncated": qualification.get(
+                "raw_plan_ready_diagnostics_truncated"
+            ),
+            "diagnostic_detail_limit": qualification.get(
+                "diagnostic_detail_limit"
+            ),
+            "latest_plan_ready_evaluation_count": qualification.get(
+                "latest_plan_ready_evaluation_count"
+            ),
+            "actionable_plan_ready_count": qualification.get(
+                "actionable_plan_ready_count"
             ),
             "unexpired_plan_ready_count": qualification.get(
                 "unexpired_plan_ready_count"
@@ -871,6 +907,22 @@ def _add_pipeline_check(
             "invalid_expiry_plan_ready_count": qualification.get(
                 "invalid_expiry_plan_ready_count"
             ),
+            "superseded_unexpired_plan_ready_count": qualification.get(
+                "superseded_unexpired_plan_ready_count"
+            ),
+            "superseded_unexpired_plan_ready_total_count": qualification.get(
+                "superseded_unexpired_plan_ready_total_count"
+            ),
+            "superseded_unexpired_plan_ready_diagnostic_count": (
+                qualification.get(
+                    "superseded_unexpired_plan_ready_diagnostic_count"
+                )
+            ),
+            "superseded_unexpired_plan_ready_diagnostics_truncated": (
+                qualification.get(
+                    "superseded_unexpired_plan_ready_diagnostics_truncated"
+                )
+            ),
             "selection_truncated": qualification.get("selection_truncated"),
             "read_snapshot_consistent": True,
             "generated_at": qualification.get("generated_at"),
@@ -887,18 +939,23 @@ def _add_pipeline_check(
 def _select_fast5_plan_binding(
     connection: sqlite3.Connection,
     qualification: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    qualified_plan_ids = [
-        str(item.get("order_plan_id") or "")
-        for item in qualification.get("items", [])
-        if isinstance(item, Mapping)
-        and item.get("status") == "PASS"
-        and str(item.get("order_plan_id") or "")
-    ]
+    *,
+    max_age_sec: float,
+    expected_trade_date: str,
+) -> _Fast5PlanBindingSelection:
+    qualified_plan_ids = list(
+        dict.fromkeys(
+            str(item.get("order_plan_id") or "")
+            for item in qualification.get("items", [])
+            if isinstance(item, Mapping)
+            and item.get("status") == "PASS"
+            and str(item.get("order_plan_id") or "")
+        )
+    )
     if not qualified_plan_ids:
-        return None
+        return _Fast5PlanBindingSelection()
     placeholders = ",".join("?" for _ in qualified_plan_ids)
-    row = connection.execute(
+    rows = connection.execute(
         f"""
         SELECT draft.*
         FROM order_plan_drafts_latest AS latest
@@ -910,13 +967,71 @@ def _select_fast5_plan_binding(
             COALESCE(latest.priority_score, 0) DESC,
             latest.created_at DESC,
             latest.order_plan_id ASC
-        LIMIT 1
         """,
         tuple(qualified_plan_ids),
-    ).fetchone()
-    if row is None:
-        return None
-    return build_order_plan_binding(dict(row))
+    ).fetchall()
+    attempts: list[dict[str, Any]] = []
+    for row in rows:
+        row_data = dict(row)
+        order_plan_id = str(row_data.get("order_plan_id") or "")
+        try:
+            binding = build_order_plan_binding(row_data)
+        except Exception as exc:
+            attempts.append(
+                {
+                    "order_plan_id": order_plan_id,
+                    "status": "FAIL",
+                    "reason_codes": ["ORDER_PLAN_BINDING_BUILD_FAILED"],
+                    "classifier_error_type": type(exc).__name__,
+                    "read_only": True,
+                    "no_order_side_effects": True,
+                }
+            )
+            continue
+        try:
+            validation = validate_order_plan_binding(
+                connection,
+                binding,
+                max_age_sec=max_age_sec,
+                expected_trade_date=expected_trade_date,
+            )
+        except Exception as exc:
+            attempts.append(
+                {
+                    "order_plan_id": order_plan_id,
+                    "binding_sha256": binding.get("binding_sha256"),
+                    "order_plan_snapshot_sha256": binding.get(
+                        "order_plan_snapshot_sha256"
+                    ),
+                    "status": "FAIL",
+                    "reason_codes": ["ORDER_PLAN_BINDING_VALIDATION_FAILED"],
+                    "classifier_error_type": type(exc).__name__,
+                    "read_only": True,
+                    "no_order_side_effects": True,
+                }
+            )
+            continue
+        attempts.append(
+            {
+                "order_plan_id": order_plan_id,
+                "binding_sha256": binding.get("binding_sha256"),
+                "order_plan_snapshot_sha256": binding.get(
+                    "order_plan_snapshot_sha256"
+                ),
+                "status": "PASS" if validation.passed else "FAIL",
+                "reason_codes": list(validation.reason_codes),
+                "checked_at": validation.checked_at,
+                "read_only": True,
+                "no_order_side_effects": True,
+            }
+        )
+        if validation.passed:
+            return _Fast5PlanBindingSelection(
+                binding=binding,
+                validation=validation,
+                attempts=tuple(attempts),
+            )
+    return _Fast5PlanBindingSelection(attempts=tuple(attempts))
 
 
 def _selected_plan_binding_from_gate(
@@ -1331,6 +1446,13 @@ def _strict_fast5_settings(
     )
     return replace(
         settings,
+        risk_gate_require_strategy_matched=True,
+        entry_timing_require_risk_observe_pass=True,
+        entry_timing_require_strategy_matched=True,
+        live_sim_require_risk_observe_pass=True,
+        live_sim_require_strategy_matched=True,
+        live_sim_order_plan_require_strategy_matched=True,
+        live_sim_order_plan_require_risk_observe_pass=True,
         entry_timing_default_notional=entry_timing_default_notional,
         entry_timing_max_notional=entry_timing_max_notional,
         live_sim_max_order_notional=max_order_notional,

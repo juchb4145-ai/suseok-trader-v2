@@ -39,8 +39,14 @@ def create_live_sim_intent_from_order_plan(
     settings: Settings | None = None,
     source: str = ORDER_PLAN_INTENT_SOURCE,
     expected_binding: Mapping[str, Any] | None = None,
+    *,
+    manage_transaction: bool = True,
 ) -> LiveSimIntent:
     resolved_settings = settings or load_settings()
+    if not manage_transaction and not connection.in_transaction:
+        raise RuntimeError(
+            "manage_transaction=False requires an active caller transaction"
+        )
     if expected_binding is None:
         normalized_expected_binding = None
     elif not isinstance(expected_binding, Mapping):
@@ -88,7 +94,8 @@ def create_live_sim_intent_from_order_plan(
                 account_id=resolved_settings.live_sim_account_id,
                 source=source,
             )
-            connection.commit()
+            if manage_transaction:
+                connection.commit()
         return LiveSimIntent.from_dict(existing)
 
     eligibility = evaluate_live_sim_order_plan_eligibility(
@@ -103,7 +110,8 @@ def create_live_sim_intent_from_order_plan(
             account_id=resolved_settings.live_sim_account_id,
             source=source,
         )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
         return _rejected_intent(eligibility, resolved_settings, source=source)
 
     current_binding = build_order_plan_binding(eligibility.order_plan)
@@ -136,11 +144,13 @@ def create_live_sim_intent_from_order_plan(
                 "eligibility": eligibility.to_dict(),
             },
         )
-        connection.commit()
+        if manage_transaction:
+            connection.commit()
         return LiveSimIntent.from_dict(duplicate_by_key)
 
     _insert_intent(connection, intent)
-    connection.commit()
+    if manage_transaction:
+        connection.commit()
     return intent
 
 

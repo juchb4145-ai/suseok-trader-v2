@@ -5,7 +5,9 @@ import sqlite3
 import pytest
 from api.routes import live_sim as live_sim_routes
 from services.config import Settings
+from services.entry_timing.service import evaluate_entry_timing
 from services.live_sim.order_plan_binding import OrderPlanBindingValidationResult
+from services.risk_gate import evaluate_risk_for_candidate, save_risk_observation
 from services.runtime import fast5_automatic_canary as fast5
 from services.runtime.fast5_automatic_canary import (
     Fast5AutomaticCanaryGate,
@@ -23,11 +25,16 @@ from services.runtime.preflight import (
     OperatingMode,
     PreflightStatus,
 )
+from services.strategy_engine import (
+    evaluate_candidate_strategy,
+    save_strategy_observation,
+)
 from storage.sqlite import initialize_database
 from tests.test_live_sim_order_plan_pipeline import (
     _pilot_settings,
     _prepared_order_plan_connection,
 )
+from tests.test_strategy_service import _insert_strategy_fixture
 
 SHA = "a" * 64
 PLAN_BINDING = {
@@ -216,7 +223,11 @@ def test_fast5_pipeline_gate_blocks_coverage_mismatch_and_zero_plan_ready(
         queue_commands=True,
     )
     _patch_dynamic_pass(monkeypatch)
-    monkeypatch.setattr(fast5, "_select_fast5_plan_binding", lambda *args: None)
+    monkeypatch.setattr(
+        fast5,
+        "_select_fast5_plan_binding",
+        lambda *args, **kwargs: fast5._Fast5PlanBindingSelection(),
+    )
     missing_binding = evaluate_fast5_automatic_canary_gate(
         connection,
         settings=settings,
@@ -253,7 +264,7 @@ def test_fast5_selects_binding_from_exact_qualified_base_plan(tmp_path) -> None:
         tmp_path / "fast5-exact-plan-binding.sqlite3"
     )
 
-    binding = fast5._select_fast5_plan_binding(
+    selection = fast5._select_fast5_plan_binding(
         connection,
         {
             "items": [
@@ -263,14 +274,372 @@ def test_fast5_selects_binding_from_exact_qualified_base_plan(tmp_path) -> None:
                 }
             ]
         },
+        max_age_sec=999_999_999,
+        expected_trade_date="2026-06-27",
     )
     connection.close()
 
+    binding = selection.binding
     assert binding is not None
     assert binding["order_plan_id"] == order_plan_id
     assert binding["contract"] == "live-sim-order-plan-binding.v1"
     assert len(binding["binding_sha256"]) == 64
     assert len(binding["order_plan_snapshot_sha256"]) == 64
+
+
+def test_fast5_binding_selection_skips_non_pass_higher_priority_candidate(
+    monkeypatch,
+) -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE order_plan_drafts (order_plan_id TEXT PRIMARY KEY)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE order_plan_drafts_latest (
+            order_plan_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            priority_score REAL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO order_plan_drafts VALUES (?)",
+        [("OPD-high-risk-fail",), ("OPD-lower-valid",)],
+    )
+    connection.executemany(
+        "INSERT INTO order_plan_drafts_latest VALUES (?, 'PLAN_READY', ?, ?)",
+        [
+            ("OPD-high-risk-fail", 100.0, "2026-07-24T00:00:02Z"),
+            ("OPD-lower-valid", 50.0, "2026-07-24T00:00:01Z"),
+        ],
+    )
+    observed_validation_order: list[str] = []
+
+    def build_binding(row) -> dict:
+        order_plan_id = str(row["order_plan_id"])
+        return {
+            "order_plan_id": order_plan_id,
+            "binding_sha256": order_plan_id,
+            "order_plan_snapshot_sha256": order_plan_id,
+        }
+
+    def validate_binding(actual_connection, binding, **kwargs):
+        assert actual_connection is connection
+        assert kwargs == {
+            "max_age_sec": 60,
+            "expected_trade_date": "2026-07-24",
+        }
+        order_plan_id = str(binding["order_plan_id"])
+        observed_validation_order.append(order_plan_id)
+        return OrderPlanBindingValidationResult(
+            passed=order_plan_id == "OPD-lower-valid",
+            reason_codes=(
+                ()
+                if order_plan_id == "OPD-lower-valid"
+                else ("ORDER_PLAN_RISK_NOT_PASS",)
+            ),
+            binding=binding,
+        )
+
+    monkeypatch.setattr(fast5, "build_order_plan_binding", build_binding)
+    monkeypatch.setattr(fast5, "validate_order_plan_binding", validate_binding)
+
+    selection = fast5._select_fast5_plan_binding(
+        connection,
+        {
+            "items": [
+                {"status": "PASS", "order_plan_id": "OPD-lower-valid"},
+                {"status": "PASS", "order_plan_id": "OPD-high-risk-fail"},
+                {"status": "FAIL", "order_plan_id": "OPD-not-actionable"},
+            ]
+        },
+        max_age_sec=60,
+        expected_trade_date="2026-07-24",
+    )
+    connection.close()
+
+    assert observed_validation_order == [
+        "OPD-high-risk-fail",
+        "OPD-lower-valid",
+    ]
+    assert selection.binding is not None
+    assert selection.binding["order_plan_id"] == "OPD-lower-valid"
+    assert selection.validation is not None
+    assert selection.validation.passed is True
+    assert [attempt["status"] for attempt in selection.attempts] == [
+        "FAIL",
+        "PASS",
+    ]
+    assert selection.attempts[0]["reason_codes"] == [
+        "ORDER_PLAN_RISK_NOT_PASS"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("plans", "expected_order_plan_id"),
+    [
+        (
+            [
+                ("OPD-older", 50.0, "2026-07-24T00:00:01Z"),
+                ("OPD-newer", 50.0, "2026-07-24T00:00:02Z"),
+            ],
+            "OPD-newer",
+        ),
+        (
+            [
+                ("OPD-z", 50.0, "2026-07-24T00:00:01Z"),
+                ("OPD-a", 50.0, "2026-07-24T00:00:01Z"),
+            ],
+            "OPD-a",
+        ),
+    ],
+    ids=["created-at-desc", "order-plan-id-asc"],
+)
+def test_fast5_binding_selection_uses_deterministic_tie_breakers(
+    monkeypatch,
+    plans,
+    expected_order_plan_id,
+) -> None:
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    connection.execute(
+        "CREATE TABLE order_plan_drafts (order_plan_id TEXT PRIMARY KEY)"
+    )
+    connection.execute(
+        """
+        CREATE TABLE order_plan_drafts_latest (
+            order_plan_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            priority_score REAL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    connection.executemany(
+        "INSERT INTO order_plan_drafts VALUES (?)",
+        [(order_plan_id,) for order_plan_id, _, _ in plans],
+    )
+    connection.executemany(
+        "INSERT INTO order_plan_drafts_latest VALUES (?, 'PLAN_READY', ?, ?)",
+        plans,
+    )
+
+    monkeypatch.setattr(
+        fast5,
+        "build_order_plan_binding",
+        lambda row: {"order_plan_id": str(row["order_plan_id"])},
+    )
+    monkeypatch.setattr(
+        fast5,
+        "validate_order_plan_binding",
+        lambda actual_connection, binding, **kwargs: (
+            OrderPlanBindingValidationResult(
+                passed=True,
+                binding=binding,
+            )
+        ),
+    )
+
+    selection = fast5._select_fast5_plan_binding(
+        connection,
+        {
+            "items": [
+                {"status": "PASS", "order_plan_id": order_plan_id}
+                for order_plan_id, _, _ in reversed(plans)
+            ]
+        },
+        max_age_sec=60,
+        expected_trade_date="2026-07-24",
+    )
+    connection.close()
+
+    assert selection.binding is not None
+    assert selection.binding["order_plan_id"] == expected_order_plan_id
+    assert [attempt["order_plan_id"] for attempt in selection.attempts] == [
+        expected_order_plan_id
+    ]
+
+
+def test_fast5_real_binding_validation_falls_back_to_lower_valid_candidate(
+    tmp_path,
+) -> None:
+    connection, high_plan_id = _prepared_order_plan_connection(
+        tmp_path / "fast5-real-binding-fallback.sqlite3"
+    )
+    settings = _pilot_settings()
+    low_candidate_id = _insert_strategy_fixture(
+        connection,
+        candidate_id="CAND-2026-06-27-000660-1",
+        trade_date="2026-06-27",
+        code="000660",
+        name="SK하이닉스",
+    )
+    connection.execute(
+        """
+        UPDATE market_ticks_latest
+        SET cumulative_trade_value = 600000000,
+            execution_strength = 130.0
+        WHERE code = '000660'
+        """
+    )
+    connection.execute(
+        """
+        UPDATE theme_snapshot_members
+        SET cumulative_trade_value = 600000000,
+            execution_strength = 130.0
+        WHERE code = '000660'
+        """
+    )
+    connection.commit()
+    strategy = evaluate_candidate_strategy(
+        connection,
+        low_candidate_id,
+        settings=settings,
+    )
+    save_strategy_observation(connection, strategy)
+    risk = evaluate_risk_for_candidate(
+        connection,
+        low_candidate_id,
+        settings=settings,
+    )
+    save_risk_observation(connection, risk)
+    low_result = evaluate_entry_timing(
+        connection,
+        candidate_instance_id=low_candidate_id,
+        settings=settings,
+    )
+    low_plan_id = low_result.order_plan_drafts[0].order_plan_id
+
+    for table_name in ("order_plan_drafts", "order_plan_drafts_latest"):
+        connection.execute(
+            f"UPDATE {table_name} SET priority_score = 100 WHERE order_plan_id = ?",
+            (high_plan_id,),
+        )
+        connection.execute(
+            f"UPDATE {table_name} SET priority_score = 50 WHERE order_plan_id = ?",
+            (low_plan_id,),
+        )
+    high_plan = connection.execute(
+        """
+        SELECT risk_observation_id
+        FROM order_plan_drafts
+        WHERE order_plan_id = ?
+        """,
+        (high_plan_id,),
+    ).fetchone()
+    high_risk_observation_id = str(high_plan["risk_observation_id"])
+    connection.execute(
+        """
+        UPDATE risk_observations
+        SET overall_status = 'CAUTION'
+        WHERE risk_observation_id = ?
+        """,
+        (high_risk_observation_id,),
+    )
+    connection.execute(
+        """
+        UPDATE risk_observations_latest
+        SET overall_status = 'CAUTION'
+        WHERE risk_observation_id = ?
+        """,
+        (high_risk_observation_id,),
+    )
+    connection.commit()
+
+    diagnostic = fast5.build_pipeline_coherency_status(
+        connection,
+        trade_date="2026-06-27",
+        max_age_sec=999_999_999,
+        limit=500,
+    )
+    qualification = fast5.build_fast5_plan_ready_coherency_status(
+        connection,
+        pipeline_status=diagnostic,
+        trade_date="2026-06-27",
+        max_age_sec=999_999_999,
+    )
+    selection = fast5._select_fast5_plan_binding(
+        connection,
+        qualification,
+        max_age_sec=999_999_999,
+        expected_trade_date="2026-06-27",
+    )
+    connection.close()
+
+    assert qualification["status"] == "PASS"
+    assert {
+        item["order_plan_id"]
+        for item in qualification["items"]
+        if item["status"] == "PASS"
+    } == {high_plan_id, low_plan_id}
+    assert selection.binding is not None
+    assert selection.binding["order_plan_id"] == low_plan_id
+    assert [attempt["order_plan_id"] for attempt in selection.attempts] == [
+        high_plan_id,
+        low_plan_id,
+    ]
+    assert selection.attempts[0]["status"] == "FAIL"
+    assert "ORDER_PLAN_RISK_NOT_PASS" in selection.attempts[0]["reason_codes"]
+    assert selection.attempts[1]["status"] == "PASS"
+
+
+def test_fast5_pipeline_fails_closed_and_preserves_all_binding_failures(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    connection = initialize_database(tmp_path / "fast5-all-bindings-fail.sqlite3")
+    _patch_dynamic_pass(monkeypatch)
+    monkeypatch.setattr(
+        fast5,
+        "_select_fast5_plan_binding",
+        lambda *args, **kwargs: fast5._Fast5PlanBindingSelection(
+            attempts=(
+                {
+                    "order_plan_id": "OPD-high-risk-fail",
+                    "status": "FAIL",
+                    "reason_codes": ["ORDER_PLAN_RISK_NOT_PASS"],
+                },
+                {
+                    "order_plan_id": "OPD-price-drift",
+                    "status": "FAIL",
+                    "reason_codes": ["ORDER_PLAN_BINDING_LIMIT_PRICE_MISMATCH"],
+                },
+            )
+        ),
+    )
+
+    gate = evaluate_fast5_automatic_canary_gate(
+        connection,
+        settings=_qualified_settings(),
+        trade_date="2026-07-20",
+        queue_commands=True,
+    )
+    connection.close()
+
+    pipeline = gate.checks["pipeline_coherency"]
+    assert gate.status is Fast5CanaryMode.PROTECT_ONLY
+    assert pipeline["selected_plan_binding"] is None
+    assert "PLAN_READY_BINDING_NON_PASS" in pipeline[
+        "qualification_reason_codes"
+    ]
+    assert "PLAN_READY_BINDING_MISSING" not in pipeline[
+        "qualification_reason_codes"
+    ]
+    assert pipeline["plan_binding_candidate_attempts"] == [
+        {
+            "order_plan_id": "OPD-high-risk-fail",
+            "status": "FAIL",
+            "reason_codes": ["ORDER_PLAN_RISK_NOT_PASS"],
+        },
+        {
+            "order_plan_id": "OPD-price-drift",
+            "status": "FAIL",
+            "reason_codes": ["ORDER_PLAN_BINDING_LIMIT_PRICE_MISMATCH"],
+        },
+    ]
 
 
 @pytest.mark.parametrize(
@@ -346,6 +715,12 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
             "status": "PASS",
             "reason_codes": [],
             "latest_plan_ready_count": count,
+            "raw_plan_ready_total_count": 3,
+            "raw_plan_ready_diagnostic_count": 2,
+            "raw_plan_ready_diagnostics_truncated": True,
+            "diagnostic_detail_limit": 2,
+            "latest_plan_ready_evaluation_count": count,
+            "actionable_plan_ready_count": count,
             "unexpired_plan_ready_count": count,
             "coherent_plan_ready_count": count,
             "non_pass_plan_ready_count": 0,
@@ -353,6 +728,10 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
             "stale_plan_ready_count": 0,
             "mismatch_plan_ready_count": 0,
             "invalid_expiry_plan_ready_count": 0,
+            "superseded_unexpired_plan_ready_count": 2,
+            "superseded_unexpired_plan_ready_total_count": 2,
+            "superseded_unexpired_plan_ready_diagnostic_count": 1,
+            "superseded_unexpired_plan_ready_diagnostics_truncated": True,
             "selection_truncated": False,
             "generated_at": "2026-07-20T00:00:00Z",
         }
@@ -366,11 +745,25 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
             kwargs=kwargs,
         )
 
-    def binding_selector(actual_connection, qualification) -> dict:
+    def binding_selector(actual_connection, qualification, **kwargs):
         assert actual_connection is connection
         assert qualification["status"] == "PASS"
         read_probe("binding")
-        return dict(PLAN_BINDING)
+        validation = OrderPlanBindingValidationResult(
+            passed=True,
+            binding=PLAN_BINDING,
+        )
+        return fast5._Fast5PlanBindingSelection(
+            binding=dict(PLAN_BINDING),
+            validation=validation,
+            attempts=(
+                {
+                    "order_plan_id": PLAN_BINDING["order_plan_id"],
+                    "status": "PASS",
+                    "reason_codes": [],
+                },
+            ),
+        )
 
     monkeypatch.setattr(fast5, "_pipeline_inventory_count", inventory_count)
     monkeypatch.setattr(fast5, "build_pipeline_coherency_status", diagnostic_status)
@@ -424,6 +817,16 @@ def test_fast5_pipeline_reads_share_one_snapshot_and_preserve_caller_transaction
     assert writer_count == 2
     assert captured["passed"] is True
     assert captured["details"]["read_snapshot_consistent"] is True
+    assert captured["details"]["raw_plan_ready_total_count"] == 3
+    assert captured["details"]["raw_plan_ready_diagnostics_truncated"] is True
+    assert captured["details"]["actionable_plan_ready_count"] == 1
+    assert captured["details"]["superseded_unexpired_plan_ready_count"] == 2
+    assert (
+        captured["details"][
+            "superseded_unexpired_plan_ready_diagnostics_truncated"
+        ]
+        is True
+    )
     assert caller_transaction_preserved is caller_transaction
     if caller_transaction:
         assert transaction_statements == [
@@ -856,6 +1259,28 @@ def test_fast5_config_requires_sha_binding_and_hard_caps() -> None:
         _pilot_settings(live_sim_fast5_max_order_notional=100_001)
 
 
+def test_fast5_strict_settings_force_strategy_and_risk_requirements() -> None:
+    strict = fast5._strict_fast5_settings(
+        _pilot_settings(
+            risk_gate_require_strategy_matched=False,
+            entry_timing_require_strategy_matched=False,
+            entry_timing_require_risk_observe_pass=False,
+            live_sim_require_strategy_matched=False,
+            live_sim_require_risk_observe_pass=False,
+            live_sim_order_plan_require_strategy_matched=False,
+            live_sim_order_plan_require_risk_observe_pass=False,
+        )
+    )
+
+    assert strict.risk_gate_require_strategy_matched is True
+    assert strict.entry_timing_require_strategy_matched is True
+    assert strict.entry_timing_require_risk_observe_pass is True
+    assert strict.live_sim_require_strategy_matched is True
+    assert strict.live_sim_require_risk_observe_pass is True
+    assert strict.live_sim_order_plan_require_strategy_matched is True
+    assert strict.live_sim_order_plan_require_risk_observe_pass is True
+
+
 def test_fast5_status_route_is_read_only(tmp_path, monkeypatch) -> None:
     db_path = tmp_path / "fast5-route.sqlite3"
     connection = initialize_database(db_path)
@@ -958,7 +1383,13 @@ def _patch_dynamic_pass(monkeypatch) -> None:
     monkeypatch.setattr(
         fast5,
         "_select_fast5_plan_binding",
-        lambda *args, **kwargs: dict(PLAN_BINDING),
+        lambda *args, **kwargs: fast5._Fast5PlanBindingSelection(
+            binding=dict(PLAN_BINDING),
+            validation=OrderPlanBindingValidationResult(
+                passed=True,
+                binding=PLAN_BINDING,
+            ),
+        ),
     )
     monkeypatch.setattr(
         fast5,

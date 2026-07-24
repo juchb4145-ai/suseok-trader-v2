@@ -257,43 +257,60 @@ def run_live_sim_operating_cycle_once(
         errors.append(_stage_error("exit", exc))
         stages["exit"] = {"status": "ERROR", "error": str(exc)}
 
-    try:
-        with _record_stage_latency(stage_latency, "theme_leadership"):
-            theme_result = rebuild_theme_leadership(
-                connection,
-                trade_date=trade_date,
-                write_candidate_sources=resolved_settings.theme_leadership_write_candidate_sources,
-                settings=resolved_settings,
-            )
-        stages["theme_leadership"] = theme_result.to_dict(include_members=False)
-    except Exception as exc:
-        errors.append(_stage_error("theme_leadership", exc))
-        stages["theme_leadership"] = {"status": "ERROR", "error": str(exc)}
+    if bound_plan is None:
+        try:
+            with _record_stage_latency(stage_latency, "theme_leadership"):
+                theme_result = rebuild_theme_leadership(
+                    connection,
+                    trade_date=trade_date,
+                    write_candidate_sources=(
+                        resolved_settings.theme_leadership_write_candidate_sources
+                    ),
+                    settings=resolved_settings,
+                )
+            stages["theme_leadership"] = theme_result.to_dict(include_members=False)
+        except Exception as exc:
+            errors.append(_stage_error("theme_leadership", exc))
+            stages["theme_leadership"] = {"status": "ERROR", "error": str(exc)}
 
-    try:
-        with _record_stage_latency(stage_latency, "candidate_quote_refresh"):
-            quote_refresh_result = run_candidate_quote_refresh_once(
-                connection,
-                trade_date=trade_date,
-                settings=resolved_settings,
-                queue_commands=queue_policy["base_commands_allowed"],
-            )
-        stages["candidate_quote_refresh"] = quote_refresh_result.to_dict()
-    except Exception as exc:
-        errors.append(_stage_error("candidate_quote_refresh", exc))
-        stages["candidate_quote_refresh"] = {"status": "ERROR", "error": str(exc)}
+        try:
+            with _record_stage_latency(stage_latency, "candidate_quote_refresh"):
+                quote_refresh_result = run_candidate_quote_refresh_once(
+                    connection,
+                    trade_date=trade_date,
+                    settings=resolved_settings,
+                    queue_commands=queue_policy["base_commands_allowed"],
+                )
+            stages["candidate_quote_refresh"] = quote_refresh_result.to_dict()
+        except Exception as exc:
+            errors.append(_stage_error("candidate_quote_refresh", exc))
+            stages["candidate_quote_refresh"] = {"status": "ERROR", "error": str(exc)}
 
-    try:
-        with _record_stage_latency(stage_latency, "incremental_backfill"):
-            incremental_backfill = enqueue_incremental_evaluation_for_fresh_candidates(
-                connection,
-                trade_date=trade_date,
-                settings=resolved_settings,
-            )
-        stages["incremental_backfill"] = incremental_backfill.to_dict()
-    except Exception as exc:
-        errors.append(_stage_error("incremental_backfill", exc))
-        stages["incremental_backfill"] = {"status": "ERROR", "error": str(exc)}
+        try:
+            with _record_stage_latency(stage_latency, "incremental_backfill"):
+                incremental_backfill = enqueue_incremental_evaluation_for_fresh_candidates(
+                    connection,
+                    trade_date=trade_date,
+                    settings=resolved_settings,
+                )
+            stages["incremental_backfill"] = incremental_backfill.to_dict()
+        except Exception as exc:
+            errors.append(_stage_error("incremental_backfill", exc))
+            stages["incremental_backfill"] = {"status": "ERROR", "error": str(exc)}
+    else:
+        for stage in (
+            "theme_leadership",
+            "candidate_quote_refresh",
+            "incremental_backfill",
+        ):
+            with _record_stage_latency(stage_latency, stage):
+                stages[stage] = {
+                    "status": "SKIPPED",
+                    "reason": "required_plan_binding",
+                    "source_mutation_skipped": True,
+                    "required_plan_binding": bound_plan,
+                    "no_order_side_effects": True,
+                }
 
     if bound_plan is None:
         try:

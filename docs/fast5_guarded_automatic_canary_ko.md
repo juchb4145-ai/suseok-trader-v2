@@ -90,8 +90,11 @@ LIVE_SIM_FAST5_SHADOW_EVIDENCE_SHA256=<64 hex>
 - KRX, LIMIT BUY 전용, scale-in/market order false
 - AI order tool·order-plan attachment 비활성: routing 영향 `0`
 - 현재 거래일 pipeline 전체 inventory가 500행 이하이며 전수 진단 조회 결과와 전체 count 일치
-- 최신 order plan 중 미만료 `PLAN_READY`가 1건 이상이고, 그 전부의 내부 FK와
-  strategy/risk/entry/plan source run·watermark·현재 source·age 검증이 `PASS`
+- candidate별 최신 EntryTiming evaluation이 `PLAN_READY`이고 그 evaluation의
+  `order_plan_id`가 정확히 가리키는 미만료 actionable plan이 1건 이상이며, 그 전부의 내부
+  FK와 strategy/risk/entry/plan source run·watermark·현재 source·age 검증이 `PASS`
+- 같은 candidate의 과거 setup/timing idempotency key에 남은 미만료 `PLAN_READY`는
+  superseded 진단으로 계속 표시하되 신규 BUY 선택 대상이나 gate blocker로 재사용하지 않음
 - PASS plan을 priority/created/id 순으로 하나 선택하고, 전체 주문 구동 필드의 canonical
   snapshot SHA-256과 plan/entry/strategy/risk/source identity를 `selected_plan_binding`으로 결속
 - broker-boundary effective `UNCONFIRMED=0`, maintenance fence 없음
@@ -122,7 +125,9 @@ eligibility와 Gateway enqueue boundary도 safety/reconcile/lifecycle를 다시 
 
 FAST-5 queue 경로는 gate가 선택한 exact binding을 Operating → Pilot → Intent → Queue까지
 그대로 전달한다. 이 경로에서는 EntryTiming 재실행, 일반 plan 재선택, 자동 reprice를 하지
-않으며 요청 거래일과 binding 거래일이 다르면 stage 실행 전에 거부한다. `send_order`
+않으며, binding 선택 뒤에는 theme leadership rebuild, candidate quote refresh,
+incremental backfill처럼 current source를 바꾸는 stage도 신규 BUY 앞에서 실행하지 않는다.
+요청 거래일과 binding 거래일이 다르면 stage 실행 전에 거부한다. `send_order`
 enqueue 직전 기존 `BEGIN IMMEDIATE` 경계 안에서 base/latest plan,
 EntryTiming, Strategy, Risk, source run/watermark, expiry와 canonical snapshot SHA를 다시
 검증하고 현재 source watermark·eligibility·가격 drift도 재확인한다. 잠금 뒤 intent를 다시
